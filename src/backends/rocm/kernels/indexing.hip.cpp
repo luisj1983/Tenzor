@@ -1986,6 +1986,17 @@ auto masked_fill_hip(
             reinterpret_cast<uint64_t*>(output.data_ptr()),
             mask.data<bool>(), packed, total_elements);
         HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::Complex128) {
+        // Fill with (value, 0): pack real double bits low, imag 0.0 high (16 bytes),
+        // mirroring the Complex64 packing above.
+        double dr = static_cast<double>(value);
+        uint64_t rbits; std::memcpy(&rbits, &dr, sizeof(double));
+        Bytes16 packed{rbits, 0ull};
+        hipLaunchKernelGGL(masked_fill_kernel<Bytes16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<Bytes16*>(output.data_ptr()),
+            mask.data<bool>(), packed, total_elements);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("masked_fill_hip: Unsupported dtype");
     }

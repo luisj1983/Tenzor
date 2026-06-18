@@ -713,7 +713,7 @@ auto maxpool2d_backward_hip(
         int64_t input_numel = 1;
         for (auto s : input_shape) input_numel *= s;
         Tensor grad_input_f32 = Tensor(input_shape, DType::Float32, grad_output.device());
-        HIP_CHECK(hipMemset(grad_input_f32.data<float>(), 0, input_numel * sizeof(float)));
+        HIP_CHECK(hipMemsetAsync(grad_input_f32.data<float>(), 0, input_numel * sizeof(float), stream));
 
         hipLaunchKernelGGL(maxpool2d_backward_kernel_fp16,
             dim3(blocks), dim3(threads), 0, stream,
@@ -797,7 +797,7 @@ __global__ void avgpool2d_forward_kernel(
             count = kernel_h * kernel_w;
         }
 
-        output[idx] = sum / static_cast<T>(count);
+        output[idx] = count > 0 ? sum / static_cast<T>(count) : T(0);
     }
 }
 
@@ -849,7 +849,7 @@ __global__ void avgpool2d_forward_kernel_fp16(
             count = kernel_h * kernel_w;
         }
 
-        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(count));
+        output[idx] = tenzor::rocm::safe_f2h(count > 0 ? sum / static_cast<float>(count) : 0.0f);
     }
 }
 
@@ -1111,7 +1111,7 @@ auto avgpool2d_backward_hip(
         int64_t input_numel = 1;
         for (auto s : input_shape) input_numel *= s;
         Tensor grad_input_f32 = Tensor(input_shape, DType::Float32, grad_output.device());
-        HIP_CHECK(hipMemset(grad_input_f32.data<float>(), 0, input_numel * sizeof(float)));
+        HIP_CHECK(hipMemsetAsync(grad_input_f32.data<float>(), 0, input_numel * sizeof(float), stream));
 
         hipLaunchKernelGGL(avgpool2d_backward_kernel_fp16,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1997,7 +1997,7 @@ __global__ void avgpool1d_forward_kernel(
             }
         }
 
-        output[idx] = sum / static_cast<T>(count);
+        output[idx] = count > 0 ? sum / static_cast<T>(count) : T(0);
     }
 }
 
@@ -2028,7 +2028,7 @@ __global__ void avgpool1d_forward_kernel_fp16(
             }
         }
 
-        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(count));
+        output[idx] = tenzor::rocm::safe_f2h(count > 0 ? sum / static_cast<float>(count) : 0.0f);
     }
 }
 

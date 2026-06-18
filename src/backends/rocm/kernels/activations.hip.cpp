@@ -927,6 +927,19 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
     return val;
 }
 
+// Lowest representable value for the element type, used to seed max reductions.
+// -FLT_MAX (~-3.4e38) is a valid *finite* double, so seeding a Float64 reduction
+// with it would mishandle rows whose values are all below -3.4e38; pick the
+// true lower bound per type.
+template<typename T>
+__device__ __forceinline__ T lowest_value() {
+    if constexpr (sizeof(T) == sizeof(double)) {
+        return static_cast<T>(-DBL_MAX);
+    } else {
+        return static_cast<T>(-FLT_MAX);
+    }
+}
+
 // Block-level reduction using shared memory
 // Optimized for AMD GPU memory hierarchy (LDS - Local Data Share)
 template<typename T>
@@ -941,7 +954,7 @@ __device__ T block_reduce_max(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : -FLT_MAX;
+    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : lowest_value<T>();
     if (wid == 0) {
         val = warp_reduce_max(val);
     }
@@ -985,7 +998,7 @@ __global__ void softmax_forward_kernel(const T* input, T* output,
     T* output_row = output + row * dim_size;
 
     // Step 1: Find max value for numerical stability
-    T max_val = -FLT_MAX;
+    T max_val = lowest_value<T>();
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
         max_val = max(max_val, input_row[i]);
     }
@@ -1229,7 +1242,7 @@ __global__ void log_softmax_forward_kernel(const T* input, T* output,
     T* output_row = output + row * dim_size;
 
     // Step 1: Find max value for numerical stability
-    T max_val = -FLT_MAX;
+    T max_val = lowest_value<T>();
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
         max_val = max(max_val, input_row[i]);
     }

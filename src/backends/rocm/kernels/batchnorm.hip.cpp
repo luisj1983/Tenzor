@@ -76,7 +76,12 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
     return val;
 }
 
-// Block-level reduction using shared memory
+// Block-level reduction using shared memory.
+// Returns the total sum in ALL threads (broadcasts the result via shared[0]),
+// matching the contract of the same-named helper in normalization.hip.cpp so the
+// two cannot diverge. Note: this reuses shared[0] as scratch, so callers that
+// need to persist a per-channel value in shared[0] must write it AFTER this
+// returns (the existing batchnorm kernels already do).
 template<typename T>
 __device__ T block_reduce_sum(T val, T* shared) {
     int lane = threadIdx.x % warpSize;
@@ -89,85 +94,29 @@ __device__ T block_reduce_sum(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : T(0);
+    int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+    val = (threadIdx.x < num_warps) ? shared[threadIdx.x] : T(0);
     if (wid == 0) {
         val = warp_reduce_sum(val);
     }
 
-    return val;
+    // Broadcast result from thread 0 to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = val;
+    }
+    __syncthreads();
+
+    return shared[0];
 }
 
 // ============================================================================
 // BatchNorm2d Mean/Variance Computation (Two-Pass Algorithm)
 // ============================================================================
-
-// Compute per-channel mean and variance using two-pass algorithm
-// Input: [N, C, H, W] - NCHW format
-// Output: mean[C], variance[C]
-template<typename T>
-__global__ void batchnorm_mean_var_kernel(const T* input,
-                                          T* mean,
-                                          T* variance,
-                                          int64_t N,
-                                          int64_t C,
-                                          int64_t H,
-                                          int64_t W) {
-    HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
-    T* shared = reinterpret_cast<T*>(shared_mem);
-
-    int64_t spatial_size = H * W;
-    int64_t total_elements = N * spatial_size;
-
-    // Each block handles one channel
-    int64_t c = blockIdx.x;
-    if (c >= C) return;
-
-    // Pass 1: Compute sum for mean
-    T sum = T(0);
-    for (int64_t n = 0; n < N; n++) {
-        for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
-            int64_t h = idx / W;
-            int64_t w = idx % W;
-            int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-            sum += input[tensor_idx];
-        }
-    }
-
-    // Reduce sum across threads in block
-    sum = block_reduce_sum(sum, shared);
-    __syncthreads();
-
-    // Thread 0 computes and stores mean
-    if (threadIdx.x == 0) {
-        shared[0] = sum / T(total_elements);
-    }
-    __syncthreads();
-
-    // All threads read the mean
-    T channel_mean = shared[0];
-
-    // Pass 2: Compute sum of squared differences for variance
-    T sum_sq_diff = T(0);
-    for (int64_t n = 0; n < N; n++) {
-        for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
-            int64_t h = idx / W;
-            int64_t w = idx % W;
-            int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-            T diff = input[tensor_idx] - channel_mean;
-            sum_sq_diff += diff * diff;
-        }
-    }
-
-    // Reduce sum of squared differences across threads
-    sum_sq_diff = block_reduce_sum(sum_sq_diff, shared);
-    __syncthreads();
-
-    // Thread 0 writes final results
-    if (threadIdx.x == 0) {
-        mean[c] = channel_mean;
-        variance[c] = sum_sq_diff / T(total_elements);
-    }
-}
+// NOTE: The fused two-pass batchnorm_mean_var_kernel was removed as dead code —
+// the live mean/var path uses the separate batchnorm_mean_kernel +
+// batchnorm_variance_kernel (see batchnorm2d_mean_var). Keeping the unused fused
+// kernel risked divergent edits (a precision fix applied to one path but not the
+// other).
 
 // Optimized version using two-pass algorithm (more parallel but requires two passes)
 template<typename T>
@@ -284,27 +233,9 @@ __global__ void batchnorm_normalize_kernel(const T* input,
 // ============================================================================
 // BatchNorm2d Affine Transform Kernel
 // ============================================================================
-
-// Apply affine transform: y = gamma * normalized + beta
-template<typename T>
-__global__ void batchnorm_affine_kernel(const T* normalized,
-                                        T* output,
-                                        const T* gamma,
-                                        const T* beta,
-                                        int64_t N,
-                                        int64_t C,
-                                        int64_t H,
-                                        int64_t W) {
-    int64_t spatial_size = H * W;
-    int64_t total_size = N * C * spatial_size;
-
-    HIP_GRID_STRIDE_LOOP(idx, total_size) {
-        // Decode NCHW index
-        int64_t c = (idx / (H * W)) % C;
-
-        output[idx] = gamma[c] * normalized[idx] + beta[c];
-    }
-}
+// NOTE: The standalone batchnorm_affine_kernel was removed as dead code — the
+// affine transform is fused into batchnorm_forward_affine_kernel below, which is
+// the only path ever launched.
 
 // Combined normalization + affine (more efficient)
 template<typename T>

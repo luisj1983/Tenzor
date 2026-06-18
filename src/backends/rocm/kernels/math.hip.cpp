@@ -2645,6 +2645,23 @@ __global__ void div_inplace_broadcast_kernel(T* a, const T* b, const int64_t* st
     }
 }
 
+// Float16 in-place broadcasting division. Computes via float and writes back
+// through f16_div_ieee so special values (0/0 -> NaN, x/0 -> +-Inf) match the
+// same-shape div_inplace_kernel_f16 path rather than relying on native __half
+// division (which some HIP builds canonicalize).
+__global__ void div_inplace_broadcast_kernel_f16(__half* a, const __half* b, const int64_t* strides_b,
+    const int64_t* a_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % a_shape[i];
+            tmp /= a_shape[i];
+            idx_b += coord * strides_b[i];
+        }
+        a[out_idx] = f16_div_ieee(a[out_idx], b[idx_b]);
+    }
+}
+
 // ============================================================================
 // Dot Product Kernel
 // ============================================================================
@@ -3391,7 +3408,7 @@ void div_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
             hipLaunchKernelGGL(div_inplace_broadcast_kernel<double>, grid, block, 0, stream,
                 a.data<double>(), b.data<double>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
         } else if (a.dtype() == DType::Float16) {
-            hipLaunchKernelGGL(div_inplace_broadcast_kernel<__half>, grid, block, 0, stream,
+            hipLaunchKernelGGL(div_inplace_broadcast_kernel_f16, grid, block, 0, stream,
                 reinterpret_cast<__half*>(a.data<Float16>()),
                 reinterpret_cast<const __half*>(b.data<Float16>()),
                 meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
@@ -5151,6 +5168,23 @@ __global__ void maximum_kernel_f16(const __half* a, const __half* b, __half* out
     }
 }
 
+// Integer element-wise min/max (used for Int8/Int32/Int64). BFloat16 is handled
+// via a widen-narrow path in the host wrapper, matching the CPU reference's
+// supported dtype set for torch.minimum / torch.maximum.
+template<typename T>
+__global__ void minimum_kernel_int(const T* a, const T* b, T* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = a[idx] < b[idx] ? a[idx] : b[idx];
+    }
+}
+
+template<typename T>
+__global__ void maximum_kernel_int(const T* a, const T* b, T* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = a[idx] > b[idx] ? a[idx] : b[idx];
+    }
+}
+
 // ============================================================================
 // Host Wrappers: Extended Math Unary Operations
 // ============================================================================
@@ -5831,8 +5865,25 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Ten
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        // Widen-narrow: BFloat16 has no native compare path here.
+        auto a_f32 = cast_kernel(a, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b, DType::Float32, stream);
+        hipLaunchKernelGGL(minimum_kernel_f32, grid, block, 0, stream,
+            a_f32.data<float>(), b_f32.data<float>(), a_f32.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return cast_kernel(a_f32, DType::BFloat16, stream);
+    } else if (a.dtype() == DType::Int8) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int8_t>), grid, block, 0, stream,
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+    } else if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int32_t>), grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int64_t>), grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
     } else {
-        throw std::runtime_error("minimum operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("minimum operation only supports Float32, Float64, Float16, BFloat16, Int8, Int32, and Int64 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -5867,8 +5918,25 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Ten
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        // Widen-narrow: BFloat16 has no native compare path here.
+        auto a_f32 = cast_kernel(a, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b, DType::Float32, stream);
+        hipLaunchKernelGGL(maximum_kernel_f32, grid, block, 0, stream,
+            a_f32.data<float>(), b_f32.data<float>(), a_f32.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return cast_kernel(a_f32, DType::BFloat16, stream);
+    } else if (a.dtype() == DType::Int8) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int8_t>), grid, block, 0, stream,
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+    } else if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int32_t>), grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int64_t>), grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
     } else {
-        throw std::runtime_error("maximum operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("maximum operation only supports Float32, Float64, Float16, BFloat16, Int8, Int32, and Int64 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -8960,6 +9028,13 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
 
     Tensor output({bins}, DType::Float32, device);
     HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, bins * sizeof(float), stream));
+
+    // Empty input: bins were already zeroed; a zero-grid launch is rejected by
+    // HIP, so just return the all-zero histogram (matches torch.histc).
+    if (n == 0) {
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return output;
+    }
 
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(n, grid_dim, block_dim);

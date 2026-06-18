@@ -710,11 +710,6 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         auto input_c128 = input.to(DType::Complex128);
         return rocm_irfft_kernel(input_c128, dim, n, norm, stream);
     }
-    if (input.dtype() == DType::Float16) {
-        auto input_c64 = input.to(DType::Float32).to(DType::Complex64);
-        auto result = rocm_irfft_kernel(input_c64, dim, n, norm, stream);
-        return result.to(DType::Float16);
-    }
 
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());

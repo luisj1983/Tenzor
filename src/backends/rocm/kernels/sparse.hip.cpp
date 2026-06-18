@@ -203,6 +203,10 @@ static void verify_col_in_range(const int64_t* d_data, int64_t n, int64_t ncols,
 }
 
 /// Check that all int64 indices fit in int32. Throws std::overflow_error on failure.
+/// IMPORTANT: this function stream-synchronizes before returning, so callers that
+/// cast the same data to int32 immediately afterwards rely on that sync to ensure
+/// the validation has completed. Do not remove the synchronize without making the
+/// validate-before-cast dependency explicit at the call sites.
 static void verify_i64_fits_i32(const int64_t* d_data, int64_t n,
                                  hipStream_t stream = nullptr) {
     if (n == 0) return;
@@ -262,6 +266,11 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, hipStream_t stream = 
 
         int threads = 256;
         int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
+        // Validate-then-cast: verify_i64_fits_i32 stream-synchronizes internally
+        // (see its hipStreamSynchronize), so the overflow check is guaranteed to
+        // have completed before the i64->i32 cast below runs on the same data.
+        // This ordering must be preserved — if that helper ever drops its sync,
+        // the cast here would silently wrap out-of-range row ids.
         verify_i64_fits_i32(row_indices_ptr, nnz, stream);
         cast_i64_to_i32<<<blocks_nnz, threads, 0, stream>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
         HIP_CHECK_SPARSE(hipGetLastError());

@@ -4624,6 +4624,11 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     v_shape.push_back(n);
     auto V = zeros(v_shape, A.dtype(), A.device());
 
+    // Empty batch: a zero-grid launch is rejected by HIP; the (empty) result
+    // tensors are already allocated, so return them as-is (mirrors the
+    // rocSOLVER-branch guard above).
+    if (nbatch == 0) return {WR, WI, V};
+
     auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
     int eblock = 256;
     int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);

@@ -991,8 +991,10 @@ auto gru_forward_kernel(
         handle_guard.set_stream(stream);
 
         const float alpha = 1.0f;
+        // GRU computes the input-hidden and hidden-hidden gate contributions
+        // independently (each GEMM uses beta=0). Unlike LSTM, it must NOT
+        // accumulate gates_ih into gates_hh, so there is deliberately no beta=1.
         const float beta_zero = 0.0f;
-        const float beta_one = 1.0f;
 
         const float* W_ih_ptr = W_ih.data<float>();
         const float* W_hh_ptr = W_hh.data<float>();
@@ -1084,8 +1086,10 @@ auto gru_forward_kernel(
         handle_guard2.set_stream(stream);
 
         const double alpha = 1.0;
+        // GRU computes the input-hidden and hidden-hidden gate contributions
+        // independently (each GEMM uses beta=0). Unlike LSTM, it must NOT
+        // accumulate gates_ih into gates_hh, so there is deliberately no beta=1.
         const double beta_zero = 0.0;
-        const double beta_one = 1.0;
 
         const double* W_ih_ptr = W_ih.data<double>();
         const double* W_hh_ptr = W_hh.data<double>();

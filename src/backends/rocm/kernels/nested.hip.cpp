@@ -678,26 +678,62 @@ __global__ void nested_layer_norm_kernel(
     int64_t end = offsets[b + 1];
     if (start >= end) return;
 
+    // Block is launched with at most 256 threads (min(D, 256)). Cooperative
+    // tree reductions over shared memory compute each row's mean/var once for the
+    // whole block instead of having every thread recompute the full O(D) sums.
+    // The two-pass formulation (sum, then sum of squared diffs about the mean) is
+    // kept verbatim from the original so results match CPU/other backends.
+    __shared__ T s_red[256];
+    __shared__ T s_mean;
+    __shared__ T s_inv_std;
+    const int tid = static_cast<int>(threadIdx.x);
+
     for (int64_t row = start; row < end; ++row) {
-        T mean = T(0);
-        for (int64_t d = 0; d < D; ++d) {
-            mean += values[row * D + d];
+        // Pass 1: cooperative sum -> mean.
+        T psum = T(0);
+        for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
+            psum += values[row * D + d];
         }
-        mean /= static_cast<T>(D);
+        s_red[tid] = psum;
+        __syncthreads();
+        // Halving reduction; the bound check makes it correct for block sizes
+        // that are not a power of two (threads = min(D, 256)).
+        for (int stride = (static_cast<int>(blockDim.x) + 1) / 2; stride > 0; stride = (stride > 1) ? (stride + 1) / 2 : 0) {
+            if (tid < stride && tid + stride < static_cast<int>(blockDim.x)) {
+                s_red[tid] += s_red[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) s_mean = s_red[0] / static_cast<T>(D);
+        __syncthreads();
+        T mean = s_mean;
 
-        T var = T(0);
-        for (int64_t d = 0; d < D; ++d) {
+        // Pass 2: cooperative sum of squared deviations -> variance.
+        T pvar = T(0);
+        for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
             T diff = values[row * D + d] - mean;
-            var += diff * diff;
+            pvar += diff * diff;
         }
-        var /= static_cast<T>(D);
-
-        T inv_std = T(1) / sqrt(var + eps);
+        s_red[tid] = pvar;
+        __syncthreads();
+        for (int stride = (static_cast<int>(blockDim.x) + 1) / 2; stride > 0; stride = (stride > 1) ? (stride + 1) / 2 : 0) {
+            if (tid < stride && tid + stride < static_cast<int>(blockDim.x)) {
+                s_red[tid] += s_red[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            T var = s_red[0] / static_cast<T>(D);
+            s_inv_std = T(1) / sqrt(var + eps);
+        }
+        __syncthreads();
+        T inv_std = s_inv_std;
 
         for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
             T normalized = (values[row * D + d] - mean) * inv_std;
             output[row * D + d] = normalized * weight[d] + bias[d];
         }
+        __syncthreads();
     }
 }
 
