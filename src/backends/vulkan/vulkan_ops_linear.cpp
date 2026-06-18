@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
 
 namespace tenzor {
 
@@ -286,9 +287,13 @@ auto VulkanBackend::dispatchDropout(const Tensor& input, float p, bool training)
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    static std::random_device rd;
-    static std::atomic<uint32_t> offset_counter{0};
-
+    // Honor `tenzor::manual_seed`; falls back to time-based when unset. The
+    // Philox offset is derived deterministically from the seed (which already
+    // increments per call via get_global_seed()), NOT from a process-global
+    // static counter — a static counter past manual_seed() with no reset hook
+    // made `manual_seed(s); dropout(...)` non-reproducible. offset==0 makes the
+    // sequence fully determined by the seed, matching the manual_seed contract
+    // and the other backends (see vulkan_ops_misc.cpp rand path).
     float scale = 1.0f / (1.0f - p);
 
     struct PushConstants {
@@ -300,8 +305,8 @@ auto VulkanBackend::dispatchDropout(const Tensor& input, float p, bool training)
     } push_constants;
 
     push_constants.n_elements = static_cast<uint32_t>(numel);
-    push_constants.seed = rd();
-    push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
+    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
+    push_constants.offset = 0;
     push_constants.p = p;
     push_constants.scale = scale;
 

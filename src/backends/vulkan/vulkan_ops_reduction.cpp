@@ -419,16 +419,18 @@ auto VulkanBackend::dispatchProd(const Tensor& input_orig, int64_t dim, bool kee
     // as Float32 by the generic prod_reduction shader, producing garbage.
     DType orig_dtype = input.dtype();
     Tensor prod_input = input;
-    if (orig_dtype == DType::Int64) {
-        prod_input = input.to(DType::Float64);
-    } else if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
+    if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
         prod_input = input.to(DType::Float32);
     }
+    // Int64 keeps its dtype and uses a dedicated int64 prod shader so the
+    // product is exact (routing through Float64 loses exactness above 2^53).
 
     // Select correct pipeline based on dtype
     std::string shader_name;
     if (prod_input.dtype() == DType::Int32) {
         shader_name = "prod_reduction_i32";
+    } else if (prod_input.dtype() == DType::Int64) {
+        shader_name = "prod_reduction_i64";
     } else if (prod_input.dtype() == DType::Float64) {
         shader_name = "prod_reduction_f64";
     } else {

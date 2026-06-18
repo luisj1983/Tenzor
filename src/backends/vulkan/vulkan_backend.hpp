@@ -465,7 +465,8 @@ public:
     // Pooling operations
     auto dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                           int64_t stride_h, int64_t stride_w,
-                          int64_t padding_h, int64_t padding_w) -> std::pair<Tensor, Tensor>;
+                          int64_t padding_h, int64_t padding_w,
+                          int64_t dilation_h = 1, int64_t dilation_w = 1) -> std::pair<Tensor, Tensor>;
     auto dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                           int64_t stride_h, int64_t stride_w,
                           int64_t padding_h, int64_t padding_w) -> Tensor;

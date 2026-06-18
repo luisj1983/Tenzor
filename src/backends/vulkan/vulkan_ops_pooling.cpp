@@ -8,15 +8,16 @@ namespace tenzor {
 // Pooling operations implementation
 auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                                       int64_t stride_h, int64_t stride_w,
-                                      int64_t padding_h, int64_t padding_w) -> std::pair<Tensor, Tensor> {
+                                      int64_t padding_h, int64_t padding_w,
+                                      int64_t dilation_h, int64_t dilation_w) -> std::pair<Tensor, Tensor> {
     auto input_shape = input.shape();
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
     int64_t in_height = input_shape[2];
     int64_t in_width = input_shape[3];
 
-    int64_t out_height = (in_height + 2*padding_h - kernel_h) / stride_h + 1;
-    int64_t out_width = (in_width + 2*padding_w - kernel_w) / stride_w + 1;
+    int64_t out_height = (in_height + 2*padding_h - dilation_h*(kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_width = (in_width + 2*padding_w - dilation_w*(kernel_w - 1) - 1) / stride_w + 1;
 
     int32_t device_id = input.device().index;
     // Select shader based on dtype
@@ -53,6 +54,8 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
         uint32_t stride_w;
         uint32_t padding_h;
         uint32_t padding_w;
+        uint32_t dilation_h;
+        uint32_t dilation_w;
     } push_constants;
 
     push_constants.batch = static_cast<uint32_t>(batch);
@@ -67,6 +70,8 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
     push_constants.stride_w = static_cast<uint32_t>(stride_w);
     push_constants.padding_h = static_cast<uint32_t>(padding_h);
     push_constants.padding_w = static_cast<uint32_t>(padding_w);
+    push_constants.dilation_h = static_cast<uint32_t>(dilation_h);
+    push_constants.dilation_w = static_cast<uint32_t>(dilation_w);
 
     // Get VkBuffer handles
     const void* buffer_input = input.data_ptr();

@@ -1,0 +1,59 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Product reduction for int64. Accumulates in int64 (exact) instead of routing
+// Int64 through Float64, which loses exactness above 2^53.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { int64_t input_data[]; };
+layout(binding = 1) buffer Output { int64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements in input
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+} params;
+
+shared int64_t shared_data[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+
+    if (output_idx >= params.outer_size) {
+        return;
+    }
+
+    // Initialize accumulator to 1 for product
+    int64_t accum = 1L;
+
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Each thread processes multiple elements along the reduction dimension
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            accum *= input_data[idx];
+        }
+    }
+
+    shared_data[tid] = accum;
+    barrier();
+
+    // Parallel reduction with multiplication
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_data[tid] *= shared_data[tid + s];
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        output_data[output_idx] = shared_data[0];
+    }
+}

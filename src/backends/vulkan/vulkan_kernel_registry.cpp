@@ -649,14 +649,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Pooling Operations
     // ========================================================================
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // F.11: per-axis kernel/stride/padding via attr_macros helpers.
-        // Note: dispatchMaxPool2d (with-indices overload) does not take dilation;
-        // nn::MaxPool2d layer does not expose dilation, so this is intentional.
+        // F.11: per-axis kernel/stride/padding/dilation via attr_macros helpers.
+        // The functional op (F.max_pool2d) can pass dilation and the CPU
+        // reference honors it, so the with-indices path must too.
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
         const auto stride      = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation    = ::tenzor::backend::attrs::dilation_2d(attrs);
         auto [output, indices] = get_vulkan_backend()->dispatchMaxPool2d(
-            inputs[0], kernel_size[0], kernel_size[1], stride[0], stride[1], padding[0], padding[1]);
+            inputs[0], kernel_size[0], kernel_size[1], stride[0], stride[1], padding[0], padding[1],
+            dilation[0], dilation[1]);
         return std::vector<Tensor>{output, indices};
     });
 
