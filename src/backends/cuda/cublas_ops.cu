@@ -616,57 +616,6 @@ __global__ void bias_grad_reduce_kernel(
     }
 }
 
-/**
- * @brief Vectorized bias gradient reduction using warp shuffles
- *
- * More efficient for larger batch sizes - uses warp-level reduction.
- */
-template<typename T, int BLOCK_SIZE = 256>
-__global__ void bias_grad_reduce_warp_kernel(
-    const T* __restrict__ grad_output,
-    T* __restrict__ grad_bias,
-    int64_t batch_size,
-    int64_t out_features
-) {
-    using Acc = typename AccumType<T>::type;
-
-    // Each block handles one output feature
-    int64_t feature_idx = blockIdx.x;
-    if (feature_idx >= out_features) return;
-
-    // Each thread accumulates multiple elements in higher precision
-    Acc sum = Acc(0);
-    for (int64_t i = threadIdx.x; i < batch_size; i += BLOCK_SIZE) {
-        sum += Acc(grad_output[i * out_features + feature_idx]);
-    }
-
-    // Warp-level reduction using shuffle
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    }
-
-    // First thread of each warp writes to shared memory
-    __shared__ Acc warp_sums[BLOCK_SIZE / 32];
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
-
-    if (lane_id == 0) {
-        warp_sums[warp_id] = sum;
-    }
-    __syncthreads();
-
-    // Final reduction across warps (first warp only)
-    if (warp_id == 0 && lane_id < (BLOCK_SIZE / 32)) {
-        sum = warp_sums[lane_id];
-        for (int offset = (BLOCK_SIZE / 32) / 2; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
-        }
-        if (lane_id == 0) {
-            grad_bias[feature_idx] = T(sum);
-        }
-    }
-}
-
 // ============================================================================
 // Fused Linear Layer - Single cuBLAS call with bias fusion
 // ============================================================================
@@ -1434,7 +1383,43 @@ void cublas_fp8_gemm(
         // cuBLAS C = C (row-major M x N) -> col-major N x M, ld = N
         cublasLtMatrixLayoutCreate(&layoutC, cuda_out_dtype, N, M, N);
 
-        // Perform the FP8 GEMM
+        // Self-check the chosen OP_N/OP_N FP8 layout before launching. On
+        // toolkits that enforce the FP8 "TN" format restriction, cublasLt
+        // supports no algorithm for this layout — querying the heuristic returns
+        // zero candidates. Detect that here and throw a clear unsupported-path
+        // error rather than launching with a nullptr (auto-select) algo, which
+        // on such toolkits would either fail opaquely or silently mis-lay the
+        // operands and compute the wrong product. (This path is currently
+        // unwired; the guard keeps the public symbol from returning a
+        // silently-wrong result if a caller ever reaches it.)
+        cublasLtMatmulHeuristicResult_t heuristic{};
+        {
+            cublasLtMatmulPreference_t pref = nullptr;
+            if (cublasLtMatmulPreferenceCreate(&pref) != CUBLAS_STATUS_SUCCESS) {
+                throw std::runtime_error("cublas_fp8_gemm: failed to create cublasLt preference");
+            }
+            size_t workspace_size = 0;
+            cublasLtMatmulPreferenceSetAttribute(
+                pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                &workspace_size, sizeof(workspace_size));
+            int returned_algos = 0;
+            cublasStatus_t hstatus = cublasLtMatmulAlgoGetHeuristic(
+                ltHandle, matmulDesc, layoutA, layoutB, layoutC, layoutC,
+                pref, 1, &heuristic, &returned_algos);
+            cublasLtMatmulPreferenceDestroy(pref);
+            if (hstatus != CUBLAS_STATUS_SUCCESS || returned_algos == 0) {
+                throw std::runtime_error(
+                    "cublas_fp8_gemm: no cublasLt algorithm available for the "
+                    "OP_N/OP_N FP8 layout on this toolkit/arch (likely the FP8 "
+                    "TN-format restriction). This path is unvalidated and is "
+                    "gated off rather than risk a silently-wrong result; "
+                    "re-lay-out operands to the required TN form and validate "
+                    "against a dequantized reference GEMM before enabling.");
+            }
+        }
+
+        // Perform the FP8 GEMM using the heuristic-selected algorithm (verified
+        // above to support this layout) rather than nullptr auto-select.
         status = cublasLtMatmul(
             ltHandle,
             matmulDesc,
@@ -1448,7 +1433,7 @@ void cublas_fp8_gemm(
             layoutC,
             C,        // D = C (in-place, since beta = 0)
             layoutC,
-            nullptr,  // algo (nullptr = auto-select)
+            &heuristic.algo,
             nullptr,  // workspace
             0,        // workspace size
             stream

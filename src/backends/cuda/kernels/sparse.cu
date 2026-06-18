@@ -106,7 +106,7 @@ cudaDataType get_cuda_data_type(DType dtype) {
 /// CUDA kernel: convert Int64 row indices to Int32.
 __global__ void cast_i64_to_i32(const int64_t* __restrict__ src,
                                  int32_t* __restrict__ dst, int64_t n) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = static_cast<int32_t>(src[i]);
 }
 
@@ -119,25 +119,25 @@ __global__ void cast_i64_to_i32(const int64_t* __restrict__ src,
 // ---------------------------------------------------------------------------
 __global__ void widen_f16_to_f32(const __half* __restrict__ src,
                                   float* __restrict__ dst, int64_t n) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = __half2float(src[i]);
 }
 
 __global__ void widen_bf16_to_f32(const __nv_bfloat16* __restrict__ src,
                                    float* __restrict__ dst, int64_t n) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = __bfloat162float(src[i]);
 }
 
 __global__ void narrow_f32_to_f16(const float* __restrict__ src,
                                    __half* __restrict__ dst, int64_t n) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = __float2half(src[i]);
 }
 
 __global__ void narrow_f32_to_bf16(const float* __restrict__ src,
                                     __nv_bfloat16* __restrict__ dst, int64_t n) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = __float2bfloat16(src[i]);
 }
 
@@ -154,7 +154,7 @@ Tensor widen_to_f32_async(const Tensor& src, cudaStream_t stream) {
         TENZOR_CUDA_CHECK(cudaMallocAsync(&d_buf, n * sizeof(float), stream));
     }
     const int threads = 256;
-    const int blocks = static_cast<int>((n + threads - 1) / threads);
+    const unsigned blocks = static_cast<unsigned>((n + threads - 1) / threads);
 
     if (src.dtype() == DType::Float16) {
         if (n > 0) {
@@ -197,7 +197,7 @@ Tensor narrow_from_f32_async(const Tensor& src_f32, DType target,
         TENZOR_CUDA_CHECK(cudaMallocAsync(&d_buf, n * elem_size, stream));
     }
     const int threads = 256;
-    const int blocks = static_cast<int>((n + threads - 1) / threads);
+    const unsigned blocks = static_cast<unsigned>((n + threads - 1) / threads);
 
     if (target == DType::Float16) {
         if (n > 0) {
@@ -229,7 +229,7 @@ Tensor narrow_from_f32_async(const Tensor& src_f32, DType target,
 /// CUDA kernel: convert Int32 crow_indices to Int64.
 __global__ void cast_i32_to_i64(const int32_t* __restrict__ src,
                                  int64_t* __restrict__ dst, int64_t n) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = static_cast<int64_t>(src[i]);
 }
 
@@ -271,7 +271,7 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream =
         CudaBuffer crow_i32_buf((nrows + 1) * sizeof(int32_t));
 
         int threads = 256;
-        int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
+        unsigned blocks_nnz = static_cast<unsigned>((nnz + threads - 1) / threads);
         cast_i64_to_i32<<<blocks_nnz, threads, 0, stream>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
         CUDA_CHECK_SPARSE(cudaGetLastError());
 
@@ -283,7 +283,7 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream =
 
         // Convert Int32 crow_indices back to Int64 on GPU
         Tensor crow_indices = zeros(std::vector<int64_t>{nrows + 1}, DType::Int64, Device::cuda());
-        int blocks_crow = static_cast<int>((nrows + 1 + threads - 1) / threads);
+        unsigned blocks_crow = static_cast<unsigned>((nrows + 1 + threads - 1) / threads);
         cast_i32_to_i64<<<blocks_crow, threads, 0, stream>>>(crow_i32_buf.as<int32_t>(), crow_indices.data<int64_t>(), nrows + 1);
         CUDA_CHECK_SPARSE(cudaGetLastError());
 
@@ -958,9 +958,12 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
     // The sparse tensor must already be on CUDA.
     if (sparse.layout() != SparseLayout::COO) return sparse;
     if (sparse.nnz() == 0) {
+        // An empty COO is trivially coalesced. Mark it so callers that invoke
+        // cuda_coalesce directly (e.g. cuda_coo_to_csc) and any is_coalesced()
+        // checks see the same flag the CPU reference sets, rather than
+        // re-running coalesce on every empty tensor.
         SparseTensor result = sparse;
-        // Can't set coalesced_ directly, but returning a zero-nnz tensor
-        // that was already coalesced is fine.
+        result.mark_coalesced(true);
         return result;
     }
 
@@ -1130,25 +1133,32 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
                           });
     }
 
-    // Trim output values to new_nnz
-    // We need to slice — simplest is to copy
+    // Trim output values to new_nnz. Use cudaMemcpyAsync on the default stream
+    // (the same stream thrust::cuda::par uses above) so the copy is
+    // stream-ordered with the preceding thrust work instead of forcing a
+    // blocking full-device sync the synchronous cudaMemcpy would impose.
     Tensor final_vals = zeros({new_nnz}, values.dtype(), Device::cuda());
     if (values.dtype() == DType::Float32) {
-        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<float>(), out_vals.data<float>(),
-                                     new_nnz * sizeof(float), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK_SPARSE(cudaMemcpyAsync(final_vals.data<float>(), out_vals.data<float>(),
+                                     new_nnz * sizeof(float), cudaMemcpyDeviceToDevice, 0));
     } else if (values.dtype() == DType::Float64) {
-        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<double>(), out_vals.data<double>(),
-                                     new_nnz * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK_SPARSE(cudaMemcpyAsync(final_vals.data<double>(), out_vals.data<double>(),
+                                     new_nnz * sizeof(double), cudaMemcpyDeviceToDevice, 0));
     } else if (values.dtype() == DType::Int32) {
-        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<int32_t>(), out_vals.data<int32_t>(),
-                                     new_nnz * sizeof(int32_t), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK_SPARSE(cudaMemcpyAsync(final_vals.data<int32_t>(), out_vals.data<int32_t>(),
+                                     new_nnz * sizeof(int32_t), cudaMemcpyDeviceToDevice, 0));
     } else if (values.dtype() == DType::Int64) {
-        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<int64_t>(), out_vals.data<int64_t>(),
-                                     new_nnz * sizeof(int64_t), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK_SPARSE(cudaMemcpyAsync(final_vals.data<int64_t>(), out_vals.data<int64_t>(),
+                                     new_nnz * sizeof(int64_t), cudaMemcpyDeviceToDevice, 0));
     }
 
-    return SparseTensor::sparse_coo(new_indices, final_vals,
+    auto coalesced = SparseTensor::sparse_coo(new_indices, final_vals,
                                     std::vector<int64_t>(sp_shape.begin(), sp_shape.end()));
+    // The sort + reduce_by_key above produces sorted, duplicate-free entries,
+    // so the result is coalesced. Flag it (callers like cuda_coo_to_csc invoke
+    // this directly and rely on is_coalesced()).
+    coalesced.mark_coalesced(true);
+    return coalesced;
 }
 
 SparseTensor cuda_coo_to_csc(const SparseTensor& sparse) {
@@ -1224,10 +1234,12 @@ SparseTensor cuda_coo_to_csc(const SparseTensor& sparse) {
                         thrust::counting_iterator<int64_t>(0),
                         thrust::counting_iterator<int64_t>(ncols),
                         thrust::device_pointer_cast(bounds_ptr));
-    // ccol[0] = 0, ccol[i+1] = upper_bound result for column i
-    CUDA_CHECK_SPARSE(cudaMemset(ccol_ptr, 0, sizeof(int64_t)));
-    CUDA_CHECK_SPARSE(cudaMemcpy(ccol_ptr + 1, bounds_ptr,
-                                 ncols * sizeof(int64_t), cudaMemcpyDeviceToDevice));
+    // ccol[0] = 0, ccol[i+1] = upper_bound result for column i. Async on the
+    // default stream (same stream as thrust::cuda::par) so it is stream-ordered
+    // with the surrounding thrust work rather than a blocking full-device sync.
+    CUDA_CHECK_SPARSE(cudaMemsetAsync(ccol_ptr, 0, sizeof(int64_t), 0));
+    CUDA_CHECK_SPARSE(cudaMemcpyAsync(ccol_ptr + 1, bounds_ptr,
+                                 ncols * sizeof(int64_t), cudaMemcpyDeviceToDevice, 0));
 
     // Gather sorted values
     Tensor sorted_vals = zeros({nnz}, values.dtype(), Device::cuda());
@@ -1316,7 +1328,7 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    int blocks = static_cast<int>((M + threads - 1) / threads);
+    unsigned blocks = static_cast<unsigned>((M + threads - 1) / threads);
 
     if (dtype == DType::Float32) {
         csr_sparse_add_kernel<float><<<blocks, threads>>>(
@@ -1469,7 +1481,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
 
     int threads = 256;
     int64_t total = M * N;
-    int blocks = static_cast<int>((total + threads - 1) / threads);
+    unsigned blocks = static_cast<unsigned>((total + threads - 1) / threads);
 
     if (dtype == DType::Float32) {
         csr_spmm_kernel<float><<<blocks, threads>>>(
@@ -1515,7 +1527,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    int blocks = static_cast<int>((M + threads - 1) / threads);
+    unsigned blocks = static_cast<unsigned>((M + threads - 1) / threads);
 
     if (dtype == DType::Float32) {
         csr_spmv_kernel<float><<<blocks, threads>>>(
@@ -1593,7 +1605,7 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    int blocks = static_cast<int>((M + threads - 1) / threads);
+    unsigned blocks = static_cast<unsigned>((M + threads - 1) / threads);
 
     if (dtype == DType::Float32) {
         csr_sparse_add_kernel<float><<<blocks, threads>>>(
@@ -1673,7 +1685,7 @@ __global__ void spgemm_count_kernel(
     int64_t* __restrict__ row_nnz,       // [M] output: nnz per row
     int64_t M, int64_t N)
 {
-    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (row >= M) return;
 
     // Use a simple hash-set approach (for small row widths)
@@ -1710,7 +1722,7 @@ __global__ void spgemm_fill_kernel(
     int64_t* __restrict__ c_row_nnz,     // [M] actual nnz per row (written back)
     int64_t M, int64_t N)
 {
-    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (row >= M) return;
 
     int64_t c_start = c_crow[row];
@@ -1790,7 +1802,7 @@ __global__ void spgemm_compact_kernel(
     const int64_t* __restrict__ row_nnz,    // [M] actual per row
     int64_t M)
 {
-    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (row >= M) return;
 
     int64_t src = old_crow[row];

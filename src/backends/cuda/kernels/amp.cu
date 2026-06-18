@@ -14,12 +14,15 @@ namespace cuda {
 
 namespace {
 
-// Helper to create a Bool scalar tensor on the target device
-inline Tensor make_bool_scalar(bool value, Device device) {
+// Helper to create a Bool scalar tensor on the target device.
+// Uses cudaMemsetAsync on the op stream (a Bool is a single byte, 0 or 1) so
+// the write is stream-ordered with the rest of has_inf_nan_kernel rather than a
+// blocking default-stream cudaMemcpy that serializes against the whole device.
+// memset avoids the host-source-lifetime hazard an async H2D copy would have.
+inline Tensor make_bool_scalar(bool value, Device device, cudaStream_t stream) {
     Tensor result({}, DType::Bool, device);
-    bool v = value;
-    TENZOR_CUDA_CHECK(cudaMemcpy(result.data<bool>(), &v, sizeof(bool),
-                                  cudaMemcpyHostToDevice));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data<bool>(),
+                                      value ? 1 : 0, sizeof(bool), stream));
     return result;
 }
 
@@ -49,7 +52,7 @@ __global__ void check_inf_nan_kernel<double>(const double* data, int64_t n, int*
 auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/, cudaStream_t stream) -> Tensor {
     const int64_t numel = input.numel();
     if (numel == 0) {
-        return make_bool_scalar(false, input.device());
+        return make_bool_scalar(false, input.device(), stream);
     }
 
     // Allocate device flag (single int) via RAII
@@ -80,7 +83,7 @@ auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/, 
         }
         default:
             // Integer types can't have inf/nan
-            return make_bool_scalar(false, input.device());
+            return make_bool_scalar(false, input.device(), stream);
     }
     TENZOR_CUDA_CHECK(cudaGetLastError());
 
@@ -90,7 +93,7 @@ auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/, 
                                         cudaMemcpyDeviceToHost, stream));
     TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    return make_bool_scalar(h_flag != 0, input.device());
+    return make_bool_scalar(h_flag != 0, input.device(), stream);
 }
 
 } // namespace cuda

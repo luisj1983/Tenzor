@@ -1733,6 +1733,16 @@ __global__ void leaky_relu_inplace_fp16_kernel(__half* data, float alpha, int64_
     }
 }
 
+// BFloat16 inplace kernel: take float alpha and compute in Float32 so the
+// negative-slope multiply is not done with a bf16-rounded alpha (mirrors the
+// Float16 inplace kernel and the CPU reference).
+__global__ void leaky_relu_inplace_bf16_kernel(__nv_bfloat16* data, float alpha, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float val = __bfloat162float(data[idx]);
+        data[idx] = __float2bfloat16(val > 0.0f ? val : alpha * val);
+    }
+}
+
 // In-place GELU — exact erf form 0.5 * x * (1 + erf(x / sqrt(2))), matching
 // PyTorch's default ('none'), the out-of-place CUDA kernel above, and every
 // other backend. The previous tanh approximation differed from the exact
@@ -1899,8 +1909,8 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) 
             reinterpret_cast<__half*>(input.data_ptr()), alpha, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
-        leaky_relu_inplace_cuda_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), __float2bfloat16(alpha), n);
+        leaky_relu_inplace_bf16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), alpha, n);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("LeakyReLU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
@@ -3261,6 +3271,8 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
         TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(double), stream));
     } else if (input.dtype() == DType::Float16) {
         TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(__half), stream));
+    } else if (input.dtype() == DType::BFloat16) {
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(__nv_bfloat16), stream));
     }
 
     if (input.numel() == 0) {

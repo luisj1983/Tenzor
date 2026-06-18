@@ -121,9 +121,14 @@ __global__ void nested_softmax_kernel_f64(
 
 auto nested_softmax_cuda(const Tensor& values, const Tensor& offsets,
                           int64_t dim, cudaStream_t stream) -> Tensor {
+    if (!values.is_contiguous()) {
+        throw std::runtime_error("nested_softmax_cuda: values must be contiguous (packed [total_len, inner] layout)");
+    }
     auto shape = values.shape();
     int64_t total_len = shape[0];
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    // Inner size = product of all dims after dim 0, so a 3D+ packed values
+    // tensor [total_len, d1, d2, ...] is fully covered (not just shape[1]).
+    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
@@ -222,9 +227,12 @@ __global__ void nested_log_softmax_kernel_f64(
 
 auto nested_log_softmax_cuda(const Tensor& values, const Tensor& offsets,
                               int64_t dim, cudaStream_t stream) -> Tensor {
+    if (!values.is_contiguous()) {
+        throw std::runtime_error("nested_log_softmax_cuda: values must be contiguous (packed [total_len, inner] layout)");
+    }
     auto shape = values.shape();
     int64_t total_len = shape[0];
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
@@ -295,8 +303,12 @@ __global__ void nested_sum_kernel_f64(
 
 auto nested_sum_cuda(const Tensor& values, const Tensor& offsets,
                       cudaStream_t stream) -> Tensor {
+    if (!values.is_contiguous()) {
+        throw std::runtime_error("nested_sum_cuda: values must be contiguous (packed [total_len, inner] layout)");
+    }
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    int64_t total_len = shape.empty() ? 0 : shape[0];
+    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
@@ -361,8 +373,12 @@ auto nested_mean_cuda(const Tensor& values, const Tensor& offsets,
         const DType orig = values.dtype();
         return nested_mean_cuda(values.to(DType::Float32), offsets, stream).to(orig);
     }
+    if (!values.is_contiguous()) {
+        throw std::runtime_error("nested_mean_cuda: values must be contiguous (packed [total_len, inner] layout)");
+    }
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    int64_t total_len = shape.empty() ? 0 : shape[0];
+    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
@@ -732,8 +748,12 @@ __global__ void nested_to_padded_kernel_t(
 auto nested_to_padded_cuda(const Tensor& values, const Tensor& offsets,
                             int64_t max_len, float padding_value,
                             cudaStream_t stream) -> Tensor {
+    if (!values.is_contiguous()) {
+        throw std::runtime_error("nested_to_padded_cuda: values must be contiguous (packed [total_len, inner] layout)");
+    }
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    int64_t total_len = shape.empty() ? 0 : shape[0];
+    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
     auto padded = tenzor::full({B, max_len, D}, padding_value,
@@ -789,10 +809,14 @@ __global__ void nested_from_padded_kernel_t(
 
 auto nested_from_padded_cuda(const Tensor& padded, const Tensor& offsets,
                               cudaStream_t stream) -> Tensor {
+    if (!padded.is_contiguous()) {
+        throw std::runtime_error("nested_from_padded_cuda: padded must be contiguous (packed [B, max_len, inner] layout)");
+    }
     auto pad_shape = padded.shape();
     int64_t B = pad_shape[0];
     int64_t max_len = pad_shape[1];
-    int64_t D = (pad_shape.size() > 2) ? pad_shape[2] : 1;
+    // Inner size = product of all dims after dim 1, covering 4D+ padded inputs.
+    int64_t D = (B > 0 && max_len > 0) ? padded.numel() / (B * max_len) : 1;
 
     // Compute total_len from offsets
     auto offsets_cpu = (offsets.device().type == Device::Type::CPU) ? offsets : offsets.to(Device::cpu());
@@ -886,8 +910,12 @@ auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets,
                                             eps, stream);
         return out.to(orig);
     }
+    if (!values.is_contiguous()) {
+        throw std::runtime_error("nested_layer_norm_cuda: values must be contiguous (packed [total_len, inner] layout)");
+    }
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    int64_t total_len = shape.empty() ? 0 : shape[0];
+    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());

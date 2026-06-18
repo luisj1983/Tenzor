@@ -568,7 +568,7 @@ namespace cuda {
     // 3D Pooling operations
     // Q.5: per-axis std::array<int64_t, 3> signatures honour asymmetric D/H/W
     // stride/padding (previously silently collapsed via scalar parameters).
-    auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, std::array<int64_t, 3> dilation, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
     auto avgpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
     auto avgpool3d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
@@ -3609,8 +3609,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
+        const auto dilation    = ::tenzor::backend::attrs::dilation_3d(attrs);
         auto [output, indices] = cuda::maxpool3d_forward_kernel(inputs[0],
-            kernel_size, stride, padding, get_cuda_stream(attrs));
+            kernel_size, stride, padding, dilation, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 

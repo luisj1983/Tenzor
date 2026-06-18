@@ -91,13 +91,6 @@ inline Tensor cuda_sum_device(const Tensor& t, float scale = 1.0f) {
     return result;
 }
 
-// Helper to create scalar tensor on device
-inline Tensor create_scalar_tensor(float value, DType dtype, Device device) {
-    Tensor t({1}, dtype, device);
-    set_scalar_host(static_cast<float*>(t.data_ptr()), value);
-    return t;
-}
-
 // ==============================================================================
 // Fused Linear + ReLU: cuBLAS matmul + fused bias+ReLU kernel
 // ==============================================================================

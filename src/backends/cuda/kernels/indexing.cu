@@ -36,6 +36,14 @@
 namespace tenzor {
 namespace cuda {
 
+// Generic addition reduction op for cub::DeviceReduce::ReduceByKey. Replaces
+// cub::Sum(), which was removed in newer CCCL/CUB. operator+ is defined in
+// device code for all scatter value types (float/double/int/__half/...).
+struct CubAddOp {
+    template<typename T>
+    __host__ __device__ T operator()(const T& a, const T& b) const { return a + b; }
+};
+
 // Centralized error checking
 #include "../cuda_error.hpp"
 
@@ -874,28 +882,21 @@ __global__ void compute_flat_scatter_indices_kernel(
     }
 }
 
-// Helper kernel: deterministic segment accumulate after sorting by output index
+// Helper kernel: add the per-segment reduced values (one per unique output
+// index, produced in parallel by cub::DeviceReduce::ReduceByKey) back into the
+// output. One thread per unique segment, so no serial per-segment walk: this
+// removes the O(N) single-thread hot-segment perf cliff the previous
+// per-boundary accumulate suffered when many scatter elements share one index.
 template<typename T>
-__global__ void deterministic_segment_accumulate_kernel(
-    const int64_t* sorted_flat_indices,
-    const T* sorted_values,
+__global__ void deterministic_apply_segments_kernel(
+    const int64_t* unique_indices,
+    const T* reduced_values,
     T* output,
-    int64_t total_scatter) {
-    // Each thread processes one segment boundary
-    TENZOR_CUDA_KERNEL_LOOP(idx, total_scatter) {
-        int64_t flat_idx = sorted_flat_indices[idx];
-        if (flat_idx < 0) continue;  // skip invalid indices
-
-        // Check if this is the start of a new segment
-        bool is_segment_start = (idx == 0) || (sorted_flat_indices[idx - 1] != flat_idx);
-        if (!is_segment_start) continue;
-
-        // Accumulate all values in this segment sequentially
-        T sum = sorted_values[idx];
-        for (int64_t j = idx + 1; j < total_scatter && sorted_flat_indices[j] == flat_idx; ++j) {
-            sum += sorted_values[j];
-        }
-        output[flat_idx] += sum;
+    int64_t num_segments) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_segments) {
+        int64_t flat_idx = unique_indices[idx];
+        if (flat_idx < 0) continue;  // skip invalid indices (compacted to front by sort)
+        output[flat_idx] += reduced_values[idx];
     }
 }
 
@@ -993,13 +994,48 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                 total_scatter, 0, static_cast<int>(sizeof(int64_t) * 8), stream);
             CUDA_CHECK(cudaGetLastError());
 
-            // Step 3: Deterministic segment accumulate
-            deterministic_segment_accumulate_kernel<ValT><<<num_blocks_det, BLOCK_SIZE_DET, 0, stream>>>(
-                sorted_indices_buf.as<int64_t>(),
-                sorted_vals_buf.as<ValT>(),
-                out_vals,  // output tensor data
-                total_scatter);
+            // Step 3: Parallel segmented reduction over the sorted keys via
+            // cub::DeviceReduce::ReduceByKey. This sums consecutive equal keys
+            // in a fixed (left-to-right) order — deterministic — and in
+            // parallel, replacing the previous per-segment single-thread serial
+            // walk that became O(N) on a hot index. Outputs the unique output
+            // indices and their summed values, then a one-thread-per-segment
+            // kernel adds them back into `output`.
+            CudaBuffer unique_indices_buf(total_scatter * sizeof(int64_t));
+            CudaBuffer reduced_vals_buf(total_scatter * sizeof(ValT));
+            CudaBuffer num_segments_buf(sizeof(int64_t));
+
+            size_t rbk_temp_bytes = 0;
+            cub::DeviceReduce::ReduceByKey(
+                nullptr, rbk_temp_bytes,
+                sorted_indices_buf.as<int64_t>(), unique_indices_buf.as<int64_t>(),
+                sorted_vals_buf.as<ValT>(), reduced_vals_buf.as<ValT>(),
+                num_segments_buf.as<int64_t>(), CubAddOp(),
+                total_scatter, stream);
+
+            CudaBuffer rbk_temp(rbk_temp_bytes);
+            cub::DeviceReduce::ReduceByKey(
+                rbk_temp.as<void>(), rbk_temp_bytes,
+                sorted_indices_buf.as<int64_t>(), unique_indices_buf.as<int64_t>(),
+                sorted_vals_buf.as<ValT>(), reduced_vals_buf.as<ValT>(),
+                num_segments_buf.as<int64_t>(), CubAddOp(),
+                total_scatter, stream);
             CUDA_CHECK(cudaGetLastError());
+
+            int64_t num_segments = 0;
+            CUDA_CHECK(cudaMemcpyAsync(&num_segments, num_segments_buf.as<int64_t>(),
+                                        sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            if (num_segments > 0) {
+                int seg_blocks = static_cast<int>((num_segments + BLOCK_SIZE_DET - 1) / BLOCK_SIZE_DET);
+                deterministic_apply_segments_kernel<ValT><<<seg_blocks, BLOCK_SIZE_DET, 0, stream>>>(
+                    unique_indices_buf.as<int64_t>(),
+                    reduced_vals_buf.as<ValT>(),
+                    out_vals,  // output tensor data
+                    num_segments);
+                CUDA_CHECK(cudaGetLastError());
+            }
         };
 
         if (input.dtype() == DType::Float32) {

@@ -1577,7 +1577,8 @@ __global__ void maxpool3d_forward_impl(
     int64_t D_out, int64_t H_out, int64_t W_out,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t sD, int64_t sH, int64_t sW,
-    int64_t pD, int64_t pH, int64_t pW
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW
 ) {
     using Compute = pool_compute_t<T>;
     const int64_t total = N * C * D_out * H_out * W_out;
@@ -1602,9 +1603,9 @@ __global__ void maxpool3d_forward_impl(
         for (int64_t kd = 0; kd < kD; ++kd) {
             for (int64_t kh = 0; kh < kH; ++kh) {
                 for (int64_t kw = 0; kw < kW; ++kw) {
-                    int64_t d = d_start + kd;
-                    int64_t h = h_start + kh;
-                    int64_t w = w_start + kw;
+                    int64_t d = d_start + kd * dD;
+                    int64_t h = h_start + kh * dH;
+                    int64_t w = w_start + kw * dW;
 
                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                         int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
@@ -1625,12 +1626,15 @@ __global__ void maxpool3d_forward_impl(
 
 auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size,
                                std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
+                               std::array<int64_t, 3> dilation,
                                cudaStream_t stream) -> std::pair<Tensor, Tensor> {
-    // Q.5: per-axis std::array<int64_t, 3>. kernel_size/stride/padding now
-    // honour asymmetric D/H/W (previously collapsed to a single scalar).
+    // Q.5: per-axis std::array<int64_t, 3>. kernel_size/stride/padding/dilation
+    // now honour asymmetric D/H/W (previously collapsed to a single scalar),
+    // matching the CPU reference (src/backends/cpu/kernels/pooling.cpp).
     const int64_t kD = kernel_size[0], kH = kernel_size[1], kW = kernel_size[2];
     const int64_t sD = stride[0],      sH = stride[1],      sW = stride[2];
     const int64_t pD = padding[0],     pH = padding[1],     pW = padding[2];
+    const int64_t dD = dilation[0],    dH = dilation[1],    dW = dilation[2];
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1638,9 +1642,9 @@ auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel
     int64_t H = shape[3];
     int64_t W = shape[4];
 
-    int64_t D_out = (D + 2 * pD - kD) / sD + 1;
-    int64_t H_out = (H + 2 * pH - kH) / sH + 1;
-    int64_t W_out = (W + 2 * pW - kW) / sW + 1;
+    int64_t D_out = (D + 2 * pD - dD * (kD - 1) - 1) / sD + 1;
+    int64_t H_out = (H + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t W_out = (W + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
 
     Tensor output({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
     Tensor indices({N, C, D_out, H_out, W_out}, DType::Int64, input.device());
@@ -1651,13 +1655,13 @@ auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel
         auto [grid, block] = optimal_launch_config(maxpool3d_forward_impl<float>, total);
         maxpool3d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(), indices.data<int64_t>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, dD, dH, dW);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         auto [grid, block] = optimal_launch_config(maxpool3d_forward_impl<double>, total);
         maxpool3d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(), indices.data<int64_t>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, dD, dH, dW);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         auto [grid, block] = optimal_launch_config(maxpool3d_forward_impl<__half>, total);
@@ -1665,7 +1669,7 @@ auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, dD, dH, dW);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         auto [grid, block] = optimal_launch_config(maxpool3d_forward_impl<__nv_bfloat16>, total);
@@ -1673,7 +1677,7 @@ auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
             indices.data<int64_t>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, dD, dH, dW);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("maxpool3d_forward_kernel: unsupported dtype");

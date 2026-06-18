@@ -3400,7 +3400,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
         case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
         case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
         default:
-            throw std::runtime_error("argmax: only Float32, Float64, Float16, BFloat16, Int32, and Int64 are supported");
+            throw std::runtime_error("argmax: unsupported dtype");
     }
 
     CUDA_PEEK_AND_THROW(stream, "argmax_kernel");
@@ -3540,7 +3540,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
         case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
         case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
         default:
-            throw std::runtime_error("argmin: only Float32, Float64, Float16, BFloat16, Int32, and Int64 are supported");
+            throw std::runtime_error("argmin: unsupported dtype");
     }
 
     CUDA_PEEK_AND_THROW(stream, "argmin_kernel");
@@ -3805,7 +3805,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
             break;
         }
         default:
-            throw std::runtime_error("prod: only Float32, Float64, Int32, and Int64 are supported");
+            throw std::runtime_error("prod: unsupported dtype");
     }
 
     CUDA_PEEK_AND_THROW(stream, "prod_kernel");
@@ -6184,7 +6184,10 @@ auto cosine_similarity_kernel(const Tensor& a, const Tensor& b, int64_t dim, dou
             output_shape.push_back(shape_span[d]);
         }
     }
-    if (output_shape.empty()) output_shape.push_back(1);
+    // Fully-reduced result collapses to a scalar shape {} to match the CPU
+    // convention (compute_reduction_shape and the var/norm paths do the same);
+    // do NOT force {1}. output_size below is 1 for an empty shape (empty
+    // product), so the single-element kernel launch is unaffected.
 
     int64_t output_size = 1;
     for (auto s : output_shape) output_size *= s;

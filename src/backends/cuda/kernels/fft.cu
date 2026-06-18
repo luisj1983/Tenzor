@@ -107,8 +107,11 @@ struct CuFFTPlan {
 
 template<typename T>
 __global__ void scale_kernel(T* data, int64_t numel, T scale) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx < numel) {
+    // Grid-stride loop so a clamped/truncated grid count still covers all
+    // elements when numel exceeds INT_MAX threads.
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < numel; idx += stride) {
         data[idx] *= scale;
     }
 }
@@ -116,9 +119,10 @@ __global__ void scale_kernel(T* data, int64_t numel, T scale) {
 // Scale complex data (2 floats per complex element)
 template<typename RealT>
 __global__ void scale_complex_kernel(RealT* data, int64_t numel_complex, RealT scale) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t total = numel_complex * 2;  // real + imag parts
-    if (idx < total) {
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += stride) {
         data[idx] *= scale;
     }
 }
@@ -155,7 +159,10 @@ void apply_normalization_complex(Tensor& output, double scale, bool is_float32, 
     int64_t numel = output.numel();
     int64_t total_reals = numel * 2;
     constexpr int block_size = 256;
-    int grid_size = static_cast<int>((total_reals + block_size - 1) / block_size);
+    // Clamp the grid to the device limit; the kernel grid-strides to cover any
+    // remainder when total_reals exceeds INT_MAX threads.
+    int64_t grid64 = (total_reals + block_size - 1) / block_size;
+    unsigned grid_size = static_cast<unsigned>(std::min<int64_t>(grid64, 65535));
 
     if (is_float32) {
         float s = static_cast<float>(scale);
@@ -175,7 +182,8 @@ void apply_normalization_real(Tensor& output, double scale, bool is_float32, cud
 
     int64_t numel = output.numel();
     constexpr int block_size = 256;
-    int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
+    int64_t grid64 = (numel + block_size - 1) / block_size;
+    unsigned grid_size = static_cast<unsigned>(std::min<int64_t>(grid64, 65535));
 
     if (is_float32) {
         float s = static_cast<float>(scale);

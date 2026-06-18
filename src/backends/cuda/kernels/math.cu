@@ -4132,12 +4132,15 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 template<typename T>
 __global__ void randint_kernel_device(T* output, curandState* states, int64_t n, int64_t low, int64_t high) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        // Generate uniform float in [0, 1)
-        float r = curand_uniform(&states[idx]);
+        // Generate uniform double in (0, 1]. Use double so the range scaling
+        // exactly represents integers up to 2^53, covering all supported int
+        // ranges (float32's 24-bit mantissa would bias/skip values for ranges
+        // above 2^24).
+        double r = curand_uniform_double(&states[idx]);
         // Scale to [low, high) and cast to integer type
-        // curand_uniform returns (0, 1], so clamp to avoid hitting 'high'
+        // curand_uniform_double returns (0, 1], so clamp to avoid hitting 'high'
         int64_t range = high - low;
-        int64_t val = low + static_cast<int64_t>(r * static_cast<float>(range));
+        int64_t val = low + static_cast<int64_t>(r * static_cast<double>(range));
         // Clamp in case r == 1.0
         if (val >= high) val = high - 1;
         output[idx] = static_cast<T>(val);

@@ -2060,6 +2060,57 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         return result;
     }
 
+    // Matrix @ vector: (M, K) @ (K,) -> (M,). Symmetric to the 1D@2D branch
+    // above; PyTorch matmul supports this. Treat the vector as a (K, 1) column,
+    // matmul to (M, 1), and the output is the flat (M,) tensor.
+    if (a_contig.ndim() == 2 && b_contig.ndim() == 1) {
+        auto a_shape = a_contig.shape();
+        auto b_shape = b_contig.shape();
+
+        int64_t M = a_shape[0];   // Matrix rows
+        int64_t K = a_shape[1];   // Matrix cols
+        int64_t K2 = b_shape[0];  // Vector size
+
+        if (K != K2) {
+            throw std::runtime_error(
+                "matmul dimension mismatch: matrix(" + std::to_string(M) + "×" +
+                std::to_string(K) + ") @ vector(" + std::to_string(K2) + ")"
+            );
+        }
+
+        // Vector treated as (K, 1) column; result (M, 1) squeezed to (M,).
+        int64_t N = 1;
+
+        Tensor result({M}, a_contig.dtype(), a_contig.device());
+
+        if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
+            matmul_f32(a_contig.data<float>(), b_contig.data<float>(),
+                       result.data<float>(), M, N, K, stream);
+        } else if (a_contig.dtype() == DType::Float64 && b_contig.dtype() == DType::Float64) {
+            matmul_f64(a_contig.data<double>(), b_contig.data<double>(),
+                       result.data<double>(), M, N, K, stream);
+        } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
+            matmul_f16(reinterpret_cast<const __half*>(a_contig.data<Float16>()),
+                       reinterpret_cast<const __half*>(b_contig.data<Float16>()),
+                       reinterpret_cast<__half*>(result.data<Float16>()), M, N, K, stream);
+        } else if (a_contig.dtype() == DType::Int32 && b_contig.dtype() == DType::Int32) {
+            matmul_i32(a_contig.data<int32_t>(), b_contig.data<int32_t>(),
+                       result.data<int32_t>(), M, N, K, stream);
+        } else if (a_contig.dtype() == DType::BFloat16 && b_contig.dtype() == DType::BFloat16) {
+            matmul_bf16(reinterpret_cast<const __nv_bfloat16*>(a_contig.data<BFloat16>()),
+                        reinterpret_cast<const __nv_bfloat16*>(b_contig.data<BFloat16>()),
+                        reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), M, N, K, stream);
+        } else {
+            throw std::runtime_error(
+                "matmul unsupported dtype combination: " +
+                std::string(dtype_name(a_contig.dtype())) + " @ " +
+                std::string(dtype_name(b_contig.dtype()))
+            );
+        }
+
+        return result;
+    }
+
     // Handle 2D matrices
     if (a_contig.ndim() == 2 && b_contig.ndim() == 2) {
         auto a_shape = a_contig.shape();
@@ -2257,6 +2308,18 @@ auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
     int64_t K = mat1.shape()[1];
     int64_t N = mat2.shape()[1];
 
+    // Half-precision widen/recurse handled up front, BEFORE allocating/filling
+    // `output`, so no buffer is allocated and no beta-copy is performed on the
+    // path that immediately recurses with Float32 operands.
+    if (mat1.dtype() == DType::Float16 || mat1.dtype() == DType::BFloat16) {
+        DType orig = mat1.dtype();
+        auto result = addmm_kernel(input.to(DType::Float32),
+                                   mat1.to(DType::Float32),
+                                   mat2.to(DType::Float32),
+                                   alpha, beta, stream);
+        return result.to(orig);
+    }
+
     Tensor a_cont = mat1.is_contiguous() ? mat1 : mat1.contiguous();
     Tensor b_cont = mat2.is_contiguous() ? mat2 : mat2.contiguous();
 
@@ -2317,19 +2380,6 @@ auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
         if (status != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("cuBLAS addmm DGEMM failed");
         }
-    } else if (mat1.dtype() == DType::Float16) {
-        // Upcast to Float32
-        auto result = addmm_kernel(input.to(DType::Float32),
-                                   mat1.to(DType::Float32),
-                                   mat2.to(DType::Float32),
-                                   alpha, beta, stream);
-        return result.to(DType::Float16);
-    } else if (mat1.dtype() == DType::BFloat16) {
-        auto result = addmm_kernel(input.to(DType::Float32),
-                                   mat1.to(DType::Float32),
-                                   mat2.to(DType::Float32),
-                                   alpha, beta, stream);
-        return result.to(DType::BFloat16);
     } else {
         throw std::runtime_error("addmm: unsupported dtype on CUDA");
     }
@@ -2344,6 +2394,16 @@ auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
                   double alpha, double beta, cudaStream_t stream) -> Tensor {
     int64_t M = mat.shape()[0];
     int64_t K = mat.shape()[1];
+
+    // Half-precision widen/recurse up front, before allocating/filling output.
+    if (mat.dtype() == DType::Float16 || mat.dtype() == DType::BFloat16) {
+        DType orig = mat.dtype();
+        auto result = addmv_kernel(input.to(DType::Float32),
+                                   mat.to(DType::Float32),
+                                   vec.to(DType::Float32),
+                                   alpha, beta, stream);
+        return result.to(orig);
+    }
 
     Tensor m_cont = mat.is_contiguous() ? mat : mat.contiguous();
     Tensor v_cont = vec.is_contiguous() ? vec : vec.contiguous();
@@ -2403,13 +2463,6 @@ auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
         if (status != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("cuBLAS addmv DGEMV failed");
         }
-    } else if (mat.dtype() == DType::Float16 || mat.dtype() == DType::BFloat16) {
-        DType orig = mat.dtype();
-        auto result = addmv_kernel(input.to(DType::Float32),
-                                   mat.to(DType::Float32),
-                                   vec.to(DType::Float32),
-                                   alpha, beta, stream);
-        return result.to(orig);
     } else {
         throw std::runtime_error("addmv: unsupported dtype on CUDA");
     }
@@ -2426,6 +2479,16 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
     int64_t M = batch1.shape()[1];
     int64_t K = batch1.shape()[2];
     int64_t N = batch2.shape()[2];
+
+    // Half-precision widen/recurse up front, before allocating/filling output.
+    if (batch1.dtype() == DType::Float16 || batch1.dtype() == DType::BFloat16) {
+        DType orig = batch1.dtype();
+        auto result = baddbmm_kernel(input.to(DType::Float32),
+                                     batch1.to(DType::Float32),
+                                     batch2.to(DType::Float32),
+                                     alpha, beta, stream);
+        return result.to(orig);
+    }
 
     Tensor b1_cont = batch1.is_contiguous() ? batch1 : batch1.contiguous();
     Tensor b2_cont = batch2.is_contiguous() ? batch2 : batch2.contiguous();
@@ -2492,13 +2555,6 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
         if (status != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("cuBLAS baddbmm batched DGEMM failed");
         }
-    } else if (batch1.dtype() == DType::Float16 || batch1.dtype() == DType::BFloat16) {
-        DType orig = batch1.dtype();
-        auto result = baddbmm_kernel(input.to(DType::Float32),
-                                     batch1.to(DType::Float32),
-                                     batch2.to(DType::Float32),
-                                     alpha, beta, stream);
-        return result.to(orig);
     } else {
         throw std::runtime_error("baddbmm: unsupported dtype on CUDA");
     }

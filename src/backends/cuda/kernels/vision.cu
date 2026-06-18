@@ -1264,7 +1264,11 @@ __global__ void box_iou_kernel(
     T area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
     T union_area = area1 + area2 - inter_area;
 
-    T iou = inter_area / (union_area + static_cast<T>(1e-7));
+    // Match the CPU reference (src/backends/cpu/kernels/vision.cpp): plain IoU
+    // is 0 for a zero/degenerate union rather than inter_area/1e-7 (which blows
+    // up tiny numerical-noise intersections or yields a negative ratio for
+    // inverted boxes).
+    T iou = (union_area > static_cast<T>(0)) ? (inter_area / union_area) : static_cast<T>(0);
 
     if (iou_type == 1) {
         // GIoU: IoU - (enclosing_area - union_area) / enclosing_area
@@ -1273,7 +1277,8 @@ __global__ void box_iou_kernel(
         T enc_x2 = max(x2_1, x2_2);
         T enc_y2 = max(y2_1, y2_2);
         T enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
-        iou = iou - (enc_area - union_area) / (enc_area + static_cast<T>(1e-7));
+        // Divide by max(enc_area, 1e-7), matching CPU std::max(enclose_area, 1e-7f).
+        iou = iou - (enc_area - union_area) / max(enc_area, static_cast<T>(1e-7));
     } else if (iou_type == 2 || iou_type == 3) {
         // DIoU (2) / CIoU (3): subtract the normalized squared center distance
         // (and, for CIoU, the aspect-ratio penalty). Previously these fell

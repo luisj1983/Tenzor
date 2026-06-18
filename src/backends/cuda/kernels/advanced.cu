@@ -12,6 +12,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include "cuda_common.cuh"
 #include <cuda_runtime.h>
@@ -1639,8 +1640,9 @@ __global__ void multinomial_sample_kernel(const float* cdf, int64_t* output,
     int64_t sid = blockIdx.x * blockDim.x + threadIdx.x;
     if (sid >= num_samples) return;
 
-    // Generate random number in [0, total)
-    uint64_t state = seed + sid * 6364136223846793005ULL + 1442695040888963407ULL;
+    // Generate random number in [0, total). SplitMix64-seed per thread so
+    // adjacent samples get de-correlated streams (matches bernoulli/poisson/etc).
+    uint64_t state = splitmix64_seed(seed, sid);
     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
     float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31) * total;
 
@@ -1671,9 +1673,10 @@ __global__ void multinomial_es_keys_kernel(const float* __restrict__ probs,
     int64_t total = batch_size * num_categories;
     if (tid >= total) return;
 
-    // Same per-thread LCG seeding pattern as bernoulli/poisson kernels.
-    uint64_t state = seed + static_cast<uint64_t>(tid) * 6364136223846793005ULL +
-                     1442695040888963407ULL;
+    // Same SplitMix64 per-thread seeding as bernoulli/poisson kernels so
+    // adjacent categories get de-correlated uniforms (correlated keys would
+    // bias the without-replacement selected set).
+    uint64_t state = splitmix64_seed(seed, tid);
     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
     // u in (0, 1) — bias upward by 1 ULP to keep -log(u) finite.
     float u = (static_cast<float>(state >> 33) + 1.0f) /
@@ -2034,6 +2037,47 @@ __global__ void cdist_l1_kernel_impl(const T* x1, const T* x2,
     output[(b * P + p_idx) * R + r] = sum;
 }
 
+// p=inf (Chebyshev) specialization: max_m |a[m] - b[m]|. Matches the CPU
+// reference (src/backends/cpu/kernels/math.cpp). The generic Lp kernel cannot
+// compute this — pow(diff, inf) overflows/underflows to inf/0.
+template<typename T>
+__global__ void cdist_inf_kernel_impl(const T* x1, const T* x2,
+                                      T* output,
+                                      int64_t B, int64_t P, int64_t R, int64_t M) {
+    int64_t b = blockIdx.z;
+    int64_t p_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= B || p_idx >= P || r >= R) return;
+
+    const T* a_b = x1 + b * P * M;
+    const T* b_b = x2 + b * R * M;
+    T max_val = T(0);
+    for (int64_t m = 0; m < M; ++m) {
+        T diff = ::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
+        if (diff > max_val) max_val = diff;
+    }
+    output[(b * P + p_idx) * R + r] = max_val;
+}
+
+// p=0 specialization: count of elementwise-unequal components. Matches CPU.
+template<typename T>
+__global__ void cdist_p0_kernel_impl(const T* x1, const T* x2,
+                                     T* output,
+                                     int64_t B, int64_t P, int64_t R, int64_t M) {
+    int64_t b = blockIdx.z;
+    int64_t p_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= B || p_idx >= P || r >= R) return;
+
+    const T* a_b = x1 + b * P * M;
+    const T* b_b = x2 + b * R * M;
+    T count = T(0);
+    for (int64_t m = 0; m < M; ++m) {
+        if (a_b[p_idx * M + m] != b_b[r * M + m]) count += T(1);
+    }
+    output[(b * P + p_idx) * R + r] = count;
+}
+
 auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                   cudaStream_t stream) -> Tensor {
     // Mirror the CPU policy (src/backends/cpu/kernels/math.cpp): compute in
@@ -2087,6 +2131,14 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                 a.data<T>(), b.data<T>(), result.data<T>(), B, P, R, M);
         } else if (p == 1.0) {
             cdist_l1_kernel_impl<T><<<blocks, threads, 0, stream>>>(
+                a.data<T>(), b.data<T>(), result.data<T>(), B, P, R, M);
+        } else if (std::isinf(p)) {
+            // p=inf -> Chebyshev (max-abs); matches the CPU reference.
+            cdist_inf_kernel_impl<T><<<blocks, threads, 0, stream>>>(
+                a.data<T>(), b.data<T>(), result.data<T>(), B, P, R, M);
+        } else if (p == 0.0) {
+            // p=0 -> count of unequal components; matches the CPU reference.
+            cdist_p0_kernel_impl<T><<<blocks, threads, 0, stream>>>(
                 a.data<T>(), b.data<T>(), result.data<T>(), B, P, R, M);
         } else {
             cdist_lp_kernel_impl<T><<<blocks, threads, 0, stream>>>(
