@@ -13,7 +13,9 @@
 #endif
 
 // Intel MKL BLAS for the Float64 im2col-GEMM path (cblas_dgemm); the float path
-// uses SIMD micro-kernels and Float64 would otherwise fall to the scalar loop.
+// uses SIMD micro-kernels and without MKL Float64 falls back to gemm_local<double>
+// (the scalar triple loop). That fallback is CORRECT — it accumulates in genuine
+// `double` — only ~10x slower; it is not a precision regression.
 #ifdef TENZOR_USE_MKL
 #include <mkl.h>
 #endif
@@ -50,8 +52,21 @@ static void im3col_cpu(
     int64_t dD, int64_t dH, int64_t dW,
     int64_t out_d, int64_t out_h, int64_t out_w
 ) {
-    int64_t col_cols = channels * kD * kH * kW;
-    int64_t total = batch * out_d * out_h * out_w * col_cols;
+    // Overflow-checked int64 product: an unchecked product can wrap negative for
+    // pathological-but-legal 5D shapes, truncating the loop below and leaving the
+    // col buffer (and thus the conv output) partially uninitialized rather than
+    // throwing. Guard each multiplicative step, mirroring calculate_output_size.
+    auto checked_mul = [](int64_t a, int64_t b) -> int64_t {
+        if (a != 0 && b != 0 &&
+            (a > std::numeric_limits<int64_t>::max() / b ||
+             a < std::numeric_limits<int64_t>::min() / b)) {
+            throw std::invalid_argument("im3col: index/size product overflows int64");
+        }
+        return a * b;
+    };
+    int64_t col_cols = checked_mul(checked_mul(checked_mul(channels, kD), kH), kW);
+    int64_t total = checked_mul(
+        checked_mul(checked_mul(checked_mul(batch, out_d), out_h), out_w), col_cols);
 
     #pragma omp parallel for if(total > ::tenzor::OmpThresholds::medium())
     for (int64_t idx = 0; idx < total; ++idx) {

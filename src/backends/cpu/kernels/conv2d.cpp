@@ -18,8 +18,11 @@
 
 // Intel MKL BLAS for the Float64 im2col-GEMM path (cblas_dgemm). The float
 // path uses hand-written SIMD micro-kernels in gemm_optimized.hpp; oneDNN is
-// Float32-only here, so without this the Float64 conv resolves to the generic
-// scalar triple loop.
+// Float32-only here, so without MKL the Float64 conv falls back to the generic
+// gemm_cpu<double> template (the scalar triple loop). That fallback is
+// numerically CORRECT — it accumulates in genuine `double`, not a narrowed
+// float — it is only ~10x slower than cblas_dgemm. It is therefore not a
+// precision regression; do not "fix" it by forcing a float accumulator.
 #ifdef TENZOR_USE_MKL
 #include <mkl.h>
 #endif
@@ -65,6 +68,19 @@ inline int64_t calculate_output_size(int64_t input_size, int64_t kernel_size,
     return (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 }
 
+// Overflow-checked int64 product. Used to guard the flat-index loop bounds in
+// im2col/im3col: an unchecked product can wrap negative for pathological-but-
+// legal shapes, silently truncating the loop and leaving the col buffer (and
+// hence the conv output) partially uninitialized instead of throwing.
+inline int64_t checked_mul_i64(int64_t a, int64_t b, const char* what) {
+    if (a != 0 && b != 0 &&
+        (a > std::numeric_limits<int64_t>::max() / b ||
+         a < std::numeric_limits<int64_t>::min() / b)) {
+        throw std::invalid_argument(std::string(what) + ": index/size product overflows int64");
+    }
+    return a * b;
+}
+
 // ============================================================================
 // im2col CPU Implementation
 // ============================================================================
@@ -91,7 +107,15 @@ void im2col_cpu(
     int64_t out_h,
     int64_t out_w
 ) {
-    const int64_t col_width = channels * kernel_h * kernel_w;
+    const int64_t col_width = checked_mul_i64(checked_mul_i64(channels, kernel_h, "im2col"),
+                                              kernel_w, "im2col");
+    // Guard the full flat extent of the col buffer so the (b,oh,ow,col_width)
+    // index arithmetic below cannot wrap negative and silently skip work.
+    {
+        int64_t spatial = checked_mul_i64(out_h, out_w, "im2col");
+        int64_t rows = checked_mul_i64(batch, spatial, "im2col");
+        (void)checked_mul_i64(rows, col_width, "im2col");
+    }
 
     // Nested loop approach: eliminates 5 div/mod per element (~200 cycles saved per element)
     #pragma omp parallel for collapse(3) if(batch * out_h * out_w > OmpThresholds::medium())

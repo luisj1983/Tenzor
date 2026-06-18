@@ -722,26 +722,64 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replaceme
                 out_row[s] = idx;
             }
         } else {
-            // Without replacement: use modified cumsum, zero out sampled
-            std::vector<float> weights(row, row + num_categories);
-            for (int64_t s = 0; s < num_samples; ++s) {
-                // Recompute cumsum from current weights
-                std::vector<float> cs(static_cast<size_t>(num_categories));
-                cs[0] = weights[0];
-                for (int64_t i = 1; i < num_categories; ++i) {
-                    cs[static_cast<size_t>(i)] = cs[static_cast<size_t>(i - 1)] + weights[static_cast<size_t>(i)];
+            // Without replacement: sample proportional to the remaining weights,
+            // then remove the sampled category. A Fenwick (binary-indexed) tree
+            // over the weights gives O(log C) prefix-sum queries and O(log C)
+            // point updates, so the whole row is O((C + num_samples) log C)
+            // instead of the previous O(C * num_samples) cumsum-per-draw.
+            //
+            // The tree is 1-indexed; tree[k] holds a partial sum and prefix(i)
+            // returns sum(weights[0..i]). Sampling draws u in [0, total) and
+            // finds the smallest index whose inclusive prefix sum exceeds u,
+            // matching the lower_bound semantics of the previous code.
+            const auto C = static_cast<size_t>(num_categories);
+            std::vector<double> tree(C + 1, 0.0);  // double accumulator for stability
+            double total_w = 0.0;
+            for (size_t i = 0; i < C; ++i) {
+                double w = static_cast<double>(row[i]);
+                total_w += w;
+                // Point-add w at 1-indexed position i+1.
+                for (size_t k = i + 1; k <= C; k += k & (~k + 1)) {
+                    tree[k] += w;
                 }
-                float t = cs[static_cast<size_t>(num_categories - 1)];
-                if (t <= 0.0f) {
+            }
+
+            for (int64_t s = 0; s < num_samples; ++s) {
+                if (!(total_w > 0.0)) {
                     throw std::runtime_error("multinomial: ran out of positive-weight categories");
                 }
+                double u = static_cast<double>(uniform(rng)) * total_w;
 
-                float u = uniform(rng) * t;
-                auto it = std::lower_bound(cs.begin(), cs.end(), u);
-                int64_t idx = static_cast<int64_t>(std::distance(cs.begin(), it));
+                // Fenwick lower_bound: smallest 1-indexed pos whose prefix sum
+                // is strictly greater than u (i.e. first index where the
+                // inclusive cumulative sum exceeds the draw).
+                size_t pos = 0;
+                double acc = 0.0;
+                size_t step = 1;
+                while ((step << 1) <= C) step <<= 1;
+                for (; step > 0; step >>= 1) {
+                    size_t next = pos + step;
+                    if (next <= C && acc + tree[next] <= u) {
+                        pos = next;
+                        acc += tree[next];
+                    }
+                }
+                // `pos` is the count of categories whose cumulative sum is <= u,
+                // so the sampled 0-indexed category is `pos` (clamped).
+                int64_t idx = static_cast<int64_t>(pos);
                 if (idx >= num_categories) idx = num_categories - 1;
                 out_row[s] = idx;
-                weights[static_cast<size_t>(idx)] = 0.0f; // Remove sampled index
+
+                // Remove the sampled category: subtract its weight from the tree
+                // and from total_w so it cannot be drawn again.
+                double removed = static_cast<double>(row[static_cast<size_t>(idx)]);
+                // Re-derive the live weight via a 1-element prefix difference in
+                // case duplicates/zeros were involved; row[idx] is the original
+                // weight and each index is sampled at most once, so this is exact.
+                for (size_t k = static_cast<size_t>(idx) + 1; k <= C; k += k & (~k + 1)) {
+                    tree[k] -= removed;
+                }
+                total_w -= removed;
             }
         }
     }

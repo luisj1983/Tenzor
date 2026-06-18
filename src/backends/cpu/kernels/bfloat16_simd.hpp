@@ -49,8 +49,11 @@ inline float bf16_to_f32_scalar(uint16_t bf16) {
 inline uint16_t f32_to_bf16_scalar(float f) {
     uint32_t bits;
     std::memcpy(&bits, &f, sizeof(uint32_t));
-    // Round-to-nearest-even: add rounding bias based on lsb and round bit
-    uint32_t rounding_bias = (bits & 0x00010000u) ? 0x00007FFFu : 0x00007FFEu;
+    // Round-to-nearest-even: bias = 0x7FFF + lsb16 (matches AVX2/AVX512 converters).
+    // At an exact tie (low 16 bits == 0x8000), lsb16==1 yields bias 0x8000 which
+    // carries into bit 16, rounding up to make the retained mantissa even.
+    uint32_t lsb = (bits >> 16) & 1u;
+    uint32_t rounding_bias = 0x00007FFFu + lsb;
     // Handle NaN: if NaN, force quiet NaN
     if ((bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0) {
         return static_cast<uint16_t>((bits >> 16) | 0x0040u);

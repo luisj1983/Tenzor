@@ -59,6 +59,11 @@ void batchnorm_mean_var_f32(
         __m512 vm2 = _mm512_setzero_ps();
         int64_t lane_count = 0;
 
+        // Single scalar Welford state for the (spatial_size % 16) tail of every
+        // batch, accumulated in the SAME n-loop so the input is streamed once.
+        const int64_t simd_covered = (spatial_size / 16) * 16;
+        double rem_n = 0.0, rem_mean = 0.0, rem_m2 = 0.0;
+
         for (int64_t n = 0; n < N; n++) {
             const float* ch_ptr = input + (n * C + c) * spatial_size;
             int64_t i = 0;
@@ -71,6 +76,15 @@ void batchnorm_mean_var_f32(
                 vmean = _mm512_add_ps(vmean, _mm512_div_ps(delta, vcount));
                 __m512 delta2 = _mm512_sub_ps(v, vmean);
                 vm2 = _mm512_fmadd_ps(delta, delta2, vm2);
+            }
+
+            // Fold this batch's tail into the running scalar state (single pass).
+            for (; i < spatial_size; i++) {
+                rem_n += 1.0;
+                double d = static_cast<double>(ch_ptr[i]) - rem_mean;
+                rem_mean += d / rem_n;
+                double d2 = static_cast<double>(ch_ptr[i]) - rem_mean;
+                rem_m2 += d * d2;
             }
         }
 
@@ -98,17 +112,15 @@ void batchnorm_mean_var_f32(
             combined_n = total_n;
         }
 
-        // Fold in scalar remainder elements
-        int64_t simd_covered = (spatial_size / 16) * 16;
-        for (int64_t n = 0; n < N; n++) {
-            const float* ch_ptr = input + (n * C + c) * spatial_size;
-            for (int64_t i = simd_covered; i < spatial_size; i++) {
-                combined_n += 1.0;
-                double delta = static_cast<double>(ch_ptr[i]) - combined_mean;
-                combined_mean += delta / combined_n;
-                double delta2 = static_cast<double>(ch_ptr[i]) - combined_mean;
-                combined_m2 += delta * delta2;
-            }
+        // Merge the scalar tail Welford state (accumulated in the single n-loop
+        // above) into the combined SIMD state once, via the parallel merge.
+        (void)simd_covered;
+        if (rem_n > 0.0) {
+            double total_n = combined_n + rem_n;
+            double delta = rem_mean - combined_mean;
+            combined_mean = (combined_mean * combined_n + rem_mean * rem_n) / total_n;
+            combined_m2 = combined_m2 + rem_m2 + delta * delta * combined_n * rem_n / total_n;
+            combined_n = total_n;
         }
 
         mean[c] = static_cast<float>(combined_mean);

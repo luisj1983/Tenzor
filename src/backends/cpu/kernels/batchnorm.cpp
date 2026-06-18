@@ -78,6 +78,12 @@ static void batchnorm_mean_var_simd_f32(
         __m256 vm2 = _mm256_setzero_ps();
         int64_t lane_count = 0;
 
+        // Single scalar Welford state for the (spatial_size % 8) tail of every
+        // batch, accumulated in the SAME n-loop as the SIMD body so the input is
+        // streamed exactly once (no second pass over all N batches).
+        const int64_t simd_covered = (spatial_size / 8) * 8;
+        double rem_n = 0.0, rem_mean = 0.0, rem_m2 = 0.0;
+
         for (int64_t n = 0; n < N; n++) {
             const float* ch_ptr = input + (n * C + c) * spatial_size;
             int64_t i = 0;
@@ -93,9 +99,15 @@ static void batchnorm_mean_var_simd_f32(
                 vm2 = _mm256_fmadd_ps(delta, delta2, vm2);
             }
 
-            // Scalar remainder: accumulate into a separate scalar Welford state
-            // that will be merged after all batches are processed. We handle
-            // remainder per-batch by folding into per-lane results below.
+            // Fold this batch's tail elements into the running scalar Welford
+            // state using the already-loaded ch_ptr (single pass over the input).
+            for (; i < spatial_size; i++) {
+                rem_n += 1.0;
+                double d = static_cast<double>(ch_ptr[i]) - rem_mean;
+                rem_mean += d / rem_n;
+                double d2 = static_cast<double>(ch_ptr[i]) - rem_mean;
+                rem_m2 += d * d2;
+            }
         }
 
         // Horizontally merge the 8 SIMD lanes using the parallel merge formula:
@@ -125,17 +137,16 @@ static void batchnorm_mean_var_simd_f32(
             combined_n = total_n;
         }
 
-        // Now fold in scalar remainder elements (those not covered by the SIMD loop)
-        int64_t simd_covered = (spatial_size / 8) * 8;
-        for (int64_t n = 0; n < N; n++) {
-            const float* ch_ptr = input + (n * C + c) * spatial_size;
-            for (int64_t i = simd_covered; i < spatial_size; i++) {
-                combined_n += 1.0;
-                double delta = static_cast<double>(ch_ptr[i]) - combined_mean;
-                combined_mean += delta / combined_n;
-                double delta2 = static_cast<double>(ch_ptr[i]) - combined_mean;
-                combined_m2 += delta * delta2;
-            }
+        // Merge the scalar tail Welford state (accumulated in the single n-loop
+        // above) into the combined SIMD state once, via the same parallel merge
+        // formula. (void) silences an unused warning when spatial_size % 8 == 0.
+        (void)simd_covered;
+        if (rem_n > 0.0) {
+            double total_n = combined_n + rem_n;
+            double delta = rem_mean - combined_mean;
+            combined_mean = (combined_mean * combined_n + rem_mean * rem_n) / total_n;
+            combined_m2 = combined_m2 + rem_m2 + delta * delta * combined_n * rem_n / total_n;
+            combined_n = total_n;
         }
 
         mean[c] = static_cast<float>(combined_mean);

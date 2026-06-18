@@ -5,7 +5,9 @@
  * Provides vectorized exp, log, tanh, sigmoid using polynomial approximations
  * with full AVX2 and AVX-512 support. Achieves 10-20x speedup over std::exp/log.
  *
- * Accuracy: < 2 ULP error for exp, ~10-20 ULP error for log in normal range
+ * Accuracy: < 2 ULP error for exp, ~10-20 ULP error for log in normal range.
+ * log handles 0 (-inf), negative (NaN), +inf (+inf) and NaN (NaN) explicitly;
+ * denormal inputs are treated as normalized and may be a few ULP off std::log.
  */
 
 #pragma once
@@ -152,8 +154,14 @@ inline __m256 exp_avx2(__m256 x) {
 inline __m256 log_avx2(__m256 x) {
     // Handle edge cases: negative -> NaN, zero -> -inf
     __m256 zero = _mm256_setzero_ps();
+    __m256 pos_inf_c = _mm256_set1_ps(std::numeric_limits<float>::infinity());
     __m256 neg_mask = _mm256_cmp_ps(x, zero, _CMP_LT_OQ);  // x < 0
     __m256 zero_mask = _mm256_cmp_ps(x, zero, _CMP_EQ_OQ); // x == 0
+    // x == +inf: the integer exponent/mantissa extraction below would otherwise
+    // produce a finite ~88.7, so detect and pass +inf through explicitly.
+    __m256 posinf_mask = _mm256_cmp_ps(x, pos_inf_c, _CMP_EQ_OQ);
+    // NaN propagation: log(NaN) = NaN. An unordered self-compare isolates NaN lanes.
+    __m256 nan_in_mask = _mm256_cmp_ps(x, x, _CMP_UNORD_Q);
 
     // Create NaN and -inf constants
     __m256 nan_val = _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN());
@@ -210,9 +218,11 @@ inline __m256 log_avx2(__m256 x) {
     result = _mm256_add_ps(_mm256_mul_ps(e, ln2), log_m);
 #endif
 
-    // Apply edge case handling: negative -> NaN, zero -> -inf
+    // Apply edge case handling: zero -> -inf, +inf -> +inf, negative/NaN -> NaN.
     result = _mm256_blendv_ps(result, neg_inf, zero_mask);
+    result = _mm256_blendv_ps(result, pos_inf_c, posinf_mask);
     result = _mm256_blendv_ps(result, nan_val, neg_mask);
+    result = _mm256_blendv_ps(result, nan_val, nan_in_mask);
 
     return result;
 }
@@ -263,142 +273,13 @@ inline __m256 sigmoid_avx2(__m256 x) {
     return _mm256_blendv_ps(sig_neg, sig_pos, mask);
 }
 
-/**
-/**
- * @brief AVX2 vectorized pow for positive bases: x^y = exp(y * log(x))
- *
- * WARNING: This function only produces correct results for x > 0.
- * Negative bases are clamped to 1e-30 (treated as ~0), which silently
- * returns ~0 instead of the mathematically correct result.  For integer
- * exponents with negative bases (e.g. (-2)^3 = -8), use std::pow or a
- * dedicated signed-pow implementation instead.
- *
- * Accuracy: ~1-2 ULP for positive x in normal float range.
- */
-inline __m256 pow_avx2(__m256 x, __m256 y) {
-    __m256 min_val = _mm256_set1_ps(1e-30f);
-    x = _mm256_max_ps(x, min_val);
-    __m256 log_x = log_avx2(x);
-    __m256 y_log_x = _mm256_mul_ps(y, log_x);
-    return exp_avx2(y_log_x);
-}
-
-inline __m256 pow_avx2(__m256 x, float y) {
-    return pow_avx2(x, _mm256_set1_ps(y));
-}
-
-/**
- * @brief AVX2 vectorized sin using polynomial approximation.
- *
- * Range-reduces to [-π/2, π/2] using k = round(x/π), x' = x - k·π,
- * then applies a degree-9 Taylor series for sin centered at 0. On the
- * reduced interval the truncation error is bounded by (π/2)^11/11! ≈
- * 9e-6, well within Float32 epsilon. Using [-π, π] reduction instead
- * (as an earlier version did) produced ~2e-3 error near ±π because the
- * Taylor polynomial diverges that far out.
- *
- * sin(x + k·π) = (-1)^k · sin(x), so we flip the sign of the result
- * when k is odd.
- */
-inline __m256 sin_avx2(__m256 x) {
-    const __m256 x_orig = x;  // retained for the large-argument scalar fallback
-    __m256 inv_pi = _mm256_set1_ps(0.318309886183791f);   // 1/π
-    __m256 pi     = _mm256_set1_ps(3.14159265358979f);    // π
-
-    // k = round(x / π) — nearest-even rounding to an integer.
-    __m256 kf = _mm256_round_ps(_mm256_mul_ps(x, inv_pi),
-                                _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-
-    // x <- x - k·π, now in [-π/2, π/2].
-#ifdef TENZOR_FAST_MATH_FMA
-    x = _mm256_fnmadd_ps(kf, pi, x);
-#else
-    x = _mm256_sub_ps(x, _mm256_mul_ps(kf, pi));
-#endif
-
-    // Degree-11 Taylor series for sin about 0. On [-π/2, π/2] the
-    // truncation error is bounded by (π/2)^13/13! ≈ 5.7e-8, well
-    // within Float32 epsilon. Degree-9 alone was ~3e-6 at the edge,
-    // which matters for precision-sensitive comparisons.
-    __m256 x2 = _mm256_mul_ps(x, x);
-
-    __m256 c3  = _mm256_set1_ps(-0.16666666666f);    // -1/6
-    __m256 c5  = _mm256_set1_ps(0.00833333333f);     // 1/120
-    __m256 c7  = _mm256_set1_ps(-0.00019841270f);    // -1/5040
-    __m256 c9  = _mm256_set1_ps(0.0000027557319f);   // 1/362880
-    __m256 c11 = _mm256_set1_ps(-2.5052108e-8f);     // -1/39916800
-
-#ifdef TENZOR_FAST_MATH_FMA
-    __m256 p = _mm256_fmadd_ps(c11, x2, c9);
-    p = _mm256_fmadd_ps(p, x2, c7);
-    p = _mm256_fmadd_ps(p, x2, c5);
-    p = _mm256_fmadd_ps(p, x2, c3);
-    p = _mm256_fmadd_ps(p, x2, _mm256_set1_ps(1.0f));
-    __m256 result = _mm256_mul_ps(p, x);
-#else
-    __m256 p = _mm256_add_ps(_mm256_mul_ps(c11, x2), c9);
-    p = _mm256_add_ps(_mm256_mul_ps(p, x2), c7);
-    p = _mm256_add_ps(_mm256_mul_ps(p, x2), c5);
-    p = _mm256_add_ps(_mm256_mul_ps(p, x2), c3);
-    p = _mm256_add_ps(_mm256_mul_ps(p, x2), _mm256_set1_ps(1.0f));
-    __m256 result = _mm256_mul_ps(p, x);
-#endif
-
-    // Flip the sign of lanes where k is odd: sin(x + k·π) = (-1)^k · sin(x').
-    // Convert kf to integer, mask the low bit, and produce a sign mask.
-    __m256i ki = _mm256_cvtps_epi32(kf);
-    __m256i one = _mm256_set1_epi32(1);
-    __m256i odd = _mm256_and_si256(ki, one);                // 0 or 1
-    // Build a lane mask that's all-ones when odd, all-zero when even.
-    __m256i odd_mask = _mm256_cmpeq_epi32(odd, one);
-    // sign_bit = 0x80000000 where odd, 0 elsewhere — XOR-in the sign.
-    __m256i sign_bit = _mm256_and_si256(odd_mask, _mm256_set1_epi32(0x80000000));
-    result = _mm256_xor_ps(result, _mm256_castsi256_ps(sign_bit));
-
-    // Large-argument safety: for |x| above ~2^22·π the k = round(x/π) value no
-    // longer fits reliably in int32 (_mm256_cvtps_epi32 returns 0x80000000 for
-    // out-of-range inputs, which would corrupt the odd/even sign), and the
-    // single-step Cody-Waite reduction loses too much precision. Fall back to
-    // scalar std::sin for exactly those lanes; the fast path is unchanged for
-    // normal magnitudes.
-    constexpr float kSinCosSafe = 13176794.0f;  // ~2^22 · π
-    __m256 abs_x_orig = _mm256_and_ps(x_orig, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
-    __m256 big_mask = _mm256_cmp_ps(abs_x_orig, _mm256_set1_ps(kSinCosSafe), _CMP_GT_OQ);
-    if (_mm256_movemask_ps(big_mask) != 0) {
-        alignas(32) float in_lanes[8];
-        alignas(32) float out_lanes[8];
-        _mm256_store_ps(in_lanes, x_orig);
-        _mm256_store_ps(out_lanes, result);
-        for (int lane = 0; lane < 8; ++lane) {
-            if (std::abs(in_lanes[lane]) > kSinCosSafe) {
-                out_lanes[lane] = std::sin(in_lanes[lane]);
-            }
-        }
-        result = _mm256_load_ps(out_lanes);
-    }
-    return result;
-}
-
-/**
- * @brief AVX2 vectorized cos using polynomial approximation
- * cos(x) = sin(x + π/2)
- */
-inline __m256 cos_avx2(__m256 x) {
-    __m256 pi_2 = _mm256_set1_ps(1.57079632679f);  // π/2
-    return sin_avx2(_mm256_add_ps(x, pi_2));
-}
-
-/**
- * @brief AVX2 vectorized leaky ReLU
- * leaky_relu(x, alpha) = x if x > 0 else alpha * x
- */
-inline __m256 leaky_relu_avx2(__m256 x, float alpha = 0.01f) {
-    __m256 alpha_vec = _mm256_set1_ps(alpha);
-    __m256 zero = _mm256_setzero_ps();
-    __m256 mask = _mm256_cmp_ps(x, zero, _CMP_GT_OQ);
-    __m256 scaled = _mm256_mul_ps(x, alpha_vec);
-    return _mm256_blendv_ps(scaled, x, mask);
-}
+// NOTE: vectorized sin/cos/pow/leaky_relu AVX2 helpers were removed here.
+// They were dead code (no callers anywhere in the tree): the live sin/cos/pow
+// CPU op kernels deliberately use libm std::sin/std::cos/std::pow (see comments
+// at math.cpp sin_kernel/cos_kernel/pow_kernel) because the SIMD polynomial
+// paths lost significance near range-reduction edges and clamped negative pow
+// bases to ~0. Re-add a vectorized transcendental only when wired into a real
+// op path and validated against libm; do not assume these match the live path.
 
 // NOTE: a tanh-approximation GELU helper (gelu_avx2) was removed here: it was
 // dead code (no callers) and described the tanh approximation, whereas every
@@ -463,8 +344,13 @@ inline __m512 exp_avx512(__m512 x) {
 inline __m512 log_avx512(__m512 x) {
     // Handle edge cases: negative -> NaN, zero -> -inf
     __m512 zero = _mm512_setzero_ps();
+    __m512 pos_inf_c = _mm512_set1_ps(std::numeric_limits<float>::infinity());
     __mmask16 neg_mask = _mm512_cmp_ps_mask(x, zero, _CMP_LT_OQ);  // x < 0
     __mmask16 zero_mask = _mm512_cmp_ps_mask(x, zero, _CMP_EQ_OQ); // x == 0
+    // x == +inf must pass +inf through (the bit extraction below yields a finite
+    // ~88.7 otherwise); x NaN must propagate NaN.
+    __mmask16 posinf_mask = _mm512_cmp_ps_mask(x, pos_inf_c, _CMP_EQ_OQ);
+    __mmask16 nan_in_mask = _mm512_cmp_ps_mask(x, x, _CMP_UNORD_Q);
 
     // Create NaN and -inf constants
     __m512 nan_val = _mm512_set1_ps(std::numeric_limits<float>::quiet_NaN());
@@ -502,9 +388,11 @@ inline __m512 log_avx512(__m512 x) {
     __m512 ln2 = _mm512_set1_ps(0.693147180559945f);
     __m512 result = _mm512_fmadd_ps(e, ln2, log_m);
 
-    // Apply edge case handling: negative -> NaN, zero -> -inf
+    // Apply edge case handling: zero -> -inf, +inf -> +inf, negative/NaN -> NaN.
     result = _mm512_mask_blend_ps(zero_mask, result, neg_inf);
+    result = _mm512_mask_blend_ps(posinf_mask, result, pos_inf_c);
     result = _mm512_mask_blend_ps(neg_mask, result, nan_val);
+    result = _mm512_mask_blend_ps(nan_in_mask, result, nan_val);
 
     return result;
 }
@@ -548,107 +436,10 @@ inline __m512 sigmoid_avx512(__m512 x) {
 // same reason as gelu_avx2 above: dead code describing the tanh approximation
 // while the live GELU paths all compute the exact erf GELU.
 
-/**
- * @brief AVX-512 vectorized pow: x^y = exp(y * log(x))
- */
-inline __m512 pow_avx512(__m512 x, __m512 y) {
-    __m512 min_val = _mm512_set1_ps(1e-30f);
-    x = _mm512_max_ps(x, min_val);
-
-    __m512 log_x = log_avx512(x);
-    __m512 y_log_x = _mm512_mul_ps(y, log_x);
-    return exp_avx512(y_log_x);
-}
-
-/**
- * @brief AVX-512 vectorized pow with scalar exponent
- */
-inline __m512 pow_avx512(__m512 x, float y) {
-    return pow_avx512(x, _mm512_set1_ps(y));
-}
-
-/**
- * @brief AVX-512 vectorized sin.
- *
- * Range-reduces to [-π/2, π/2] via k = round(x/π), then applies a
- * degree-9 Taylor series centered at 0 and flips sign on odd k. The
- * earlier [-π, π] reduction left ~2e-3 error near ±π (the Taylor
- * series diverges that far out); this reduction bounds the error at
- * ~9e-6 on the whole domain.
- */
-inline __m512 sin_avx512(__m512 x) {
-    const __m512 x_orig = x;  // retained for the large-argument scalar fallback
-    __m512 inv_pi = _mm512_set1_ps(0.318309886183791f);  // 1/π
-    __m512 pi     = _mm512_set1_ps(3.14159265358979f);   // π
-
-    __m512 kf = _mm512_roundscale_ps(_mm512_mul_ps(x, inv_pi),
-                                     _MM_FROUND_TO_NEAREST_INT);
-    x = _mm512_fnmadd_ps(kf, pi, x);
-
-    __m512 x2 = _mm512_mul_ps(x, x);
-
-    __m512 c3  = _mm512_set1_ps(-0.16666666666f);
-    __m512 c5  = _mm512_set1_ps(0.00833333333f);
-    __m512 c7  = _mm512_set1_ps(-0.00019841270f);
-    __m512 c9  = _mm512_set1_ps(0.0000027557319f);
-    __m512 c11 = _mm512_set1_ps(-2.5052108e-8f);
-
-    __m512 p = _mm512_fmadd_ps(c11, x2, c9);
-    p = _mm512_fmadd_ps(p, x2, c7);
-    p = _mm512_fmadd_ps(p, x2, c5);
-    p = _mm512_fmadd_ps(p, x2, c3);
-    p = _mm512_fmadd_ps(p, x2, _mm512_set1_ps(1.0f));
-    __m512 result = _mm512_mul_ps(p, x);
-
-    // Flip the sign of lanes where k is odd: sin(x + k·π) = (-1)^k · sin(x').
-    __m512i ki = _mm512_cvtps_epi32(kf);
-    __m512i odd_mask = _mm512_and_si512(ki, _mm512_set1_epi32(1));
-    __mmask16 odd_lanes =
-        _mm512_cmpeq_epi32_mask(odd_mask, _mm512_set1_epi32(1));
-    // XOR in the sign bit for odd lanes.
-    __m512 sign_flip = _mm512_castsi512_ps(_mm512_set1_epi32(0x80000000));
-    result = _mm512_mask_xor_ps(result, odd_lanes, result, sign_flip);
-
-    // Large-argument safety: for |x| above ~2^22·π the k = round(x/π) value no
-    // longer fits reliably in int32 (_mm512_cvtps_epi32 saturates/returns the
-    // integer indefinite, corrupting the odd/even sign) and the single-step
-    // reduction loses precision. Fall back to scalar std::sin for those lanes.
-    constexpr float kSinCosSafe = 13176794.0f;  // ~2^22 · π
-    __m512 abs_x_orig = _mm512_abs_ps(x_orig);
-    __mmask16 big_lanes = _mm512_cmp_ps_mask(abs_x_orig, _mm512_set1_ps(kSinCosSafe), _CMP_GT_OQ);
-    if (big_lanes != 0) {
-        alignas(64) float in_lanes[16];
-        alignas(64) float out_lanes[16];
-        _mm512_store_ps(in_lanes, x_orig);
-        _mm512_store_ps(out_lanes, result);
-        for (int lane = 0; lane < 16; ++lane) {
-            if (std::abs(in_lanes[lane]) > kSinCosSafe) {
-                out_lanes[lane] = std::sin(in_lanes[lane]);
-            }
-        }
-        result = _mm512_load_ps(out_lanes);
-    }
-    return result;
-}
-
-/**
- * @brief AVX-512 vectorized cos
- */
-inline __m512 cos_avx512(__m512 x) {
-    __m512 pi_2 = _mm512_set1_ps(1.57079632679f);
-    return sin_avx512(_mm512_add_ps(x, pi_2));
-}
-
-/**
- * @brief AVX-512 vectorized leaky ReLU
- */
-inline __m512 leaky_relu_avx512(__m512 x, float alpha = 0.01f) {
-    __m512 alpha_vec = _mm512_set1_ps(alpha);
-    __m512 zero = _mm512_setzero_ps();
-    __mmask16 mask = _mm512_cmp_ps_mask(x, zero, _CMP_GT_OQ);
-    __m512 scaled = _mm512_mul_ps(x, alpha_vec);
-    return _mm512_mask_blend_ps(mask, scaled, x);
-}
+// NOTE: vectorized sin/cos/pow/leaky_relu AVX-512 helpers were removed here for
+// the same reason as their AVX2 siblings above: dead code that diverged from the
+// live libm-based sin/cos/pow op kernels. Re-add only when wired into a real op
+// path and validated against libm.
 
 #endif // TENZOR_FAST_MATH_AVX512
 

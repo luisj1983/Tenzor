@@ -1606,6 +1606,17 @@ auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_
     // Expected output length before trimming
     int64_t expected_length = n_fft + (num_frames - 1) * hop_length;
 
+    // Region of the overlap-added signal that will actually be RETURNED after
+    // center-padding is trimmed (and after an explicit `length` clamp). PyTorch's
+    // istft enforces the NOLA (non-zero overlap-add) constraint over exactly this
+    // region: if the squared-window envelope is ~0 anywhere here the inverse is
+    // ill-defined and istft errors. We validate the same region below.
+    int64_t nola_start = center ? (n_fft / 2) : 0;
+    int64_t nola_len = center ? (expected_length - 2 * (n_fft / 2)) : expected_length;
+    if (length > 0) nola_len = std::min(nola_len, length);
+    if (nola_len < 0) nola_len = 0;
+    const int64_t nola_end = nola_start + nola_len;
+
     // Ensure input is Complex64
     Tensor input_c64 = (input.dtype() != DType::Complex64) ? input.to(DType::Complex64) : input;
     auto* in_ptr = reinterpret_cast<const std::complex<float>*>(input_c64.data_ptr());
@@ -1655,9 +1666,27 @@ auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_
             }
         }
 
-        // Normalize by window sum (COLA constraint)
+        // Enforce the NOLA constraint over the region that will be returned,
+        // matching PyTorch's istft: a near-zero squared-window sum there means
+        // the original signal cannot be recovered, so error rather than emit an
+        // un-normalized (garbage) sample.
+        constexpr float kNolaEps = 1e-10f;
+        for (int64_t i = nola_start; i < nola_end; ++i) {
+            if (!(wsum[i] > kNolaEps)) {
+                throw std::runtime_error(
+                    "istft: window overlap-add envelope is zero (or below "
+                    "tolerance) within the reconstructed region; the NOLA "
+                    "(non-zero overlap-add) constraint is not satisfied for this "
+                    "window/hop_length combination");
+            }
+        }
+
+        // Normalize by the squared-window sum (COLA/NOLA normalization). Inside
+        // the validated region wsum[i] > kNolaEps. Outside it (the trimmed
+        // padding tail) a zero envelope is harmless — leave those samples at the
+        // raw overlap-add value; they are discarded by the trim below.
         for (int64_t i = 0; i < expected_length; ++i) {
-            if (wsum[i] > 1e-10f) {
+            if (wsum[i] > kNolaEps) {
                 out[i] /= wsum[i];
             }
         }

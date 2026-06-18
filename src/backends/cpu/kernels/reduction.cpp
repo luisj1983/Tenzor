@@ -2329,16 +2329,70 @@ template<typename T>
 auto argmin_impl(const T* input_data, int64_t n) -> int64_t {
     if (n == 0) throw std::runtime_error("argmin: input tensor is empty");
 
-    int64_t min_idx = 0;
-    T min_val = input_data[0];
-
-    for (int64_t i = 1; i < n; i++) {
-        if (arg_takes_min(input_data[i], min_val)) {
-            min_val = input_data[i];
-            min_idx = i;
+    // Small arrays: stay single-threaded (OMP overhead not worth it).
+    if (n < REDUCTION_OMP_THRESHOLD) {
+        int64_t min_idx = 0;
+        T min_val = input_data[0];
+        for (int64_t i = 1; i < n; i++) {
+            if (arg_takes_min(input_data[i], min_val)) {
+                min_val = input_data[i];
+                min_idx = i;
+            }
         }
+        return min_idx;
     }
 
+    // Large arrays: parallel per-thread argmin, then single-threaded reduce.
+    // Mirrors argmax_impl so the two siblings share throughput characteristics.
+    int max_threads = 1;
+#ifdef _OPENMP
+    max_threads = omp_get_max_threads();
+#endif
+    // Pad to cache line to avoid false sharing.
+    struct alignas(64) LocalMin {
+        T   val;
+        int64_t idx;
+        char _pad[64 - sizeof(T) - sizeof(int64_t) < 0 ? 0
+                                                        : 64 - sizeof(T) - sizeof(int64_t)];
+    };
+    std::vector<LocalMin> thread_min(max_threads, {input_data[0], 0, {}});
+
+    #pragma omp parallel
+    {
+        int tid = 0;
+        int nthreads = 1;
+#ifdef _OPENMP
+        tid      = omp_get_thread_num();
+        nthreads = omp_get_num_threads();
+#endif
+        int64_t chunk = (n + nthreads - 1) / nthreads;
+        int64_t start = tid * chunk;
+        int64_t end   = std::min(start + chunk, n);
+
+        T   local_val = (start < end) ? input_data[start] : input_data[0];
+        int64_t local_idx = (start < end) ? start : 0;
+
+        for (int64_t i = start + 1; i < end; i++) {
+            if (arg_takes_min(input_data[i], local_val)) {
+                local_val = input_data[i];
+                local_idx = i;
+            }
+        }
+        thread_min[tid].val = local_val;
+        thread_min[tid].idx = local_idx;
+    }
+
+    // Reduce across threads sequentially. Threads are merged in ascending tid
+    // order and arg_takes_min only replaces on a strict improvement, so the
+    // lowest index wins ties — matching PyTorch's first-occurrence semantics.
+    int64_t min_idx = thread_min[0].idx;
+    T       min_val = thread_min[0].val;
+    for (int t = 1; t < max_threads; t++) {
+        if (arg_takes_min(thread_min[t].val, min_val)) {
+            min_val = thread_min[t].val;
+            min_idx = thread_min[t].idx;
+        }
+    }
     return min_idx;
 }
 
@@ -4383,6 +4437,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
         edges_vec.reserve(static_cast<size_t>(D));
         std::vector<T> dim_min(static_cast<size_t>(D));
         std::vector<T> dim_step(static_cast<size_t>(D));
+        std::vector<T> dim_max(static_cast<size_t>(D));
 
         for (int64_t d = 0; d < D; ++d) {
             auto sd = static_cast<size_t>(d);
@@ -4398,6 +4453,11 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
             for (int64_t i = 0; i <= nb; ++i) {
                 edata[i] = fmin + static_cast<T>(i) * step;
             }
+            // Record the actual computed upper edge so the in-range test matches
+            // the edges that were emitted. Recomputing fmin + nb*step at test time
+            // is not bit-identical to edata[nb] (and neither equals fmax exactly
+            // once step is rounded), which could drop a sample equal to the max.
+            dim_max[sd] = edata[nb];
             edges_vec.push_back(std::move(edge));
         }
 
@@ -4427,7 +4487,7 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
                 T step_d = dim_step[sd];
                 int64_t nb = bins[sd];
 
-                if (v < fmin_d || v > fmin_d + step_d * static_cast<T>(nb)) {
+                if (v < fmin_d || v > dim_max[sd]) {
                     in_range = false;
                     break;
                 }

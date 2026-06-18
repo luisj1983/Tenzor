@@ -26,6 +26,7 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <stdexcept>
 
 #include "buffer_pool.hpp"
 #include "gemm_optimized.hpp"
@@ -73,6 +74,20 @@ inline void fold_bn_params(
 ) {
     const int64_t weight_per_oc = in_channels * kernel_h * kernel_w;
 
+    // BN folding always produces a nonzero folded bias (beta - gamma*mean/std)
+    // that must be stored somewhere. A null bias buffer would silently drop that
+    // shift term, turning the result into relu(scale*conv(x)) instead of
+    // relu(scale*conv(x) + folded_bias) — a hard-to-spot correctness bug.
+    // Validate the precondition here, OUTSIDE the parallel region (we cannot
+    // throw from inside an OpenMP parallel for). Callers with a bias-less conv
+    // must pass a zero-initialised [out_channels] buffer.
+    if (bias == nullptr) {
+        throw std::invalid_argument(
+            "fold_bn_params: bias buffer must be non-null (BN folding produces a "
+            "folded bias that must be stored; pass a zero-initialised buffer for "
+            "a bias-less conv)");
+    }
+
     #pragma omp parallel for if(out_channels > 32)
     for (int64_t oc = 0; oc < out_channels; ++oc) {
         // Compute scale factor: gamma / sqrt(var + eps)
@@ -98,18 +113,10 @@ inline void fold_bn_params(
         }
 #endif
 
-        // Fold into bias: bias * scale + beta - gamma * mean / sqrt(var + eps)
+        // Fold into bias: bias * scale + beta - gamma * mean / sqrt(var + eps).
+        // `bias` is guaranteed non-null by the precondition check above.
         float bias_fold = bn_beta[oc] - bn_gamma[oc] * bn_mean[oc] / std::sqrt(bn_var[oc] + eps);
-        if (bias != nullptr) {
-            bias[oc] = bias[oc] * scale + bias_fold;
-        } else {
-            // PRECONDITION: `bias` must be non-null. BN folding always yields a
-            // folded bias (beta - gamma*mean/std) that must be stored, so the
-            // caller must pass a buffer (zero-initialised when the conv had no
-            // bias) — the sole caller (fused_ops.cpp) does exactly that, making
-            // this branch unreachable. Left as a defensive no-op; we cannot
-            // throw here because this loop runs inside an OpenMP parallel region.
-        }
+        bias[oc] = bias[oc] * scale + bias_fold;
     }
 }
 
