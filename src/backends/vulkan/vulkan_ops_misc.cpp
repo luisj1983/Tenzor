@@ -6771,13 +6771,18 @@ auto VulkanBackend::dispatchDiagEmbed(const Tensor& input, int64_t offset,
         pushConstants.diagonal = static_cast<int32_t>(offset);
         pushConstants.op = 1; // construct
 
+        // For 16-bit dtypes the shader packs two elements per 32-bit word and
+        // uses an atomic CAS on whole words; round the bound buffer sizes up to
+        // a 4-byte boundary so the final word's RMW stays in bounds for an odd
+        // element count.
+        auto round4 = [](size_t bytes) -> size_t { return (bytes + 3u) & ~size_t(3u); };
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, input.data_ptr()},
             {1, zero_out.data_ptr()}
         };
         std::vector<size_t> sizes_vec = {
-            static_cast<size_t>(input.numel() * input.dtype_size()),
-            static_cast<size_t>(zero_out.numel() * zero_out.dtype_size())
+            round4(static_cast<size_t>(input.numel() * input.dtype_size())),
+            round4(static_cast<size_t>(zero_out.numel() * zero_out.dtype_size()))
         };
 
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes_vec);
@@ -6807,13 +6812,15 @@ auto VulkanBackend::dispatchDiagEmbed(const Tensor& input, int64_t offset,
         pushConstants.diagonal = static_cast<int32_t>(offset);
         pushConstants.op = 1; // construct
 
+        // Round 16-bit packed buffer sizes up to a 4-byte boundary (see batch==1 path).
+        auto round4 = [](size_t bytes) -> size_t { return (bytes + 3u) & ~size_t(3u); };
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, in_slice.data_ptr()},
             {1, out_slice.data_ptr()}
         };
         std::vector<size_t> sizes_vec = {
-            static_cast<size_t>(in_slice.numel() * in_slice.dtype_size()),
-            static_cast<size_t>(out_slice.numel() * out_slice.dtype_size())
+            round4(static_cast<size_t>(in_slice.numel() * in_slice.dtype_size())),
+            round4(static_cast<size_t>(out_slice.numel() * out_slice.dtype_size()))
         };
 
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes_vec);

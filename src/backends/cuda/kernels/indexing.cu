@@ -2864,90 +2864,157 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
 // take_along_dim kernel
 // ============================================================================
 
+namespace {
+constexpr int MAX_TAKE_ALONG_DIM_DIMS = 16;
+}
+
+// Per-dimension metadata for take_along_dim: the index shape (used to decode the
+// flat output coordinate per axis) and the INPUT's contiguous strides (used to
+// re-linearise each decoded coordinate). These differ from the index strides
+// whenever the index extent is smaller than the input on a non-dim axis.
+struct TakeAlongDimMeta {
+    int64_t idx_shape[MAX_TAKE_ALONG_DIM_DIMS];
+    int64_t in_strides[MAX_TAKE_ALONG_DIM_DIMS];
+};
+
 template<typename T>
 __global__ void take_along_dim_cuda_kernel(
     const T* __restrict__ input, const int64_t* __restrict__ indices, T* __restrict__ output,
-    int64_t numel, int64_t in_dim_size, int64_t idx_dim_size, int64_t inner_size,
-    int* error_flag)
+    int64_t numel, int64_t in_dim_size, int ndim, int dim,
+    TakeAlongDimMeta meta, int* error_flag)
 {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numel) return;
+    TENZOR_CUDA_KERNEL_LOOP(i, numel) {
+        int64_t src_idx = indices[i];
+        if (src_idx < 0) src_idx += in_dim_size;
+        if (src_idx < 0 || src_idx >= in_dim_size) {
+            // Record the error; the host wrapper surfaces std::out_of_range after
+            // synchronizing (matches the CPU reference). Write 0 to stay safe.
+            atomicExch(error_flag, 1);
+            output[i] = T(0);
+            continue;
+        }
 
-    int64_t outer = i / (idx_dim_size * inner_size);
-    int64_t rem = i % (idx_dim_size * inner_size);
-    int64_t inner = rem % inner_size;
-
-    int64_t src_idx = indices[i];
-    if (src_idx < 0) src_idx += in_dim_size;
-    if (src_idx < 0 || src_idx >= in_dim_size) {
-        // Record the error and clamp to a valid offset so the access stays
-        // memory-safe; the host wrapper surfaces std::out_of_range.
-        atomicExch(error_flag, 1);
-        src_idx = (src_idx < 0) ? 0 : (in_dim_size - 1);
+        // Decode the flat output position i per-dimension from idx_shape, then
+        // re-linearise against the INPUT's contiguous strides. The collapsed
+        // outer/inner formula is only correct when input and index share extents
+        // on every non-dim axis; PyTorch/CPU allow the index extent to be smaller
+        // on a non-dim axis (selecting a sub-block), which requires this per-dim
+        // decode (mirrors the CPU in_offset_of lambda in indexing.cpp).
+        int64_t in_offset = 0;
+        int64_t rem = i;
+        for (int d = ndim - 1; d >= 0; --d) {
+            int64_t c = rem % meta.idx_shape[d];
+            rem /= meta.idx_shape[d];
+            if (d == dim) {
+                in_offset += src_idx * meta.in_strides[d];
+            } else {
+                in_offset += c * meta.in_strides[d];
+            }
+        }
+        output[i] = input[in_offset];
     }
-
-    int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
-    output[i] = input[in_offset];
 }
 
 auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim,
                            cudaStream_t stream) -> Tensor {
-    auto in_shape = input.shape();
-    auto idx_shape = indices.shape();
+    // The kernel addresses the input with contiguous strides, so a non-contiguous
+    // (transposed/sliced/permuted) input view would otherwise read the wrong
+    // storage elements. Materialize contiguous copies (matches the CPU reference).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor idx_c = indices.is_contiguous() ? indices : indices.contiguous();
+
+    auto in_shape = in_c.shape();
+    auto idx_shape = idx_c.shape();
     int64_t ndim = in_shape.size();
 
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("take_along_dim CUDA: dim out of range");
+    }
+    if (idx_c.dtype() != DType::Int64) {
+        throw std::invalid_argument("take_along_dim CUDA: index tensor must have dtype Int64");
+    }
+
+    // Index must have the same rank as input; along every non-dim axis its extent
+    // must not exceed the input's (it selects a sub-block there). Mirrors CPU.
+    if (static_cast<int64_t>(idx_shape.size()) != ndim) {
+        throw std::invalid_argument("take_along_dim CUDA: indices must have same rank as input");
+    }
+    if (ndim > MAX_TAKE_ALONG_DIM_DIMS) {
+        throw std::runtime_error("take_along_dim CUDA: ndim exceeds MAX_TAKE_ALONG_DIM_DIMS");
+    }
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim) continue;
+        if (idx_shape[d] > in_shape[d]) {
+            throw std::out_of_range(
+                "take_along_dim CUDA: index shape exceeds input shape on a non-dim axis");
+        }
+    }
 
     Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
-                  input.dtype(), input.device());
+                  in_c.dtype(), in_c.device());
 
-    int64_t numel = indices.numel();
+    int64_t numel = idx_c.numel();
     if (numel == 0) return output;
 
-    int64_t idx_dim_size = idx_shape[dim];
     int64_t in_dim_size = in_shape[dim];
-    int64_t inner_size = 1;
-    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
+
+    // Per-dim metadata: index shape (to decode each output coordinate) and the
+    // INPUT's contiguous strides (to re-linearise every non-dim coordinate and
+    // the substituted index on the `dim` axis). The collapsed outer/inner formula
+    // cannot reproduce this when index and input differ on a non-dim extent.
+    TakeAlongDimMeta meta{};
+    {
+        int64_t s = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            meta.idx_shape[d] = idx_shape[d];
+            meta.in_strides[d] = s;
+            s *= in_shape[d];
+        }
+    }
+
+    int ndim_i = static_cast<int>(ndim);
+    int dim_i = static_cast<int>(dim);
 
     int blocks = get_num_blocks(numel);
-    const int64_t* idx_ptr = indices.data<int64_t>();
+    const int64_t* idx_ptr = idx_c.data<int64_t>();
 
     CudaBuffer error_buf(sizeof(int));
     CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
     int* error_flag = error_buf.as<int>();
 
-    switch (input.dtype()) {
+    switch (in_c.dtype()) {
         case DType::Float32:
             take_along_dim_cuda_kernel<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<float>(), idx_ptr, output.data<float>(),
-                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
+                in_c.data<float>(), idx_ptr, output.data<float>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, error_flag);
             break;
         case DType::Float64:
             take_along_dim_cuda_kernel<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<double>(), idx_ptr, output.data<double>(),
-                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
+                in_c.data<double>(), idx_ptr, output.data<double>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, error_flag);
             break;
         case DType::Int32:
             take_along_dim_cuda_kernel<int32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<int32_t>(), idx_ptr, output.data<int32_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
+                in_c.data<int32_t>(), idx_ptr, output.data<int32_t>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, error_flag);
             break;
         case DType::Int64:
             take_along_dim_cuda_kernel<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<int64_t>(), idx_ptr, output.data<int64_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
+                in_c.data<int64_t>(), idx_ptr, output.data<int64_t>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, error_flag);
             break;
         case DType::Float16:
             take_along_dim_cuda_kernel<__half><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __half*>(input.data_ptr()), idx_ptr,
+                reinterpret_cast<const __half*>(in_c.data_ptr()), idx_ptr,
                 reinterpret_cast<__half*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
+                numel, in_dim_size, ndim_i, dim_i, meta, error_flag);
             break;
         case DType::BFloat16:
             take_along_dim_cuda_kernel<__nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()), idx_ptr,
+                reinterpret_cast<const __nv_bfloat16*>(in_c.data_ptr()), idx_ptr,
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
+                numel, in_dim_size, ndim_i, dim_i, meta, error_flag);
             break;
         default:
             throw std::runtime_error("take_along_dim CUDA: unsupported dtype");

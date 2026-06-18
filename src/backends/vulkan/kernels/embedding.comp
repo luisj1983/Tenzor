@@ -23,6 +23,12 @@ void main() {
 
     int embedding_idx = indices[idx];
 
+    // Normalize negative indices (mirror CPU reference nn_kernels.cpp:883,895):
+    // a value like -1 maps to row num_embeddings-1, matching the CPU path.
+    if (embedding_idx < 0) {
+        embedding_idx += int(params.num_embeddings);
+    }
+
     // Handle padding
     if (embedding_idx == int(params.padding_idx)) {
         // Zero out embedding for padding index

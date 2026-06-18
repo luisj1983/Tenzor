@@ -53,8 +53,24 @@ void writeF16HOut(uint idx, float val) {
     h_out[word_idx] = packHalf2x16(pair);
 }
 
-float sigmoid(float x) {
-    return 1.0 / (1.0 + exp(-x));
+// exp()-based activations avoid the NVIDIA GLSL tanh intrinsic (MUFU.TANH),
+// which drifts >1e-3 from std::tanh and compounds over GRU timesteps (see
+// lstm_cell.comp). Computed in float32 here regardless.
+
+// Numerically stable sigmoid: avoids exp() overflow for large |x|.
+precise float sigmoid_stable(float x) {
+    if (x >= 0.0) {
+        float e = exp(-x);
+        return 1.0 / (1.0 + e);
+    } else {
+        float e = exp(x);
+        return e / (1.0 + e);
+    }
+}
+
+// Stable tanh via sigmoid: tanh(x) = 2 * sigmoid(2x) - 1.
+precise float tanh_stable(float x) {
+    return 2.0 * sigmoid_stable(2.0 * x) - 1.0;
 }
 
 void main() {
@@ -68,10 +84,10 @@ void main() {
 
     uint gate_base = b * (3 * params.hidden_size);
 
-    float r = sigmoid(readF16GatesX(gate_base + h) + readF16GatesH(gate_base + h));
-    float z = sigmoid(readF16GatesX(gate_base + params.hidden_size + h) +
+    float r = sigmoid_stable(readF16GatesX(gate_base + h) + readF16GatesH(gate_base + h));
+    float z = sigmoid_stable(readF16GatesX(gate_base + params.hidden_size + h) +
                       readF16GatesH(gate_base + params.hidden_size + h));
-    float n = tanh(readF16GatesX(gate_base + 2 * params.hidden_size + h) +
+    float n = tanh_stable(readF16GatesX(gate_base + 2 * params.hidden_size + h) +
                    r * readF16GatesH(gate_base + 2 * params.hidden_size + h));
 
     writeF16HOut(idx, (1.0 - z) * n + z * readF16HPrev(idx));

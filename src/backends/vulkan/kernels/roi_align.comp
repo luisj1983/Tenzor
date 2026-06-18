@@ -103,6 +103,14 @@ void main() {
     float roi_width = roi_x2 - roi_x1;
     float roi_height = roi_y2 - roi_y1;
 
+    // Non-aligned mode clamps ROI extent to a minimum of 1 (torchvision / CPU
+    // reference vision.cpp:1069-1072). The aligned path intentionally does NOT
+    // clamp, matching the CPU reference.
+    if (params.aligned == 0u) {
+        roi_width = max(roi_width, 1.0);
+        roi_height = max(roi_height, 1.0);
+    }
+
     float bin_size_h = roi_height / float(params.output_h);
     float bin_size_w = roi_width / float(params.output_w);
 
