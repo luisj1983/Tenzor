@@ -92,11 +92,16 @@ void main() {
 
     if (tid == 0u) {
         uint count = shared_count[0];
-        double denom = (params.unbiased != 0u && count > 1u)
-                       ? double(count - 1u)
-                       : double(max(count, 1u));
-        double variance = shared_m2[0] / denom;
-        double result = (params.compute_std != 0u) ? sqrt(variance) : variance;
-        output_data[output_idx] = float(result);
+        uint correction = (params.unbiased != 0u) ? 1u : 0u;
+        if (count <= correction) {
+            // Variance is undefined (NaN) when count <= correction, matching
+            // CPU/PyTorch instead of returning 0. quiet-NaN bit pattern.
+            output_data[output_idx] = uintBitsToFloat(0x7fc00000u);
+        } else {
+            double denom = double(count - correction);
+            double variance = shared_m2[0] / denom;
+            double result = (params.compute_std != 0u) ? sqrt(variance) : variance;
+            output_data[output_idx] = float(result);
+        }
     }
 }

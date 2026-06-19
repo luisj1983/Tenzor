@@ -933,13 +933,19 @@ Returns:
                     " bytes)");
             }
             // Keep the Python object alive by capturing it in the deleter closure.
-            // When the last Tensor sharing this storage is destroyed, the shared_ptr
-            // to ExternalStorage dies, which destroys the std::function deleter,
-            // which drops the py::object reference, allowing Python GC.
+            // The deleter runs when the last Tensor sharing this storage is freed,
+            // which can happen on ANY thread without the GIL held. Dropping the
+            // py::object reference there does a Py_DECREF, which MUST hold the GIL
+            // or it corrupts the interpreter. Acquire the GIL and reset the
+            // reference inside the deleter; after reset() the captured shared_ptr
+            // is null, so the later destruction of the std::function is a no-op.
             auto obj_ref = std::make_shared<py::object>(std::move(obj));
             return tenzor::Tensor::from_blob(
                 info.ptr, std::move(shape), dtype, device,
-                [obj_ref](void*) { /* prevent GC until tensor dies */ });
+                [obj_ref](void*) mutable {
+                    py::gil_scoped_acquire gil;
+                    obj_ref.reset();
+                });
         },
         py::arg("buffer"), py::arg("shape"),
         py::arg("dtype") = tenzor::DType::Float32,

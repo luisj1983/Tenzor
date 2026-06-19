@@ -14,8 +14,10 @@ if(NOT METAL_FRAMEWORK OR NOT MPS_FRAMEWORK)
     return()
 endif()
 
-# Collect Objective-C++ sources (including kernels subdirectory)
-file(GLOB MPS_SOURCES
+# Collect Objective-C++ sources (including kernels subdirectory).
+# CONFIGURE_DEPENDS so CMake re-globs when sources are added/removed; without it
+# a newly added .mm/.cpp is silently dropped until a manual reconfigure.
+file(GLOB MPS_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/*.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.mm
@@ -23,7 +25,7 @@ file(GLOB MPS_SOURCES
 )
 
 # Compile Metal shaders to metallib
-file(GLOB METAL_SHADERS ${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.metal)
+file(GLOB METAL_SHADERS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.metal)
 
 if(METAL_SHADERS)
     set(METALLIB_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/tenzor_kernels.metallib)

@@ -151,7 +151,7 @@ auto MPIBackend::broadcast(Tensor& tensor, int src_rank) -> void {
 
     MPI_CHECK(MPI_Bcast(
         ptr,
-        static_cast<int>(tensor.numel()),
+        checked_mpi_count(tensor.numel(), "broadcast"),
         to_mpi_datatype(tensor.dtype()),
         src_rank,
         comm_
@@ -169,7 +169,7 @@ auto MPIBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     MPI_CHECK(MPI_Allreduce(
         MPI_IN_PLACE,
         ptr,
-        static_cast<int>(tensor.numel()),
+        checked_mpi_count(tensor.numel(), "all_reduce"),
         to_mpi_datatype(tensor.dtype()),
         to_mpi_op(op),
         comm_
@@ -177,9 +177,15 @@ auto MPIBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 
     copy_back_if_staged(tensor, host_buf);
 
-    // Handle AVG: MPI doesn't have a native average op
-    if (op == ReduceOp::AVG) {
-        tensor = tensor / static_cast<float>(world_size_);
+    // Handle AVG: MPI doesn't have a native average op. Divide IN PLACE through a
+    // dtype/device-matched scalar so Float64 keeps full precision and the
+    // caller's storage (aliased Variables/views) is preserved — `tensor = tensor
+    // / float` allocated a new buffer and detached aliases (the H6 fix already
+    // applied to MPIProcessGroup/NCCLProcessGroup).
+    if (op == ReduceOp::AVG && world_size_ > 0) {
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   tensor.dtype(), tensor.device());
+        tensor /= scalar;
     }
 }
 
@@ -193,7 +199,7 @@ auto MPIBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
         MPI_CHECK(MPI_Reduce(
             MPI_IN_PLACE,
             ptr,
-            static_cast<int>(tensor.numel()),
+            checked_mpi_count(tensor.numel(), "reduce"),
             to_mpi_datatype(tensor.dtype()),
             to_mpi_op(op),
             dst_rank,
@@ -203,7 +209,7 @@ auto MPIBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
         MPI_CHECK(MPI_Reduce(
             ptr,
             nullptr,
-            static_cast<int>(tensor.numel()),
+            checked_mpi_count(tensor.numel(), "reduce"),
             to_mpi_datatype(tensor.dtype()),
             to_mpi_op(op),
             dst_rank,
@@ -216,8 +222,10 @@ auto MPIBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
     // MPI has no AVG collective (ReduceOp::AVG maps to MPI_SUM); only the
     // destination rank holds the reduced result, so divide there to get the
     // mean. Non-root ranks keep their unchanged local tensor.
-    if (op == ReduceOp::AVG && rank_ == dst_rank) {
-        tensor = tensor / static_cast<float>(world_size_);
+    if (op == ReduceOp::AVG && rank_ == dst_rank && world_size_ > 0) {
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   tensor.dtype(), tensor.device());
+        tensor /= scalar;
     }
 }
 
@@ -430,7 +438,7 @@ auto MPIBackend::reduce_scatter(const std::vector<Tensor>& tensors,
     MPI_CHECK(MPI_Reduce_scatter_block(
         send_buf.data_ptr(),
         recv_ptr,
-        static_cast<int>(output.numel()),
+        checked_mpi_count(output.numel(), "reduce_scatter"),
         to_mpi_datatype(output.dtype()),
         to_mpi_op(op),
         comm_
@@ -438,10 +446,13 @@ auto MPIBackend::reduce_scatter(const std::vector<Tensor>& tensors,
 
     copy_back_if_staged(output, recv_host_buf);
 
-    // MPI has no AVG collective (ReduceOp::AVG maps to MPI_SUM); divide by world
-    // size afterwards, mirroring MPIBackend::all_reduce.
-    if (op == ReduceOp::AVG) {
-        output = output / static_cast<float>(world_size_);
+    // MPI has no AVG collective (ReduceOp::AVG maps to MPI_SUM); divide IN PLACE
+    // through a dtype/device-matched scalar afterwards, mirroring
+    // MPIBackend::all_reduce (preserves precision and caller aliasing).
+    if (op == ReduceOp::AVG && world_size_ > 0) {
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   output.dtype(), output.device());
+        output /= scalar;
     }
 }
 
@@ -468,7 +479,7 @@ auto MPIBackend::send(const Tensor& tensor, int dst_rank) -> void {
 
     MPI_CHECK(MPI_Send(
         ptr,
-        static_cast<int>(tensor.numel()),
+        checked_mpi_count(tensor.numel(), "send"),
         to_mpi_datatype(tensor.dtype()),
         dst_rank,
         /*tag=*/0,
@@ -490,7 +501,7 @@ auto MPIBackend::recv(Tensor& tensor, int src_rank) -> void {
 
     MPI_CHECK(MPI_Recv(
         ptr,
-        static_cast<int>(tensor.numel()),
+        checked_mpi_count(tensor.numel(), "recv"),
         to_mpi_datatype(tensor.dtype()),
         src_rank,
         /*tag=*/0,

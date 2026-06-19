@@ -57,12 +57,20 @@ auto compute_asymmetric_params(float min_val, float max_val, QuantDType dtype)
     -> std::pair<float, int32_t> {
     auto [quant_min, quant_max] = get_quant_range(dtype);
 
-    // Handle edge case where all values are identical (min == max)
+    // Handle edge case where all values are identical (min == max). Hard-coding
+    // scale=EPSILON (1e-8) destroyed the value: round(c / 1e-8) saturates to
+    // quant_max and dequantizes to ~0. Instead extend the range to include 0
+    // (matching PyTorch's choose_qparams) and derive a real scale/zero_point so
+    // the constant dequantizes back to itself.
     constexpr float EPSILON = 1e-8f;
     if (std::abs(max_val - min_val) < EPSILON) {
-        // When all values are the same, set scale to small value and zero_point to center
-        float scale = EPSILON;
-        int32_t zero_point = (quant_min + quant_max) / 2;
+        float lo = std::min(min_val, 0.0f);
+        float hi = std::max(max_val, 0.0f);
+        float quant_range = static_cast<float>(quant_max - quant_min);
+        float scale = std::max((hi - lo) / quant_range, EPSILON);
+        int32_t zero_point =
+            static_cast<int32_t>(std::round(quant_min - lo / scale));
+        zero_point = std::clamp(zero_point, quant_min, quant_max);
         return {scale, zero_point};
     }
 
@@ -608,8 +616,6 @@ auto calibrate_quantization_params(
         throw std::runtime_error("Cannot calibrate with empty sample set");
     }
 
-    constexpr float EPSILON = 1e-8f;
-
     // Check if per-channel quantization
     bool is_per_channel = (scheme == QuantizationScheme::PerChannelSymmetric ||
                           scheme == QuantizationScheme::PerChannelAsymmetric);
@@ -652,13 +658,11 @@ auto calibrate_quantization_params(
             }
         }
 
-        // Handle edge case where all values in a channel are identical
-        for (int64_t c = 0; c < num_channels; ++c) {
-            if (std::abs(max_data[c] - min_data[c]) < EPSILON) {
-                min_data[c] -= EPSILON;
-                max_data[c] += EPSILON;
-            }
-        }
+        // Degenerate (all-identical) channels are handled correctly downstream
+        // by compute_asymmetric_params / compute_symmetric_scale, which extend
+        // the range to include 0 so the constant round-trips. Widening min/max
+        // by EPSILON here would instead bypass that path and yield a tiny,
+        // value-destroying scale for large constants.
 
         // Keep min/max on CPU for compute_quantization_params (params stay on CPU)
         auto params = compute_quantization_params(min, max, dtype, scheme);
@@ -695,12 +699,9 @@ auto calibrate_quantization_params(
             throw std::runtime_error("Cannot calibrate with all-empty sample tensors");
         }
 
-        // Handle edge case where all values are identical
-        if (std::abs(global_max - global_min) < EPSILON) {
-            // Expand range slightly to avoid numerical issues
-            global_min -= EPSILON;
-            global_max += EPSILON;
-        }
+        // Degenerate (all-identical) inputs are handled correctly downstream by
+        // compute_asymmetric_params / compute_symmetric_scale (range extended to
+        // include 0 so the constant round-trips); no EPSILON widening needed.
 
         Tensor min({1}, DType::Float32, samples[0].device());
         Tensor max({1}, DType::Float32, samples[0].device());

@@ -31,14 +31,36 @@ inline T gs_denormalize(T coord, int size, bool align_corners) {
 }
 
 template <typename T>
-inline T gs_reflect_coord(T coord, int size) {
+inline T gs_reflect_coord(T coord, int size, bool align_corners) {
     if (size <= 1) return T(0);
-    T max_val = static_cast<T>(size - 1);
-    coord = sycl::fabs(coord);
-    T period = T(2) * max_val;
-    coord = sycl::fmod(coord, period);
-    if (coord > max_val) coord = period - coord;
-    return coord;
+    // align_corners-aware reflection matching the CPU reflect_coord_impl
+    // convention (the previous hardcoded span only matched align_corners=true).
+    T twice_low  = align_corners ? T(0) : T(-1);
+    T twice_high = align_corners ? static_cast<T>(2 * (size - 1))
+                                 : static_cast<T>(2 * size - 1);
+    T mn = twice_low / T(2);
+    T span = (twice_high - twice_low) / T(2);
+    T c = sycl::fabs(coord - mn);
+    T extra = sycl::fmod(c, span);
+    long long flips = static_cast<long long>(sycl::floor(c / span));
+    T reflected = ((flips % 2) == 0) ? (extra + mn) : (span - extra + mn);
+    return sycl::fmin(sycl::fmax(reflected, T(0)), static_cast<T>(size - 1));
+}
+
+// d(gs_reflect_coord)/d(coord): +1 or -1 fold-sign (align_corners-aware).
+template <typename T>
+inline T gs_reflect_coord_grad(T coord, int size, bool align_corners) {
+    if (size <= 1) return T(0);
+    T twice_low  = align_corners ? T(0) : T(-1);
+    T twice_high = align_corners ? static_cast<T>(2 * (size - 1))
+                                 : static_cast<T>(2 * size - 1);
+    T mn = twice_low / T(2);
+    T span = (twice_high - twice_low) / T(2);
+    T d = coord - mn;
+    T sign = (d < T(0)) ? T(-1) : T(1);
+    long long flips = static_cast<long long>(sycl::floor(sycl::fabs(d) / span));
+    if (flips % 2 != 0) sign = -sign;
+    return sign;
 }
 
 template <typename T>
@@ -106,8 +128,8 @@ void run_grid_sample_forward(sycl::queue& queue, const std::string& mode,
                 ix = sycl::fmin(sycl::fmax(ix, T(0)), static_cast<T>(W_in - 1));
                 iy = sycl::fmin(sycl::fmax(iy, T(0)), static_cast<T>(H_in - 1));
             } else if (pad_mode == 2) {
-                ix = gs_reflect_coord<T>(ix, W_in);
-                iy = gs_reflect_coord<T>(iy, H_in);
+                ix = gs_reflect_coord<T>(ix, W_in, align_corners);
+                iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
             int nx = static_cast<int>(sycl::round(ix));
             int ny = static_cast<int>(sycl::round(iy));
@@ -131,8 +153,8 @@ void run_grid_sample_forward(sycl::queue& queue, const std::string& mode,
                 ix = sycl::fmin(sycl::fmax(ix, T(0)), static_cast<T>(W_in - 1));
                 iy = sycl::fmin(sycl::fmax(iy, T(0)), static_cast<T>(H_in - 1));
             } else if (pad_mode == 2) {
-                ix = gs_reflect_coord<T>(ix, W_in);
-                iy = gs_reflect_coord<T>(iy, H_in);
+                ix = gs_reflect_coord<T>(ix, W_in, align_corners);
+                iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
             int x0 = static_cast<int>(sycl::floor(ix));
             int y0 = static_cast<int>(sycl::floor(iy));
@@ -165,8 +187,8 @@ void run_grid_sample_forward(sycl::queue& queue, const std::string& mode,
                 ix = sycl::fmin(sycl::fmax(ix, T(0)), static_cast<T>(W_in - 1));
                 iy = sycl::fmin(sycl::fmax(iy, T(0)), static_cast<T>(H_in - 1));
             } else if (pad_mode == 2) {
-                ix = gs_reflect_coord<T>(ix, W_in);
-                iy = gs_reflect_coord<T>(iy, H_in);
+                ix = gs_reflect_coord<T>(ix, W_in, align_corners);
+                iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
             int ix_floor = static_cast<int>(sycl::floor(ix));
             int iy_floor = static_cast<int>(sycl::floor(iy));
@@ -222,12 +244,17 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
             T iy = gs_denormalize<T>(grid_ptr[grid_idx + 1], H_in, align_corners);
             bool in_bounds_ix = (ix >= T(0) && ix <= static_cast<T>(W_in - 1));
             bool in_bounds_iy = (iy >= T(0) && iy <= static_cast<T>(H_in - 1));
+            // Reflection contributes a ±1 fold-sign to the coordinate gradient;
+            // capture it from the PRE-reflection coordinate before overwrite.
+            T refl_sign_x = T(1), refl_sign_y = T(1);
             if (pad_mode == 1) {
                 ix = sycl::fmin(sycl::fmax(ix, T(0)), static_cast<T>(W_in - 1));
                 iy = sycl::fmin(sycl::fmax(iy, T(0)), static_cast<T>(H_in - 1));
             } else if (pad_mode == 2) {
-                ix = gs_reflect_coord<T>(ix, W_in);
-                iy = gs_reflect_coord<T>(iy, H_in);
+                refl_sign_x = gs_reflect_coord_grad<T>(ix, W_in, align_corners);
+                refl_sign_y = gs_reflect_coord_grad<T>(iy, H_in, align_corners);
+                ix = gs_reflect_coord<T>(ix, W_in, align_corners);
+                iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
             T dix_dgx, diy_dgy;
             if (align_corners) {
@@ -237,6 +264,8 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                 dix_dgx = T(0.5) * static_cast<T>(W_in);
                 diy_dgy = T(0.5) * static_cast<T>(H_in);
             }
+            dix_dgx *= refl_sign_x;
+            diy_dgy *= refl_sign_y;
             int x0 = static_cast<int>(sycl::floor(ix));
             int y0 = static_cast<int>(sycl::floor(iy));
             int x1 = x0 + 1, y1 = y0 + 1;
@@ -283,8 +312,8 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                 ix = sycl::fmin(sycl::fmax(ix, T(0)), static_cast<T>(W_in - 1));
                 iy = sycl::fmin(sycl::fmax(iy, T(0)), static_cast<T>(H_in - 1));
             } else if (pad_mode == 2) {
-                ix = gs_reflect_coord<T>(ix, W_in);
-                iy = gs_reflect_coord<T>(iy, H_in);
+                ix = gs_reflect_coord<T>(ix, W_in, align_corners);
+                iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
             int nx = static_cast<int>(sycl::round(ix));
             int ny = static_cast<int>(sycl::round(iy));
@@ -306,12 +335,17 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
             int grid_idx = ((n * H_out + h) * W_out + w) * 2;
             T ix = gs_denormalize<T>(grid_ptr[grid_idx], W_in, align_corners);
             T iy = gs_denormalize<T>(grid_ptr[grid_idx + 1], H_in, align_corners);
+            // Reflection contributes a ±1 fold-sign to the coordinate gradient;
+            // capture it from the PRE-reflection coordinate before overwrite.
+            T refl_sign_x = T(1), refl_sign_y = T(1);
             if (pad_mode == 1) {
                 ix = sycl::fmin(sycl::fmax(ix, T(0)), static_cast<T>(W_in - 1));
                 iy = sycl::fmin(sycl::fmax(iy, T(0)), static_cast<T>(H_in - 1));
             } else if (pad_mode == 2) {
-                ix = gs_reflect_coord<T>(ix, W_in);
-                iy = gs_reflect_coord<T>(iy, H_in);
+                refl_sign_x = gs_reflect_coord_grad<T>(ix, W_in, align_corners);
+                refl_sign_y = gs_reflect_coord_grad<T>(iy, H_in, align_corners);
+                ix = gs_reflect_coord<T>(ix, W_in, align_corners);
+                iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
             T dix_dgx, diy_dgy;
             if (align_corners) {
@@ -321,6 +355,8 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                 dix_dgx = T(0.5) * static_cast<T>(W_in);
                 diy_dgy = T(0.5) * static_cast<T>(H_in);
             }
+            dix_dgx *= refl_sign_x;
+            diy_dgy *= refl_sign_y;
             int ix_floor = static_cast<int>(sycl::floor(ix));
             int iy_floor = static_cast<int>(sycl::floor(iy));
             T tx = ix - static_cast<T>(ix_floor);

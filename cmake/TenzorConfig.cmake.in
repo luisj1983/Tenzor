@@ -2,11 +2,15 @@
 
 set(TENZOR_VERSION "@PROJECT_VERSION@")
 
-# Backend availability flags (set at configure time)
-set(Tenzor_CUDA_FOUND @TENZOR_BUILD_CUDA@)
-set(Tenzor_ROCM_FOUND @TENZOR_BUILD_ROCM@)
-set(Tenzor_ONEAPI_FOUND @TENZOR_BUILD_ONEAPI@)
-set(Tenzor_VULKAN_FOUND @TENZOR_BUILD_VULKAN@)
+# Backend availability flags — reflect what was ACTUALLY built (the backend's
+# target existed at configure time), not merely what was requested via
+# TENZOR_BUILD_*. A requested backend can be auto-disabled (e.g. CUDA with no
+# compiler), so keying off the request would falsely advertise it as available.
+set(Tenzor_CUDA_FOUND @TENZOR_CUDA_BUILT@)
+set(Tenzor_ROCM_FOUND @TENZOR_ROCM_BUILT@)
+set(Tenzor_ONEAPI_FOUND @TENZOR_ONEAPI_BUILT@)
+set(Tenzor_VULKAN_FOUND @TENZOR_VULKAN_BUILT@)
+set(Tenzor_MPS_FOUND @TENZOR_MPS_BUILT@)
 
 # Find required dependencies
 include(CMakeFindDependencyMacro)

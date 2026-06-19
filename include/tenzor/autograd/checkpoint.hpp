@@ -715,8 +715,11 @@ struct RecomputeHooks {
 /// to clear.
 auto set_recompute_hooks(RecomputeHooks hooks) -> RecomputeHooks;
 
-/// Get the current global recompute hooks (default-constructed if none set).
-auto get_recompute_hooks() -> const RecomputeHooks&;
+/// Get a snapshot copy of the current global recompute hooks (default-
+/// constructed if none set). Returned by value (taken under the hooks mutex)
+/// so the caller's copy stays valid even if set_recompute_hooks() runs
+/// concurrently.
+auto get_recompute_hooks() -> RecomputeHooks;
 
 } // namespace autograd
 } // namespace tenzor

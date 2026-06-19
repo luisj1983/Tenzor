@@ -201,14 +201,39 @@ inline Device::Type get_dispatch_device(std::span<const Tensor> inputs) {
 
     Device::Type device_type = inputs[0].device().type;
 
-    // Verify all inputs are on the same device type
-    for (size_t i = 1; i < inputs.size(); ++i) {
-        if (inputs[i].device().type != device_type) [[unlikely]] {
+    // Reference accelerator index, established by the first input that actually
+    // carries data. Empty tensors carry no data, so their device index is
+    // irrelevant and must not constrain the dispatch device.
+    int32_t ref_index = -1;
+
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        const Device& d = inputs[i].device();
+
+        // Verify all inputs are on the same device type.
+        if (i > 0 && d.type != device_type) [[unlikely]] {
             throw std::runtime_error(
                 "All input tensors must be on the same device type. "
                 "Got " + std::string(device_type_to_string(device_type)) +
-                " and " + std::string(device_type_to_string(inputs[i].device().type))
+                " and " + std::string(device_type_to_string(d.type))
             );
+        }
+
+        // Verify all inputs are on the same accelerator INDEX. A kernel runs on
+        // a single physical device, so combining tensors on e.g. cuda:0 and
+        // cuda:1 would read another device's memory; reject it explicitly. (CPU
+        // has no meaningful index; empty tensors are skipped.)
+        if (device_type != Device::Type::CPU && inputs[i].numel() > 0) [[likely]] {
+            if (ref_index < 0) {
+                ref_index = d.index;
+            } else if (d.index != ref_index) [[unlikely]] {
+                throw std::runtime_error(
+                    "All input tensors must be on the same device. Got " +
+                    std::string(device_type_to_string(device_type)) + ":" +
+                    std::to_string(ref_index) + " and " +
+                    std::string(device_type_to_string(device_type)) + ":" +
+                    std::to_string(d.index)
+                );
+            }
         }
     }
 

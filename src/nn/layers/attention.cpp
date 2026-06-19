@@ -427,8 +427,12 @@ auto MultiheadAttention::scaled_dot_product_attention(
         // `!needs_attn_upcast && (Float16||BFloat16)`, which is identically
         // false (needs_attn_upcast == (Float16||BFloat16)) — dead code, removed.
         float neg_inf_val = -std::numeric_limits<float>::infinity();
-        auto causal = triu(ones({seq_len_q, seq_len_k}, score_dtype, query.device()), 1);
-        causal = causal * full({1}, neg_inf_val, score_dtype, query.device());
+        // Build the additive mask as triu of an all -inf matrix: triangular_op
+        // starts from zeros() and copies only the kept (strict-upper) region,
+        // so allowed positions are a literal 0, never 0 * -inf. The previous
+        // `triu(ones) * -inf` produced NaN (0 * -inf) on every allowed position,
+        // which the subsequent add + softmax then propagated across the row.
+        auto causal = triu(full({seq_len_q, seq_len_k}, neg_inf_val, score_dtype, query.device()), 1);
         Variable causal_var(causal, false);
         scores = scores + causal_var;
     }
@@ -511,6 +515,10 @@ auto MultiheadAttention::forward(const Variable& query,
     // Call forward pre-hooks (enables CPU-start offloading)
     // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
     call_forward_pre_hooks();
+    // Multi-input pre-hooks receive the actual (query, key, value) inputs. This
+    // multi-arg forward is the canonical multi-input entry point, so without
+    // this call the register_forward_pre_hook_multi API would never fire.
+    call_forward_pre_hooks_multi({query, key, value});
 
     // Handle batch_first parameter - only transform if needed
     const Variable* q_ptr = &query;
@@ -717,6 +725,9 @@ auto MultiheadAttention::forward(const Variable& query,
 
     // Call forward post-hooks (enables CPU-start offloading)
     call_forward_post_hooks();
+    // Multi-input post-hooks receive the (query, key, value) inputs and the
+    // final output, completing the multi-input hook API wiring.
+    call_forward_post_hooks_multi({query, key, value}, {output});
 
     // Return attention weights based on need_weights flag
     if (need_weights) {

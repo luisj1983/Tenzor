@@ -85,6 +85,20 @@ inline std::mt19937& tl_rng() {
     return rng;
 }
 
+// Counter-based per-element uniform in [0,1). Deterministic in (seed, index),
+// so a parallel dropout produces the SAME mask regardless of OpenMP thread
+// count or loop scheduling. (A per-thread mt19937 + `#pragma omp for` makes the
+// value at element i depend on which thread/chunk processes it, which is why
+// manual_seed() was not reproducible across thread counts.) splitmix64 mixing.
+inline float counter_uniform(uint64_t seed, uint64_t index) {
+    uint64_t z = seed + (index + 1) * 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    // Top 24 bits -> [0, 1) with 2^-24 resolution.
+    return static_cast<float>(z >> 40) * (1.0f / 16777216.0f);
+}
+
 // Delegate to single source of truth for OMP thread count.
 inline void configure_threads() {
     tenzor::backends::cpu::configure_omp_threads();
@@ -748,48 +762,39 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
     float* mask_data = mask.data<float>();
 
     float scale = 1.0f / (1.0f - p);
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    // Draw ONE base seed on the calling (master) thread, BEFORE any parallel
+    // region, so manual_seed() set on this thread is honored and the per-element
+    // randomness is independent of OpenMP thread count/scheduling. Each element
+    // i then gets a deterministic value from counter_uniform(base_seed, i).
+    const uint64_t base_seed = static_cast<uint64_t>(tl_rng()());
 
     auto apply_dropout_float = [&](auto* in_data, auto* out_data) {
         using T = std::remove_pointer_t<decltype(in_data)>;
-        #pragma omp parallel
-        {
-            // audit-3 T.19: tl_rng() now returns a reference to the
-            // thread-local generator (function form); invoke it to draw a
-            // seed value for the per-OMP-thread local_rng.
-            std::mt19937 local_rng(tl_rng()());
-            #pragma omp for
-            for (int64_t i = 0; i < n; ++i) {
-                float r = dist(local_rng);
-                if (r < p) {
-                    mask_data[i] = 0.0f;
-                    out_data[i] = T(0);
-                } else {
-                    mask_data[i] = scale;
-                    out_data[i] = in_data[i] * static_cast<T>(scale);
-                }
+        #pragma omp parallel for
+        for (int64_t i = 0; i < n; ++i) {
+            float r = counter_uniform(base_seed, static_cast<uint64_t>(i));
+            if (r < p) {
+                mask_data[i] = 0.0f;
+                out_data[i] = T(0);
+            } else {
+                mask_data[i] = scale;
+                out_data[i] = in_data[i] * static_cast<T>(scale);
             }
         }
     };
 
     auto apply_dropout_half = [&](auto* in_data, auto* out_data) {
         using T = std::remove_pointer_t<decltype(in_data)>;
-        #pragma omp parallel
-        {
-            // audit-3 T.19: tl_rng() now returns a reference to the
-            // thread-local generator (function form); invoke it to draw a
-            // seed value for the per-OMP-thread local_rng.
-            std::mt19937 local_rng(tl_rng()());
-            #pragma omp for
-            for (int64_t i = 0; i < n; ++i) {
-                float r = dist(local_rng);
-                if (r < p) {
-                    mask_data[i] = 0.0f;
-                    out_data[i] = T(0.0f);
-                } else {
-                    mask_data[i] = scale;
-                    out_data[i] = T(static_cast<float>(in_data[i]) * scale);
-                }
+        #pragma omp parallel for
+        for (int64_t i = 0; i < n; ++i) {
+            float r = counter_uniform(base_seed, static_cast<uint64_t>(i));
+            if (r < p) {
+                mask_data[i] = 0.0f;
+                out_data[i] = T(0.0f);
+            } else {
+                mask_data[i] = scale;
+                out_data[i] = T(static_cast<float>(in_data[i]) * scale);
             }
         }
     };

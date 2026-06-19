@@ -148,11 +148,11 @@ auto Module::to(Device device) -> void {
         module->to(device);
     }
 
-    // P.3: re-propagate train/eval mode to submodules after the device move.
-    // Some submodules (e.g. Dropout) may have been reconstructed during
-    // device transfer; without this, a freshly-recreated child can revert
-    // to its default training_=true even though the parent is in eval mode.
-    train(training_);
+    // Device transfer moves each parameter/buffer in place and recurses into
+    // submodules without reconstructing them, so every (sub)module retains its
+    // own training_ flag. We must NOT call train(training_) here: that recurses
+    // and overwrites intentional per-submodule eval state (e.g. a frozen child
+    // inside a training parent) with the parent's flag.
 
     // std::cerr << "[DEBUG] Module::to() completed successfully" << std::endl;
 }
@@ -185,11 +185,10 @@ auto Module::to(DType dtype) -> void {
         module->to(dtype);
     }
 
-    // R.15: mirror the to(Device) fix — re-propagate train/eval mode to
-    // submodules after the dtype conversion so any freshly-recreated child
-    // (e.g. Dropout) inherits the parent's training flag instead of its
-    // default-constructed training_=true.
-    train(training_);
+    // As in to(Device): dtype conversion is in-place and does not reconstruct
+    // submodules, so per-submodule training_ flags are preserved. Calling
+    // train(training_) here would recurse and clobber intentional per-submodule
+    // eval state with the parent's flag.
 }
 
 auto Module::cuda(int device_id) -> void {

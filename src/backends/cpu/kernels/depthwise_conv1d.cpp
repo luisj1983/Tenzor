@@ -198,23 +198,38 @@ auto depthwise_conv1d_kernel(const Tensor& input_4d,
 
     auto output = Tensor::empty_uninitialized({N, C, 1, L_out}, input_4d.dtype(), input_4d.device());
 
+    // The impl/AVX2 paths index input/weight as flat packed [N,C,1,L] buffers.
+    // When the Conv1d layer runs with padding==0 it forwards padded.unsqueeze(2)
+    // of the raw (possibly non-contiguous) input view, which stays
+    // non-contiguous — walking it as flat would silently produce wrong results.
+    // Materialize contiguous copies once (no-op when already packed). The
+    // F16/BF16 branches below already repack via .to(Float32).
+    const Tensor in_c = input_4d.is_contiguous() ? input_4d : input_4d.contiguous();
+    const Tensor w_c  = weight_4d.is_contiguous() ? weight_4d : weight_4d.contiguous();
+    Tensor bias_c_storage;
+    const Tensor* bias_c = bias;
+    if (bias && !bias->is_contiguous()) {
+        bias_c_storage = bias->contiguous();
+        bias_c = &bias_c_storage;
+    }
+
     const DType dt = input_4d.dtype();
     if (dt == DType::Float32) {
 #ifdef TENZOR_DWCONV1D_AVX2
         if (stride_l == 1 && dilation_l == 1) {
-            depthwise_conv1d_avx2_f32(input_4d.data<float>(), weight_4d.data<float>(),
-                bias ? bias->data<float>() : nullptr, output.data<float>(),
+            depthwise_conv1d_avx2_f32(in_c.data<float>(), w_c.data<float>(),
+                bias_c ? bias_c->data<float>() : nullptr, output.data<float>(),
                 N, C, L, kL, L_out, padding_l);
         } else
 #endif
         {
-            depthwise_conv1d_impl<float>(input_4d.data<float>(), weight_4d.data<float>(),
-                bias ? bias->data<float>() : nullptr, output.data<float>(),
+            depthwise_conv1d_impl<float>(in_c.data<float>(), w_c.data<float>(),
+                bias_c ? bias_c->data<float>() : nullptr, output.data<float>(),
                 N, C, L, kL, L_out, stride_l, padding_l, dilation_l);
         }
     } else if (dt == DType::Float64) {
-        depthwise_conv1d_impl<double>(input_4d.data<double>(), weight_4d.data<double>(),
-            bias ? bias->data<double>() : nullptr, output.data<double>(),
+        depthwise_conv1d_impl<double>(in_c.data<double>(), w_c.data<double>(),
+            bias_c ? bias_c->data<double>() : nullptr, output.data<double>(),
             N, C, L, kL, L_out, stride_l, padding_l, dilation_l);
     } else if (dt == DType::Float16) {
         // Widen-narrow. Same pattern as depthwise_conv2d_impl<Float16>: the

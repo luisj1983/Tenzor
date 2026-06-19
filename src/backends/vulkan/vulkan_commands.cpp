@@ -292,13 +292,18 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     // Flush deferred frees now that all GPU work is complete
     flush_deferred_frees(device_id);
 
-    // Phase 8.3: do NOT reset the descriptor pool on every synchronize().
-    // The pool grows on demand (`grow()` doubles capacity on
-    // `VK_ERROR_OUT_OF_POOL_MEMORY`); resetting on every synchronize() defeats
-    // that growth and makes pool exhaustion paths chatty in tight inference
-    // loops. The pool's ~64K-set ceiling is reset only at backend destruction.
-    // If a future workload genuinely needs per-step reclamation, the user can
-    // call `descriptorPool->reset()` explicitly.
+    // Reclaim descriptor sets now that the device is confirmed idle (the
+    // per-fence wait above guarantees every submitted command buffer — and thus
+    // every descriptor set it referenced — has completed). Without this, a
+    // pure-compute batch loop that only ever reaches synchronize() (and never a
+    // host-readback path, which is the only other place the pool is reset) grew
+    // the descriptor pool without bound: every dispatch allocates a fresh set
+    // and nothing ever frees them, so the pool repeatedly hit its ceiling and
+    // grow()-doubled until memory was exhausted. Resetting here is safe (no set
+    // is live) and bounds steady-state usage to one batch's worth of sets.
+    if (ctx.descriptorPool) {
+        ctx.descriptorPool->reset();
+    }
 }
 
 auto VulkanBackend::is_device_lost(int32_t device_id) const -> bool {

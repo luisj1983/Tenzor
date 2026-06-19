@@ -36,34 +36,39 @@ __device__ __forceinline__ T denormalize_dev(T coord, int size, bool align_corne
 }
 
 template <typename T>
-__device__ __forceinline__ T reflect_coord(T coord, int size) {
+__device__ __forceinline__ T reflect_coord(T coord, int size, bool align_corners) {
     if (size <= 1) return T(0);
-    T max_val = static_cast<T>(size - 1);
-    if constexpr (std::is_same_v<T, float>)  coord = fabsf(coord);
-    else                                     coord = fabs(coord);
-    T period = T(2) * max_val;
-    if constexpr (std::is_same_v<T, float>)  coord = fmodf(coord, period);
-    else                                     coord = fmod(coord, period);
-    if (coord > max_val) coord = period - coord;
-    return coord;
+    // align_corners-aware reflection, matching the CPU reflect_coord_impl
+    // twice_low/twice_high convention (the previous version hardcoded the
+    // align_corners=true span and so produced wrong samples for
+    // align_corners=false).
+    T twice_low  = align_corners ? T(0) : T(-1);
+    T twice_high = align_corners ? static_cast<T>(2 * (size - 1))
+                                 : static_cast<T>(2 * size - 1);
+    T mn = twice_low / T(2);
+    T span = (twice_high - twice_low) / T(2);
+    T c = fabs(coord - mn);
+    T extra = fmod(c, span);
+    long long flips = static_cast<long long>(floor(c / span));
+    T reflected = ((flips % 2) == 0) ? (extra + mn) : (span - extra + mn);
+    return fmin(fmax(reflected, T(0)), static_cast<T>(size - 1));
 }
 
 // d(reflect_coord)/d(coord): +1 or -1 depending on which leg of the reflection
-// fold the (pre-reflection) coordinate lands on. Mirrors reflect_coord's branch
-// structure. The fabs leg flips sign for negative coords; the upper fold flips
-// it again. Returns 0 for the degenerate size<=1 case (constant output).
+// fold the (pre-reflection) coordinate lands on. align_corners-aware to match
+// reflect_coord above. Returns 0 for the degenerate size<=1 case.
 template <typename T>
-__device__ __forceinline__ T reflect_coord_grad(T coord, int size) {
+__device__ __forceinline__ T reflect_coord_grad(T coord, int size, bool align_corners) {
     if (size <= 1) return T(0);
-    T max_val = static_cast<T>(size - 1);
-    T sign = (coord < T(0)) ? T(-1) : T(1);   // d|coord|/dcoord
-    T a;
-    if constexpr (std::is_same_v<T, float>)  a = fabsf(coord);
-    else                                     a = fabs(coord);
-    T period = T(2) * max_val;
-    if constexpr (std::is_same_v<T, float>)  a = fmodf(a, period);
-    else                                     a = fmod(a, period);
-    if (a > max_val) sign = -sign;            // upper fold leg flips the sign
+    T twice_low  = align_corners ? T(0) : T(-1);
+    T twice_high = align_corners ? static_cast<T>(2 * (size - 1))
+                                 : static_cast<T>(2 * size - 1);
+    T mn = twice_low / T(2);
+    T span = (twice_high - twice_low) / T(2);
+    T d = coord - mn;
+    T sign = (d < T(0)) ? T(-1) : T(1);
+    long long flips = static_cast<long long>(floor(fabs(d) / span));
+    if (flips % 2 != 0) sign = -sign;
     return sign;
 }
 
@@ -108,8 +113,8 @@ __global__ void grid_sample_bilinear_kernel(
             iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
         }
     } else if (padding_mode == 2) {  // reflection
-        ix = reflect_coord<T>(ix, W_in);
-        iy = reflect_coord<T>(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in, align_corners);
+        iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
     int x0, y0;
@@ -198,8 +203,8 @@ __global__ void grid_sample_bicubic_kernel(
             iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
         }
     } else if (padding_mode == 2) {  // reflection
-        ix = reflect_coord<T>(ix, W_in);
-        iy = reflect_coord<T>(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in, align_corners);
+        iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
     int ix_floor, iy_floor;
@@ -276,8 +281,8 @@ __global__ void grid_sample_nearest_kernel(
             iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
         }
     } else if (padding_mode == 2) {
-        ix = reflect_coord<T>(ix, W_in);
-        iy = reflect_coord<T>(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in, align_corners);
+        iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
     int nx, ny;
@@ -499,8 +504,8 @@ __global__ void grid_sample_bilinear_backward_kernel(
             iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
         }
     } else if (padding_mode == 2) {
-        ix = reflect_coord<T>(ix, W_in);
-        iy = reflect_coord<T>(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in, align_corners);
+        iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
     // d(sampled coord)/d(grid): chain rule
@@ -576,8 +581,8 @@ __global__ void grid_sample_bilinear_backward_kernel(
         if (!in_bounds_ix) scale_x = T(0);
         if (!in_bounds_iy) scale_y = T(0);
     } else if (padding_mode == 2) {
-        scale_x *= reflect_coord_grad<T>(ix_raw, W_in);
-        scale_y *= reflect_coord_grad<T>(iy_raw, H_in);
+        scale_x *= reflect_coord_grad<T>(ix_raw, W_in, align_corners);
+        scale_y *= reflect_coord_grad<T>(iy_raw, H_in, align_corners);
     }
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
@@ -617,8 +622,8 @@ __global__ void grid_sample_nearest_backward_kernel(
             iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
         }
     } else if (padding_mode == 2) {
-        ix = reflect_coord<T>(ix, W_in);
-        iy = reflect_coord<T>(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in, align_corners);
+        iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
     int nx, ny;
@@ -681,8 +686,8 @@ __global__ void grid_sample_bicubic_backward_kernel(
             iy = fmin(fmax(iy, 0.0), static_cast<double>(H_in - 1));
         }
     } else if (padding_mode == 2) {
-        ix = reflect_coord<T>(ix, W_in);
-        iy = reflect_coord<T>(iy, H_in);
+        ix = reflect_coord<T>(ix, W_in, align_corners);
+        iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
     T dix_dgx, diy_dgy;
@@ -766,8 +771,8 @@ __global__ void grid_sample_bicubic_backward_kernel(
         if (!in_bounds_ix) scale_x = T(0);
         if (!in_bounds_iy) scale_y = T(0);
     } else if (padding_mode == 2) {
-        scale_x *= reflect_coord_grad<T>(ix_raw, W_in);
-        scale_y *= reflect_coord_grad<T>(iy_raw, H_in);
+        scale_x *= reflect_coord_grad<T>(ix_raw, W_in, align_corners);
+        scale_y *= reflect_coord_grad<T>(iy_raw, H_in, align_corners);
     }
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;

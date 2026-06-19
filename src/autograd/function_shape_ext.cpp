@@ -431,51 +431,31 @@ auto IndexBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("IndexBackward::forward should not be called");
 }
 
-auto IndexBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad = grad_outputs[0];
-
-    // saved_tensors_[0] = input shape (1D Int64)
-    // saved_tensors_[1..num_indices_] = index tensors (0-element = nullopt)
-    const auto& shape_tensor = saved_tensors_[0];
-    auto shape_ptr = shape_tensor.data<int64_t>();
-    auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
-
-    // Create zeros of input shape
-    auto grad_input = zeros(input_shape, grad.dtype(), grad.device());
-
-    // Reconstruct optional indices
-    std::vector<std::optional<Tensor>> indices;
-    indices.reserve(num_indices_);
-    for (int64_t i = 0; i < num_indices_; ++i) {
-        const auto& idx = saved_tensors_[1 + i];
-        if (idx.numel() > 0) {
-            indices.push_back(idx);
-        } else {
-            indices.push_back(std::nullopt);
-        }
-    }
-
-    // index_put with accumulation: grad_input[indices] += grad
-    index_put(grad_input, indices, grad);
-
-    return {grad_input};
+auto IndexBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    // The closed-form backward of advanced/fancy indexing is a scatter-add of
+    // the output gradient into a zero-filled source-shaped tensor: DUPLICATE
+    // indices (e.g. x[[0,0,1]]) must ACCUMULATE. `tenzor::index_put` has NumPy
+    // `a[indices] = values` (overwrite) semantics and its AdvancedIndexPut
+    // kernels expose no accumulate mode, so using it here silently drops the
+    // duplicate-index gradient contributions. Mirror the live sibling
+    // AdvancedIndexBackward and fail loudly rather than return wrong grads.
+    throw NonDifferentiable(
+        "index (x[indices]): closed-form backward requires an accumulating "
+        "scatter (duplicate indices must sum), but the AdvancedIndexPut "
+        "kernels are overwrite-only, so this path would silently drop "
+        "duplicate-index contributions. Marked non-differentiable so callers "
+        "fail loudly instead of getting wrong gradients. Use gather/"
+        "index_select for the single-dim case if you need autograd today.");
 }
 
-auto IndexBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // R.5 — honest higher-order stub. Advanced (fancy) indexing backward is
-    // implemented as `index_put` with accumulation; the project does not yet
-    // expose a Variable-level multi-tensor `index_put` overload whose
-    // backward closes the loop. Until that lands, the tensor-level path is
-    // mathematically correct for *first* order, but `create_graph=true`
-    // users would silently see zeros. Emit a one-shot warning and report
-    // the stub status through `is_higher_order_stub()` so the engine
-    // counter fires.
-    TENZOR_WARN_ONCE(
-        "[IndexBackward] higher-order backward is a stub — advanced "
-        "(fancy) indexing backward (index_put + accumulate) does not yet "
-        "have a Variable-level overload; second-order grads will be zero.");
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+auto IndexBackward::backward_with_variables(std::vector<Variable> /*grad_outputs*/) -> std::vector<Variable> {
+    // No accumulating advanced-index scatter exists, so a higher-order backward
+    // cannot be correct either; fail loudly for the same reason as backward().
+    throw NonDifferentiable(
+        "index (x[indices]): higher-order backward unavailable — the "
+        "advanced-index backward needs an accumulating scatter kernel that the "
+        "project does not yet provide. Marked non-differentiable to avoid "
+        "silently-zero second-order gradients.");
 }
 
 // NarrowBackward implementation

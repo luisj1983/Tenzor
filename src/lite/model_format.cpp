@@ -92,6 +92,22 @@ auto read_bytes(const uint8_t* buffer, size_t size, size_t& offset,
     offset += n;
 }
 
+// Reject an element count that cannot fit in the bytes remaining in the buffer
+// BEFORE reserving/resizing for it. Each element occupies at least
+// `min_elem_bytes` on the wire, so a count larger than remaining/min_elem_bytes
+// is impossible — refuse it instead of eagerly allocating gigabytes (a crafted
+// .tzlite could otherwise declare count=0xFFFFFFFF and OOM the process before
+// the first per-element read fails).
+inline auto check_element_count(size_t count, size_t min_elem_bytes,
+                                size_t size, size_t offset, const char* what) -> void {
+    const size_t remaining = (offset <= size) ? (size - offset) : 0;
+    if (count > remaining / min_elem_bytes) {
+        throw std::runtime_error(std::string("TZLiteReader: ") + what +
+                                 " count (" + std::to_string(count) +
+                                 ") exceeds remaining payload");
+    }
+}
+
 template <typename T>
 auto append_pod(std::vector<uint8_t>& out, const T& value) -> void {
     const auto* p = reinterpret_cast<const uint8_t*>(&value);
@@ -179,6 +195,7 @@ auto deserialise_node_table(const uint8_t* buffer, size_t size,
 
         uint16_t num_inputs = 0;
         read_pod(buffer, size, offset, num_inputs);
+        check_element_count(num_inputs, sizeof(int16_t), size, offset, "node inputs");
         node.input_ids.resize(num_inputs);
         for (uint16_t i = 0; i < num_inputs; ++i) {
             read_pod(buffer, size, offset, node.input_ids[i]);
@@ -186,6 +203,7 @@ auto deserialise_node_table(const uint8_t* buffer, size_t size,
 
         uint16_t num_outputs = 0;
         read_pod(buffer, size, offset, num_outputs);
+        check_element_count(num_outputs, sizeof(int16_t), size, offset, "node outputs");
         node.output_ids.resize(num_outputs);
         for (uint16_t i = 0; i < num_outputs; ++i) {
             read_pod(buffer, size, offset, node.output_ids[i]);
@@ -198,12 +216,14 @@ auto deserialise_node_table(const uint8_t* buffer, size_t size,
         if (version >= 3) {
             uint32_t ec_i = 0;
             read_pod(buffer, size, offset, ec_i);
+            check_element_count(ec_i, sizeof(int64_t), size, offset, "node extra_i");
             node.attrs.extra_i.resize(ec_i);
             for (uint32_t k = 0; k < ec_i; ++k) {
                 read_pod(buffer, size, offset, node.attrs.extra_i[k]);
             }
             uint32_t ec_f = 0;
             read_pod(buffer, size, offset, ec_f);
+            check_element_count(ec_f, sizeof(float), size, offset, "node extra_f");
             node.attrs.extra_f.resize(ec_f);
             for (uint32_t k = 0; k < ec_f; ++k) {
                 read_pod(buffer, size, offset, node.attrs.extra_f[k]);
@@ -243,6 +263,10 @@ auto parse_tval_payload(const uint8_t* buffer, size_t size)
     size_t offset = 0;
     uint32_t count = 0;
     read_pod(buffer, size, offset, count);
+    // Each TensorValue entry is at least 26 bytes on the wire (fixed prefix with
+    // ndim=0): tensor_id(2)+src(1)+ndim(1)+dt(2)+input_index(4)+
+    // weight_offset(8)+weight_nbytes(8).
+    check_element_count(count, 26, size, offset, "TVAL");
     out.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         TensorValue tv;
@@ -266,6 +290,7 @@ auto parse_tval_payload(const uint8_t* buffer, size_t size)
         read_pod(buffer, size, offset, tv.input_index);
         read_pod(buffer, size, offset, tv.weight_offset);
         read_pod(buffer, size, offset, tv.weight_nbytes);
+        check_element_count(ndim, sizeof(int64_t), size, offset, "TVAL shape");
         tv.shape.resize(ndim);
         for (uint8_t d = 0; d < ndim; ++d) {
             read_pod(buffer, size, offset, tv.shape[d]);
@@ -294,6 +319,7 @@ auto parse_iosp_payload(const uint8_t* buffer, size_t size)
     size_t offset = 0;
     uint32_t ni = 0;
     read_pod(buffer, size, offset, ni);
+    check_element_count(ni, sizeof(int16_t), size, offset, "IOSP inputs");
     out.first.resize(ni);
     for (uint32_t i = 0; i < ni; ++i) {
         read_pod(buffer, size, offset, out.first[i]);
@@ -306,6 +332,7 @@ auto parse_iosp_payload(const uint8_t* buffer, size_t size)
     }
     uint32_t no = 0;
     read_pod(buffer, size, offset, no);
+    check_element_count(no, sizeof(int16_t), size, offset, "IOSP outputs");
     out.second.resize(no);
     for (uint32_t i = 0; i < no; ++i) {
         read_pod(buffer, size, offset, out.second[i]);
@@ -385,12 +412,15 @@ auto parse_mmpl_payload(const uint8_t* buffer, size_t size) -> MmplPlan {
     plan.alignment = alignment ? alignment : 64;
     uint32_t num_pools = 0;
     read_pod(buffer, size, offset, num_pools);
+    check_element_count(num_pools, sizeof(uint64_t), size, offset, "MMPL pools");
     plan.pool_sizes.resize(num_pools);
     for (uint32_t i = 0; i < num_pools; ++i) {
         read_pod(buffer, size, offset, plan.pool_sizes[i]);
     }
     uint32_t num_placements = 0;
     read_pod(buffer, size, offset, num_placements);
+    // Each placement is 11 bytes on the wire: tensor_id(2)+pool_index(1)+offset(8).
+    check_element_count(num_placements, 11, size, offset, "MMPL placements");
     plan.placements.resize(num_placements);
     for (uint32_t i = 0; i < num_placements; ++i) {
         auto& p = plan.placements[i];

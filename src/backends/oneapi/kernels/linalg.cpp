@@ -380,9 +380,12 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             d_diag_ptr[i] = d_a_ptr[i * n + i];  // column-major diagonal
         }).wait();
 
-        // Device-side reduction: product of diagonal * (-1)^swaps
-        auto* prod_buf = sycl::malloc_shared<float>(1, queue);
-        auto* swap_buf = sycl::malloc_shared<int32_t>(1, queue);
+        // Device-side reduction: product of diagonal * (-1)^swaps. RAII so the
+        // shared buffers free on any exception from the .wait() calls below.
+        SyclSharedBuffer<float> prod_buf_guard(1, queue);
+        SyclSharedBuffer<int32_t> swap_buf_guard(1, queue);
+        float* prod_buf = prod_buf_guard.get();
+        int32_t* swap_buf = swap_buf_guard.get();
         prod_buf[0] = 1.0f;
         swap_buf[0] = 0;
 
@@ -400,9 +403,7 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.single_task<SyclDetCombineF32>([=]() {
             out_ptr[0] = prod_buf[0] * ((swap_buf[0] % 2) ? -1.0f : 1.0f);
         }).wait();
-
-        sycl::free(prod_buf, queue);
-        sycl::free(swap_buf, queue);
+        // prod_buf/swap_buf freed by their SyclSharedBuffer guards.
     } else if (input.dtype() == DType::Float64) {
         SyclDeviceBuffer<double> d_a(n * n, queue);
         SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
@@ -422,9 +423,12 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             d_diag_ptr[i] = d_a_ptr[i * n + i];  // column-major diagonal
         }).wait();
 
-        // Device-side reduction: product of diagonal * (-1)^swaps
-        auto* prod_buf = sycl::malloc_shared<double>(1, queue);
-        auto* swap_buf = sycl::malloc_shared<int32_t>(1, queue);
+        // Device-side reduction: product of diagonal * (-1)^swaps. RAII so the
+        // shared buffers free on any exception from the .wait() calls below.
+        SyclSharedBuffer<double> prod_buf_guard(1, queue);
+        SyclSharedBuffer<int32_t> swap_buf_guard(1, queue);
+        double* prod_buf = prod_buf_guard.get();
+        int32_t* swap_buf = swap_buf_guard.get();
         prod_buf[0] = 1.0;
         swap_buf[0] = 0;
 
@@ -442,9 +446,7 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.single_task<SyclDetCombineF64>([=]() {
             out_ptr[0] = prod_buf[0] * ((swap_buf[0] % 2) ? -1.0 : 1.0);
         }).wait();
-
-        sycl::free(prod_buf, queue);
-        sycl::free(swap_buf, queue);
+        // prod_buf/swap_buf freed by their SyclSharedBuffer guards.
     } else {
         throw std::runtime_error("linalg_det: only Float32 and Float64 supported");
     }
@@ -963,7 +965,9 @@ inline std::pair<double, double> linalg_eig_symmetry_metrics(
 {
     if (nbatch == 0 || n == 0) return {0.0, 0.0};
 
-    double* d_pair = sycl::malloc_device<double>(2, queue);
+    // RAII so d_pair frees on any exception from the .wait() / submit below.
+    SyclDeviceBuffer<double> d_pair_guard(2, queue);
+    double* d_pair = d_pair_guard.get();
     double init[2] = {0.0, 0.0};
     queue.memcpy(d_pair, init, 2 * sizeof(double)).wait();
 
@@ -1033,7 +1037,7 @@ inline std::pair<double, double> linalg_eig_symmetry_metrics(
 
     double host_pair[2] = {0.0, 0.0};
     queue.memcpy(host_pair, d_pair, 2 * sizeof(double)).wait();
-    sycl::free(d_pair, queue);
+    // d_pair freed by its SyclDeviceBuffer guard on scope exit.
     return {host_pair[0], host_pair[1]};
 }
 

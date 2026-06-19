@@ -561,7 +561,13 @@ public:
         if (has_offsets_) {
             offsets_cpu = (offsets_.device() == Device::cpu()) ? offsets_ : offsets_.to(Device::cpu());
             offsets_ptr = offsets_cpu.data<int64_t>();
-            num_bags = offsets_cpu.numel();
+            // With include_last_offset, the final offset entry is the total
+            // length sentinel, not a bag start, so there are numel()-1 bags
+            // (PyTorch semantics). Counting it produced a spurious trailing
+            // zero bag.
+            num_bags = include_last_offset_
+                ? std::max<int64_t>(offsets_cpu.numel() - 1, 0)
+                : offsets_cpu.numel();
         } else {
             num_bags = 1;
         }
@@ -1374,7 +1380,12 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings,
     // comment above; the GPU path returned earlier.)
     Tensor offsets_cpu = offsets_tensor;
     auto offsets_ptr = offsets_cpu.data<int64_t>();
-    int64_t num_bags = offsets_cpu.numel();
+    // include_last_offset: final offset is the total-length sentinel, so the
+    // bag count is numel()-1 (PyTorch semantics); the per-bag end logic below
+    // already maps the last bag's end to that final offset.
+    int64_t num_bags = include_last_offset_
+        ? std::max<int64_t>(offsets_cpu.numel() - 1, 0)
+        : offsets_cpu.numel();
 
     auto output = zeros({num_bags, embedding_dim}, DType::Float32, Device::cpu());
     auto output_ptr = output.data<float>();

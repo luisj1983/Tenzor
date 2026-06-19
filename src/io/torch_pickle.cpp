@@ -876,11 +876,29 @@ private:
                 int64_t val = 0;
                 std::vector<uint8_t> buf(n);
                 if (n > 0) read_into(buf.data(), n);
-                for (size_t i = 0; i < n; ++i) {
+                // n is a single byte (0..255), so a crafted .pth can request far
+                // more than 8 bytes. Shifting an int64_t by >= 64 bits is UB, so
+                // mirror the LONG4 guard: any byte above the low 8 must be pure
+                // sign-fill, otherwise the value does not fit in int64_t.
+                bool negative = (n > 0) && (buf[n - 1] & 0x80);
+                if (n > 8) {
+                    uint8_t fill = negative ? 0xff : 0x00;
+                    for (size_t i = 8; i < n; ++i) {
+                        if (buf[i] != fill) {
+                            throw std::runtime_error(
+                                "torch_pickle: LONG1 integer too large for int64_t");
+                        }
+                    }
+                    if (negative != ((buf[7] & 0x80) != 0)) {
+                        throw std::runtime_error(
+                            "torch_pickle: LONG1 integer too large for int64_t");
+                    }
+                }
+                for (size_t i = 0; i < std::min<size_t>(n, 8); ++i) {
                     val |= static_cast<int64_t>(buf[i]) << (8 * i);
                 }
-                // Sign-extend if MSB set.
-                if (n > 0 && (buf[n - 1] & 0x80)) {
+                // Sign-extend a sub-8-byte negative value into the high bytes.
+                if (n > 0 && n < 8 && (buf[n - 1] & 0x80)) {
                     for (size_t i = n; i < 8; ++i) {
                         val |= static_cast<int64_t>(0xff) << (8 * i);
                     }

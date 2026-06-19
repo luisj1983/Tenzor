@@ -138,6 +138,14 @@ auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor 
     // x,y[32,32] — therefore failed everywhere. Materialize the common
     // broadcast shape here so each backend still sees equal-shape
     // inputs but callers don't have to pre-broadcast manually.
+    // Promote x and y to their common dtype (matches PyTorch torch.where type
+    // promotion). The backend Where kernels require x.dtype()==y.dtype() and
+    // throw otherwise, so a mixed-dtype where(cond, f32, f64) used to fail at
+    // the kernel instead of returning the promoted result.
+    DType out_dtype = promote_types(x.dtype(), y.dtype());
+    Tensor xp = (x.dtype() == out_dtype) ? x : x.to(out_dtype);
+    Tensor yp = (y.dtype() == out_dtype) ? y : y.to(out_dtype);
+
     auto cs = condition.shape();
     auto xs = x.shape();
     auto ys = y.shape();
@@ -152,8 +160,8 @@ auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor 
         // / permuted) would be read in the wrong order. Force contiguity here,
         // mirroring the broadcast path below.
         Tensor cond_c = condition.is_contiguous() ? condition : contiguous(condition);
-        Tensor x_c    = x.is_contiguous()         ? x         : contiguous(x);
-        Tensor y_c    = y.is_contiguous()         ? y         : contiguous(y);
+        Tensor x_c    = xp.is_contiguous()        ? xp        : contiguous(xp);
+        Tensor y_c    = yp.is_contiguous()        ? yp        : contiguous(yp);
         std::vector<Tensor> inputs = {cond_c, x_c, y_c};
         return dispatch(OpId::Where, inputs)[0];
     }
@@ -185,8 +193,8 @@ auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor 
                std::equal(s.begin(), s.end(), target.begin());
     };
     Tensor cond_b = shape_eq(cs, out_shape) ? condition : broadcast_to(condition, out_shape);
-    Tensor x_b    = shape_eq(xs, out_shape) ? x         : broadcast_to(x, out_shape);
-    Tensor y_b    = shape_eq(ys, out_shape) ? y         : broadcast_to(y, out_shape);
+    Tensor x_b    = shape_eq(xs, out_shape) ? xp        : broadcast_to(xp, out_shape);
+    Tensor y_b    = shape_eq(ys, out_shape) ? yp        : broadcast_to(yp, out_shape);
     // broadcast_to may return a non-contiguous view; backend kernels
     // like the CPU where generally assume contiguous strides.
     if (!cond_b.is_contiguous()) cond_b = contiguous(cond_b);

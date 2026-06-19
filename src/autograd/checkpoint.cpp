@@ -273,7 +273,7 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
     // ZeROStage3Optimizer registers a hook that re-gathers all currently-
     // partitioned parameters so the recomputed forward sees full-shape weights
     // instead of 1-D partition slices.
-    const auto& hooks = get_recompute_hooks();
+    auto hooks = get_recompute_hooks();
     if (hooks.on_begin) {
         hooks.on_begin(this);
     }
@@ -789,11 +789,14 @@ auto set_recompute_hooks(RecomputeHooks hooks) -> RecomputeHooks {
     return prev;
 }
 
-auto get_recompute_hooks() -> const RecomputeHooks& {
-    // No lock on read: the typical access pattern is "set once at register_model,
-    // clear once at unregister_model, read many times during recompute". A torn
-    // read of std::function is theoretically possible but only between set/clear
-    // events that aren't concurrent in practice.
+auto get_recompute_hooks() -> RecomputeHooks {
+    // Return a COPY taken under the same mutex set_recompute_hooks() uses.
+    // Returning an unlocked reference to the global std::functions raced with a
+    // concurrent set_recompute_hooks() (e.g. optimizer teardown): the caller
+    // could invoke on_begin while its target was being reassigned/destroyed
+    // underneath it (UB). A by-value snapshot keeps the target alive for the
+    // duration of the call regardless of subsequent mutations.
+    std::lock_guard<std::mutex> lock(recompute_hooks_mutex());
     return recompute_hooks_storage();
 }
 

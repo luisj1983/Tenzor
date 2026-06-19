@@ -595,10 +595,32 @@ auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     Variable sx = needs_upcast ? tenzor::nn::variable_cast(saved_x, DType::Float32) : saved_x;
     Variable sw = needs_upcast ? tenzor::nn::variable_cast(saved_w, DType::Float32) : saved_w;
 
-    auto grad_x = tenzor::matmul(go, sw);
-    auto grad_out_t = tenzor::transpose(go, 0, 1);
-    auto grad_w = tenzor::matmul(grad_out_t, sx);
-    auto grad_b = tenzor::sum(go, 0, false);
+    // Collapse leading batch dims to a single row dim so the higher-order
+    // (create_graph) path matches the first-order Tensor backward() above and
+    // handles >2D activations (e.g. (B, T, in) from transformers). Operating
+    // on the raw >2D Variable previously transposed batch/seq dims and ran a
+    // batched matmul with mismatched batch dims, throwing or producing wrong
+    // grads for any double-backward through a Linear with rank>2 inputs.
+    auto go_shape = go.shape();
+    auto sx_shape = sx.shape();
+    const int64_t out_features = go_shape.back();
+    const int64_t in_features = sx_shape.back();
+    const int64_t rows = go.tensor().numel() / out_features;  // product of leading dims
+
+    Variable go_2d = tenzor::reshape(go, {rows, out_features});
+    Variable sx_2d = tenzor::reshape(sx, {rows, in_features});
+
+    // grad_input = grad_out @ W, restored to the original input shape.
+    auto grad_x_2d = tenzor::matmul(go_2d, sw);  // (rows, in)
+    auto grad_x = tenzor::reshape(
+        grad_x_2d, std::vector<int64_t>(sx_shape.begin(), sx_shape.end()));
+
+    // grad_weight = grad_out.T @ x  (summed over all batch rows)
+    auto grad_out_t = tenzor::transpose(go_2d, 0, 1);  // (out, rows)
+    auto grad_w = tenzor::matmul(grad_out_t, sx_2d);   // (out, in)
+
+    // grad_bias = sum over all batch rows
+    auto grad_b = tenzor::sum(go_2d, 0, false);  // (out,)
 
     if (needs_upcast) {
         // Use autograd-aware cast (TypeCastBackward) so the Variable graph

@@ -414,6 +414,26 @@ inline T reflect_coord_T(T coord, int64_t size, bool align_corners) {
     return reflect_coord_impl<T>(coord, size, align_corners);
 }
 
+// d(reflect_coord_impl)/d(coord) = +1 or -1, depending on which leg of the
+// reflection fold the coordinate lands on. The backward must chain this factor
+// into grad_grid for reflection padding; omitting it (as the CPU path used to)
+// drops the sign whenever a sample lands in an odd reflection region, diverging
+// from PyTorch and the CUDA backend.
+template <typename T>
+inline T reflect_coord_grad_T(T coord, int64_t size, bool align_corners) {
+    if (size <= 1) return T(0);
+    T twice_low  = align_corners ? T(0) : T(-1);
+    T twice_high = align_corners ? static_cast<T>(2 * (size - 1))
+                                 : static_cast<T>(2 * size - 1);
+    T mn = twice_low / T(2);
+    T span = (twice_high - twice_low) / T(2);
+    T d = coord - mn;
+    T sign = (d < T(0)) ? T(-1) : T(1);
+    int64_t flips = static_cast<int64_t>(std::floor(std::fabs(d) / span));
+    if (flips % 2 != 0) sign = -sign;
+    return sign;
+}
+
 // Full backward implementation for one dtype. Computes grad_input AND
 // grad_grid in a single scalar pass — both have the same access pattern,
 // just differing in how they accumulate.
@@ -467,15 +487,23 @@ void grid_sample_backward_impl(
                 bool in_bounds_ix = (ix >= T(0) && ix <= static_cast<T>(W_in - 1));
                 bool in_bounds_iy = (iy >= T(0) && iy <= static_cast<T>(H_in - 1));
 
+                // Reflection contributes a ±1 fold-sign to the coordinate
+                // gradient; capture it from the PRE-reflection coordinate before
+                // ix/iy are overwritten below.
+                T refl_sign_x = T(1);
+                T refl_sign_y = T(1);
                 if (padding_mode == "border") {
                     ix = std::min(std::max(ix, T(0)), static_cast<T>(W_in - 1));
                     iy = std::min(std::max(iy, T(0)), static_cast<T>(H_in - 1));
                 } else if (padding_mode == "reflection") {
+                    refl_sign_x = reflect_coord_grad_T<T>(ix, W_in, align_corners);
+                    refl_sign_y = reflect_coord_grad_T<T>(iy, H_in, align_corners);
                     ix = reflect_coord_T<T>(ix, W_in, align_corners);
                     iy = reflect_coord_T<T>(iy, H_in, align_corners);
                 }
 
-                // d(ix)/d(gx), d(iy)/d(gy) — chain back to normalised grid.
+                // d(px)/d(gx), d(py)/d(gy) — chain the reflection fold-sign
+                // through the denormalisation factor back to the normalised grid.
                 T dix_dgx, diy_dgy;
                 if (align_corners) {
                     dix_dgx = T(0.5) * static_cast<T>(W_in - 1);
@@ -484,6 +512,8 @@ void grid_sample_backward_impl(
                     dix_dgx = T(0.5) * static_cast<T>(W_in);
                     diy_dgy = T(0.5) * static_cast<T>(H_in);
                 }
+                dix_dgx *= refl_sign_x;
+                diy_dgy *= refl_sign_y;
 
                 if (mode == "bilinear") {
                     const int64_t x0 = static_cast<int64_t>(std::floor(ix));

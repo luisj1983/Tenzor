@@ -159,6 +159,38 @@ TEST_P(ReductionNumericalFixes, SumFloat64KahanCompensation) {
         << " — Kahan compensation not applied to Float64?";
 }
 
+// var/std are undefined (NaN) when the number of reduced elements N is <= the
+// Bessel correction (PyTorch / CPU semantics). The CUDA backend used to return
+// finite values (0 or a clamped m2) here, silently diverging from CPU and any
+// parity test that exercises a single-element reduction or a length-1 axis —
+// both reachable with the DEFAULT correction=1 (unbiased=true).
+TEST_P(ReductionNumericalFixes, VarStdUndefinedReturnsNaN) {
+    // Single-element tensor, full reduction (unbiased): N=1, correction=1.
+    {
+        auto t = tz::full({1}, 3.0f, tz::DType::Float32).to(device);
+        EXPECT_TRUE(std::isnan(tz::var(t).cpu().item<float>()))
+            << "var of a single element should be NaN on " << device.to_string();
+        EXPECT_TRUE(std::isnan(tz::std(t).cpu().item<float>()))
+            << "std of a single element should be NaN on " << device.to_string();
+    }
+    // Length-1 reduced axis (unbiased): dim_size=1, correction=1.
+    {
+        auto t = tz::randn({3, 1}, tz::DType::Float32).to(device);
+        auto v = tz::var(t, /*dim=*/1).cpu();
+        const float* vp = v.data<float>();
+        for (int64_t i = 0; i < v.numel(); ++i) {
+            EXPECT_TRUE(std::isnan(vp[i]))
+                << "var over a length-1 axis should be NaN on " << device.to_string();
+        }
+    }
+    // correction=0 (biased): single-element variance IS defined and equals 0.
+    {
+        auto t = tz::full({1}, 3.0f, tz::DType::Float32).to(device);
+        EXPECT_FLOAT_EQ(tz::var(t, std::nullopt, false, /*unbiased=*/false).cpu().item<float>(), 0.0f)
+            << "biased var of a single element should be 0 on " << device.to_string();
+    }
+}
+
 // Fan every TEST_P above over all five backends. BackendTest::SetUp skips a
 // backend that is physically absent on the host; a present backend that does
 // not implement a given reduction dtype throws → the corresponding cell FAILS.

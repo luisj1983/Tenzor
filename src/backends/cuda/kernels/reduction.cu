@@ -3934,8 +3934,10 @@ __global__ void welford_finalize_kernel(
 
     if (tid == 0) {
         int64_t divisor = s_count[0] - correction;
-        if (divisor <= 0) divisor = 1;
-        output[0] = s_m2[0] / static_cast<T>(divisor);
+        // Variance is undefined (NaN) when N <= correction — match CPU/PyTorch
+        // instead of clamping the divisor to 1 and returning a finite m2.
+        output[0] = (divisor > 0) ? (s_m2[0] / static_cast<T>(divisor))
+                                  : static_cast<T>(NAN);
     }
 }
 
@@ -3949,7 +3951,11 @@ static void launch_variance_computation(const T* d_input, T* d_output, int64_t n
     }
 
     if (n == 1) {
-        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
+        // var/std of a single element is 0 only when correction == 0; for
+        // correction >= 1 (the default unbiased=true) it is undefined (NaN),
+        // matching the CPU backend and PyTorch.
+        T fill = (correction <= 0) ? T(0) : static_cast<T>(NAN);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, fill);
         CUDA_CHECK(cudaGetLastError());
         return;
     }
@@ -4025,9 +4031,10 @@ __global__ void var_along_dim_kernel(
         m2 = m2 + delta * delta2;
     }
 
-    // variance = m2 / (count - correction)
+    // variance = m2 / (count - correction); NaN when count <= correction
+    // (undefined), matching CPU/PyTorch rather than returning 0.
     int64_t denom = count - correction;
-    output[out_idx] = denom > 0 ? T(m2 / Acc(denom)) : T(0);
+    output[out_idx] = denom > 0 ? T(m2 / Acc(denom)) : static_cast<T>(NAN);
 }
 
 // Public API for variance

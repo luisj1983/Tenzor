@@ -144,7 +144,7 @@ auto var(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
     return dispatch(OpId::Var, inputs, attrs)[0];
 }
 
-auto norm(const Tensor& input, float p, std::optional<int64_t> dim, bool keepdim) -> Tensor {
+auto norm(const Tensor& input, double p, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     // Complex norm = norm of the elementwise magnitudes (PyTorch semantics).
     // Reduce to the real magnitude here so every backend computes it uniformly
     // (the per-backend kernels operate on real dtypes only).
@@ -393,7 +393,7 @@ auto var_mean(const Tensor& input, std::optional<int64_t> dim,
     return {v, m};
 }
 
-auto dist(const Tensor& a, const Tensor& b, float p) -> Tensor {
+auto dist(const Tensor& a, const Tensor& b, double p) -> Tensor {
     auto diff = tenzor::sub(a, b);
     return norm(diff, p);
 }

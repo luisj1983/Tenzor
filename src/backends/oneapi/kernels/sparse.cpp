@@ -13,6 +13,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "../sycl_prefix_sum.hpp"
+#include "../sycl_buffer_guard.hpp"
 #include <sycl/sycl.hpp>
 #include <cstdint>
 #include <span>
@@ -596,6 +597,14 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     DType dtype = A.values().dtype();
     Device dev = A.values().device();
 
+    // Validate the dtype BEFORE allocating any device memory. Previously the
+    // unsupported-dtype error was thrown deep inside the compute lambda, after
+    // five device buffers had been allocated, leaking all of them.
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error(
+            "oneapi spgemm_kernel: only Float32/Float64 supported");
+    }
+
     auto a_crow = A.crow_indices();
     auto a_col  = A.col_indices();
     auto a_vals = A.values();
@@ -610,8 +619,11 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
     }
 
-    // Pass 1: Count nnz upper bound per row
-    int64_t* d_row_nnz = sycl::malloc_device<int64_t>(M, queue);
+    // Pass 1: Count nnz upper bound per row. All device scratch buffers below
+    // use RAII (SyclDeviceBuffer) so they are freed on every exit path,
+    // including async-exception throws from .wait().
+    SyclDeviceBuffer<int64_t> d_row_nnz_buf(M, queue);
+    int64_t* d_row_nnz = d_row_nnz_buf.get();
 
     const int64_t* ac = a_crow.data<int64_t>();
     const int64_t* acol = a_col.data<int64_t>();
@@ -638,7 +650,8 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     //
     // Simpler: copy row_nnz into d_crow_ub[0..M-1], set d_crow_ub[M]=0, run
     // exclusive scan on all M+1 elements. Result: [0, nnz0, nnz0+nnz1, ..., total].
-    int64_t* d_crow_ub = sycl::malloc_device<int64_t>(M + 1, queue);
+    SyclDeviceBuffer<int64_t> d_crow_ub_buf(M + 1, queue);
+    int64_t* d_crow_ub = d_crow_ub_buf.get();
     queue.memcpy(d_crow_ub, d_row_nnz, M * sizeof(int64_t)).wait();
     queue.memset(d_crow_ub + M, 0, sizeof(int64_t)).wait();  // d_crow_ub[M] = 0
 
@@ -646,8 +659,6 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     int64_t total_nnz_ub = sycl_exclusive_prefix_sum<int64_t>(d_crow_ub, M + 1, queue);
 
     if (total_nnz_ub == 0) {
-        sycl::free(d_row_nnz, queue);
-        sycl::free(d_crow_ub, queue);
         auto c_crow = tenzor::zeros({M + 1}, DType::Int64, dev);
         auto c_col  = tenzor::empty({0}, DType::Int64, dev);
         auto c_vals = tenzor::empty({0}, dtype, dev);
@@ -655,8 +666,10 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     }
 
     // Allocate upper-bound output
-    int64_t* d_col_ub = sycl::malloc_device<int64_t>(total_nnz_ub, queue);
-    int64_t* d_actual_nnz = sycl::malloc_device<int64_t>(M, queue);
+    SyclDeviceBuffer<int64_t> d_col_ub_buf(total_nnz_ub, queue);
+    int64_t* d_col_ub = d_col_ub_buf.get();
+    SyclDeviceBuffer<int64_t> d_actual_nnz_buf(M, queue);
+    int64_t* d_actual_nnz = d_actual_nnz_buf.get();
 
     // Pass 3 + Compact: Fill with dedup (templated by dtype).
     //
@@ -666,11 +679,13 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     // O(nnz_products). Each (row,col) cell is owned by exactly one work-item
     // (one row per item), so the M*N marker needs no per-row reset and no atomics.
     // d_col_marker[row*N + col] holds (relative write slot + 1), 0 meaning unseen.
-    int64_t* d_col_marker = sycl::malloc_device<int64_t>(M * N, queue);
+    SyclDeviceBuffer<int64_t> d_col_marker_buf(M * N, queue);
+    int64_t* d_col_marker = d_col_marker_buf.get();
     queue.memset(d_col_marker, 0, static_cast<size_t>(M * N) * sizeof(int64_t)).wait();
 
     auto run_fill_and_compact = [&]<typename T>() {
-        T* d_vals_ub = sycl::malloc_device<T>(total_nnz_ub, queue);
+        SyclDeviceBuffer<T> d_vals_ub_buf(total_nnz_ub, queue);
+        T* d_vals_ub = d_vals_ub_buf.get();
         const T* av = a_vals.data<T>();
         const T* bv = b_vals.data<T>();
         const int64_t* bcol = b_col.data<int64_t>();
@@ -711,7 +726,8 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         }).wait();
 
         // Compact: device-side prefix sum on actual nnz → final crow indices
-        int64_t* d_crow_final = sycl::malloc_device<int64_t>(M + 1, queue);
+        SyclDeviceBuffer<int64_t> d_crow_final_buf(M + 1, queue);
+        int64_t* d_crow_final = d_crow_final_buf.get();
         queue.memcpy(d_crow_final, d_actual_nnz, M * sizeof(int64_t)).wait();
         queue.memset(d_crow_final + M, 0, sizeof(int64_t)).wait();
 
@@ -741,9 +757,6 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
             }).wait();
         }
 
-        sycl::free(d_crow_final, queue);
-
-        sycl::free(d_vals_ub, queue);
         return SparseTensor::sparse_csr(c_crow_t, c_col_t, c_vals_t, {M, N});
     };
 
@@ -753,16 +766,13 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         } else if (dtype == DType::Float64) {
             return run_fill_and_compact.template operator()<double>();
         } else {
+            // Unreachable: dtype validated at function entry.
             throw std::runtime_error("oneapi spgemm_kernel: only Float32/Float64 supported");
         }
     }();
 
-    sycl::free(d_row_nnz, queue);
-    sycl::free(d_crow_ub, queue);
-    sycl::free(d_col_ub, queue);
-    sycl::free(d_actual_nnz, queue);
-    sycl::free(d_col_marker, queue);
-
+    // Scratch buffers (d_row_nnz, d_crow_ub, d_col_ub, d_actual_nnz,
+    // d_col_marker) are freed by their SyclDeviceBuffer guards on scope exit.
     return result;
 #endif
 }

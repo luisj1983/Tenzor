@@ -291,8 +291,15 @@ inline auto broadcast_shapes(std::span<const int64_t> shape1,
         int64_t dim1 = i < shape1.size() ? shape1[shape1.size() - 1 - i] : 1;
         int64_t dim2 = i < shape2.size() ? shape2[shape2.size() - 1 - i] : 1;
 
-        if (dim1 == dim2 || dim1 == 1 || dim2 == 1) {
-            result[ndim - 1 - i] = std::max(dim1, dim2);
+        // Result is the non-1 dimension (NumPy semantics). Using std::max is
+        // wrong when one extent is 0: broadcasting size-0 against size-1 must
+        // yield 0, not 1.
+        if (dim1 == dim2) {
+            result[ndim - 1 - i] = dim1;
+        } else if (dim1 == 1) {
+            result[ndim - 1 - i] = dim2;
+        } else if (dim2 == 1) {
+            result[ndim - 1 - i] = dim1;
         } else {
             throw std::runtime_error("Shapes are not broadcastable");
         }

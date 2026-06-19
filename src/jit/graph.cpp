@@ -439,9 +439,16 @@ auto Graph::infer_types() -> void {
             case OpType::Transpose:
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
+                    int64_t rank = static_cast<int64_t>(shape.size());
                     int64_t dim0 = node->get_int_attr("dim0");
                     int64_t dim1 = node->get_int_attr("dim1");
-                    if (dim0 < static_cast<int64_t>(shape.size()) && dim1 < static_cast<int64_t>(shape.size())) {
+                    // Normalize negative dims before indexing (PyTorch-legal,
+                    // e.g. transpose(-1,-2)). A bare `dim < size` signed check
+                    // passes for negatives and then indexes the vector out of
+                    // bounds.
+                    if (dim0 < 0) dim0 += rank;
+                    if (dim1 < 0) dim1 += rank;
+                    if (dim0 >= 0 && dim0 < rank && dim1 >= 0 && dim1 < rank) {
                         std::swap(shape[dim0], shape[dim1]);
                     }
                     output_shapes.push_back(shape);
@@ -465,8 +472,13 @@ auto Graph::infer_types() -> void {
             case OpType::Squeeze:
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
+                    int64_t rank = static_cast<int64_t>(shape.size());
                     int64_t dim = node->get_int_attr("dim");
-                    if (dim < static_cast<int64_t>(shape.size()) && shape[dim] == 1) {
+                    // Normalize negative dim before indexing (mirrors Unsqueeze/
+                    // Sum); the previous `dim < size` check passed for negatives
+                    // and read shape[dim] out of bounds.
+                    if (dim < 0) dim += rank;
+                    if (dim >= 0 && dim < rank && shape[dim] == 1) {
                         shape.erase(shape.begin() + dim);
                     }
                     output_shapes.push_back(shape);

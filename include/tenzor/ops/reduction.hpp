@@ -82,7 +82,14 @@ auto prod(const Tensor& input,
 
 /**
  * @brief Standard deviation of tensor elements.
- * @param unbiased Use unbiased estimator (N-1 denominator)
+ * @param unbiased Use unbiased estimator (N-1 denominator).
+ *
+ * Note on the API: std/var intentionally expose a boolean @p unbiased, while
+ * nanstd/nanvar expose an integer @p correction (Bessel correction). The two
+ * map directly: `unbiased=true` ≡ `correction=1` (N-1 denominator) and
+ * `unbiased=false` ≡ `correction=0` (N denominator). The boolean form is kept
+ * here for source compatibility; use nan* if you need a correction other
+ * than 0 or 1.
  */
 auto std(const Tensor& input,
         std::optional<int64_t> dim = std::nullopt,
@@ -103,7 +110,7 @@ auto var(const Tensor& input,
  * @param p Norm order (1=L1, 2=L2, inf=max)
  */
 auto norm(const Tensor& input,
-         float p = 2.0f,
+         double p = 2.0,
          std::optional<int64_t> dim = std::nullopt,
          bool keepdim = false) -> Tensor;
 
@@ -213,7 +220,7 @@ auto var_mean(const Tensor& input, std::optional<int64_t> dim = std::nullopt,
               bool keepdim = false, bool unbiased = true) -> std::pair<Tensor, Tensor>;
 
 /// p-norm of (a - b)
-auto dist(const Tensor& a, const Tensor& b, float p = 2.0f) -> Tensor;
+auto dist(const Tensor& a, const Tensor& b, double p = 2.0) -> Tensor;
 
 // =========================================================================
 // New reduction operations for PyTorch parity

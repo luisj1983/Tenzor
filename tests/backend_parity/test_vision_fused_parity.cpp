@@ -116,9 +116,44 @@ TEST_P(VisionFusedParity, GridSample_Bilinear) {
 
     test_operation_parity(
         [&grid](const std::vector<Tensor>& ins) {
-            return ops::grid_sample(ins[0], grid, "bilinear", "zeros", false);
+            // grid must live on the same device as the input — otherwise the
+            // backend correctly rejects the mixed-device call and the parity
+            // harness skips for lack of a second backend (this test previously
+            // never actually ran on any GPU backend).
+            return ops::grid_sample(ins[0], grid.to(ins[0].device()), "bilinear", "zeros", false);
         },
         {input}, 1e-4f, 1e-6f, "grid_sample");
+}
+
+// Reflection-padding grad_grid carries a +/-1 fold-sign from the reflection.
+// CPU/ROCm/OneAPI previously dropped that sign while CUDA applied it (PyTorch
+// behaviour), so grad_grid diverged across backends. Make BOTH input and grid
+// differentiable and use grid coords that land in reflected regions so the
+// fold-sign is exercised; the parity harness then compares grad_grid across all
+// backends. Run for align_corners=true and false (the reflection span differs).
+TEST_P(VisionFusedParity, GridSample_Reflection) {
+    auto input = randn({1, 2, 5, 5}, DType::Float32, Device::cpu());
+    // DETERMINISTIC grid whose samples land in reflected regions but comfortably
+    // mid-leg — away from the fold turning points (where the gradient sign is
+    // discontinuous) and away from integer pixel boundaries (where bilinear is
+    // non-smooth). A random grid would inevitably straddle those discontinuities
+    // and make CPU/GPU disagree by an O(1) sign flip for FP-rounding reasons,
+    // which is a property of reflection, not of the kernels.
+    auto grid = zeros({1, 2, 2, 2}, DType::Float32, Device::cpu());
+    {
+        float* g = grid.data<float>();
+        const float vals[8] = {1.40f, 1.30f, -1.40f, -1.30f,
+                               1.35f, -1.25f, -1.35f, 1.20f};
+        for (int i = 0; i < 8; ++i) g[i] = vals[i];
+    }
+
+    for (bool align : {true, false}) {
+        test_operation_parity(
+            [align](const std::vector<Tensor>& ins) {
+                return ops::grid_sample(ins[0], ins[1], "bilinear", "reflection", align);
+            },
+            {input, grid}, 1e-4f, 1e-4f, "grid_sample_reflection");
+    }
 }
 
 // Release audit: bicubic forward must match CPU on every backend. ROCm/OneAPI

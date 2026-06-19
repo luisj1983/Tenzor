@@ -282,6 +282,13 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
     switch (kind) {
         case CopyKind::HostToDevice: {
             size_t staging_idx = acquireStagingBuffer(device_id, bytes);
+            // Release the staging slot on EVERY exit path, including an exception
+            // thrown by the submit/map/wait calls below. Without this, a throw
+            // between acquire and release left the slot permanently in_use.
+            struct StagingGuard {
+                VulkanBackend* self; int32_t dev; size_t idx;
+                ~StagingGuard() { self->releaseStagingBuffer(dev, idx); }
+            } staging_guard{this, device_id, staging_idx};
             auto& pool = stagingPools_[device_id];
             auto& staging = pool.buffers[staging_idx];
 
@@ -309,7 +316,7 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
                 ensurePendingWorkComplete(device_id);   // Wait for copy to complete
             }
 
-            releaseStagingBuffer(device_id, staging_idx);
+            // staging slot released by StagingGuard on scope exit.
             break;
         }
         case CopyKind::DeviceToHost: {
@@ -321,6 +328,13 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             ensurePendingWorkComplete(device_id);
 
             size_t staging_idx = acquireStagingBuffer(device_id, bytes);
+            // Release the staging slot on EVERY exit path, including an exception
+            // thrown by the submit/map/wait calls below. Without this, a throw
+            // between acquire and release left the slot permanently in_use.
+            struct StagingGuard {
+                VulkanBackend* self; int32_t dev; size_t idx;
+                ~StagingGuard() { self->releaseStagingBuffer(dev, idx); }
+            } staging_guard{this, device_id, staging_idx};
             auto& pool = stagingPools_[device_id];
             auto& staging = pool.buffers[staging_idx];
 
@@ -343,7 +357,7 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             std::memcpy(dst, mapped, bytes);
             staging.buffer->unmap();
 
-            releaseStagingBuffer(device_id, staging_idx);
+            // staging slot released by StagingGuard on scope exit.
             break;
         }
         case CopyKind::DeviceToDevice: {

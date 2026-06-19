@@ -1487,10 +1487,18 @@ public:
         , q_scales_(other.q_scales_)
         , q_zero_points_(other.q_zero_points_)
         , q_axis_(other.q_axis_)
-        , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed))
-        , memory_format_cache_(other.memory_format_cache_.load(std::memory_order_relaxed))
+        // Do NOT copy the lazy geometry caches. Every copy is either a view
+        // about to mutate shape/strides/offset (which must recompute) or a
+        // detach() with identical geometry (which can cheaply recompute). Views
+        // reset is_contiguous_cache_ but historically forgot memory_format_cache_
+        // and shape_info_cache_, so the copy propagated a stale snapshot of the
+        // SOURCE's shape/strides/offset and NHWC/NCHW format. Initialize all
+        // three to their unset sentinel so they recompute against the view's
+        // real geometry.
+        , is_contiguous_cache_(-1)
+        , memory_format_cache_(-1)
         , version_counter_(other.version_counter_.load(std::memory_order_relaxed))
-        , shape_info_cache_(other.shape_info_cache_.load(std::memory_order_relaxed)) {}
+        , shape_info_cache_(nullptr) {}
 
     TensorImpl& operator=(const TensorImpl&) = delete;
 

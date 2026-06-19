@@ -141,8 +141,12 @@ auto load_external_tensor_bytes(const tenzor_onnx::TensorProto& t,
         // Per ONNX spec, length is optional — when absent, read to EOF.
         length = file_size - offset;
     }
+    // Check length against the remaining bytes WITHOUT computing offset+length,
+    // which can overflow int64_t for attacker-controlled values and wrap to a
+    // small number that passes the bound. At this point (short-circuit) offset
+    // is in [0, file_size] and length >= 0, so file_size - offset >= 0.
     if (offset < 0 || offset > file_size || length < 0 ||
-        offset + length > file_size) {
+        length > file_size - offset) {
         throw std::runtime_error(
             "ONNXImporter: external_data offset/length out of range for " +
             full.string() + " (file=" + std::to_string(file_size) +
@@ -543,9 +547,13 @@ auto ONNXImporter::import_from_file(const std::string& filepath) -> std::shared_
     }
 
     file.seekg(0, std::ios::end);
-    size_t file_size = file.tellg();
+    const std::streamoff file_size_off = file.tellg();
+    if (file_size_off < 0) {
+        throw std::runtime_error("Failed to determine size of ONNX file: " + filepath);
+    }
     file.seekg(0, std::ios::beg);
 
+    const size_t file_size = static_cast<size_t>(file_size_off);
     std::vector<uint8_t> bytes(file_size);
     file.read(reinterpret_cast<char*>(bytes.data()), file_size);
     file.close();
@@ -778,6 +786,32 @@ auto ONNXImporter::load_initializers(const ONNXGraphData& graph) -> void {
 }
 
 auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std::shared_ptr<nn::Module>> {
+    // Validate node arity BEFORE any converter indexes node.inputs/outputs. A
+    // malformed (untrusted) model with too few inputs/outputs would otherwise
+    // read past the vector (OOB). Default required minimum is (1 input, 1
+    // output) — every operator this importer supports consumes at least one
+    // input and produces at least one output. Operators with additional
+    // *required* operands/results are listed explicitly; optional trailing
+    // inputs are not counted (their converters guard on size()).
+    {
+        static const std::unordered_map<std::string, std::pair<size_t, size_t>> kMinArity = {
+            {"Add", {2, 1}},  {"Sub", {2, 1}},   {"Mul", {2, 1}},     {"Div", {2, 1}},
+            {"Pow", {2, 1}},  {"MatMul", {2, 1}},{"Gemm", {2, 1}},    {"Where", {3, 1}},
+            {"Expand", {2, 1}},{"Tile", {2, 1}}, {"Gather", {2, 1}},  {"Reshape", {2, 1}},
+            {"Range", {3, 1}},{"LinalgSolve", {2, 1}}, {"TopK", {2, 2}},
+        };
+        auto it = kMinArity.find(node.op_type);
+        const size_t min_in = (it != kMinArity.end()) ? it->second.first : 1;
+        const size_t min_out = (it != kMinArity.end()) ? it->second.second : 1;
+        if (node.inputs.size() < min_in || node.outputs.size() < min_out) {
+            throw std::runtime_error(
+                "ONNX import: operator '" + node.op_type + "' requires at least " +
+                std::to_string(min_in) + " input(s) and " + std::to_string(min_out) +
+                " output(s), but the node provides " + std::to_string(node.inputs.size()) +
+                " input(s) and " + std::to_string(node.outputs.size()) + " output(s)");
+        }
+    }
+
     // Tensor operations (in-place, return nullopt as they modify context)
     if (node.op_type == "Add") {
         convert_add(node);
@@ -1197,6 +1231,16 @@ auto ONNXImporter::convert_split(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     auto axis_attr = node.get_attr("axis");
     int64_t axis = axis_attr.has_value() ? axis_attr->get_int(0) : 0;
+    // Normalize and bounds-check axis before it indexes the shape span and the
+    // slice() calls below. A negative or out-of-range axis from an untrusted
+    // model otherwise reads past the shape vector.
+    const int64_t split_rank = input.ndim();
+    if (axis < 0) axis += split_rank;
+    if (axis < 0 || axis >= split_rank) {
+        throw std::runtime_error(
+            "ONNX Split: axis " + std::to_string(axis) +
+            " out of range for input rank " + std::to_string(split_rank));
+    }
 
     auto split_attr = node.get_attr("split");
     std::vector<int64_t> split_sizes;
@@ -2356,15 +2400,22 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
         int64_t end = ends[i];
         int64_t step = steps_vec[i];
 
-        // Handle negative indices
-        int64_t dim_size = result.shape()[dim < 0 ? dim + result.ndim() : dim];
+        // Normalize and bounds-check the axis before it indexes the shape span.
+        // An out-of-range axis from an untrusted model is otherwise an OOB read.
+        int64_t norm_dim = dim < 0 ? dim + result.ndim() : dim;
+        if (norm_dim < 0 || norm_dim >= result.ndim()) {
+            throw std::runtime_error(
+                "ONNX Slice: axis " + std::to_string(dim) +
+                " out of range for input rank " + std::to_string(result.ndim()));
+        }
+        int64_t dim_size = result.shape()[norm_dim];
         if (start < 0) start += dim_size;
         if (end < 0) end += dim_size;
         // Clamp
         start = std::max(int64_t(0), std::min(start, dim_size));
         end = std::max(int64_t(0), std::min(end, dim_size));
 
-        result = result.slice(dim, start, end, step);
+        result = result.slice(norm_dim, start, end, step);
     }
     register_output(node.outputs[0], result);
 }

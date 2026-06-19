@@ -252,48 +252,56 @@ auto orthogonal_(Tensor& tensor, double gain) -> Tensor& {
 
     // Generate random matrix
     bool needs_device_transfer = (tensor.device().type != Device::Type::CPU);
-    Tensor flat = tenzor::randn({rows, cols}, DType::Float64, Device::cpu());
 
-    // QR decomposition via modified Gram-Schmidt orthogonalization
-    // This is simpler than full SVD and sufficient for initialization
-    int64_t n = std::min(rows, cols);
+    // Work on a tall matrix (wrows >= wcols) so modified Gram-Schmidt
+    // orthonormalizes EVERY basis vector. For a wide target (cols > rows) we
+    // orthonormalize the transpose and transpose back, which yields orthonormal
+    // ROWS (matching PyTorch). The previous code processed only the first
+    // min(rows,cols) columns, leaving the trailing columns of a wide matrix
+    // non-orthogonal.
+    bool transposed = rows < cols;
+    int64_t wrows = transposed ? cols : rows;
+    int64_t wcols = transposed ? rows : cols;
+
+    Tensor flat = tenzor::randn({wrows, wcols}, DType::Float64, Device::cpu());
     auto* data = flat.data<double>();
 
-    for (int64_t j = 0; j < n; ++j) {
+    for (int64_t j = 0; j < wcols; ++j) {
         // Orthogonalize column j against all previous columns
         for (int64_t i = 0; i < j; ++i) {
-            // Compute dot product of column i and column j
             double dot = 0.0;
-            for (int64_t r = 0; r < rows; ++r) {
-                dot += data[r * cols + i] * data[r * cols + j];
+            for (int64_t r = 0; r < wrows; ++r) {
+                dot += data[r * wcols + i] * data[r * wcols + j];
             }
-            // Subtract projection
-            for (int64_t r = 0; r < rows; ++r) {
-                data[r * cols + j] -= dot * data[r * cols + i];
+            for (int64_t r = 0; r < wrows; ++r) {
+                data[r * wcols + j] -= dot * data[r * wcols + i];
             }
         }
         // Normalize column j
         double norm = 0.0;
-        for (int64_t r = 0; r < rows; ++r) {
-            norm += data[r * cols + j] * data[r * cols + j];
+        for (int64_t r = 0; r < wrows; ++r) {
+            norm += data[r * wcols + j] * data[r * wcols + j];
         }
         norm = std::sqrt(norm);
         if (norm > 1e-10) {
-            for (int64_t r = 0; r < rows; ++r) {
-                data[r * cols + j] /= norm;
+            for (int64_t r = 0; r < wrows; ++r) {
+                data[r * wcols + j] /= norm;
             }
         }
     }
 
     // Apply gain
     if (gain != 1.0) {
-        for (int64_t i = 0; i < rows * cols; ++i) {
+        for (int64_t i = 0; i < wrows * wcols; ++i) {
             data[i] *= gain;
         }
     }
 
+    // Transpose back to (rows, cols) when we orthonormalized the transpose.
+    Tensor oriented = transposed ? tenzor::transpose(flat, 0, 1).contiguous() : flat;
+
     // Convert to target dtype and reshape
-    Tensor result = flat.to(tensor.dtype());
+    Tensor result = oriented.to(tensor.dtype());
     result = tenzor::reshape(result, std::vector<int64_t>(shape.begin(), shape.end()));
 
     if (needs_device_transfer) {

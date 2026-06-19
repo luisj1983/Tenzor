@@ -63,4 +63,51 @@ struct SyclDeviceBuffer {
     explicit operator bool() const { return ptr != nullptr; }
 };
 
+/// RAII wrapper for sycl::malloc_shared / sycl::free. Use when the allocation
+/// must be host-accessible (e.g. host-side initialization of a reduction
+/// accumulator) and so cannot live in device-only memory.
+template<typename T>
+struct SyclSharedBuffer {
+    T* ptr = nullptr;
+    sycl::queue* q = nullptr;
+
+    SyclSharedBuffer() = default;
+
+    SyclSharedBuffer(size_t count, sycl::queue& queue) : q(&queue) {
+        if (count > 0) {
+            ptr = sycl::malloc_shared<T>(count, queue);
+            if (!ptr) {
+                throw std::runtime_error(
+                    "sycl::malloc_shared returned nullptr for " +
+                    std::to_string(count * sizeof(T)) + " bytes");
+            }
+        }
+    }
+
+    ~SyclSharedBuffer() noexcept {
+        if (ptr && q) sycl::free(ptr, *q);
+    }
+
+    SyclSharedBuffer(const SyclSharedBuffer&) = delete;
+    SyclSharedBuffer& operator=(const SyclSharedBuffer&) = delete;
+
+    SyclSharedBuffer(SyclSharedBuffer&& other) noexcept
+        : ptr(other.ptr), q(other.q) {
+        other.ptr = nullptr;
+    }
+
+    SyclSharedBuffer& operator=(SyclSharedBuffer&& other) noexcept {
+        if (this != &other) {
+            if (ptr && q) sycl::free(ptr, *q);
+            ptr = other.ptr;
+            q = other.q;
+            other.ptr = nullptr;
+        }
+        return *this;
+    }
+
+    T* get() const { return ptr; }
+    explicit operator bool() const { return ptr != nullptr; }
+};
+
 }  // namespace tenzor::oneapi

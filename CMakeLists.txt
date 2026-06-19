@@ -25,13 +25,12 @@ if(EXISTS "${_ROCM_ROOT}/bin/hipcc")
 endif()
 
 
-# Set TENZOR_BUILD_ROCM before project() - use cache to preserve user preference.
-# Source builds keep heavyweight GPU SDKs opt-in; enabling this option must
-# build a real ROCm backend or fail during configure/build.
+# Set TENZOR_BUILD_ROCM before project() so the HIP language can be enabled.
+# Defaults ON (GPU backends are on by default); pass -DTENZOR_BUILD_ROCM=OFF to
+# opt out. The previous `if(NOT DEFINED ...)` block was dead code — option()
+# above already defines the variable, so the guard was never taken and only
+# contradicted the ON default.
 option(TENZOR_BUILD_ROCM "Build ROCm backend" ON)
-if(NOT DEFINED TENZOR_BUILD_ROCM)
-    option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF)
-endif()
 
 # Set up HIP architectures if building ROCm backend
 if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
@@ -774,7 +773,7 @@ install(DIRECTORY include/tenzor DESTINATION include)
 # Install backend shared libraries (only non-imported targets that were built).
 # Fix 2: include backends in TenzorTargets so downstream find_package(Tenzor)
 # resolves Tenzor::tenzor_backend_cpu etc. via the exported config.
-foreach(backend cpu cuda rocm oneapi vulkan)
+foreach(backend cpu cuda rocm oneapi vulkan mps)
     if(TARGET tenzor_backend_${backend})
         get_target_property(_imported tenzor_backend_${backend} IMPORTED)
         if(NOT _imported)
@@ -799,6 +798,19 @@ install(EXPORT TenzorTargets
 
 # Package configuration
 include(CMakePackageConfigHelpers)
+
+# Report backend availability based on whether the backend was ACTUALLY built
+# (its target exists), not merely requested via TENZOR_BUILD_*. A backend can be
+# auto-disabled at configure time (e.g. CUDA when no compiler is found), in which
+# case the request flag is ON but no library was produced.
+foreach(_b CUDA ROCM ONEAPI VULKAN MPS)
+    string(TOLOWER ${_b} _bl)
+    if(TARGET tenzor_backend_${_bl})
+        set(TENZOR_${_b}_BUILT ON)
+    else()
+        set(TENZOR_${_b}_BUILT OFF)
+    endif()
+endforeach()
 
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TenzorConfig.cmake.in"

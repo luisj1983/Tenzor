@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "../hip_buffer.hpp"  // RAII for HIP device memory (leak-safe on throw)
 #include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed, complex
 
 // Forward-declare the handful of public tensor ops used by the complex dot
@@ -4052,8 +4053,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     compute_launch_config_1d(n, grid, block);
 
     // Allocate hipRAND states
-    hiprandState* d_states;
-    HIP_CHECK(hipMalloc(&d_states, n * sizeof(hiprandState)));
+    HipBuffer d_states_buf(static_cast<size_t>(n) * sizeof(hiprandState));
+    hiprandState* d_states = d_states_buf.as<hiprandState>();
 
     // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
     uint64_t seed = ::tenzor::get_global_seed();
@@ -4077,8 +4078,7 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         HIP_CHECK(hipGetLastError());
     }
 
-    // Cleanup
-    HIP_CHECK(hipFree(d_states));
+    // d_states freed by its HipBuffer guard on scope exit.
 
     return result;
 #else
@@ -4117,8 +4117,8 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     compute_launch_config_1d(n, grid, block);
 
     // Allocate hipRAND states
-    hiprandState* d_states;
-    HIP_CHECK(hipMalloc(&d_states, n * sizeof(hiprandState)));
+    HipBuffer d_states_buf(static_cast<size_t>(n) * sizeof(hiprandState));
+    hiprandState* d_states = d_states_buf.as<hiprandState>();
 
     // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
     uint64_t seed = ::tenzor::get_global_seed();
@@ -4142,8 +4142,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         HIP_CHECK(hipGetLastError());
     }
 
-    // Cleanup
-    HIP_CHECK(hipFree(d_states));
+    // d_states freed by its HipBuffer guard on scope exit.
 
     return result;
 #else
@@ -4180,8 +4179,8 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     compute_launch_config_1d(n, grid, block);
 
     // Allocate hipRAND states
-    hiprandState* d_states;
-    HIP_CHECK(hipMalloc(&d_states, n * sizeof(hiprandState)));
+    HipBuffer d_states_buf(static_cast<size_t>(n) * sizeof(hiprandState));
+    hiprandState* d_states = d_states_buf.as<hiprandState>();
 
     // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
     uint64_t seed = ::tenzor::get_global_seed();
@@ -4729,9 +4728,9 @@ auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         return make_bool_scalar(false, input.device());
     }
 
-    // Allocate device flag
-    int* d_flag = nullptr;
-    HIP_CHECK(hipMalloc(&d_flag, sizeof(int)));
+    // Allocate device flag (RAII so it frees on every exit/throw path).
+    HipBuffer d_flag_buf(sizeof(int));
+    int* d_flag = d_flag_buf.as<int>();
     HIP_CHECK(hipMemsetAsync(d_flag, 0, sizeof(int), stream));
 
     // Handle BFloat16/Float16 by casting to Float32
@@ -4755,8 +4754,7 @@ auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
                 scan.data<double>(), numel, d_flag);
             break;
         default:
-            // Integer types can't have inf/nan
-            HIP_CHECK(hipFree(d_flag));
+            // Integer types can't have inf/nan (d_flag freed by guard).
             return make_bool_scalar(false, input.device());
     }
     HIP_CHECK(hipGetLastError());
@@ -4765,7 +4763,7 @@ auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     HIP_CHECK(hipMemcpyAsync(&h_flag, d_flag, sizeof(int),
                              hipMemcpyDeviceToHost, stream));
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_flag));
+    // d_flag freed by its HipBuffer guard on scope exit.
 
     return make_bool_scalar(h_flag != 0, input.device());
 }

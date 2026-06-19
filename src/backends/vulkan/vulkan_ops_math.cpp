@@ -2835,10 +2835,16 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
                               : "col2im";
     auto* pipeline = getPipeline(col2im_shader, device_id);
 
-    // Total elements to process (HH.6: per-axis K_h*K_w)
+    // Total elements to process (HH.6: per-axis K_h*K_w). The atomicAdd
+    // variants (f32/f16/bf16) are input-centric (one thread per column entry).
+    // The Float64 variant has no atomicAdd and instead runs an output-centric
+    // GATHER (one thread per OUTPUT element), so it must be dispatched over the
+    // output element count to avoid the overlapping read-modify-write race.
     int64_t col_channels = channels * kernel_h * kernel_w;
     int64_t num_blocks = out_h * out_w;
-    int64_t total_elements = batch * col_channels * num_blocks;
+    int64_t total_elements = is_col2im_f64
+        ? (batch * channels * height * width)
+        : (batch * col_channels * num_blocks);
 
     // Prepare buffers
     const void* buffer_in = input.data_ptr();

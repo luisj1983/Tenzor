@@ -1,10 +1,14 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Col2im (Fold) operation for Float64
-// Transforms (N, C*K_h*K_w, L) -> (N,C,H,W) with accumulation
-// No atomicAdd for float64 — uses read-modify-write (safe only with
-// non-overlapping output mapping or serial accumulation strategy).
+// Col2im (Fold) operation for Float64.
+// Transforms (N, C*K_h*K_w, L) -> (N,C,H,W) with accumulation of overlapping
+// patches. Core Vulkan has no atomicAdd for float64, so this uses an
+// OUTPUT-CENTRIC GATHER: one thread per output element (b,c,ih,iw) loops over
+// every kernel position that maps onto it, sums the contributing column entries
+// locally, and writes the result exactly once. This avoids the data race the
+// previous input-centric read-modify-write had when sliding windows overlap.
+// (The Float32/Float16/BFloat16 variants use atomicAdd instead.)
 // HH.6: per-axis kernel/stride/padding/dilation.
 layout(local_size_x_id = 0) in;
 
@@ -12,7 +16,7 @@ layout(binding = 0) buffer Input { float64_t input_data[]; };
 layout(binding = 1) buffer Output { float64_t output_data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n_elements;    // Total elements to process
+    uint n_elements;    // Total OUTPUT elements to process (batch*channels*H*W)
     uint batch;
     uint channels;
     uint height;
@@ -33,40 +37,46 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
-    // Calculate derived values
     uint num_blocks = params.out_h * params.out_w;
     uint col_channels = params.channels * params.kernel_h * params.kernel_w;
 
-    // Decode flat index to (b, col_c, block_idx)
+    // Decode flat OUTPUT index to (b, c, ih, iw)
     uint temp = idx;
-    uint block_idx = temp % num_blocks; temp /= num_blocks;
-    uint col_c = temp % col_channels; temp /= col_channels;
-    uint b = temp;
+    uint iw = temp % params.width;    temp /= params.width;
+    uint ih = temp % params.height;   temp /= params.height;
+    uint c  = temp % params.channels; temp /= params.channels;
+    uint b  = temp;
 
-    // Decode col_c to (c, kh, kw)
-    uint kw = col_c % params.kernel_w;
-    uint kh = (col_c / params.kernel_w) % params.kernel_h;
-    uint c = col_c / (params.kernel_h * params.kernel_w);
+    float64_t sum = 0.0lf;
 
-    // Calculate output position from block_idx
-    uint oh = block_idx / params.out_w;
-    uint ow = block_idx % params.out_w;
+    // Gather every (kh, kw) whose sliding window lands on (ih, iw):
+    //   ih = oh*stride_h - pad_h + kh*dil_h  =>  oh = (ih + pad_h - kh*dil_h)/stride_h
+    // valid only when the numerator is non-negative, divisible by the stride,
+    // and the resulting oh/ow are within the output extent.
+    for (uint kh = 0; kh < params.kernel_h; ++kh) {
+        int oh_num = int(ih) + int(params.pad_h) - int(kh * params.dil_h);
+        if (oh_num < 0) continue;
+        if (uint(oh_num) % params.stride_h != 0u) continue;
+        uint oh = uint(oh_num) / params.stride_h;
+        if (oh >= params.out_h) continue;
 
-    // Calculate output position in image
-    int ih = int(oh * params.stride_h) - int(params.pad_h) + int(kh * params.dil_h);
-    int iw = int(ow * params.stride_w) - int(params.pad_w) + int(kw * params.dil_w);
+        for (uint kw = 0; kw < params.kernel_w; ++kw) {
+            int ow_num = int(iw) + int(params.pad_w) - int(kw * params.dil_w);
+            if (ow_num < 0) continue;
+            if (uint(ow_num) % params.stride_w != 0u) continue;
+            uint ow = uint(ow_num) / params.stride_w;
+            if (ow >= params.out_w) continue;
 
-    // Check bounds
-    if (ih >= 0 && ih < int(params.height) && iw >= 0 && iw < int(params.width)) {
-        uint input_idx = b * (col_channels * num_blocks) +
-                        col_c * num_blocks +
-                        block_idx;
-
-        uint output_idx = b * (params.channels * params.height * params.width) +
-                         c * (params.height * params.width) +
-                         uint(ih) * params.width + uint(iw);
-
-        // Read-modify-write accumulation (no atomic for float64)
-        output_data[output_idx] = output_data[output_idx] + input_data[input_idx];
+            uint col_c = c * (params.kernel_h * params.kernel_w) + kh * params.kernel_w + kw;
+            uint block_idx = oh * params.out_w + ow;
+            uint input_idx = b * (col_channels * num_blocks) + col_c * num_blocks + block_idx;
+            sum += input_data[input_idx];
+        }
     }
+
+    uint output_idx = b * (params.channels * params.height * params.width) +
+                      c * (params.height * params.width) +
+                      ih * params.width + iw;
+    // Each output element is written exactly once — no atomics, no race.
+    output_data[output_idx] = sum;
 }

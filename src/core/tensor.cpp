@@ -1771,8 +1771,14 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
 
     result.impl_->shape.insert(result.impl_->shape.begin() + dim, 1);
 
-    // Compute stride for new dimension (should be product of all following dims)
-    int64_t new_stride = (dim < ndims) ? impl_->strides[dim] : 1;
+    // Stride for the inserted size-1 dim. Its value is addressing-irrelevant
+    // (the axis is never indexed past 0), but it must match the contiguous
+    // layout so a logically-contiguous tensor keeps reporting is_contiguous().
+    // The contiguity-consistent value is strides[dim] * shape[dim] (the "outer"
+    // stride at the insertion point); using strides[dim] alone made an unsqueeze
+    // at dim 0 (or any non-trailing position) report non-contiguous.
+    int64_t new_stride =
+        (dim < ndims) ? (impl_->strides[dim] * impl_->shape[dim]) : 1;
     result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;

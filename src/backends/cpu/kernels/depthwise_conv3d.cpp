@@ -258,26 +258,40 @@ auto depthwise_conv3d_kernel(const Tensor& input,
     auto output = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out},
                                               input.dtype(), input.device());
 
+    // The impl/AVX2 paths index input/weight as flat packed buffers
+    // ([N,C,D,H,W] / [C,1,kD,kH,kW]); a non-contiguous view (permuted/sliced
+    // channels) would be walked in the wrong order, silently producing wrong
+    // results. Materialize contiguous copies once (no-op when already packed).
+    // The F16/BF16 branches below already repack via .to(Float32).
+    const Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor w_c  = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c_storage;
+    const Tensor* bias_c = bias;
+    if (bias && !bias->is_contiguous()) {
+        bias_c_storage = bias->contiguous();
+        bias_c = &bias_c_storage;
+    }
+
     const DType dt = input.dtype();
     if (dt == DType::Float32) {
 #ifdef TENZOR_DWCONV3D_AVX2
         if (stride_d == 1 && stride_h == 1 && stride_w == 1 &&
             dil_d == 1 && dil_h == 1 && dil_w == 1) {
-            depthwise_conv3d_avx2_f32(input.data<float>(), weight.data<float>(),
-                bias ? bias->data<float>() : nullptr, output.data<float>(),
+            depthwise_conv3d_avx2_f32(in_c.data<float>(), w_c.data<float>(),
+                bias_c ? bias_c->data<float>() : nullptr, output.data<float>(),
                 N, C, D, H, W, kD, kH, kW, D_out, H_out, W_out,
                 pad_d, pad_h, pad_w);
         } else
 #endif
         {
-            depthwise_conv3d_impl<float>(input.data<float>(), weight.data<float>(),
-                bias ? bias->data<float>() : nullptr, output.data<float>(),
+            depthwise_conv3d_impl<float>(in_c.data<float>(), w_c.data<float>(),
+                bias_c ? bias_c->data<float>() : nullptr, output.data<float>(),
                 N, C, D, H, W, kD, kH, kW, D_out, H_out, W_out,
                 stride_d, stride_h, stride_w, pad_d, pad_h, pad_w, dil_d, dil_h, dil_w);
         }
     } else if (dt == DType::Float64) {
-        depthwise_conv3d_impl<double>(input.data<double>(), weight.data<double>(),
-            bias ? bias->data<double>() : nullptr, output.data<double>(),
+        depthwise_conv3d_impl<double>(in_c.data<double>(), w_c.data<double>(),
+            bias_c ? bias_c->data<double>() : nullptr, output.data<double>(),
             N, C, D, H, W, kD, kH, kW, D_out, H_out, W_out,
             stride_d, stride_h, stride_w, pad_d, pad_h, pad_w, dil_d, dil_h, dil_w);
     } else if (dt == DType::Float16) {

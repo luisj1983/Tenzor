@@ -577,13 +577,27 @@ auto GlooBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     // ring_all_reduce only dispatches Float32/Float64. Widen Float16/BFloat16
     // to Float32 for the reduction, then narrow back in place.
     auto orig_dtype = tensor.dtype();
+
+    // Reduce with SUM semantics for AVG, then finish the average here via
+    // tenzor::div (promotes integer tensors to Float32, matching
+    // reduce()/reduce_scatter()). Dividing in-place by an integer scalar_t
+    // inside the ring truncated toward zero and disagreed with the other two
+    // collectives.
+    ReduceOp ring_op = (op == ReduceOp::AVG) ? ReduceOp::SUM : op;
+
     if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
         Tensor wide = tensor.to(DType::Float32);
-        ring_all_reduce(wide, op);
+        ring_all_reduce(wide, ring_op);
+        if (op == ReduceOp::AVG && world_size_ > 0) {
+            wide = tenzor::div(wide, static_cast<double>(world_size_));
+        }
         tensor = wide.to(orig_dtype);
         return;
     }
-    ring_all_reduce(tensor, op);
+    ring_all_reduce(tensor, ring_op);
+    if (op == ReduceOp::AVG && world_size_ > 0) {
+        tensor = tenzor::div(tensor, static_cast<double>(world_size_));
+    }
 }
 
 auto GlooBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
@@ -1278,22 +1292,31 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
             int send_rank = (rank_ + 1) % world_size_;
             int recv_rank = (rank_ - 1 + world_size_) % world_size_;
 
-            // Calculate chunk boundaries
-            size_t send_start = send_chunk_idx * chunk_size;
-            size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
+            // Calculate chunk boundaries. Clamp counts to 0 when the chunk
+            // starts past the end of the buffer (happens when
+            // total_elements < world_size_), instead of letting
+            // total_elements - send_start underflow to a huge size_t.
+            size_t send_start = static_cast<size_t>(send_chunk_idx) * chunk_size;
+            size_t recv_start = static_cast<size_t>(recv_chunk_idx) * chunk_size;
+            size_t send_count = (send_start < static_cast<size_t>(total_elements))
+                ? std::min(chunk_size, static_cast<size_t>(total_elements) - send_start) : 0;
+            size_t recv_count = (recv_start < static_cast<size_t>(total_elements))
+                ? std::min(chunk_size, static_cast<size_t>(total_elements) - recv_start) : 0;
 
-            size_t recv_start = recv_chunk_idx * chunk_size;
-            size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
-
-            if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
-                // Use tensor-based send/recv buffers (dtype-safe)
+            // Guard send and recv INDEPENDENTLY on their own chunk's count. The
+            // sender of chunk C (this rank) and its receiver (rank+1) compute the
+            // SAME count for chunk C, so a send is posted iff the matching recv
+            // is — the ring stays paired. The previous combined guard gated both
+            // on different chunks, so a rank could skip its send while its
+            // neighbour blocked on the matching recv → deadlock (and an
+            // all_reduce/barrier on a tensor with numel < world_size hung the job).
+            if (send_count > 0) {
                 Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
                 std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * elem_size);
-
-                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
-
-                // Send/receive
                 send_tensor(send_chunk, send_rank);
+            }
+            if (recv_count > 0) {
+                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
                 recv_tensor(recv_chunk, recv_rank);
 
                 // Reduce received data into our chunk
@@ -1330,35 +1353,32 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
             int send_rank = (rank_ + 1) % world_size_;
             int recv_rank = (rank_ - 1 + world_size_) % world_size_;
 
-            // Calculate chunk boundaries
-            size_t send_start = send_chunk_idx * chunk_size;
-            size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
+            // Calculate chunk boundaries; clamp empty chunks to 0 (see the
+            // reduce-scatter phase above for why send/recv are guarded
+            // independently rather than with a single combined condition).
+            size_t send_start = static_cast<size_t>(send_chunk_idx) * chunk_size;
+            size_t recv_start = static_cast<size_t>(recv_chunk_idx) * chunk_size;
+            size_t send_count = (send_start < static_cast<size_t>(total_elements))
+                ? std::min(chunk_size, static_cast<size_t>(total_elements) - send_start) : 0;
+            size_t recv_count = (recv_start < static_cast<size_t>(total_elements))
+                ? std::min(chunk_size, static_cast<size_t>(total_elements) - recv_start) : 0;
 
-            size_t recv_start = recv_chunk_idx * chunk_size;
-            size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
-
-            if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
+            if (send_count > 0) {
                 Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
                 std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * elem_size);
-
-                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
-
-                // Send/receive
                 send_tensor(send_chunk, send_rank);
+            }
+            if (recv_count > 0) {
+                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
                 recv_tensor(recv_chunk, recv_rank);
-
                 // Copy received data to our buffer
                 std::memcpy(data_ptr + recv_start, recv_chunk.data_ptr(), recv_count * elem_size);
             }
         }
 
-        // Handle AVG operation
-        if (op == ReduceOp::AVG) {
-            scalar_t divisor = static_cast<scalar_t>(world_size_);
-            for (int64_t i = 0; i < total_elements; ++i) {
-                data_ptr[i] /= divisor;
-            }
-        }
+        // AVG is finished by the caller (all_reduce) via tenzor::div so integer
+        // tensors promote to Float32 instead of truncating; ring_all_reduce only
+        // sees SUM/MIN/MAX/PRODUCT for AVG requests.
     };
 
     switch (cpu_tensor.dtype()) {

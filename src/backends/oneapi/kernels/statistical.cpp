@@ -10,6 +10,12 @@
 namespace tenzor {
 namespace oneapi {
 
+// Defined in reduction.cpp. std/var/norm/prod index the raw device pointer with
+// shape-derived/linear offsets that assume a packed (contiguous) layout, so a
+// non-contiguous input (transpose/permute/slice) must be materialized first or
+// the kernels read the wrong physical elements and return silently-wrong stats.
+auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
 // RAII wrapper for sycl::malloc_device allocations
 struct SyclDeviceGuard {
     void* ptr; sycl::queue& q;
@@ -58,12 +64,15 @@ class NormDimKernelFloat64;
  * @param queue SYCL queue for execution
  * @return Tensor Standard deviation tensor
  */
-auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+auto std_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
     // INT64_MIN is the project-wide "all dims" sentinel. Treat any other
     // negative dim as a back-from-end axis (e.g. -1 = last dim).
     int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
     bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
     int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+
+    const Tensor input = input_raw.is_contiguous() ? input_raw
+                                                   : contiguous_kernel(input_raw, queue);
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
@@ -92,8 +101,12 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
             const float* in_ptr = get_data_ptr<const float>(input);
             const double d_total = static_cast<double>(total_size);
             int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            const double d_divisor = static_cast<double>(divisor);
+            // Variance is undefined (NaN) when N <= correction. A NaN divisor
+            // propagates through m2/divisor (and sqrt for std), matching CPU/
+            // PyTorch instead of clamping the divisor to 1 and returning finite.
+            const double d_divisor = (divisor > 0)
+                ? static_cast<double>(divisor)
+                : std::numeric_limits<double>::quiet_NaN();
 
             // Two-phase work-group reduction with double accumulation, matching
             // prod/norm. A single float32 global atomic over ~1e6 elements loses
@@ -165,8 +178,12 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
             const double* in_ptr = get_data_ptr<const double>(input);
             const double d_total = static_cast<double>(total_size);
             int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            const double d_divisor = static_cast<double>(divisor);
+            // Variance is undefined (NaN) when N <= correction. A NaN divisor
+            // propagates through m2/divisor (and sqrt for std), matching CPU/
+            // PyTorch instead of clamping the divisor to 1 and returning finite.
+            const double d_divisor = (divisor > 0)
+                ? static_cast<double>(divisor)
+                : std::numeric_limits<double>::quiet_NaN();
 
             double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
@@ -262,8 +279,10 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                         var_sum += diff * diff;
                     }
                     int64_t divisor = dim_size - corr;
-                    if (divisor <= 0) divisor = 1;
-                    out_ptr[idx] = sycl::sqrt(var_sum / static_cast<float>(divisor));
+                    // NaN when dim_size <= correction (undefined), matching CPU.
+                    out_ptr[idx] = (divisor > 0)
+                        ? sycl::sqrt(var_sum / static_cast<float>(divisor))
+                        : std::numeric_limits<float>::quiet_NaN();
                 }
             );
             queue.wait_and_throw();
@@ -293,8 +312,10 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                         var_sum += diff * diff;
                     }
                     int64_t divisor = dim_size - corr;
-                    if (divisor <= 0) divisor = 1;
-                    out_ptr[idx] = sycl::sqrt(var_sum / static_cast<double>(divisor));
+                    // NaN when dim_size <= correction (undefined), matching CPU.
+                    out_ptr[idx] = (divisor > 0)
+                        ? sycl::sqrt(var_sum / static_cast<double>(divisor))
+                        : std::numeric_limits<double>::quiet_NaN();
                 }
             );
             queue.wait_and_throw();
@@ -320,13 +341,18 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @param queue SYCL queue for execution
  * @return Tensor Variance tensor
  */
-auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+auto var_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
     // Float16/BFloat16 aren't handled by the native kernels below; widen to
-    // Float32, compute, and narrow back (variance is fine in fp32).
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        const DType orig = input.dtype();
-        return var_kernel(input.to(DType::Float32), attrs, queue).to(orig);
+    // Float32, compute, and narrow back (variance is fine in fp32). .to() also
+    // returns a contiguous tensor, so the widen path is layout-safe.
+    if (input_raw.dtype() == DType::Float16 || input_raw.dtype() == DType::BFloat16) {
+        const DType orig = input_raw.dtype();
+        return var_kernel(input_raw.to(DType::Float32), attrs, queue).to(orig);
     }
+    // Materialize a contiguous copy: the native kernels below index with
+    // shape-derived/linear offsets that assume a packed layout.
+    const Tensor input = input_raw.is_contiguous() ? input_raw
+                                                   : contiguous_kernel(input_raw, queue);
     // INT64_MIN is the project-wide "all dims" sentinel. The legacy
     // OneAPI convention also accepted -1 as full reduction; that
     // ambiguates `var(v, dim=-1)` (last dim) with full reduction. Treat
@@ -362,8 +388,12 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
             const float* in_ptr = get_data_ptr<const float>(input);
             const double d_total = static_cast<double>(total_size);
             int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            const double d_divisor = static_cast<double>(divisor);
+            // Variance is undefined (NaN) when N <= correction. A NaN divisor
+            // propagates through m2/divisor (and sqrt for std), matching CPU/
+            // PyTorch instead of clamping the divisor to 1 and returning finite.
+            const double d_divisor = (divisor > 0)
+                ? static_cast<double>(divisor)
+                : std::numeric_limits<double>::quiet_NaN();
 
             // Two-phase work-group reduction with double accumulation, matching
             // prod/norm and std_kernel. Avoids the precision loss and
@@ -430,8 +460,12 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
             const double* in_ptr = get_data_ptr<const double>(input);
             const double d_total = static_cast<double>(total_size);
             int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            const double d_divisor = static_cast<double>(divisor);
+            // Variance is undefined (NaN) when N <= correction. A NaN divisor
+            // propagates through m2/divisor (and sqrt for std), matching CPU/
+            // PyTorch instead of clamping the divisor to 1 and returning finite.
+            const double d_divisor = (divisor > 0)
+                ? static_cast<double>(divisor)
+                : std::numeric_limits<double>::quiet_NaN();
 
             double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
@@ -522,8 +556,10 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                         var_sum += diff * diff;
                     }
                     int64_t divisor = dim_size - corr;
-                    if (divisor <= 0) divisor = 1;
-                    out_ptr[idx] = var_sum / static_cast<float>(divisor);
+                    // NaN when dim_size <= correction (undefined), matching CPU.
+                    out_ptr[idx] = (divisor > 0)
+                        ? (var_sum / static_cast<float>(divisor))
+                        : std::numeric_limits<float>::quiet_NaN();
                 }
             );
             queue.wait_and_throw();
@@ -553,8 +589,10 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                         var_sum += diff * diff;
                     }
                     int64_t divisor = dim_size - corr;
-                    if (divisor <= 0) divisor = 1;
-                    out_ptr[idx] = var_sum / static_cast<double>(divisor);
+                    // NaN when dim_size <= correction (undefined), matching CPU.
+                    out_ptr[idx] = (divisor > 0)
+                        ? (var_sum / static_cast<double>(divisor))
+                        : std::numeric_limits<double>::quiet_NaN();
                 }
             );
             queue.wait_and_throw();
@@ -580,16 +618,20 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @param queue SYCL queue for execution
  * @return Tensor Product tensor
  */
-auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+auto prod_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
     // Float16/BFloat16: compute in Float32 for numerical stability and
     // because the SYCL kernels below are only specialised for Float32/
     // Float64/Int32/Int64. Matches the widen-narrow pattern used by the
     // norm/var/std kernels in this file.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        DType orig = input.dtype();
-        auto result = prod_kernel(input.to(DType::Float32), attrs, queue);
+    if (input_raw.dtype() == DType::Float16 || input_raw.dtype() == DType::BFloat16) {
+        DType orig = input_raw.dtype();
+        auto result = prod_kernel(input_raw.to(DType::Float32), attrs, queue);
         return result.to(orig);
     }
+    // The full-reduction/integer paths index the device pointer linearly, so a
+    // non-contiguous (sliced/narrowed) input must be materialized first.
+    const Tensor input = input_raw.is_contiguous() ? input_raw
+                                                   : contiguous_kernel(input_raw, queue);
 
     // INT64_MIN is the project-wide "all dims" sentinel. Treat any other
     // negative dim as a back-from-end axis.
@@ -933,13 +975,17 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
 }
 
 // Norm kernel - compute Lp norm
-auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
     // Float16/BFloat16: compute in Float32 for numerical stability
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        DType orig = input.dtype();
-        auto result = norm_kernel(input.to(DType::Float32), attrs, queue);
+    if (input_raw.dtype() == DType::Float16 || input_raw.dtype() == DType::BFloat16) {
+        DType orig = input_raw.dtype();
+        auto result = norm_kernel(input_raw.to(DType::Float32), attrs, queue);
         return result.to(orig);
     }
+    // Materialize a contiguous copy: the kernels index with shape-derived/linear
+    // offsets that assume a packed layout.
+    const Tensor input = input_raw.is_contiguous() ? input_raw
+                                                   : contiguous_kernel(input_raw, queue);
 
     float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
     // INT64_MIN is the project-wide "all dims" sentinel. Treat any other

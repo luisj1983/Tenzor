@@ -4248,10 +4248,12 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     auto result = zeros(out_shape, A.dtype(), A.device());
 
     // Allocate pivots and info on device
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    HIP_CHECK_LINALG(hipMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    HIP_CHECK_LINALG(hipMalloc(&d_info, nbatch * sizeof(int)));
+    // RAII so d_pivots/d_info free on every exit path, including the
+    // HIP_CHECK_LINALG throws after the kernel launches below.
+    HipBuffer d_pivots_buf(static_cast<size_t>(nbatch) * n * sizeof(int));
+    HipBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(int));
+    int* d_pivots = d_pivots_buf.as<int>();
+    int* d_info = d_info_buf.as<int>();
     HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
 
     if (A.dtype() == DType::Float32) {
@@ -4285,8 +4287,7 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    hipFree(d_pivots);
-    hipFree(d_info);
+    // d_pivots/d_info freed by their HipBuffer guards on scope exit.
     return result;
 }
 
@@ -4309,10 +4310,12 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 
     auto result = zeros(to_vec(work.shape()), A.dtype(), A.device());
 
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    HIP_CHECK_LINALG(hipMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    HIP_CHECK_LINALG(hipMalloc(&d_info, nbatch * sizeof(int)));
+    // RAII so d_pivots/d_info free on every exit path, including the
+    // HIP_CHECK_LINALG throws after the kernel launches below.
+    HipBuffer d_pivots_buf(static_cast<size_t>(nbatch) * n * sizeof(int));
+    HipBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(int));
+    int* d_pivots = d_pivots_buf.as<int>();
+    int* d_info = d_info_buf.as<int>();
     HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
 
     if (A.dtype() == DType::Float32) {
@@ -4346,8 +4349,7 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    hipFree(d_pivots);
-    hipFree(d_info);
+    // d_pivots/d_info freed by their HipBuffer guards on scope exit.
     return result;
 }
 
@@ -4373,10 +4375,12 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
     auto b_ndim = static_cast<int64_t>(b_shape.size());
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
 
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    HIP_CHECK_LINALG(hipMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    HIP_CHECK_LINALG(hipMalloc(&d_info, nbatch * sizeof(int)));
+    // RAII so d_pivots/d_info free on every exit path, including the
+    // HIP_CHECK_LINALG throws after the kernel launches below.
+    HipBuffer d_pivots_buf(static_cast<size_t>(nbatch) * n * sizeof(int));
+    HipBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(int));
+    int* d_pivots = d_pivots_buf.as<int>();
+    int* d_info = d_info_buf.as<int>();
     HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
 
     if (A.dtype() == DType::Float32) {
@@ -4410,8 +4414,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    hipFree(d_pivots);
-    hipFree(d_info);
+    // d_pivots/d_info freed by their HipBuffer guards on scope exit.
     return work_b;
 }
 
@@ -4669,8 +4672,10 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     // this the native fallback silently returns a garbage factor for
     // indefinite/non-PD input, diverging from rocSOLVER potrf and the CPU
     // backend which both raise.
-    int* d_info = nullptr;
-    HIP_CHECK_LINALG(hipMalloc(&d_info, nbatch * sizeof(int)));
+    // RAII so d_info frees on every exit path, including the HIP_CHECK_LINALG
+    // throws after the kernel launches below.
+    HipBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(int));
+    int* d_info = d_info_buf.as<int>();
     HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
 
     if (A.dtype() == DType::Float32) {
@@ -4696,7 +4701,7 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
     hipError_t copy_err = hipMemcpy(h_info.data(), d_info,
                                     nbatch * sizeof(int), hipMemcpyDeviceToHost);
-    hipFree(d_info);
+    // d_info freed by its HipBuffer guard on scope exit.
     HIP_CHECK_LINALG(copy_err);
     for (int64_t b = 0; b < nbatch; ++b) {
         if (h_info[b] > 0) {
@@ -4735,10 +4740,12 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
     piv_shape.push_back(n);
 
     // Allocate pivots and info on device
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    HIP_CHECK_LINALG(hipMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    HIP_CHECK_LINALG(hipMalloc(&d_info, nbatch * sizeof(int)));
+    // RAII so d_pivots/d_info free on every exit path, including the
+    // HIP_CHECK_LINALG throws after the kernel launches below.
+    HipBuffer d_pivots_buf(static_cast<size_t>(nbatch) * n * sizeof(int));
+    HipBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(int));
+    int* d_pivots = d_pivots_buf.as<int>();
+    int* d_info = d_info_buf.as<int>();
     HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
 
     // Step 1: Run LU factorization in-place on work tensor
@@ -4784,8 +4791,7 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
         nbatch * n * sizeof(int), hipMemcpyDeviceToDevice, stream));
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    hipFree(d_pivots);
-    hipFree(d_info);
+    // d_pivots/d_info freed by their HipBuffer guards on scope exit.
     return {L, U, pivots_out};
 }
 
@@ -4898,6 +4904,7 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     auto [n, ndim_a] = check_square(work_a);
     auto b_shape = B.shape();
     auto b_ndim = static_cast<int64_t>(b_shape.size());
+    const bool b_is_1d = (b_ndim < 2);
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
     int64_t nbatch = batch_size(work_a);
 

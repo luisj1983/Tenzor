@@ -345,7 +345,11 @@ __global__ void var_along_dim_kernel(
     }
 
     int64_t denom = count - correction;
-    output[out_idx] = denom > 0 ? m2 / T(denom) : T(0);
+    // Variance is undefined (NaN) when count <= correction, matching CPU/
+    // PyTorch instead of returning 0. Build the NaN from its IEEE-754 bit
+    // pattern (ROCm's NaN conversion intrinsics are unreliable).
+    output[out_idx] = denom > 0 ? m2 / T(denom)
+                                : static_cast<T>(__int_as_float(0x7fc00000));
 }
 
 /**
@@ -4438,7 +4442,8 @@ __global__ void nanvar_finalize_f32(const float* __restrict__ sum_sq,
     if (threadIdx.x == 0) {
         int64_t c = count[0];
         int64_t denom = c - correction;
-        output[0] = (denom > 0) ? sum_sq[0] / static_cast<float>(denom) : 0.0f;
+        output[0] = (denom > 0) ? sum_sq[0] / static_cast<float>(denom)
+                                : __int_as_float(0x7fc00000);  // NaN: undefined for N<=correction
     }
 }
 
@@ -4483,7 +4488,8 @@ __global__ void nanvar_finalize_f64(const double* __restrict__ sum_sq,
     if (threadIdx.x == 0) {
         int64_t c = count[0];
         int64_t denom = c - correction;
-        output[0] = (denom > 0) ? sum_sq[0] / static_cast<double>(denom) : 0.0;
+        output[0] = (denom > 0) ? sum_sq[0] / static_cast<double>(denom)
+                                : __longlong_as_double(0x7ff8000000000000LL);  // NaN
     }
 }
 
