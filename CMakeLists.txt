@@ -28,6 +28,7 @@ endif()
 # Set TENZOR_BUILD_ROCM before project() - use cache to preserve user preference.
 # Source builds keep heavyweight GPU SDKs opt-in; enabling this option must
 # build a real ROCm backend or fail during configure/build.
+option(TENZOR_BUILD_ROCM "Build ROCm backend" ON)
 if(NOT DEFINED TENZOR_BUILD_ROCM)
     option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF)
 endif()
@@ -85,16 +86,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
-option(TENZOR_BUILD_CUDA "Build CUDA backend" OFF)
+option(TENZOR_BUILD_CUDA "Build CUDA backend" ON)
 # Note: TENZOR_BUILD_ROCM is set before project() to enable HIP language
-option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" OFF)
-option(TENZOR_BUILD_VULKAN "Build Vulkan backend" OFF)
+option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" ON)
+option(TENZOR_BUILD_VULKAN "Build Vulkan backend" ON)
 if(APPLE)
     option(TENZOR_BUILD_MPS "Build Apple Metal/MPS backend" ON)
 endif()
 option(TENZOR_BUILD_PYTHON "Build Python bindings" ON)
 option(TENZOR_BUILD_TESTS "Build tests" ON)
-option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" ON)
 # Expand the default multi-dtype parity matrix to include BFloat16. BF16 is
 # the dominant training dtype on modern GPUs (CUDA TF32/H100, ROCm MI300,
 # OneAPI PVC, Vulkan Cooperative Matrix), so the BF16 column of the parity
