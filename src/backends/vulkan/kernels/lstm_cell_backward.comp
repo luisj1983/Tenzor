@@ -34,8 +34,22 @@ layout(push_constant) uniform PushConstants {
     uint hidden_size;
 } params;
 
-float sigmoid(float x) {
-    return 1.0 / (1.0 + exp(-x));
+// Use exp()-based stable activations matching lstm_cell.comp forward exactly, so the
+// recomputed g_gate and tanh_c match the values forward produced (the driver `tanh`
+// intrinsic drifts >1e-3 from std::tanh and breaks gradient parity on NVIDIA/Vulkan).
+precise float sigmoid_stable(float x) {
+    if (x >= 0.0) {
+        float e = exp(-x);
+        return 1.0 / (1.0 + e);
+    } else {
+        float e = exp(x);
+        return e / (1.0 + e);
+    }
+}
+
+// Stable tanh via sigmoid: tanh(x) = 2 * sigmoid(2x) - 1.
+precise float tanh_stable(float x) {
+    return 2.0 * sigmoid_stable(2.0 * x) - 1.0;
 }
 
 void main() {
@@ -57,12 +71,12 @@ void main() {
     uint o_idx = gate_base + 3 * H + h;
 
     // ---- Recompute forward gate activations ----
-    float i_gate = sigmoid(gates[i_idx]);
-    float f_gate = sigmoid(gates[f_idx]);
-    float g_gate = tanh(gates[g_idx]);
-    float o_gate = sigmoid(gates[o_idx]);
+    float i_gate = sigmoid_stable(gates[i_idx]);
+    float f_gate = sigmoid_stable(gates[f_idx]);
+    float g_gate = tanh_stable(gates[g_idx]);
+    float o_gate = sigmoid_stable(gates[o_idx]);
 
-    float tanh_c = tanh(c_out[idx]);
+    float tanh_c = tanh_stable(c_out[idx]);
 
     // ---- Backward through h_out = o * tanh(c_out) ----
     float dh = grad_h[idx];

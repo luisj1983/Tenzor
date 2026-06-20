@@ -18,13 +18,36 @@ layout(push_constant) uniform PushConstants {
     uint n;
     uint max_iterations;
     uint batch_idx;
-    uint rot_stride;  // n * 2, stride per sweep step in rotation arrays
+    uint rot_stride;     // n * 2, stride per sweep step in rotation arrays
+    uint rot_capacity;   // total number of (cos,sin) rotation *pairs* each of
+                         // u_rot / v_rot can hold (i.e. each buffer has
+                         // rot_capacity*2 floats). Recordable rotations are
+                         // limited to indices below min(rot_capacity, rot_stride/2)-1
+                         // so they never overrun the buffer nor collide with the
+                         // metadata count stored at u_rot[rot_stride-2]. Host must
+                         // size rot_capacity for the worst case (O(max_iterations*n)).
 };
+
+// Maximum rotation-pair index that may be written by an actual rotation.
+// One pair is reserved at the very end for the metadata count, and rot_stride
+// (n*2 floats => the metadata pair sits at index rot_stride/2 - 1) must also
+// stay clear, so the recordable region is everything strictly below
+// min(rot_capacity, rot_stride/2) - 1. We clamp to the smaller of the two so a
+// rotation write can never collide with the metadata slot nor overrun either
+// host-allocated buffer.
+uint rot_limit() {
+    uint stride_pairs = rot_stride / 2u;      // metadata pair index
+    uint cap = rot_capacity;
+    uint lim = (cap < stride_pairs) ? cap : stride_pairs;
+    return (lim > 0u) ? (lim - 1u) : 0u;      // last index usable for a rotation
+}
 
 void main() {
     if (gl_WorkGroupID.x != batch_idx) return;
 
     uint total_rots = 0;
+    uint max_rot = rot_limit();   // total_rots may write while total_rots < max_rot
+    bool overflowed = false;
 
     // Golub-Kahan implicit QR with Wilkinson shift
     // Work on submatrix [p, q] where p is the first non-negligible superdiagonal
@@ -75,10 +98,16 @@ void main() {
                         f = s * sdiag[j];
                         sdiag[j] = c * sdiag[j];
                     }
-                    // Store left rotation
-                    u_rot[total_rots * 2] = c;
-                    u_rot[total_rots * 2 + 1] = s;
-                    total_rots++;
+                    // Store left rotation (only if rotation log has capacity;
+                    // numerical update above still applied so singular values
+                    // remain correct even when the rotation log is full).
+                    if (total_rots < max_rot) {
+                        u_rot[total_rots * 2] = c;
+                        u_rot[total_rots * 2 + 1] = s;
+                        total_rots++;
+                    } else {
+                        overflowed = true;
+                    }
                 }
                 break;
             }
@@ -127,9 +156,13 @@ void main() {
             float new_dk1 = c * dk1;
 
             // Store right rotation
-            v_rot[total_rots * 2] = c;
-            v_rot[total_rots * 2 + 1] = s;
-            total_rots++;
+            if (total_rots < max_rot) {
+                v_rot[total_rots * 2] = c;
+                v_rot[total_rots * 2 + 1] = s;
+                total_rots++;
+            } else {
+                overflowed = true;
+            }
 
             // Left Givens rotation on rows k, k+1 to zero bulge
             y = new_dk;
@@ -156,9 +189,13 @@ void main() {
             }
 
             // Store left rotation
-            u_rot[total_rots * 2] = c;
-            u_rot[total_rots * 2 + 1] = s;
-            total_rots++;
+            if (total_rots < max_rot) {
+                u_rot[total_rots * 2] = c;
+                u_rot[total_rots * 2 + 1] = s;
+                total_rots++;
+            } else {
+                overflowed = true;
+            }
         }
     }
 
@@ -167,9 +204,13 @@ void main() {
         if (diag[i] < 0.0) {
             diag[i] = -diag[i];
             // Record a sign flip as a rotation with c=-1, s=0
-            v_rot[total_rots * 2] = -1.0;
-            v_rot[total_rots * 2 + 1] = 0.0;
-            total_rots++;
+            if (total_rots < max_rot) {
+                v_rot[total_rots * 2] = -1.0;
+                v_rot[total_rots * 2 + 1] = 0.0;
+                total_rots++;
+            } else {
+                overflowed = true;
+            }
         }
     }
 
@@ -192,16 +233,30 @@ void main() {
             // Record swap as rotation parameter (index pair for U and V column swap)
             // Encode swap: c = float(i), s = float(max_idx) — sentinel with c < 0 would conflict
             // Use a special marker: c = -2.0, s encodes the swap pair
-            u_rot[total_rots * 2] = -2.0;
-            u_rot[total_rots * 2 + 1] = float(i) * 65536.0 + float(max_idx);
-            v_rot[total_rots * 2] = -2.0;
-            v_rot[total_rots * 2 + 1] = float(i) * 65536.0 + float(max_idx);
-            total_rots++;
+            if (total_rots < max_rot) {
+                u_rot[total_rots * 2] = -2.0;
+                u_rot[total_rots * 2 + 1] = float(i) * 65536.0 + float(max_idx);
+                v_rot[total_rots * 2] = -2.0;
+                v_rot[total_rots * 2 + 1] = float(i) * 65536.0 + float(max_idx);
+                total_rots++;
+            } else {
+                overflowed = true;
+            }
         }
     }
 
-    // Store total rotation count at end of u_rot (overwrite last reserved slot)
-    // Convention: u_rot[rot_stride - 2] = float(total_rots) as metadata
-    u_rot[rot_stride - 2] = float(total_rots);
-    u_rot[rot_stride - 1] = 0.0;
+    // Store total rotation count at end of u_rot (overwrite last reserved slot).
+    // Convention: u_rot[rot_stride - 2] = float(total_rots) as metadata.
+    // The reserved metadata pair was excluded from the recordable region by
+    // rot_limit(), so this write never collides with a stored rotation. Guard
+    // the index against rot_capacity in case the host under-allocated.
+    uint meta_pair = (rot_stride >= 2u) ? (rot_stride / 2u - 1u) : 0u;
+    if (meta_pair >= rot_capacity && rot_capacity > 0u) {
+        meta_pair = rot_capacity - 1u;
+    }
+    // Encode truncation by negating the count so the host can detect that the
+    // rotation log overflowed (it must then recompute U/V from a larger buffer
+    // rather than trust an incomplete rotation sequence).
+    u_rot[meta_pair * 2u]     = overflowed ? -float(total_rots) : float(total_rots);
+    u_rot[meta_pair * 2u + 1] = 0.0;
 }

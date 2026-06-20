@@ -1474,7 +1474,11 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
  * @param stream HIP stream
  * @return Output tensor with max values
  */
-auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous (transposed/strided) views reduce over
+    // the correct logical elements, matching the CPU/CUDA reference.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -1589,7 +1593,10 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
  * @param stream HIP stream
  * @return Output tensor with min values
  */
-auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over correct elements.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -1711,7 +1718,10 @@ __global__ void argmax_kernel(const T* input, int64_t* output_idx, T* output_val
     T max_val = (idx < n) ? input[idx] : std::numeric_limits<T>::lowest();
     int64_t max_idx = (idx < n) ? idx : 0;
 
-    // Grid-stride loop to handle large inputs
+    // Grid-stride loop to handle large inputs. On value ties keep the smaller
+    // index to match CPU/PyTorch first-index semantics (this thread visits
+    // strictly increasing idx, so > alone already keeps the first, but be
+    // explicit for clarity and parity with the reduction below).
     for (idx += blockDim.x * gridDim.x; idx < n; idx += blockDim.x * gridDim.x) {
         if (input[idx] > max_val) {
             max_val = input[idx];
@@ -1723,10 +1733,12 @@ __global__ void argmax_kernel(const T* input, int64_t* output_idx, T* output_val
     sidx[tid] = max_idx;
     __syncthreads();
 
-    // Block-level reduction
+    // Block-level reduction. On value ties keep the smaller index so the result
+    // is the first occurrence in logical order (PyTorch/CPU parity).
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] > sdata[tid]) {
+            if (sdata[tid + s] > sdata[tid] ||
+                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -1753,10 +1765,11 @@ __global__ void argmax_final_kernel(const T* partial_vals, const int64_t* partia
     T max_val = std::numeric_limits<T>::lowest();
     int64_t max_idx = 0;
 
-    // Grid-stride load (single block, so stride = blockDim.x)
+    // Grid-stride load (single block, so stride = blockDim.x). On value ties keep
+    // the smaller global index so the first occurrence wins (PyTorch/CPU parity).
     for (int i = tid; i < num_partials; i += blockDim.x) {
         T v = partial_vals[i];
-        if (v > max_val) {
+        if (v > max_val || (v == max_val && partial_idx[i] < max_idx)) {
             max_val = v;
             max_idx = partial_idx[i];
         }
@@ -1768,7 +1781,8 @@ __global__ void argmax_final_kernel(const T* partial_vals, const int64_t* partia
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] > sdata[tid]) {
+            if (sdata[tid + s] > sdata[tid] ||
+                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -1803,9 +1817,12 @@ __global__ void argmin_kernel(const T* input, int64_t* output_idx, T* output_val
     sidx[tid] = min_idx;
     __syncthreads();
 
+    // Block-level reduction. On value ties keep the smaller index so the result
+    // is the first occurrence in logical order (PyTorch/CPU parity).
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] < sdata[tid]) {
+            if (sdata[tid + s] < sdata[tid] ||
+                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -1832,9 +1849,11 @@ __global__ void argmin_final_kernel(const T* partial_vals, const int64_t* partia
     T min_val = std::numeric_limits<T>::max();
     int64_t min_idx = 0;
 
+    // On value ties keep the smaller global index so the first occurrence wins
+    // (PyTorch/CPU parity).
     for (int i = tid; i < num_partials; i += blockDim.x) {
         T v = partial_vals[i];
-        if (v < min_val) {
+        if (v < min_val || (v == min_val && partial_idx[i] < min_idx)) {
             min_val = v;
             min_idx = partial_idx[i];
         }
@@ -1846,7 +1865,8 @@ __global__ void argmin_final_kernel(const T* partial_vals, const int64_t* partia
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] < sdata[tid]) {
+            if (sdata[tid + s] < sdata[tid] ||
+                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -2092,7 +2112,11 @@ __global__ void all_final_kernel(const uint8_t* partials, uint8_t* output, int n
 /**
  * @brief ArgMax reduction kernel
  */
-auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over the correct elements
+    // (and the returned indices match the contiguous logical order, like CPU).
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -2224,7 +2248,11 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
 /**
  * @brief ArgMin reduction kernel
  */
-auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over the correct elements
+    // (and the returned indices match the contiguous logical order, like CPU).
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -2353,7 +2381,10 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
 /**
  * @brief Product reduction kernel
  */
-auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto prod_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over correct elements.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -2515,7 +2546,14 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
 /**
  * @brief Variance reduction kernel
  */
-auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor {
+auto var_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1/#2: the full-reduction var device kernel indexes
+    // input linearly over [0,n) for the sum-of-squared-deviations pass, while the
+    // mean (via mean_kernel->sum_kernel) is already contiguity-safe. Contiguify
+    // here so BOTH passes read the same logical elements; otherwise a
+    // non-contiguous input yields a mean over correct elements but a deviation
+    // sum over linear storage, producing a wrong (inconsistent) variance.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     int64_t n = input.numel();
@@ -2661,7 +2699,10 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
 /**
  * @brief Norm reduction kernel (p-norm)
  */
-auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over correct elements.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     int64_t n = input.numel();
@@ -3132,7 +3173,10 @@ static void launch_dim_all(
  * @param stream HIP stream
  * @return Bool tensor with any-reduction result
  */
-auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto any_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over correct elements.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3215,7 +3259,10 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
  * @param stream HIP stream
  * @return Bool tensor with all-reduction result
  */
-auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto all_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over correct elements.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3471,7 +3518,10 @@ __global__ void logsumexp_full_kernel(
  * @param stream HIP stream
  * @return Output tensor with logsumexp
  */
-auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    // audit-2026-05-03 bug #1: full-reduction kernels index input linearly over
+    // [0,n); contiguify so non-contiguous views reduce over correct elements.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();

@@ -2,12 +2,18 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // Col2im (Fold) operation for Float16
-// Transforms (N, C*K_h*K_w, L) -> (N,C,H,W) with accumulation
-// F16 packed buffers (2 Float16 per uint32), arithmetic in float32
-// Note: Cannot use atomicAdd on packed F16 — use read-modify-write
-// (col2im threads may race on the same output element, so this shader
-//  is only safe when dispatched with non-overlapping output mapping,
-//  or when used as part of a serial accumulation strategy.)
+// Transforms (N, C*K_h*K_w, L) -> (N,C,H,W) with accumulation of overlapping
+// patches. Dispatched input-centric (one thread per column entry), identical to
+// the Float32 atomicAdd path. F16 packed buffers (2 Float16 per uint32),
+// arithmetic in float32.
+//
+// Core Vulkan has no native atomicAdd for 16-bit floats, so overlapping sliding
+// windows (stride < kernel) would race when multiple threads accumulate into the
+// same output pixel (and the same packed uint32 word). A plain read-modify-write
+// silently drops contributions. We instead accumulate with an atomicCompSwap
+// loop on the backing uint32 word (same pattern as put_bf16.comp / softmax_f16),
+// which updates only the targeted half-word atomically and never clobbers its
+// neighbour. This matches the F32 atomicAdd semantics for cross-backend parity.
 // HH.6: per-axis kernel/stride/padding/dilation.
 layout(local_size_x_id = 0) in;
 
@@ -41,21 +47,31 @@ float readF16Input(uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-float readF16Output(uint element_idx) {
+// Atomic add for Float16 using a bounded CAS loop on the backing uint32 word.
+// Reads the current packed half, adds in float32, repacks to F16, and commits
+// only the targeted 16-bit lane via atomicCompSwap so concurrent threads racing
+// on the same output pixel (or the neighbouring half of the same word) all have
+// their contributions applied without loss or clobbering.
+void atomicAddF16Output(uint element_idx, float val) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint packed = output_data[word_idx];
-    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
-    return unpackHalf2x16(bits | (bits << 16)).x;
-}
+    uint shift = (element_idx % 2) * 16;
+    uint mask = 0xFFFFu << shift;
 
-void writeF16Output(uint element_idx, float val) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
-    uint existing = output_data[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    output_data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+    uint old_word = output_data[word_idx];
+    // Bounded retries to prevent GPU hangs from infinite spinning under
+    // pathological contention (hardware/driver failure).
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
+        uint old_bits = (old_word >> shift) & 0xFFFFu;
+        float old_val = unpackHalf2x16(old_bits | (old_bits << 16)).x;
+        float new_val = old_val + val;
+        uint new_bits = packHalf2x16(vec2(new_val, 0.0)) & 0xFFFFu;
+        uint new_word = (old_word & ~mask) | (new_bits << shift);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+    // Saturation: do NOT fall back to a non-atomic store — it would clobber the
+    // neighbouring packed half-word.
 }
 
 void main() {
@@ -95,9 +111,8 @@ void main() {
                          c * (params.height * params.width) +
                          uint(ih) * params.width + uint(iw);
 
-        // Read input value, read existing output, accumulate, write back
+        // Read input value and atomically accumulate into the output pixel.
         float in_val = readF16Input(input_idx);
-        float out_val = readF16Output(output_idx);
-        writeF16Output(output_idx, out_val + in_val);
+        atomicAddF16Output(output_idx, in_val);
     }
 }

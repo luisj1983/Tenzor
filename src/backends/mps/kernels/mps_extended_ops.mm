@@ -58,14 +58,31 @@ Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
     int64_t o_h = (in_h + 2*ph - dh*(kh-1) - 1) / sh + 1;
     int64_t o_w = (in_w + 2*pw - dw*(kw-1) - 1) / sw + 1;
 
-    // im2col + matmul approach
-    int64_t col_rows = (in_c / groups) * kd * kh * kw;
+    // The im2col Metal shader (conv3d_im2col_kernel) and the cblas_sgemm matmul
+    // below are float32-only. Widen Float16/BFloat16/Float64 inputs to Float32
+    // and convert the result back at the end, matching the widen->compute->narrow
+    // pattern used elsewhere in this file.
+    const DType in_dtype = input.dtype();
+    const bool widen = (in_dtype != DType::Float32);
+    Tensor input_use = widen ? input.to(DType::Float32) : input;
+    Tensor weight_use = widen ? weight.to(DType::Float32) : weight;
+
+    // im2col + matmul approach.
+    // The shader lays out col with the FULL input-channel count
+    // (col_h indexes over in_c*kd*kh*kw per batch), so the col buffer must be
+    // sized for in_c rows even for grouped convolution. Grouping is then applied
+    // in the matmul by slicing the weight rows and the matching col rows per
+    // group.
+    int64_t in_c_g = in_c / groups;        // input channels per group
+    int64_t out_c_g = out_c / groups;      // output channels per group
+    int64_t weight_rows = in_c_g * kd * kh * kw;   // == w_shape[1]*kd*kh*kw
+    int64_t col_rows = in_c * kd * kh * kw;         // full-channel im2col rows
     int64_t col_cols = o_d * o_h * o_w;
-    Tensor col({batch, col_rows, col_cols}, input.dtype(), input.device());
+    Tensor col({batch, col_rows, col_cols}, DType::Float32, input.device());
 
     // Dispatch im2col kernel
     auto pipeline = get_pipeline("conv3d_im2col_kernel");
-    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_in = get_buffer(input_use);
     id<MTLBuffer> buf_col = get_buffer(col);
 
     // S.11: extended to 20 entries — last three are dd_dil/dh_dil/dw_dil.
@@ -97,21 +114,36 @@ Tensor mps_conv3d_forward_kernel(const Tensor& input, const Tensor& weight,
     [cmd waitUntilCompleted];
     ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
-    // matmul: weight.reshape(out_c, col_rows) x col for each batch
-    // Use Accelerate (zero-copy on Apple Silicon)
-    Tensor output({batch, out_c, o_d, o_h, o_w}, input.dtype(), input.device());
-    const float* w_ptr = static_cast<const float*>(weight.data_ptr());
+    // matmul: per group, weight_g (out_c_g x weight_rows) x col_g (weight_rows x col_cols)
+    // Use Accelerate (zero-copy on Apple Silicon).
+    // weight layout: [out_c, in_c_g, kd, kh, kw] -> rows of length weight_rows.
+    //   group g owns output channels [g*out_c_g, (g+1)*out_c_g).
+    // col layout:    [batch, in_c*kd*kh*kw, col_cols]
+    //   group g owns col rows [g*weight_rows, (g+1)*weight_rows).
+    Tensor output({batch, out_c, o_d, o_h, o_w}, DType::Float32, input.device());
+    const float* w_ptr = static_cast<const float*>(weight_use.data_ptr());
     const float* col_ptr = static_cast<const float*>(col.data_ptr());
     float* out_ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
 
     for (int64_t b = 0; b < batch; ++b) {
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    static_cast<int>(out_c), static_cast<int>(col_cols), static_cast<int>(col_rows),
-                    1.0f,
-                    w_ptr, static_cast<int>(col_rows),
-                    col_ptr + b * col_rows * col_cols, static_cast<int>(col_cols),
-                    0.0f,
-                    out_ptr + b * out_c * col_cols, static_cast<int>(col_cols));
+        const float* col_b = col_ptr + b * col_rows * col_cols;
+        float* out_b = out_ptr + b * out_c * col_cols;
+        for (int64_t g = 0; g < groups; ++g) {
+            const float* w_g = w_ptr + g * out_c_g * weight_rows;
+            const float* col_g = col_b + g * weight_rows * col_cols;
+            float* out_g = out_b + g * out_c_g * col_cols;
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        static_cast<int>(out_c_g), static_cast<int>(col_cols),
+                        static_cast<int>(weight_rows),
+                        1.0f,
+                        w_g, static_cast<int>(weight_rows),
+                        col_g, static_cast<int>(col_cols),
+                        0.0f,
+                        out_g, static_cast<int>(col_cols));
+        }
+    }
+    if (widen) {
+        return output.to(in_dtype);
     }
     return output;
 }
@@ -421,15 +453,28 @@ std::vector<Tensor> mps_median_kernel(const Tensor& input, int64_t dim) {
         int64_t row_size = shape[ndim - 1];
         int64_t num_rows = input.numel() / row_size;
 
-        // Allocate scratch space for sorting (same as input shape)
+        // Allocate scratch space for sorting (same as input shape). The kernel
+        // sorts each row in-place in its own [base, base+row_size) slice of this
+        // scratch and writes the single per-row answer to the dedicated result
+        // buffers (indices 4/5), avoiding the prior race where the result was
+        // written into another row's active scratch region.
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
         Tensor scratch_vals(shape_vec, input.dtype(), input.device());
         Tensor scratch_idx(shape_vec, DType::Int32, input.device());
+
+        // Result tensors (one element per row).
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape.erase(out_shape.begin() + dim);
+        if (out_shape.empty()) out_shape = {1};
+        Tensor out_values(out_shape, input.dtype(), input.device());
+        Tensor out_indices(out_shape, DType::Int32, input.device());
 
         auto pipeline = get_pipeline("median_per_row_kernel");
         id<MTLBuffer> buf_in = get_buffer(input);
         id<MTLBuffer> buf_vals = get_buffer(scratch_vals);
         id<MTLBuffer> buf_idx = get_buffer(scratch_idx);
+        id<MTLBuffer> buf_result_vals = get_buffer(out_values);
+        id<MTLBuffer> buf_result_idx = get_buffer(out_indices);
         uint32_t rs = (uint32_t)row_size;
 
         id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
@@ -439,6 +484,8 @@ std::vector<Tensor> mps_median_kernel(const Tensor& input, int64_t dim) {
         [enc setBuffer:buf_vals offset:0 atIndex:1];
         [enc setBuffer:buf_idx offset:0 atIndex:2];
         [enc setBytes:&rs length:sizeof(rs) atIndex:3];
+        [enc setBuffer:buf_result_vals offset:0 atIndex:4];
+        [enc setBuffer:buf_result_idx offset:0 atIndex:5];
 
         MTLSize grid = MTLSizeMake(num_rows, 1, 1);
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
@@ -446,17 +493,6 @@ std::vector<Tensor> mps_median_kernel(const Tensor& input, int64_t dim) {
         [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
-        // Extract first num_rows elements (median values written there by kernel)
-        std::vector<int64_t> out_shape(shape.begin(), shape.end());
-        out_shape.erase(out_shape.begin() + dim);
-        if (out_shape.empty()) out_shape = {1};
-
-        Tensor out_values(out_shape, input.dtype(), input.device());
-        Tensor out_indices(out_shape, DType::Int32, input.device());
-        std::memcpy(const_cast<void*>(out_values.data_ptr()),
-                    scratch_vals.data_ptr(), num_rows * dtype_size(input.dtype()));
-        std::memcpy(const_cast<void*>(out_indices.data_ptr()),
-                    scratch_idx.data_ptr(), num_rows * sizeof(int32_t));
         return {out_values, out_indices};
     }
     // H: non-last-dim — permute on-device and recurse.
@@ -480,14 +516,26 @@ std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim) {
         int64_t row_size = shape[ndim - 1];
         int64_t num_rows = input.numel() / row_size;
 
+        // Scratch space for the in-place per-row sort (same as input shape). The
+        // single per-row answer is written to the dedicated result buffers
+        // (indices 4/5) to avoid aliasing another row's active scratch region.
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
         Tensor scratch_vals(shape_vec, input.dtype(), input.device());
         Tensor scratch_idx(shape_vec, DType::Int32, input.device());
+
+        // Result tensors (one element per row).
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape.erase(out_shape.begin() + dim);
+        if (out_shape.empty()) out_shape = {1};
+        Tensor out_values(out_shape, input.dtype(), input.device());
+        Tensor out_indices(out_shape, DType::Int32, input.device());
 
         auto pipeline = get_pipeline("mode_per_row_kernel");
         id<MTLBuffer> buf_in = get_buffer(input);
         id<MTLBuffer> buf_vals = get_buffer(scratch_vals);
         id<MTLBuffer> buf_idx = get_buffer(scratch_idx);
+        id<MTLBuffer> buf_result_vals = get_buffer(out_values);
+        id<MTLBuffer> buf_result_idx = get_buffer(out_indices);
         uint32_t rs = (uint32_t)row_size;
 
         id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
@@ -497,6 +545,8 @@ std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim) {
         [enc setBuffer:buf_vals offset:0 atIndex:1];
         [enc setBuffer:buf_idx offset:0 atIndex:2];
         [enc setBytes:&rs length:sizeof(rs) atIndex:3];
+        [enc setBuffer:buf_result_vals offset:0 atIndex:4];
+        [enc setBuffer:buf_result_idx offset:0 atIndex:5];
 
         MTLSize grid = MTLSizeMake(num_rows, 1, 1);
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
@@ -504,16 +554,6 @@ std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim) {
         [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
-        std::vector<int64_t> out_shape(shape.begin(), shape.end());
-        out_shape.erase(out_shape.begin() + dim);
-        if (out_shape.empty()) out_shape = {1};
-
-        Tensor out_values(out_shape, input.dtype(), input.device());
-        Tensor out_indices(out_shape, DType::Int32, input.device());
-        std::memcpy(const_cast<void*>(out_values.data_ptr()),
-                    scratch_vals.data_ptr(), num_rows * dtype_size(input.dtype()));
-        std::memcpy(const_cast<void*>(out_indices.data_ptr()),
-                    scratch_idx.data_ptr(), num_rows * sizeof(int32_t));
         return {out_values, out_indices};
     }
     // H: non-last-dim — permute on-device and recurse.
@@ -532,9 +572,26 @@ std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim) {
 // ============================================================================
 
 std::vector<Tensor> mps_unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool return_counts) {
-    // Use shared memory (zero-copy) — sort + scan on CPU side
-    const float* ptr = static_cast<const float*>(input.data_ptr());
+    // Use shared memory (zero-copy) — sort + scan on CPU side. The scan works in
+    // Float32; non-Float32 inputs (Float16/BFloat16/Float64/integers) are widened
+    // so the float* read and the sizeof(float) value copy are always in-bounds.
+    // The unique-value tensor is produced in Float32 and converted back to the
+    // input dtype, so a half-sized (e.g. Float16) output buffer is never written
+    // with float-width data.
+    const DType in_dtype = input.dtype();
+    Tensor input_f32 = (in_dtype == DType::Float32) ? input.contiguous()
+                                                    : input.to(DType::Float32);
+    const float* ptr = static_cast<const float*>(input_f32.data_ptr());
     size_t n = input.numel();
+
+    // Empty input: return empty unique (and empty inverse/counts) without
+    // dereferencing idx[0].
+    if (n == 0) {
+        std::vector<Tensor> empty_result = {Tensor({0}, in_dtype, input.device())};
+        if (return_inverse) empty_result.push_back(Tensor({0}, DType::Int32, input.device()));
+        if (return_counts) empty_result.push_back(Tensor({0}, DType::Int32, input.device()));
+        return empty_result;
+    }
 
     // Sort indices
     std::vector<size_t> idx(n);
@@ -561,9 +618,12 @@ std::vector<Tensor> mps_unique_kernel(const Tensor& input, bool sorted, bool ret
         inverse[idx[i]] = static_cast<int32_t>(unique_vals.size() - 1);
     }
 
-    Tensor unique_t({static_cast<int64_t>(unique_vals.size())}, input.dtype(), input.device());
-    std::memcpy(const_cast<void*>(unique_t.data_ptr()), unique_vals.data(),
+    // Build the unique tensor in Float32 (matches the buffer width written
+    // below), then convert to the original dtype for the caller.
+    Tensor unique_f32({static_cast<int64_t>(unique_vals.size())}, DType::Float32, input.device());
+    std::memcpy(const_cast<void*>(unique_f32.data_ptr()), unique_vals.data(),
                 unique_vals.size() * sizeof(float));
+    Tensor unique_t = (in_dtype == DType::Float32) ? unique_f32 : unique_f32.to(in_dtype);
 
     std::vector<Tensor> result = {unique_t};
     if (return_inverse) {
@@ -1133,20 +1193,31 @@ std::vector<Tensor> mps_dropout_kernel(const Tensor& input, float p) {
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     size_t numel = input.numel();
 
-    // Generate mask on CPU (shared memory)
-    Tensor mask(shape_vec, input.dtype(), input.device());
+    // The Metal dropout shader is float32-typed (device const float*). Half /
+    // double inputs are routed through a Float32 staging buffer and converted
+    // back to the input dtype, matching the widen->compute->narrow pattern used
+    // by the sparse kernels in this file. This also guarantees the mask buffer
+    // is sized for the float writes below (a Float16 mask would be half-sized,
+    // producing a heap overflow when written as float).
+    const DType in_dtype = input.dtype();
+    const bool widen = (in_dtype != DType::Float32);
+    Tensor input_use = widen ? input.to(DType::Float32) : input;
+
+    // Generate the mask in Float32 (shared memory) regardless of input dtype so
+    // the float writes always fit the backing storage.
+    Tensor mask(shape_vec, DType::Float32, input.device());
     float* mask_ptr = static_cast<float*>(const_cast<void*>(mask.data_ptr()));
     std::mt19937 gen(std::random_device{}());
     std::bernoulli_distribution dist(1.0 - static_cast<double>(p));
     for (size_t i = 0; i < numel; ++i) mask_ptr[i] = dist(gen) ? 1.0f : 0.0f;
 
-    // Apply on Metal
-    Tensor output(shape_vec, input.dtype(), input.device());
+    // Apply on Metal (Float32 staging output)
+    Tensor output(shape_vec, DType::Float32, input.device());
     float scale = 1.0f / (1.0f - p);
 
     ensure_initialized();
     auto pipeline = get_pipeline("dropout_kernel");
-    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_in = get_buffer(input_use);
     id<MTLBuffer> buf_mask = get_buffer(mask);
     id<MTLBuffer> buf_out = get_buffer(output);
 
@@ -1163,6 +1234,12 @@ std::vector<Tensor> mps_dropout_kernel(const Tensor& input, float p) {
                              static_cast<NSUInteger>(numel));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
     [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
+    if (widen) {
+        // Return both the scaled output and the mask in the original dtype so
+        // DropoutBackward (which multiplies grad * mask * scale) stays parity
+        // with the input precision.
+        return {output.to(in_dtype), mask.to(in_dtype)};
+    }
     return {output, mask};
 }
 

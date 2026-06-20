@@ -1345,9 +1345,9 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, double min_value, double 
                           0, sizeof(PushConstants), &push_constants);
     }
 
-    // Float16 shader processes pairs of elements
+    // Float16 / BFloat16 shaders process pairs of elements (2 packed per uint32)
     uint32_t workgroups;
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {
         uint32_t num_pairs = (static_cast<uint32_t>(output.numel()) + 1) / 2;
         workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
     } else {
@@ -2062,6 +2062,7 @@ auto VulkanBackend::dispatchLogSoftmaxBackward(const Tensor& grad_output,
     std::string shader_name = "log_softmax_backward";
     if (grad_output.dtype() == DType::Float64) shader_name = "log_softmax_backward_f64";
     else if (grad_output.dtype() == DType::Float16) shader_name = "log_softmax_backward_f16";
+    else if (grad_output.dtype() == DType::BFloat16) shader_name = "log_softmax_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     auto shape = output.shape();

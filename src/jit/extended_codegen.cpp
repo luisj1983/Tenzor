@@ -8,6 +8,11 @@
 #include "tenzor/ops/math.hpp"   // tenzor::matmul for the GEMM-epilogue fusion
 #include <sstream>
 #include <algorithm>
+#include <cstring>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <stdexcept>
 
 namespace tenzor {
 namespace jit {
@@ -25,11 +30,23 @@ auto ExtendedFusionGroup::compute_signature() -> std::string {
             ss << "_dim" << reduce_dim << "_rk" << static_cast<int>(reduce_kind)
                << "_pre" << pre_ops.size()
                << "_post" << post_ops.size();
-            for (auto& op : pre_ops) ss << "_" << static_cast<int>(op.op);
-            for (auto& op : post_ops) ss << "_" << static_cast<int>(op.op);
+            // Include each pre/post op's scalar (by exact bits) — the kernel
+            // source bakes the scalar in, so groups differing only in a
+            // MulScalar/AddScalar constant must not share a cache signature.
+            for (auto& op : pre_ops) {
+                ss << "_" << static_cast<int>(op.op);
+                uint64_t bits; std::memcpy(&bits, &op.scalar, sizeof(bits));
+                ss << "s" << bits;
+            }
+            for (auto& op : post_ops) {
+                ss << "_" << static_cast<int>(op.op);
+                uint64_t bits; std::memcpy(&bits, &op.scalar, sizeof(bits));
+                ss << "s" << bits;
+            }
             break;
         case FusionKind::GemmEpilogue:
-            ss << "_bias" << has_bias << "_act" << static_cast<int>(activation_type);
+            ss << "_bias" << has_bias << "_hasact" << has_activation
+               << "_act" << static_cast<int>(activation_type);
             break;
         case FusionKind::Softmax:
             ss << "_dim" << softmax_dim;
@@ -176,7 +193,7 @@ extern "C" __global__ void fused_reduction_kernel(
     // Each block reduces one (outer, inner) slice. Accumulate in the compute
     // type (float for the 16-bit storage types) and narrow to T only on store.
     )" << C << R"( sum = )" << ident << R"(;
-    for (int r = threadIdx.x; r < reduce_size; r += blockDim.x) {
+    for (int64_t r = threadIdx.x; r < reduce_size; r += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(input[outer * reduce_size * inner_size + r * inner_size + inner]);
 )";
 
@@ -319,7 +336,7 @@ extern "C" __global__ void fused_softmax_kernel(
     // compute type (float for the 16-bit storage types); only loads/stores touch
     // T.
     )" << C << R"( thread_max = -1e30)" << F << R"(;
-    for (int c = threadIdx.x; c < cols; c += blockDim.x) {
+    for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(row_input[c]);
         thread_max = val > thread_max ? val : thread_max;
     }
@@ -354,7 +371,7 @@ extern "C" __global__ void fused_softmax_kernel(
     // diverge from the float reference. Keep the running sum in the compute type
     // and recompute exp() from the untouched input in pass 3.
     )" << C << R"( thread_sum = 0;
-    for (int c = threadIdx.x; c < cols; c += blockDim.x) {
+    for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
         )" << C << R"( val = )" << exp_fn << R"((static_cast<)" << C << R"(>(row_input[c]) - row_max);
         thread_sum += val;
     }
@@ -380,7 +397,7 @@ extern "C" __global__ void fused_softmax_kernel(
 
     // Pass 3: recompute exp(x - max) in the compute type and normalize. The
     // numerator stays in C until the single final narrowing store to T.
-    for (int c = threadIdx.x; c < cols; c += blockDim.x) {
+    for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
         )" << C << R"( val = )" << exp_fn << R"((static_cast<)" << C << R"(>(row_input[c]) - row_max);
         row_output[c] = static_cast<)" << T << R"(>(val * inv_sum);
     }
@@ -427,7 +444,7 @@ extern "C" __global__ void fused_layer_norm_kernel(
     )" << C << R"( m2 = 0;
     int count = 0;
 
-    for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         count++;
         )" << C << R"( xi = static_cast<)" << C << R"(>(x[i]);
         )" << C << R"( delta = xi - mean;
@@ -495,7 +512,7 @@ extern "C" __global__ void fused_layer_norm_kernel(
     )" << C << R"( inv_std = )" << rsqrt_fn << R"((s_m2[0] + eps);
 
     // Normalize + affine
-    for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         )" << C << R"( val = (static_cast<)" << C << R"(>(x[i]) - final_mean) * inv_std;)";
 
     if (group.has_affine) {
@@ -544,7 +561,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
     // Compute sum of squares (accumulate in compute type; 16-bit storage types
     // are promoted to float for the reduction).
     )" << C << R"( sum_sq = 0;
-    for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(x[i]);
         sum_sq += val * val;
     }
@@ -573,7 +590,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
     )" << C << R"( rms_inv = )" << rsqrt_fn << R"((shared[0] / norm_size + eps);
 
     // Normalize
-    for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(x[i]) * rms_inv;)";
 
     if (group.has_affine) {
@@ -626,9 +643,9 @@ extern "C" __global__ void fused_small_mlp_kernel(
     // Stage 1: hidden = activation(x @ W1 + b1). Accumulate the dot product in
     // the compute type (float for the 16-bit storage types) and narrow to T when
     // writing the shared-memory intermediate (whose layout is sized in T).
-    for (int h = threadIdx.x; h < hidden_dim; h += blockDim.x) {
+    for (int64_t h = threadIdx.x; h < hidden_dim; h += blockDim.x) {
         )" << C << R"( acc = static_cast<)" << C << R"(>(b1[h]);
-        for (int i = 0; i < in_dim; ++i) {
+        for (int64_t i = 0; i < in_dim; ++i) {
             acc += static_cast<)" << C << R"(>(x[i]) * static_cast<)" << C << R"(>(w1[i * hidden_dim + h]);
         }
         hidden[h] = static_cast<)" << T << R"(>()" << activation_expr(group.mlp_activation, "acc", group.dtype) << R"();
@@ -637,9 +654,9 @@ extern "C" __global__ void fused_small_mlp_kernel(
 
     // Stage 2: output = hidden @ W2 + b2
     )" << T << R"(* out = output + b * out_dim;
-    for (int o = threadIdx.x; o < out_dim; o += blockDim.x) {
+    for (int64_t o = threadIdx.x; o < out_dim; o += blockDim.x) {
         )" << C << R"( acc = static_cast<)" << C << R"(>(b2[o]);
-        for (int h = 0; h < hidden_dim; ++h) {
+        for (int64_t h = 0; h < hidden_dim; ++h) {
             acc += static_cast<)" << C << R"(>(hidden[h]) * static_cast<)" << C << R"(>(w2[h * out_dim + o]);
         }
         out[o] = static_cast<)" << T << R"(>(acc);
@@ -734,6 +751,20 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     int grid = 1;
     unsigned shared = 0;
 
+    // launch_raw takes a 1D int grid (gridDim.x only); blockIdx.y is always 0 for
+    // these launches. A grid that exceeds INT_MAX cannot be represented as a 1D
+    // int, so silently truncating would launch too few/negative blocks and leave
+    // output slices uninitialized. Reject it explicitly instead of wrapping.
+    auto grid_to_int = [](int64_t blocks, const char* what) -> int {
+        if (blocks < 0 || blocks > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error(
+                std::string("execute_extended_fused: ") + what +
+                " grid size " + std::to_string(blocks) +
+                " exceeds the maximum representable 1D launch grid (INT_MAX)");
+        }
+        return static_cast<int>(blocks);
+    };
+
     switch (group.kind) {
         case FusionKind::Softmax: {
             int64_t cols = std::max<int64_t>(1, suffix_prod(axis_norm(group.softmax_dim)));
@@ -741,7 +772,7 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             output = Tensor(in_shape, group.dtype, inputs[0].device());
             ptrs = {inputs[0].data_ptr(), output.data_ptr()};
             ivals = {rows, cols};
-            grid = static_cast<int>(rows);
+            grid = grid_to_int(rows, "Softmax");
             break;
         }
         case FusionKind::LayerNorm:
@@ -758,7 +789,7 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             }
             ivals = {outer, norm_size};
             has_eps = true;
-            grid = static_cast<int>(outer);
+            grid = grid_to_int(outer, "Norm");
             break;
         }
         case FusionKind::Reduction: {
@@ -774,7 +805,7 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             output = Tensor(out_shape, group.dtype, inputs[0].device());
             ptrs = {inputs[0].data_ptr(), output.data_ptr()};
             ivals = {outer, reduce_size, inner};
-            grid = static_cast<int>(outer * inner);
+            grid = grid_to_int(outer * inner, "Reduction");
             break;
         }
         case FusionKind::GemmEpilogue: {
@@ -799,7 +830,7 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             ptrs = {output.data_ptr()};                            // output FIRST
             if (group.has_bias) ptrs.push_back(params.at(0).data_ptr());
             ivals = {rows, cols};
-            grid = static_cast<int>((rows * cols + kBlock - 1) / kBlock);
+            grid = grid_to_int((rows * cols + kBlock - 1) / kBlock, "GemmEpilogue");
             break;
         }
         case FusionKind::SmallMLP: {
@@ -812,7 +843,7 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             ptrs = {inputs[0].data_ptr(), params.at(0).data_ptr(), params.at(1).data_ptr(),
                     params.at(2).data_ptr(), params.at(3).data_ptr(), output.data_ptr()};
             ivals = {batch, in_dim, hidden_dim, out_dim};
-            grid = static_cast<int>(batch);
+            grid = grid_to_int(batch, "SmallMLP");
             shared = static_cast<unsigned>(hidden_dim * static_cast<int64_t>(inputs[0].dtype_size()));
             break;
         }

@@ -14,23 +14,32 @@ layout(push_constant) uniform PushConstants {
     uint n;
     uint digit;
     uint n_wgs;
+    uint descending; // 0 = ascending, 1 = descending
 };
 
 shared uint local_offsets[256];
 
+// Must derive exactly the same digit as the histogram pass, so apply the same
+// descending key inversion here: an ascending LSD radix over the inverted key
+// yields descending values with stable (ascending-index) tie order.
 uint64_t double_to_sortable(float64_t val) {
     uvec2 v = unpackDouble2x32(double(val));
     uint64_t bits = uint64_t(v.x) | (uint64_t(v.y) << 32u);
     uint64_t mask = -int64_t(bits >> 63) | 0x8000000000000000ul;
-    return bits ^ mask;
+    uint64_t sortable = bits ^ mask;
+    if (descending != 0u) sortable = ~sortable;
+    return sortable;
 }
 
 void main() {
     uint lid = gl_LocalInvocationID.x;
     uint wg_id = gl_WorkGroupID.x;
 
-    if (lid < 256) {
-        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    // Load this workgroup's prefix sums into shared memory. The dispatched
+    // local size is a spec constant (often != 256), so stride the load over
+    // the full 256-bin table by the actual workgroup size to cover every bin.
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        local_offsets[b] = histos[b * n_wgs + wg_id];
     }
     barrier();
 
@@ -38,7 +47,7 @@ void main() {
     uint tile_start = wg_id * tile_size;
     uint tile_end = min(tile_start + tile_size, n);
 
-    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+    for (uint i = tile_start + lid; i < tile_end; i += gl_WorkGroupSize.x) {
         uint64_t sortable = double_to_sortable(keys_in[i]);
         uint digit_val = uint((sortable >> (digit * 8)) & 0xFFul);
         uint dest = atomicAdd(local_offsets[digit_val], 1);

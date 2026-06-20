@@ -87,8 +87,11 @@ auto sanitize_repository_path(const std::string& requested,
 // ============================================================================
 
 DynamicBatcher::DynamicBatcher(std::shared_ptr<jit::CompiledModule> model,
-                               BatchConfig config)
-    : model_(std::move(model)), config_(std::move(config)) {}
+                               BatchConfig config,
+                               std::string model_name)
+    : model_(std::move(model)),
+      config_(std::move(config)),
+      model_name_(std::move(model_name)) {}
 
 DynamicBatcher::~DynamicBatcher() {
     stop();
@@ -154,87 +157,143 @@ auto DynamicBatcher::batch_loop() -> void {
 
 auto DynamicBatcher::execute_batch(
     std::vector<std::shared_ptr<InferRequest>>& batch) -> void {
+    // Record dynamic-batching metrics for this group. batch_loop() only calls
+    // execute_batch() with a non-empty batch, and each call corresponds to
+    // exactly one batching decision, so total_batch_count is incremented once
+    // here. total_batch_size accumulates the actual number of rows fed through
+    // the model (each request may carry >1 leading-dim row, i.e. a client-side
+    // batch), so format_prometheus()'s batch_sum/batch_count yields the true
+    // mean rows-per-batch rather than mean requests-per-batch. A request with a
+    // scalar (rank-0) input contributes 1 to the row count. Recorded for both
+    // the batched and per-request fallback paths because the batching decision
+    // (and therefore the metric) is independent of how the group ultimately
+    // executes. Skipped when no model name was supplied (no metrics handle to
+    // attribute the batch to).
+    if (!model_name_.empty()) {
+        uint64_t row_count = 0;
+        for (const auto& req : batch) {
+            const auto& in_shape = req->input.shape();
+            row_count += in_shape.empty()
+                             ? 1
+                             : static_cast<uint64_t>(in_shape[0]);
+        }
+        auto& metrics = MetricsRegistry::instance().get_metrics(model_name_);
+        metrics.total_batch_count.fetch_add(1, std::memory_order_relaxed);
+        metrics.total_batch_size.fetch_add(row_count, std::memory_order_relaxed);
+    }
+
+    // Run every request in the batch on its own forward pass. Each request's
+    // failure is isolated to that request so a single bad input never poisons
+    // co-batched requests. Used both as the deliberate fallback path and as the
+    // safety net whenever a batched (concatenated) execution cannot succeed for
+    // the whole group (incompatible input shapes/dtypes/devices that make cat
+    // throw, a model that collapses the batch dimension, etc.).
+    auto run_per_request =
+        [this](std::vector<std::shared_ptr<InferRequest>>& reqs) {
+            for (auto& req : reqs) {
+                try {
+                    tenzor::Variable iv(req->input, false);
+                    req->result.set_value(model_->forward(iv).tensor());
+                } catch (...) {
+                    try {
+                        req->result.set_exception(std::current_exception());
+                    } catch (...) {}
+                }
+            }
+        };
+
     try {
         if (batch.size() == 1) {
             // Single request: no batching overhead
             tenzor::Variable input_var(batch[0]->input, false);
             auto output = model_->forward(input_var);
             batch[0]->result.set_value(output.tensor());
-        } else {
-            // Batch multiple requests: concatenate along dim 0, single forward, split
-            std::vector<Tensor> inputs;
-            inputs.reserve(batch.size());
-            // Record each request's leading-dim row count BEFORE cat so the
-            // batched output can be split back by per-request section sizes.
-            // A request may legitimately carry >1 row (a client-side batch); a
-            // fixed split_size=1 would mis-map rows to requests, dropping rows
-            // or raising a spurious split mismatch.
-            std::vector<int64_t> row_counts;
-            row_counts.reserve(batch.size());
-            for (auto& req : batch) {
-                const auto& in_shape = req->input.shape();
-                if (in_shape.empty()) {
-                    throw std::runtime_error(
-                        "DynamicBatcher: request input must have at least one "
-                        "(batch) dimension");
-                }
-                row_counts.push_back(in_shape[0]);
-                inputs.push_back(req->input);
+            return;
+        }
+
+        // Batch multiple requests: concatenate along dim 0, single forward,
+        // split. Independent clients can submit requests whose non-batch dims,
+        // dtype, or device differ; tenzor::cat then throws, and the model may
+        // also fail on the combined batch or collapse the batch dimension. Any
+        // of those is a property of the *group*, not of an individual request,
+        // so the whole batched attempt is wrapped in its own try and degrades
+        // to per-request execution rather than failing every co-batched
+        // request. Per-request execution must produce identical results to
+        // batched execution, so availability/correctness never depend on how
+        // requests happen to be co-scheduled.
+        std::vector<Tensor> inputs;
+        inputs.reserve(batch.size());
+        // Record each request's leading-dim row count BEFORE cat so the
+        // batched output can be split back by per-request section sizes.
+        // A request may legitimately carry >1 row (a client-side batch); a
+        // fixed split_size=1 would mis-map rows to requests, dropping rows
+        // or raising a spurious split mismatch.
+        std::vector<int64_t> row_counts;
+        row_counts.reserve(batch.size());
+        bool inputs_ok = true;
+        for (auto& req : batch) {
+            const auto& in_shape = req->input.shape();
+            if (in_shape.empty()) {
+                // A scalar input cannot participate in dim-0 batching; fall
+                // back so this request (and its co-batched peers) still run.
+                inputs_ok = false;
+                break;
             }
+            row_counts.push_back(in_shape[0]);
+            inputs.push_back(req->input);
+        }
 
-            // Concatenate all inputs along batch dimension
-            auto batched_input = tenzor::cat(inputs, 0);
+        if (inputs_ok) {
+            try {
+                // Concatenate all inputs along batch dimension. Throws if the
+                // requests have incompatible non-batch shapes, dtypes, or
+                // devices.
+                auto batched_input = tenzor::cat(inputs, 0);
 
-            // Single forward pass on the full batch
-            tenzor::Variable batched_var(batched_input, false);
-            auto batched_output = model_->forward(batched_var);
+                // Single forward pass on the full batch
+                tenzor::Variable batched_var(batched_input, false);
+                auto batched_output = model_->forward(batched_var);
 
-            // split_with_sizes assumes the model preserved the dim-0 row count.
-            // Models that pool/reduce the batch dimension (or emit a fixed-size
-            // output) break that assumption: the split would throw and the
-            // outer catch would fail EVERY co-batched request — even though
-            // each would succeed run individually. Validate the row count first
-            // and, on mismatch, fall back to per-request execution so batching
-            // never changes correctness/availability versus unbatched.
-            int64_t total_rows = 0;
-            for (int64_t rc : row_counts) total_rows += rc;
-            const auto& out_shape = batched_output.tensor().shape();
-            bool batch_dim_preserved =
-                !out_shape.empty() && out_shape[0] == total_rows;
+                // split_with_sizes assumes the model preserved the dim-0 row
+                // count. Models that pool/reduce the batch dimension (or emit a
+                // fixed-size output) break that assumption: the split would
+                // throw. Validate the row count first and, on mismatch, fall
+                // back to per-request execution so batching never changes
+                // correctness/availability versus unbatched.
+                int64_t total_rows = 0;
+                for (int64_t rc : row_counts) total_rows += rc;
+                const auto& out_shape = batched_output.tensor().shape();
+                bool batch_dim_preserved =
+                    !out_shape.empty() && out_shape[0] == total_rows;
 
-            if (batch_dim_preserved) {
-                // Split the batched output by each request's actual row count so
-                // every request gets its full sub-tensor back.
-                auto split_outputs = tenzor::split_with_sizes(
-                    batched_output.tensor(), row_counts, /*dim=*/0);
-                for (size_t i = 0; i < batch.size(); ++i) {
-                    if (i < split_outputs.size()) {
-                        batch[i]->result.set_value(split_outputs[i]);
-                    } else {
-                        batch[i]->result.set_exception(
-                            std::make_exception_ptr(std::runtime_error(
-                                "Batch output split mismatch")));
+                if (batch_dim_preserved) {
+                    // Split the batched output by each request's actual row
+                    // count so every request gets its full sub-tensor back.
+                    auto split_outputs = tenzor::split_with_sizes(
+                        batched_output.tensor(), row_counts, /*dim=*/0);
+                    if (split_outputs.size() == batch.size()) {
+                        for (size_t i = 0; i < batch.size(); ++i) {
+                            batch[i]->result.set_value(split_outputs[i]);
+                        }
+                        return;
                     }
+                    // Unexpected split arity — treat as a batched-path failure
+                    // and re-run each request individually below.
                 }
-            } else {
-                // Output does not preserve the batch row count — run each
-                // request on its own so a batch-collapsing model still serves
-                // correct results. Each request's failure is isolated to that
-                // request rather than poisoning the whole batch.
-                for (auto& req : batch) {
-                    try {
-                        tenzor::Variable iv(req->input, false);
-                        req->result.set_value(model_->forward(iv).tensor());
-                    } catch (...) {
-                        try {
-                            req->result.set_exception(std::current_exception());
-                        } catch (...) {}
-                    }
-                }
+            } catch (...) {
+                // Batched execution failed for the group as a whole (cat shape/
+                // dtype/device mismatch, forward error on the combined batch,
+                // split failure, ...). Do NOT poison the batch — fall through
+                // to isolated per-request execution.
             }
         }
-    } catch (const std::exception& e) {
-        // If batch execution fails, propagate error to all requests
+
+        // Fallback: execute each request independently.
+        run_per_request(batch);
+    } catch (...) {
+        // Last-resort guard: anything outside the per-request loop (e.g. an
+        // allocation failure) must still surface to callers rather than leaving
+        // their futures unfulfilled.
         for (auto& req : batch) {
             try {
                 req->result.set_exception(std::current_exception());
@@ -262,7 +321,11 @@ auto ModelRepository::load_model(const std::string& name, const std::string& pat
         module->optimize_for_inference();
 
         entry->module = std::move(module);
-        entry->batcher = std::make_unique<DynamicBatcher>(entry->module, batch_config);
+        // Pass the serving name so the batcher can attribute its per-batch
+        // metrics (total_batch_count / total_batch_size) to the same
+        // ModelMetrics handle the request handlers update under this name.
+        entry->batcher = std::make_unique<DynamicBatcher>(
+            entry->module, batch_config, name);
         entry->batcher->start();
         entry->state.store(ModelState::READY, std::memory_order_release);
     } catch (...) {

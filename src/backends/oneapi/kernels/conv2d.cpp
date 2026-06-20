@@ -3,6 +3,7 @@
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
+#include <type_traits>
 
 #ifdef TENZOR_HAS_ONEDNN
 #include <oneapi/dnnl/dnnl.hpp>
@@ -1478,51 +1479,77 @@ auto conv2d_backward_input_im2col(const Tensor& grad_output, const Tensor& weigh
         const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
         const sycl::half* grad_output_ptr = get_data_ptr<const sycl::half>(grad_output);
 
-        // Initialize to zero
-        queue.parallel_for(sycl::range<1>(N * C_in * H_in * W_in), [=](sycl::id<1> i) {
-            grad_input_ptr[i] = sycl::half(0.0f);
-        });
-
-        Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
-        sycl::half* col_ptr = get_data_ptr<sycl::half>(col_buffer);
-
-        for (int64_t n = 0; n < N; ++n) {
-            sycl::half* grad_in_batch = grad_input_ptr + n * C_in * H_in * W_in;
-
-            for (int64_t g = 0; g < groups; ++g) {
-                const int64_t in_channel_offset = g * C_in_per_group;
-                const int64_t out_channel_offset = g * C_out_per_group;
-                const int64_t weight_offset = g * C_out_per_group * C_in_per_group * K_h * K_w;
-
-                const sycl::half* grad_out_group = grad_output_ptr + n * C_out * H_out * W_out + out_channel_offset * H_out * W_out;
-                const sycl::half* weight_group = weight_ptr + weight_offset;
-
-                const int64_t M_group = C_in_per_group * K_h * K_w;
-                const int64_t N_gemm = H_out * W_out;
-                const int64_t K_group = C_out_per_group;
-
-                // Use float accumulation for precision
-                queue.parallel_for<Conv2dBackwardInputSeparateGemmFloat16>(sycl::range<2>(M_group, N_gemm),
-                                 [=](sycl::id<2> idx) {
-                    const int64_t k = idx[0];
-                    const int64_t hw = idx[1];
-
-                    float sum = 0.0f;
-                    for (int64_t oc = 0; oc < K_group; ++oc) {
-                        sum += static_cast<float>(weight_group[oc * M_group + k]) *
-                               static_cast<float>(grad_out_group[oc * N_gemm + hw]);
-                    }
-                    col_ptr[k * N_gemm + hw] = saturate_to_half(sum);
-                });
-
-                col2im_grouped_kernel(
-                    col_ptr, C_in, C_in_per_group, in_channel_offset,
-                    H_in, W_in, K_h, K_w,
-                    padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
-                    grad_in_batch, queue
-                );
-            }
+        // F16 grouped backward-input: accumulate the whole grad_input image in a
+        // single Float32 USM scratch buffer (atomic_ref<float> is portable; half
+        // atomics are not), then narrow once at the end. This avoids the previous
+        // per-(batch,group) malloc/free + full-image widen/narrow churn (and the
+        // three serialising .wait() calls per call) that the F16 col2im overload
+        // performed, while keeping the col GEMM in full Float32 precision instead
+        // of round-tripping through half between the GEMM and col2im.
+        const int64_t im_total = N * C_in * H_in * W_in;
+        float* grad_scratch = sycl::malloc_device<float>(static_cast<size_t>(im_total), queue);
+        if (grad_scratch == nullptr) {
+            throw std::runtime_error("conv2d_backward_input_im2col(F16): failed to allocate grad scratch USM");
         }
+
+        // Float32 col buffer reused across (n, g) iterations.
+        Tensor col_buffer({col_size}, DType::Float32, grad_output.device());
+        float* col_ptr = get_data_ptr<float>(col_buffer);
+
+        try {
+            // Zero the Float32 accumulator once.
+            queue.fill(grad_scratch, 0.0f, static_cast<size_t>(im_total)).wait();
+
+            for (int64_t n = 0; n < N; ++n) {
+                float* grad_in_batch = grad_scratch + n * C_in * H_in * W_in;
+
+                for (int64_t g = 0; g < groups; ++g) {
+                    const int64_t in_channel_offset = g * C_in_per_group;
+                    const int64_t out_channel_offset = g * C_out_per_group;
+                    const int64_t weight_offset = g * C_out_per_group * C_in_per_group * K_h * K_w;
+
+                    const sycl::half* grad_out_group = grad_output_ptr + n * C_out * H_out * W_out + out_channel_offset * H_out * W_out;
+                    const sycl::half* weight_group = weight_ptr + weight_offset;
+
+                    const int64_t M_group = C_in_per_group * K_h * K_w;
+                    const int64_t N_gemm = H_out * W_out;
+                    const int64_t K_group = C_out_per_group;
+
+                    // Use float accumulation for precision; keep col buffer in float.
+                    queue.parallel_for<Conv2dBackwardInputSeparateGemmFloat16>(sycl::range<2>(M_group, N_gemm),
+                                     [=](sycl::id<2> idx) {
+                        const int64_t k = idx[0];
+                        const int64_t hw = idx[1];
+
+                        float sum = 0.0f;
+                        for (int64_t oc = 0; oc < K_group; ++oc) {
+                            sum += static_cast<float>(weight_group[oc * M_group + k]) *
+                                   static_cast<float>(grad_out_group[oc * N_gemm + hw]);
+                        }
+                        col_ptr[k * N_gemm + hw] = sum;
+                    });
+
+                    // Atomic accumulate into the Float32 scratch via the F32 overload
+                    // (native atomic_ref<float>, no per-call scratch/widen/narrow).
+                    col2im_grouped_kernel(
+                        col_ptr, C_in, C_in_per_group, in_channel_offset,
+                        H_in, W_in, K_h, K_w,
+                        padding_h, padding_w, stride_h, stride_w, dilation_h, dilation_w,
+                        grad_in_batch, queue
+                    );
+                }
+            }
+
+            // Narrow the accumulated Float32 image into the F16 grad_input once.
+            queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
+                grad_input_ptr[i] = saturate_to_half(grad_scratch[i]);
+            }).wait();
+        } catch (...) {
+            sycl::free(grad_scratch, queue);
+            throw;
+        }
+
+        sycl::free(grad_scratch, queue);
     }
     else if (grad_output.dtype() == DType::BFloat16) {
         // BF16 widen-on-device → compute in F32 → narrow back (Cast runs on the GPU).
@@ -2210,13 +2237,21 @@ class DeformableConv2dBackwardInputF64;
 class DeformableConv2dBackwardWeightF32;
 class DeformableConv2dBackwardWeightF64;
 
+// Real accumulation/interpolation type tied to the data type: full double precision
+// for Float64 deformable conv, single precision otherwise. This keeps the bilinear
+// coordinate math, weights and sampled values in the correct precision so F64
+// deformable forward/backward match the CPU reference.
+template <typename T>
+using DcnReal = std::conditional_t<std::is_same_v<T, double>, double, float>;
+
 // Device-side bilinear interpolation at fractional (h, w) in a single channel plane.
 // Returns 0 for out-of-bounds.
 template <typename T>
 inline T dcn_bilinear_sample(const T* data, int64_t H, int64_t W,
-                             float h, float w) {
-    if (h <= -1.0f || h >= static_cast<float>(H) ||
-        w <= -1.0f || w >= static_cast<float>(W)) {
+                             DcnReal<T> h, DcnReal<T> w) {
+    using Real = DcnReal<T>;
+    if (h <= Real(-1) || h >= static_cast<Real>(H) ||
+        w <= Real(-1) || w >= static_cast<Real>(W)) {
         return T(0);
     }
 
@@ -2225,15 +2260,15 @@ inline T dcn_bilinear_sample(const T* data, int64_t H, int64_t W,
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - static_cast<float>(h_low);
-    float lw = w - static_cast<float>(w_low);
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    Real lh = h - static_cast<Real>(h_low);
+    Real lw = w - static_cast<Real>(w_low);
+    Real hh = Real(1) - lh;
+    Real hw = Real(1) - lw;
 
-    float v1 = (h_low >= 0 && w_low >= 0)   ? static_cast<float>(data[h_low * W + w_low])   : 0.0f;
-    float v2 = (h_low >= 0 && w_high < W)    ? static_cast<float>(data[h_low * W + w_high])  : 0.0f;
-    float v3 = (h_high < H && w_low >= 0)    ? static_cast<float>(data[h_high * W + w_low])  : 0.0f;
-    float v4 = (h_high < H && w_high < W)    ? static_cast<float>(data[h_high * W + w_high]) : 0.0f;
+    Real v1 = (h_low >= 0 && w_low >= 0)   ? static_cast<Real>(data[h_low * W + w_low])   : Real(0);
+    Real v2 = (h_low >= 0 && w_high < W)    ? static_cast<Real>(data[h_low * W + w_high])  : Real(0);
+    Real v3 = (h_high < H && w_low >= 0)    ? static_cast<Real>(data[h_high * W + w_low])  : Real(0);
+    Real v4 = (h_high < H && w_high < W)    ? static_cast<Real>(data[h_high * W + w_high]) : Real(0);
 
     return static_cast<T>(hh * hw * v1 + hh * lw * v2 + lh * hw * v3 + lh * lw * v4);
 }
@@ -2241,9 +2276,10 @@ inline T dcn_bilinear_sample(const T* data, int64_t H, int64_t W,
 // Device-side: scatter gradient back through bilinear interpolation via sycl::atomic_ref.
 template <typename T>
 inline void dcn_bilinear_scatter(T* grad_data, int64_t H, int64_t W,
-                                  float h, float w, float top_grad) {
-    if (h <= -1.0f || h >= static_cast<float>(H) ||
-        w <= -1.0f || w >= static_cast<float>(W)) {
+                                  DcnReal<T> h, DcnReal<T> w, DcnReal<T> top_grad) {
+    using Real = DcnReal<T>;
+    if (h <= Real(-1) || h >= static_cast<Real>(H) ||
+        w <= Real(-1) || w >= static_cast<Real>(W)) {
         return;
     }
 
@@ -2252,10 +2288,10 @@ inline void dcn_bilinear_scatter(T* grad_data, int64_t H, int64_t W,
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - static_cast<float>(h_low);
-    float lw = w - static_cast<float>(w_low);
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    Real lh = h - static_cast<Real>(h_low);
+    Real lw = w - static_cast<Real>(w_low);
+    Real hh = Real(1) - lh;
+    Real hw = Real(1) - lw;
 
     if (h_low >= 0 && w_low >= 0) {
         sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
@@ -2286,12 +2322,13 @@ inline void dcn_bilinear_scatter(T* grad_data, int64_t H, int64_t W,
 // Device-side: compute dval/dh and dval/dw for bilinear interpolation (offset gradients).
 template <typename T>
 inline void dcn_bilinear_offset_grad(const T* data, int64_t H, int64_t W,
-                                      float h, float w,
-                                      float& grad_h, float& grad_w) {
-    grad_h = 0.0f;
-    grad_w = 0.0f;
-    if (h <= -1.0f || h >= static_cast<float>(H) ||
-        w <= -1.0f || w >= static_cast<float>(W)) {
+                                      DcnReal<T> h, DcnReal<T> w,
+                                      DcnReal<T>& grad_h, DcnReal<T>& grad_w) {
+    using Real = DcnReal<T>;
+    grad_h = Real(0);
+    grad_w = Real(0);
+    if (h <= Real(-1) || h >= static_cast<Real>(H) ||
+        w <= Real(-1) || w >= static_cast<Real>(W)) {
         return;
     }
 
@@ -2300,15 +2337,15 @@ inline void dcn_bilinear_offset_grad(const T* data, int64_t H, int64_t W,
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - static_cast<float>(h_low);
-    float lw = w - static_cast<float>(w_low);
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    Real lh = h - static_cast<Real>(h_low);
+    Real lw = w - static_cast<Real>(w_low);
+    Real hh = Real(1) - lh;
+    Real hw = Real(1) - lw;
 
-    float v1 = (h_low >= 0 && w_low >= 0)   ? static_cast<float>(data[h_low * W + w_low])   : 0.0f;
-    float v2 = (h_low >= 0 && w_high < W)    ? static_cast<float>(data[h_low * W + w_high])  : 0.0f;
-    float v3 = (h_high < H && w_low >= 0)    ? static_cast<float>(data[h_high * W + w_low])  : 0.0f;
-    float v4 = (h_high < H && w_high < W)    ? static_cast<float>(data[h_high * W + w_high]) : 0.0f;
+    Real v1 = (h_low >= 0 && w_low >= 0)   ? static_cast<Real>(data[h_low * W + w_low])   : Real(0);
+    Real v2 = (h_low >= 0 && w_high < W)    ? static_cast<Real>(data[h_low * W + w_high])  : Real(0);
+    Real v3 = (h_high < H && w_low >= 0)    ? static_cast<Real>(data[h_high * W + w_low])  : Real(0);
+    Real v4 = (h_high < H && w_high < W)    ? static_cast<Real>(data[h_high * W + w_high]) : Real(0);
 
     // d/dh: derivative of bilinear w.r.t. h
     grad_h = -hw * v1 - lw * v2 + hw * v3 + lw * v4;
@@ -2448,10 +2485,10 @@ auto deformable_conv2d_forward_kernel(
                         const double* off_w_plane = off_ptr +
                             (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear + 1) * H_out * W_out;
 
-                        float h_base = static_cast<float>(oh * stride_h - pad_h + kh * dil_h);
-                        float w_base = static_cast<float>(ow * stride_w - pad_w + kw * dil_w);
-                        float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
-                        float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
+                        double h_base = static_cast<double>(oh * stride_h - pad_h + kh * dil_h);
+                        double w_base = static_cast<double>(ow * stride_w - pad_w + kw * dil_w);
+                        double h_loc = h_base + off_h_plane[oh * W_out + ow];
+                        double w_loc = w_base + off_w_plane[oh * W_out + ow];
 
                         double val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
 
@@ -2676,10 +2713,10 @@ auto deformable_conv2d_backward_input_kernel(
                         const double* off_w_plane = off_ptr +
                             (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
 
-                        float h_base = static_cast<float>(oh * stride_h - pad_h + kh * dil_h);
-                        float w_base = static_cast<float>(ow * stride_w - pad_w + kw * dil_w);
-                        float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
-                        float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
+                        double h_base = static_cast<double>(oh * stride_h - pad_h + kh * dil_h);
+                        double w_base = static_cast<double>(ow * stride_w - pad_w + kw * dil_w);
+                        double h_loc = h_base + off_h_plane[oh * W_out + ow];
+                        double w_loc = w_base + off_w_plane[oh * W_out + ow];
 
                         double w_val = weight_plane[k_linear];
                         double m_val = 1.0;
@@ -2691,9 +2728,9 @@ auto deformable_conv2d_backward_input_kernel(
 
                         double top_grad = grad_out_val * w_val * m_val;
 
-                        dcn_bilinear_scatter(grad_input_plane, H, W, h_loc, w_loc, static_cast<float>(top_grad));
+                        dcn_bilinear_scatter(grad_input_plane, H, W, h_loc, w_loc, top_grad);
 
-                        float dh, dw_grad;
+                        double dh, dw_grad;
                         dcn_bilinear_offset_grad(input_plane, H, W, h_loc, w_loc, dh, dw_grad);
 
                         double* grad_off_h = go_off_ptr +
@@ -2862,16 +2899,16 @@ auto deformable_conv2d_backward_weight_kernel(
 
                 for (int64_t oh = 0; oh < H_out; ++oh) {
                     for (int64_t ow = 0; ow < W_out; ++ow) {
-                        float h_base = static_cast<float>(oh * stride_h - pad_h + kh_idx * dil_h);
-                        float w_base = static_cast<float>(ow * stride_w - pad_w + kw_idx * dil_w);
+                        double h_base = static_cast<double>(oh * stride_h - pad_h + kh_idx * dil_h);
+                        double w_base = static_cast<double>(ow * stride_w - pad_w + kw_idx * dil_w);
 
                         const double* off_h_plane = off_ptr +
                             (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear) * H_out * W_out;
                         const double* off_w_plane = off_ptr +
                             (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear + 1) * H_out * W_out;
 
-                        float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
-                        float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
+                        double h_loc = h_base + off_h_plane[oh * W_out + ow];
+                        double w_loc = w_base + off_w_plane[oh * W_out + ow];
 
                         double val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
 
@@ -2909,19 +2946,20 @@ template <typename T> struct DWConv3dK {};
 
 template <typename T>
 void run_dwconv1d(sycl::queue& q, const T* in, const T* w, const T* bias, T* out,
-                  int N, int C, int L, int kL, int Lo, int S, int P, int D) {
-    int total = N * C * Lo;
+                  int64_t N, int64_t C, int64_t L, int64_t kL, int64_t Lo,
+                  int64_t S, int64_t P, int64_t D) {
+    int64_t total = N * C * Lo;
     if (total == 0) return;
     q.parallel_for<DWConv1dK<T>>(sycl::range<1>(total), [=](sycl::id<1> i_) {
-        int idx = (int)i_;
-        int ol = idx % Lo;
-        int c  = (idx / Lo) % C;
-        int n  = idx / (C * Lo);
+        int64_t idx = (int64_t)i_;
+        int64_t ol = idx % Lo;
+        int64_t c  = (idx / Lo) % C;
+        int64_t n  = idx / (C * Lo);
         const T* in_nc = in + (n * C + c) * L;
         const T* w_c   = w + c * kL;
         T acc = bias ? bias[c] : T(0);
-        for (int k = 0; k < kL; ++k) {
-            int il = ol * S - P + k * D;
+        for (int64_t k = 0; k < kL; ++k) {
+            int64_t il = ol * S - P + k * D;
             if (il >= 0 && il < L) acc += in_nc[il] * w_c[k];
         }
         out[(n * C + c) * Lo + ol] = acc;
@@ -2931,29 +2969,31 @@ void run_dwconv1d(sycl::queue& q, const T* in, const T* w, const T* bias, T* out
 
 template <typename T>
 void run_dwconv3d(sycl::queue& q, const T* in, const T* w, const T* bias, T* out,
-                  int N, int C, int Di, int Hi, int Wi, int kD, int kH, int kW,
-                  int Do, int Ho, int Wo,
-                  int sD, int sH, int sW, int pD, int pH, int pW, int dD, int dH, int dW) {
-    int total = N * C * Do * Ho * Wo;
+                  int64_t N, int64_t C, int64_t Di, int64_t Hi, int64_t Wi,
+                  int64_t kD, int64_t kH, int64_t kW,
+                  int64_t Do, int64_t Ho, int64_t Wo,
+                  int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW,
+                  int64_t dD, int64_t dH, int64_t dW) {
+    int64_t total = N * C * Do * Ho * Wo;
     if (total == 0) return;
     q.parallel_for<DWConv3dK<T>>(sycl::range<1>(total), [=](sycl::id<1> i_) {
-        int idx = (int)i_;
-        int ow = idx % Wo;
-        int oh = (idx / Wo) % Ho;
-        int od = (idx / (Wo * Ho)) % Do;
-        int c  = (idx / (Wo * Ho * Do)) % C;
-        int n  = idx / (C * Do * Ho * Wo);
+        int64_t idx = (int64_t)i_;
+        int64_t ow = idx % Wo;
+        int64_t oh = (idx / Wo) % Ho;
+        int64_t od = (idx / (Wo * Ho)) % Do;
+        int64_t c  = (idx / (Wo * Ho * Do)) % C;
+        int64_t n  = idx / (C * Do * Ho * Wo);
         const T* in_nc = in + (n * C + c) * Di * Hi * Wi;
         const T* w_c   = w + c * kD * kH * kW;
         T acc = bias ? bias[c] : T(0);
-        for (int kd = 0; kd < kD; ++kd) {
-            int id = od * sD - pD + kd * dD;
+        for (int64_t kd = 0; kd < kD; ++kd) {
+            int64_t id = od * sD - pD + kd * dD;
             if (id < 0 || id >= Di) continue;
-            for (int kh = 0; kh < kH; ++kh) {
-                int ih = oh * sH - pH + kh * dH;
+            for (int64_t kh = 0; kh < kH; ++kh) {
+                int64_t ih = oh * sH - pH + kh * dH;
                 if (ih < 0 || ih >= Hi) continue;
-                for (int kw = 0; kw < kW; ++kw) {
-                    int iw = ow * sW - pW + kw * dW;
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t iw = ow * sW - pW + kw * dW;
                     if (iw < 0 || iw >= Wi) continue;
                     acc += in_nc[(id * Hi + ih) * Wi + iw] * w_c[(kd * kH + kh) * kW + kw];
                 }
@@ -2970,8 +3010,8 @@ auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Te
                              sycl::queue& queue) -> Tensor {
     auto is = input.shape();
     auto ws = weight.shape();
-    int N = (int)is[0], C = (int)is[1], L = (int)is[3], kL = (int)ws[3];
-    int Lo = (int)((L + 2 * padding - dilation * (kL - 1) - 1) / stride + 1);
+    int64_t N = is[0], C = is[1], L = is[3], kL = ws[3];
+    int64_t Lo = (L + 2 * padding - dilation * (kL - 1) - 1) / stride + 1;
     if (Lo <= 0) throw std::runtime_error("depthwise_conv1d (OneAPI): non-positive output length");
 
     auto run = [&](DType dt) {
@@ -2979,15 +3019,15 @@ auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Te
         Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
         Tensor b; const void* bptr = nullptr;
         if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
-        Tensor out(std::vector<int64_t>{(int64_t)N, (int64_t)C, 1, (int64_t)Lo}, dt, input.device());
+        Tensor out(std::vector<int64_t>{N, C, 1, Lo}, dt, input.device());
         if (dt == DType::Float64) {
             run_dwconv1d<double>(queue, get_data_ptr<const double>(in), get_data_ptr<const double>(w),
                 (const double*)bptr, get_data_ptr<double>(out), N, C, L, kL, Lo,
-                (int)stride, (int)padding, (int)dilation);
+                stride, padding, dilation);
         } else {
             run_dwconv1d<float>(queue, get_data_ptr<const float>(in), get_data_ptr<const float>(w),
                 (const float*)bptr, get_data_ptr<float>(out), N, C, L, kL, Lo,
-                (int)stride, (int)padding, (int)dilation);
+                stride, padding, dilation);
         }
         return out;
     };
@@ -3006,11 +3046,11 @@ auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Te
                              sycl::queue& queue) -> Tensor {
     auto is = input.shape();
     auto ws = weight.shape();
-    int N = (int)is[0], C = (int)is[1], Di = (int)is[2], Hi = (int)is[3], Wi = (int)is[4];
-    int kD = (int)ws[2], kH = (int)ws[3], kW = (int)ws[4];
-    int Do = (int)((Di + 2 * pD - dD * (kD - 1) - 1) / sD + 1);
-    int Ho = (int)((Hi + 2 * pH - dH * (kH - 1) - 1) / sH + 1);
-    int Wo = (int)((Wi + 2 * pW - dW * (kW - 1) - 1) / sW + 1);
+    int64_t N = is[0], C = is[1], Di = is[2], Hi = is[3], Wi = is[4];
+    int64_t kD = ws[2], kH = ws[3], kW = ws[4];
+    int64_t Do = (Di + 2 * pD - dD * (kD - 1) - 1) / sD + 1;
+    int64_t Ho = (Hi + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t Wo = (Wi + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
     if (Do <= 0 || Ho <= 0 || Wo <= 0) throw std::runtime_error("depthwise_conv3d (OneAPI): non-positive output size");
 
     auto run = [&](DType dt) {
@@ -3018,15 +3058,15 @@ auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Te
         Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
         Tensor b; const void* bptr = nullptr;
         if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
-        Tensor out(std::vector<int64_t>{(int64_t)N, (int64_t)C, (int64_t)Do, (int64_t)Ho, (int64_t)Wo}, dt, input.device());
+        Tensor out(std::vector<int64_t>{N, C, Do, Ho, Wo}, dt, input.device());
         if (dt == DType::Float64) {
             run_dwconv3d<double>(queue, get_data_ptr<const double>(in), get_data_ptr<const double>(w),
                 (const double*)bptr, get_data_ptr<double>(out), N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
-                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+                sD,sH,sW,pD,pH,pW,dD,dH,dW);
         } else {
             run_dwconv3d<float>(queue, get_data_ptr<const float>(in), get_data_ptr<const float>(w),
                 (const float*)bptr, get_data_ptr<float>(out), N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
-                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+                sD,sH,sW,pD,pH,pW,dD,dH,dW);
         }
         return out;
     };

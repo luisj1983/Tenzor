@@ -2976,6 +2976,11 @@ auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             __m256 clamped = _mm256_max_ps(v, min_vec);
+            // NaN parity: Intel max returns the non-NaN operand, so a NaN input
+            // would become min_f. The scalar tail and PyTorch propagate NaN, so
+            // blend the original value back wherever v is NaN.
+            __m256 nan_mask = _mm256_cmp_ps(v, v, _CMP_UNORD_Q);
+            clamped = _mm256_blendv_ps(clamped, v, nan_mask);
             _mm256_storeu_ps(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
@@ -3000,6 +3005,9 @@ auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
         for (size_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             __m256d clamped = _mm256_max_pd(v, min_vec);
+            // NaN parity with the scalar path / PyTorch (propagate NaN).
+            __m256d nan_mask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
+            clamped = _mm256_blendv_pd(clamped, v, nan_mask);
             _mm256_storeu_pd(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
@@ -3079,6 +3087,11 @@ auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             __m256 clamped = _mm256_min_ps(v, max_vec);
+            // NaN parity: Intel min returns the non-NaN operand, so a NaN input
+            // would become max_f. The scalar tail and PyTorch propagate NaN, so
+            // blend the original value back wherever v is NaN.
+            __m256 nan_mask = _mm256_cmp_ps(v, v, _CMP_UNORD_Q);
+            clamped = _mm256_blendv_ps(clamped, v, nan_mask);
             _mm256_storeu_ps(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
@@ -3103,6 +3116,9 @@ auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
         for (size_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             __m256d clamped = _mm256_min_pd(v, max_vec);
+            // NaN parity with the scalar path / PyTorch (propagate NaN).
+            __m256d nan_mask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
+            clamped = _mm256_blendv_pd(clamped, v, nan_mask);
             _mm256_storeu_pd(&out_data[i], clamped);
         }
         for (size_t i = simd_end; i < n; ++i) {
@@ -3329,21 +3345,31 @@ auto exp_kernel(const Tensor& input) -> Tensor {
                 __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
                 __m256 fp32 = _mm256_cvtph_ps(packed);
                 // Clamp to safe range for Float16
+                __m256 fp16exp_nan = _mm256_cmp_ps(fp32, fp32, _CMP_UNORD_Q);  // preserve NaN across clamp
                 fp32 = _mm256_min_ps(_mm256_max_ps(fp32, clamp_min), clamp_max);
                 __m256 result_v = fast_math::exp_avx2(fp32);
+                result_v = _mm256_blendv_ps(result_v, _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN()), fp16exp_nan);
                 __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
                 _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
             }
             for (; i < n; ++i) {
                 float val = static_cast<float>(in_data[i]);
-                val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
-                out_data[i] = Float16(std::exp(val));
+                if (std::isnan(val)) {
+                    out_data[i] = Float16(val);  // preserve NaN
+                } else {
+                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                    out_data[i] = Float16(std::exp(val));
+                }
             }
 #else
             for (size_t i = 0; i < n; ++i) {
                 float val = static_cast<float>(in_data[i]);
-                val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
-                out_data[i] = Float16(std::exp(val));
+                if (std::isnan(val)) {
+                    out_data[i] = Float16(val);  // preserve NaN
+                } else {
+                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                    out_data[i] = Float16(std::exp(val));
+                }
             }
 #endif
         } else {
@@ -3364,21 +3390,31 @@ auto exp_kernel(const Tensor& input) -> Tensor {
                     __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
                     __m256 fp32 = _mm256_cvtph_ps(packed);
                     // Clamp to safe range for Float16
+                    __m256 fp16exp_nan = _mm256_cmp_ps(fp32, fp32, _CMP_UNORD_Q);  // preserve NaN across clamp
                     fp32 = _mm256_min_ps(_mm256_max_ps(fp32, clamp_min), clamp_max);
                     __m256 result_v = fast_math::exp_avx2(fp32);
+                    result_v = _mm256_blendv_ps(result_v, _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN()), fp16exp_nan);
                     __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
                     _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
                 }
                 for (; i < end; ++i) {
                     float val = static_cast<float>(in_data[i]);
-                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
-                    out_data[i] = Float16(std::exp(val));
+                    if (std::isnan(val)) {
+                        out_data[i] = Float16(val);  // preserve NaN
+                    } else {
+                        val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                        out_data[i] = Float16(std::exp(val));
+                    }
                 }
 #else
                 for (size_t i = start; i < end; ++i) {
                     float val = static_cast<float>(in_data[i]);
-                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
-                    out_data[i] = Float16(std::exp(val));
+                    if (std::isnan(val)) {
+                        out_data[i] = Float16(val);  // preserve NaN
+                    } else {
+                        val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                        out_data[i] = Float16(std::exp(val));
+                    }
                 }
 #endif
             }
@@ -5626,26 +5662,69 @@ auto to_bool_value(const Tensor& t, size_t idx) -> bool {
 }
 } // anonymous namespace
 
-auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
-    Tensor result(shape_vec, DType::Bool, a.device());
-    size_t n = static_cast<size_t>(a.numel());
+// Apply a binary boolean op over two (possibly broadcasting) operands of any
+// dtype, writing a Bool result of the broadcast shape. Indices into each
+// operand are computed via broadcast strides so smaller operands (scalar or a
+// broadcastable shape) are never read out of bounds and the output shape is the
+// true broadcast shape — matching minimum/eq and PyTorch semantics.
+template<typename BoolOp>
+static auto logical_binary_kernel(const Tensor& a, const Tensor& b, BoolOp op) -> Tensor {
+    // Logical ops are dtype-agnostic (operands may differ in dtype — each is
+    // reduced to bool via to_bool_value), so do NOT enforce equal dtypes the way
+    // validate_elementwise does. We still require contiguous, broadcastable
+    // operands (the op layer guarantees both via binary_op_raw).
+    if (!a.is_contiguous() || !b.is_contiguous()) {
+        throw std::runtime_error("Element-wise operations require contiguous tensors");
+    }
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+
+    Tensor result(output_shape, DType::Bool, a.device());
     bool* out = result.data<bool>();
-    for (size_t i = 0; i < n; ++i) {
-        out[i] = to_bool_value(a, i) && to_bool_value(b, i);
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(result.numel());
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = op(to_bool_value(a, i), to_bool_value(b, i));
+        }
+        return result;
+    }
+
+    auto strides_a = detail::compute_broadcast_strides(shape_a_vec, output_shape);
+    auto strides_b = detail::compute_broadcast_strides(shape_b_vec, output_shape);
+
+    const size_t ndim = output_shape.size();
+    int64_t total_elements = 1;
+    for (auto dim : output_shape) total_elements *= dim;
+
+    std::vector<int64_t> coords(ndim, 0);
+    for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+        int64_t idx_a = 0, idx_b = 0;
+        for (size_t d = 0; d < ndim; ++d) {
+            idx_a += coords[d] * strides_a[d];
+            idx_b += coords[d] * strides_b[d];
+        }
+        out[out_idx] = op(to_bool_value(a, static_cast<size_t>(idx_a)),
+                          to_bool_value(b, static_cast<size_t>(idx_b)));
+
+        for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+            if (++coords[d] < output_shape[d]) break;
+            coords[d] = 0;
+        }
     }
     return result;
 }
 
+auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return logical_binary_kernel(a, b, [](bool x, bool y) { return x && y; });
+}
+
 auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
-    Tensor result(shape_vec, DType::Bool, a.device());
-    size_t n = static_cast<size_t>(a.numel());
-    bool* out = result.data<bool>();
-    for (size_t i = 0; i < n; ++i) {
-        out[i] = to_bool_value(a, i) || to_bool_value(b, i);
-    }
-    return result;
+    return logical_binary_kernel(a, b, [](bool x, bool y) { return x || y; });
 }
 
 auto logical_not_kernel(const Tensor& input) -> Tensor {
@@ -5660,14 +5739,7 @@ auto logical_not_kernel(const Tensor& input) -> Tensor {
 }
 
 auto logical_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
-    Tensor result(shape_vec, DType::Bool, a.device());
-    size_t n = static_cast<size_t>(a.numel());
-    bool* out = result.data<bool>();
-    for (size_t i = 0; i < n; ++i) {
-        out[i] = to_bool_value(a, i) != to_bool_value(b, i);
-    }
-    return result;
+    return logical_binary_kernel(a, b, [](bool x, bool y) { return x != y; });
 }
 
 template<typename T>
@@ -6625,20 +6697,42 @@ auto heaviside_kernel(const Tensor& input, const Tensor& values) -> Tensor {
         return result.to(input.dtype());
     }
 
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    // heaviside broadcasts `values` against `input` (matching PyTorch). A scalar
+    // `values` (the common case) and any broadcastable shape must be indexed via
+    // broadcast strides — reading val_data[i] with input's element count is an
+    // out-of-bounds heap read whenever values has fewer elements than input.
+    auto in_shape = input.shape();
+    auto val_shape = values.shape();
+    std::vector<int64_t> in_shape_vec(in_shape.begin(), in_shape.end());
+    std::vector<int64_t> val_shape_vec(val_shape.begin(), val_shape.end());
+    std::vector<int64_t> output_shape =
+        detail::compute_broadcast_shape(in_shape_vec, val_shape_vec);
+
+    auto output = Tensor::empty_uninitialized(output_shape, input.dtype(), input.device());
+    int64_t n = output.numel();
+
+    const bool same_shape = detail::have_same_shape(input, values);
 
     TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "heaviside", [&]() {
         const scalar_t* in_data = input.data<scalar_t>();
         const scalar_t* val_data = values.data<scalar_t>();
         scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            scalar_t x = in_data[i];
-            if (x < scalar_t(0)) out_data[i] = scalar_t(0);
-            else if (x == scalar_t(0)) out_data[i] = val_data[i];
-            else out_data[i] = scalar_t(1);
+
+        auto apply = [](scalar_t x, scalar_t v) -> scalar_t {
+            if (x < scalar_t(0)) return scalar_t(0);
+            if (x == scalar_t(0)) return v;
+            return scalar_t(1);
+        };
+
+        if (same_shape) {
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = apply(in_data[i], val_data[i]);
+            }
+        } else {
+            detail::broadcast_op<scalar_t, scalar_t>(
+                in_data, val_data, out_data, in_shape_vec, val_shape_vec, output_shape,
+                apply);
         }
     });
     return output;
@@ -7082,12 +7176,14 @@ auto nansum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         Tensor result({1}, input.dtype(), input.device());
         TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "nansum", [&]() {
             const scalar_t* data = input.data<scalar_t>();
-            scalar_t acc = 0;
+            // Accumulate in double so a Float32 input does not lose precision in
+            // a long sequential sum; lossless for Float64 input.
+            double acc = 0.0;
             for (int64_t i = 0; i < n; i++) {
                 scalar_t v = data[i];
-                if (!std::isnan(v)) acc += v;
+                if (!std::isnan(v)) acc += static_cast<double>(v);
             }
-            *result.data<scalar_t>() = acc;
+            *result.data<scalar_t>() = static_cast<scalar_t>(acc);
         });
         return result;
     }
@@ -7119,13 +7215,13 @@ auto nansum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         for (int64_t idx = 0; idx < out_n; idx++) {
             int64_t o = idx / inner;
             int64_t i_inner = idx % inner;
-            scalar_t acc = 0;
+            double acc = 0.0;
             for (int64_t r = 0; r < reduce_size; r++) {
                 int64_t src_idx = (o * reduce_size + r) * inner + i_inner;
                 scalar_t v = in_data[src_idx];
-                if (!std::isnan(v)) acc += v;
+                if (!std::isnan(v)) acc += static_cast<double>(v);
             }
-            out_data[idx] = acc;
+            out_data[idx] = static_cast<scalar_t>(acc);
         }
     });
     return result;
@@ -7143,13 +7239,14 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         Tensor result({1}, input.dtype(), input.device());
         TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "nanmean", [&]() {
             const scalar_t* data = input.data<scalar_t>();
-            scalar_t acc = 0;
+            double acc = 0.0;
             int64_t count = 0;
             for (int64_t i = 0; i < n; i++) {
                 scalar_t v = data[i];
-                if (!std::isnan(v)) { acc += v; count++; }
+                if (!std::isnan(v)) { acc += static_cast<double>(v); count++; }
             }
-            *result.data<scalar_t>() = count > 0 ? acc / static_cast<scalar_t>(count) : scalar_t(0);
+            *result.data<scalar_t>() =
+                count > 0 ? static_cast<scalar_t>(acc / static_cast<double>(count)) : scalar_t(0);
         });
         return result;
     }
@@ -7180,14 +7277,15 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         for (int64_t idx = 0; idx < out_n; idx++) {
             int64_t o = idx / inner;
             int64_t i_inner = idx % inner;
-            scalar_t acc = 0;
+            double acc = 0.0;
             int64_t count = 0;
             for (int64_t r = 0; r < reduce_size; r++) {
                 int64_t src_idx = (o * reduce_size + r) * inner + i_inner;
                 scalar_t v = in_data[src_idx];
-                if (!std::isnan(v)) { acc += v; count++; }
+                if (!std::isnan(v)) { acc += static_cast<double>(v); count++; }
             }
-            out_data[idx] = count > 0 ? acc / static_cast<scalar_t>(count) : scalar_t(0);
+            out_data[idx] =
+                count > 0 ? static_cast<scalar_t>(acc / static_cast<double>(count)) : scalar_t(0);
         }
     });
     return result;
@@ -8363,25 +8461,27 @@ auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
         Tensor result({1}, input.dtype(), input.device());
         TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "nanvar", [&]() {
             const scalar_t* data = input.data<scalar_t>();
-            // First pass: compute nanmean
-            scalar_t acc = 0;
+            // First pass: compute nanmean. Accumulate in double so a Float32
+            // input keeps precision over a long sequential sum.
+            double acc = 0.0;
             int64_t count = 0;
             for (int64_t i = 0; i < n; i++) {
                 scalar_t v = data[i];
-                if (!std::isnan(v)) { acc += v; count++; }
+                if (!std::isnan(v)) { acc += static_cast<double>(v); count++; }
             }
-            scalar_t mean_val = count > 0 ? acc / static_cast<scalar_t>(count) : scalar_t(0);
+            double mean_val = count > 0 ? acc / static_cast<double>(count) : 0.0;
             // Second pass: compute sum of squared deviations
-            scalar_t sum_sq = 0;
+            double sum_sq = 0.0;
             for (int64_t i = 0; i < n; i++) {
                 scalar_t v = data[i];
                 if (!std::isnan(v)) {
-                    scalar_t diff = v - mean_val;
+                    double diff = static_cast<double>(v) - mean_val;
                     sum_sq += diff * diff;
                 }
             }
             int64_t denom = count - correction;
-            *result.data<scalar_t>() = denom > 0 ? sum_sq / static_cast<scalar_t>(denom) : scalar_t(0);
+            *result.data<scalar_t>() =
+                denom > 0 ? static_cast<scalar_t>(sum_sq / static_cast<double>(denom)) : scalar_t(0);
         });
         return result;
     }
@@ -8413,27 +8513,28 @@ auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
         for (int64_t idx = 0; idx < out_n; idx++) {
             int64_t o = idx / inner;
             int64_t i_inner = idx % inner;
-            // First pass: nanmean
-            scalar_t acc = 0;
+            // First pass: nanmean (accumulate in double for Float32 precision)
+            double acc = 0.0;
             int64_t count = 0;
             for (int64_t r = 0; r < reduce_size; r++) {
                 int64_t src_idx = (o * reduce_size + r) * inner + i_inner;
                 scalar_t v = in_data[src_idx];
-                if (!std::isnan(v)) { acc += v; count++; }
+                if (!std::isnan(v)) { acc += static_cast<double>(v); count++; }
             }
-            scalar_t mean_val = count > 0 ? acc / static_cast<scalar_t>(count) : scalar_t(0);
+            double mean_val = count > 0 ? acc / static_cast<double>(count) : 0.0;
             // Second pass: sum of squared deviations
-            scalar_t sum_sq = 0;
+            double sum_sq = 0.0;
             for (int64_t r = 0; r < reduce_size; r++) {
                 int64_t src_idx = (o * reduce_size + r) * inner + i_inner;
                 scalar_t v = in_data[src_idx];
                 if (!std::isnan(v)) {
-                    scalar_t diff = v - mean_val;
+                    double diff = static_cast<double>(v) - mean_val;
                     sum_sq += diff * diff;
                 }
             }
             int64_t denom = count - correction;
-            out_data[idx] = denom > 0 ? sum_sq / static_cast<scalar_t>(denom) : scalar_t(0);
+            out_data[idx] =
+                denom > 0 ? static_cast<scalar_t>(sum_sq / static_cast<double>(denom)) : scalar_t(0);
         }
     });
     return result;
@@ -8717,6 +8818,35 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p) -> T
 // Pdist kernel (all-pairs pairwise distances)
 // ============================================================================
 
+// Closed-form O(1) inversion of the flat upper-triangular index (i<j, row-major
+// over an N-row condensed distance matrix) back to its (i, j) row/column pair.
+// Replaces the previous O(N) per-pair linear scan (which made the index decode
+// O(N^3) overall). The flat ordering is:
+//     idx = i*N - i*(i+1)/2 + (j - i - 1),   0 <= i < j < N
+// Inverting for i (the row):
+//     i = floor( ((2N - 1) - sqrt((2N-1)^2 - 8*idx)) / 2 )
+// then j follows directly. The sqrt is computed in double and the result is
+// clamped/corrected to guard against floating-point rounding at the row
+// boundaries, so every idx maps to exactly the same pair the scan produced.
+static inline std::pair<int64_t, int64_t> pdist_decode_pair(int64_t idx, int64_t N) {
+    const double Nd = static_cast<double>(N);
+    const double b = 2.0 * Nd - 1.0;
+    double disc = b * b - 8.0 * static_cast<double>(idx);
+    if (disc < 0.0) disc = 0.0;
+    int64_t i = static_cast<int64_t>((b - std::sqrt(disc)) / 2.0);
+    if (i < 0) i = 0;
+    if (i > N - 2) i = N - 2;
+    // row_start = number of pairs in rows 0..i-1 = i*N - i*(i+1)/2
+    auto row_start = [N](int64_t r) -> int64_t {
+        return r * N - r * (r + 1) / 2;
+    };
+    // Correct for rounding: ensure row_start(i) <= idx < row_start(i+1).
+    while (i < N - 2 && row_start(i + 1) <= idx) ++i;
+    while (i > 0 && row_start(i) > idx) --i;
+    int64_t j = idx - row_start(i) + i + 1;
+    return {i, j};
+}
+
 auto pdist_kernel(const Tensor& input, double p) -> Tensor {
     return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
         int64_t N = x_wide.shape()[0];
@@ -8732,15 +8862,7 @@ auto pdist_kernel(const Tensor& input, double p) -> Tensor {
             if (p == 2.0) {
                 _Pragma("omp parallel for if(num_pairs > 1000)")
                 for (int64_t idx = 0; idx < num_pairs; idx++) {
-                    // Map flat index to (i, j) pair where i < j
-                    // Using the formula: idx = i * N - i*(i+1)/2 + j - i - 1
-                    // We solve for i iteratively for correctness
-                    int64_t i = 0, offset = 0;
-                    while (offset + (N - 1 - i) <= idx) {
-                        offset += (N - 1 - i);
-                        i++;
-                    }
-                    int64_t j = idx - offset + i + 1;
+                    auto [i, j] = pdist_decode_pair(idx, N);
 
                     scalar_t sum_sq = 0;
                     for (int64_t d = 0; d < D; d++) {
@@ -8752,12 +8874,7 @@ auto pdist_kernel(const Tensor& input, double p) -> Tensor {
             } else if (p == 1.0) {
                 _Pragma("omp parallel for if(num_pairs > 1000)")
                 for (int64_t idx = 0; idx < num_pairs; idx++) {
-                    int64_t i = 0, offset = 0;
-                    while (offset + (N - 1 - i) <= idx) {
-                        offset += (N - 1 - i);
-                        i++;
-                    }
-                    int64_t j = idx - offset + i + 1;
+                    auto [i, j] = pdist_decode_pair(idx, N);
 
                     scalar_t sum_abs = 0;
                     for (int64_t d = 0; d < D; d++) {
@@ -8768,12 +8885,7 @@ auto pdist_kernel(const Tensor& input, double p) -> Tensor {
             } else if (std::isinf(p)) {
                 _Pragma("omp parallel for if(num_pairs > 1000)")
                 for (int64_t idx = 0; idx < num_pairs; idx++) {
-                    int64_t i = 0, offset = 0;
-                    while (offset + (N - 1 - i) <= idx) {
-                        offset += (N - 1 - i);
-                        i++;
-                    }
-                    int64_t j = idx - offset + i + 1;
+                    auto [i, j] = pdist_decode_pair(idx, N);
 
                     scalar_t max_abs = 0;
                     for (int64_t d = 0; d < D; d++) {
@@ -8786,12 +8898,7 @@ auto pdist_kernel(const Tensor& input, double p) -> Tensor {
                 scalar_t inv_p = scalar_t(1) / p_val;
                 _Pragma("omp parallel for if(num_pairs > 1000)")
                 for (int64_t idx = 0; idx < num_pairs; idx++) {
-                    int64_t i = 0, offset = 0;
-                    while (offset + (N - 1 - i) <= idx) {
-                        offset += (N - 1 - i);
-                        i++;
-                    }
-                    int64_t j = idx - offset + i + 1;
+                    auto [i, j] = pdist_decode_pair(idx, N);
 
                     scalar_t sum_pow = 0;
                     for (int64_t d = 0; d < D; d++) {

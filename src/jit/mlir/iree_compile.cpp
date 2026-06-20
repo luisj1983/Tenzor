@@ -33,6 +33,7 @@
 #include <cerrno>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -359,25 +360,56 @@ auto run_iree_compile_subprocess(const std::string& binary,
     }
     close(in_pipe[1]);
 
-    auto drain = [](int fd) {
-        std::string s;
+    // Drain stdout and stderr concurrently with poll(). Draining stdout to
+    // EOF before touching stderr would deadlock: with `-o <file>` the child's
+    // stdout is empty and only reaches EOF at process exit, while iree-compile
+    // can emit more diagnostics on stderr than the ~64KB pipe buffer holds.
+    // Once the stderr pipe fills the child blocks on write(STDERR) forever,
+    // never exits, so stdout never reaches EOF. Interleaving the reads lets us
+    // keep both pipes drained so the child can always make progress.
+    vmfb_out.clear();
+    stderr_out.clear();
+    {
+        struct pollfd fds[2];
+        fds[0].fd = out_pipe[0];
+        fds[1].fd = err_pipe[0];
+        fds[0].events = fds[1].events = POLLIN;
+        std::string* const targets[2] = {&vmfb_out, &stderr_out};
+        int open_fds = 2;
         char buf[8192];
-        while (true) {
-            const ssize_t r = read(fd, buf, sizeof(buf));
-            if (r > 0) {
-                s.append(buf, static_cast<std::size_t>(r));
-            } else if (r == 0) {
-                break;
-            } else {
+        while (open_fds > 0) {
+            for (int i = 0; i < 2; ++i) {
+                fds[i].revents = 0;
+                if (fds[i].fd < 0) {
+                    fds[i].events = 0;  // ignored by poll() once fd is -1
+                }
+            }
+            const int pr = poll(fds, 2, -1);
+            if (pr < 0) {
                 if (errno == EINTR) continue;
-                break;
+                break;  // unexpected poll failure; stop draining
+            }
+            for (int i = 0; i < 2; ++i) {
+                if (fds[i].fd < 0) continue;
+                // POLLHUP/POLLERR may arrive with or without POLLIN; attempt a
+                // read whenever the kernel reports any activity so we capture
+                // bytes buffered alongside a hangup.
+                if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+                    const ssize_t r = read(fds[i].fd, buf, sizeof(buf));
+                    if (r > 0) {
+                        targets[i]->append(buf, static_cast<std::size_t>(r));
+                    } else if (r == 0) {
+                        // EOF: stop polling this descriptor.
+                        fds[i].fd = -1;
+                        --open_fds;
+                    } else if (errno != EINTR && errno != EAGAIN) {
+                        fds[i].fd = -1;
+                        --open_fds;
+                    }
+                }
             }
         }
-        return s;
-    };
-
-    vmfb_out   = drain(out_pipe[0]);
-    stderr_out = drain(err_pipe[0]);
+    }
     close(out_pipe[0]);
     close(err_pipe[0]);
 

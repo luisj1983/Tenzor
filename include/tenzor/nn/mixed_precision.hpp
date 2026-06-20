@@ -118,6 +118,11 @@ public:
     /// Copy model's working parameters -> FP32 masters (after optimizer step)
     auto sync_from_working() -> void;
 
+    /// Zero the gradients of the working (FP16/BF16) parameters. The optimizer's
+    /// zero_grad() only touches the FP32 master Variables, so the working leaves
+    /// that backward() accumulates into must be zeroed independently each step.
+    auto zero_working_grads() -> void;
+
     /// Get the FP32 master parameters (for optimizer construction)
     auto master_params() -> std::vector<std::shared_ptr<Variable>>&;
 

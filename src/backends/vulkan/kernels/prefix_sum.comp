@@ -83,13 +83,25 @@ void main() {
             prefix_sums[gid] = shared_data[tid];
         }
     } else {
-        // Pass 1: Add block offsets
+        // Pass 1: Add block offsets.
+        //
+        // The exclusive prefix of all preceding block sums is identical for
+        // every thread in this workgroup, so compute it once (cooperatively in
+        // thread 0) into shared memory rather than having all WORKGROUP_SIZE
+        // threads redundantly re-run the O(bid) summation. shared_data[0] is
+        // reused as the per-block scratch slot for the broadcast.
         if (bid == 0) return;
 
-        uint block_offset = 0;
-        for (uint i = 0; i < bid; i++) {
-            block_offset += block_sums[i];
+        if (tid == 0) {
+            uint block_offset = 0;
+            for (uint i = 0; i < bid; i++) {
+                block_offset += block_sums[i];
+            }
+            shared_data[0] = block_offset;
         }
+        barrier();
+
+        uint block_offset = shared_data[0];
 
         if (gid < params.n_elements) {
             prefix_sums[gid] += block_offset;

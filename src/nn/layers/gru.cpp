@@ -166,6 +166,22 @@ auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable
                           gates_ih.dtype(), gates_ih.device()), false);
     }
 
+    // For Float16/BFloat16, run the gate sigmoid/tanh, reset/update gating, and
+    // the new-state combine in Float32, then narrow the new hidden state back.
+    // Mirrors GRUCell::forward: half-precision gate activations and the
+    // recurrence lose precision and some elementwise kernels lack half dispatch.
+    // Widening h to Float32 makes weight_hh_ cast its weights to Float32 to match
+    // (Linear's compute dtype follows input), and we widen the precomputed
+    // gates_ih constant to Float32 so all gate arithmetic runs at Float32 —
+    // including the mode-0 re-run of weight_hh_ on (r_t ⊙ h).
+    const DType orig_dtype = gates_ih.dtype();
+    const bool needs_upcast =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor gates_ih_c = needs_upcast ? gates_ih.to(DType::Float32) : gates_ih;
+    if (needs_upcast) {
+        h = variable_cast(h, DType::Float32);
+    }
+
     // Variable-level hidden-to-hidden gate computation.
     auto gates_hh = weight_hh_->forward(h);  // Variable, carries grad_fn
 
@@ -173,7 +189,7 @@ auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable
     // grad). No autograd-aware chunk yet, so split 3*H-wide gate tensors with
     // autograd-aware slice — same pattern as the standard RNN per-timestep
     // path and as our LSTMCell::forward_with_precomputed_ih rewrite.
-    Variable gates_ih_var(gates_ih, false);
+    Variable gates_ih_var(gates_ih_c, false);
     const int64_t H = hidden_size_;
     auto r_i = ::tenzor::slice(gates_ih_var, 1, 0,     H);
     auto z_i = ::tenzor::slice(gates_ih_var, 1, H,   2*H);
@@ -200,7 +216,10 @@ auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable
     }
 
     // h_new = (1 - z_t) * n_t + z_t * h   ≡   n_t + z_t * (h - n_t)
-    return n_t + z_t * (h - n_t);
+    auto h_new = n_t + z_t * (h - n_t);
+
+    // Narrow the new hidden state back to the caller's original dtype.
+    return needs_upcast ? variable_cast(h_new, orig_dtype) : h_new;
 }
 
 // ============================================================================
@@ -386,8 +405,14 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // below only implement the linear_before_reset=1 new-gate math. When the
     // GRU is configured for mode 0 we must fall through to the per-timestep
     // autograd path, whose GRUCell::forward honors linear_before_reset_.
+    // NOTE: must exclude bidirectional. The fused fast-path below iterates only
+    // forward_cells_ and stacks num_layers states (feature dim = hidden), so a
+    // bidirectional GRU would silently run forward-only and produce the wrong
+    // output/h_final shapes. Bidirectional must fall through to the per-timestep
+    // autograd path that also runs backward_cells_.
     const bool can_use_fused =
         linear_before_reset_ &&
+        !bidirectional_ &&
         !x.requires_grad() && !tenzor::is_grad_enabled();
 
     if (can_use_fused) {

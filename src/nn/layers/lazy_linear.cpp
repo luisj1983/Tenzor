@@ -179,36 +179,44 @@ auto LazyLinear::forward_impl(const Variable& input) -> Variable {
     if (is_2d) {
         DType compute_dtype = input.dtype();
 
-        // Handle device mismatch - transfer input to weight's device
-        Variable input_device = input;
+        // Handle device mismatch - transfer weight/bias to the input's device
+        // via the autograd-aware to_device (mirrors Linear::forward_impl). This
+        // keeps computation AND the gradient on the input's device, inserting a
+        // DeviceTransferBackward for the weight so its gradient is moved back to
+        // the weight's device during backward. Moving the input instead would
+        // route the input gradient to the wrong device (it would land on the
+        // weight's device while the input's grad_fn expects the input device).
+        Variable weight_device = weight;
         if (input.tensor().device() != weight.tensor().device()) {
-            auto input_transferred = input.tensor().to(weight.tensor().device());
-            input_device = Variable(input_transferred, input.requires_grad());
-            input_device.set_grad_fn(input.grad_fn());
+            weight_device = autograd::to_device(weight, input.tensor().device());
         }
 
         // Handle dtype mismatch
-        Variable weight_matched = variable_cast(weight, compute_dtype);
+        Variable weight_matched = variable_cast(weight_device, compute_dtype);
 
         Variable bias_matched;
         Variable* bias_ptr = nullptr;
         auto bias_it = parameters_.find("bias");
         if (bias_it != parameters_.end()) {
-            bias_matched = variable_cast(*bias_it->second, compute_dtype);
+            Variable bias_device = *bias_it->second;
+            if (input.tensor().device() != bias_device.tensor().device()) {
+                bias_device = autograd::to_device(bias_device, input.tensor().device());
+            }
+            bias_matched = variable_cast(bias_device, compute_dtype);
             bias_ptr = &bias_matched;
         }
 
-        if (has_fused_linear_kernel(weight.tensor().device())) {
+        if (has_fused_linear_kernel(input.tensor().device())) {
             Variable zero_bias_var;
             if (!bias_ptr) {
-                auto zero_bias = zeros({out_features_}, compute_dtype, input_device.tensor().device());
+                auto zero_bias = zeros({out_features_}, compute_dtype, input.tensor().device());
                 zero_bias_var = Variable(zero_bias, false);
-                return autograd::linear(input_device, weight_matched, zero_bias_var);
+                return autograd::linear(input, weight_matched, zero_bias_var);
             } else {
-                return autograd::linear(input_device, weight_matched, *bias_ptr);
+                return autograd::linear(input, weight_matched, *bias_ptr);
             }
         } else {
-            return linear_via_matmul(input_device, weight_matched, bias_ptr);
+            return linear_via_matmul(input, weight_matched, bias_ptr);
         }
     }
 
@@ -224,35 +232,40 @@ auto LazyLinear::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> flat_shape = {batch_total, in_features_};
     auto input_2d = autograd::reshape(input, flat_shape);
 
-    Variable input_2d_device = input_2d;
+    // Handle device mismatch - transfer weight/bias to the input's device via
+    // the autograd-aware to_device (mirrors Linear::forward_impl), keeping the
+    // computation and the input gradient on the input's device.
+    Variable weight_device = weight;
     if (input_2d.tensor().device() != weight.tensor().device()) {
-        auto input_transferred = input_2d.tensor().to(weight.tensor().device());
-        input_2d_device = Variable(input_transferred, input_2d.requires_grad());
-        input_2d_device.set_grad_fn(input_2d.grad_fn());
+        weight_device = autograd::to_device(weight, input_2d.tensor().device());
     }
 
-    Variable weight_matched = variable_cast(weight, compute_dtype);
+    Variable weight_matched = variable_cast(weight_device, compute_dtype);
 
     Variable bias_matched;
     Variable* bias_ptr = nullptr;
     auto bias_it = parameters_.find("bias");
     if (bias_it != parameters_.end()) {
-        bias_matched = variable_cast(*bias_it->second, compute_dtype);
+        Variable bias_device = *bias_it->second;
+        if (input_2d.tensor().device() != bias_device.tensor().device()) {
+            bias_device = autograd::to_device(bias_device, input_2d.tensor().device());
+        }
+        bias_matched = variable_cast(bias_device, compute_dtype);
         bias_ptr = &bias_matched;
     }
 
     Variable output_2d;
-    if (has_fused_linear_kernel(weight.tensor().device())) {
+    if (has_fused_linear_kernel(input_2d.tensor().device())) {
         Variable zero_bias_var;
         if (!bias_ptr) {
-            auto zero_bias = zeros({out_features_}, compute_dtype, input_2d_device.tensor().device());
+            auto zero_bias = zeros({out_features_}, compute_dtype, input_2d.tensor().device());
             zero_bias_var = Variable(zero_bias, false);
-            output_2d = autograd::linear(input_2d_device, weight_matched, zero_bias_var);
+            output_2d = autograd::linear(input_2d, weight_matched, zero_bias_var);
         } else {
-            output_2d = autograd::linear(input_2d_device, weight_matched, *bias_ptr);
+            output_2d = autograd::linear(input_2d, weight_matched, *bias_ptr);
         }
     } else {
-        output_2d = linear_via_matmul(input_2d_device, weight_matched, bias_ptr);
+        output_2d = linear_via_matmul(input_2d, weight_matched, bias_ptr);
     }
 
     std::vector<int64_t> output_shape = original_shape;

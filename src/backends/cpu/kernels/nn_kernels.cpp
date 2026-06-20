@@ -1022,6 +1022,30 @@ auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
         num_bags -= 1;
     }
 
+    // Validate offsets before any (potentially parallel) read of the embeddings
+    // buffer. Per-bag [start, end) bounds are derived from offsets and indexed
+    // directly into emb_ptr; a non-monotonic or out-of-range offset would cause
+    // an out-of-bounds read (and OOB write of the argmax buffer in max mode).
+    // Mirrors the index validation done by the plain-embedding lookup paths.
+    // Throwing here (sequentially) is safe; throwing inside the OMP region is UB.
+    {
+        int64_t prev = 0;
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            int64_t start = offsets_ptr[bag];
+            int64_t end = (bag + 1 < offsets.numel()) ? offsets_ptr[bag + 1]
+                                                       : total_elements;
+            if (start < prev || start > total_elements ||
+                end < start || end > total_elements) {
+                throw std::out_of_range(
+                    "embedding_bag_forward: offset out of range or non-monotonic "
+                    "at bag " + std::to_string(bag) + " ([" +
+                    std::to_string(start) + ", " + std::to_string(end) +
+                    ") not within [0, " + std::to_string(total_elements) + "])");
+            }
+            prev = start;
+        }
+    }
+
     // Float16/BFloat16: upcast to Float32, compute, downcast the output. The
     // Int64 argmax indices are dtype-independent and pass through unchanged.
     // Done before allocating output/max_indices so the recursive Float32 call
@@ -1146,6 +1170,28 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
 
     if (include_last_offset && num_bags > 0) {
         num_bags -= 1;
+    }
+
+    // Validate offsets before deriving per-bag [start, end) scatter bounds. A
+    // non-monotonic or out-of-range offset would otherwise produce an out-of-
+    // range loop bound into indices_ptr. Mirrors the forward validation.
+    {
+        int64_t prev = 0;
+        const int64_t offsets_len = offsets.numel();
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            int64_t start = offsets_ptr[bag];
+            int64_t end = (bag + 1 < offsets_len) ? offsets_ptr[bag + 1]
+                                                   : total_elements;
+            if (start < prev || start > total_elements ||
+                end < start || end > total_elements) {
+                throw std::out_of_range(
+                    "embedding_bag_backward: offset out of range or non-monotonic "
+                    "at bag " + std::to_string(bag) + " ([" +
+                    std::to_string(start) + ", " + std::to_string(end) +
+                    ") not within [0, " + std::to_string(total_elements) + "])");
+            }
+            prev = start;
+        }
     }
 
     // Exact max-mode backward: the forward kernel emits, per (bag, feature), the
@@ -2635,8 +2681,11 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
         #pragma omp parallel if(N * num_groups > 16)
         {
-            std::vector<float> t_gw(C, 0.0f);
-            std::vector<float> t_gb(C, 0.0f);
+            // Accumulate reductions in double to match the file's double-
+            // accumulation policy for normalization statistics; narrow only
+            // when writing the (float) grad buffers.
+            std::vector<double> t_gw(C, 0.0);
+            std::vector<double> t_gb(C, 0.0);
 
             #pragma omp for collapse(2)
             for (int64_t n = 0; n < N; ++n) {
@@ -2645,33 +2694,34 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                     float m = mean_data[n * num_groups + g];
                     float r = rstd_data[n * num_groups + g];
 
-                    float ds = 0.0f, db = 0.0f;
+                    double ds = 0.0, db = 0.0;
                     for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                         for (int64_t s = 0; s < spatial_size; ++s) {
                             int64_t idx = (n * C + c) * spatial_size + s;
-                            float dy = grad_out_f32[idx];
-                            float x_hat = (in_f32[idx] - m) * r;
+                            double dy = grad_out_f32[idx];
+                            double x_hat = (static_cast<double>(in_f32[idx]) - m) * r;
                             ds += dy * w_f32[c] * x_hat;
                             db += dy * w_f32[c];
                         }
                     }
 
-                    float inv_gs = 1.0f / static_cast<float>(group_size);
+                    double inv_gs = 1.0 / static_cast<double>(group_size);
                     for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                         for (int64_t s = 0; s < spatial_size; ++s) {
                             int64_t idx = (n * C + c) * spatial_size + s;
-                            float dy = grad_out_f32[idx];
-                            float x_hat = (in_f32[idx] - m) * r;
-                            grad_in_f32[idx] = r * (dy * w_f32[c] - inv_gs * (db + x_hat * ds));
+                            double dy = grad_out_f32[idx];
+                            double x_hat = (static_cast<double>(in_f32[idx]) - m) * r;
+                            grad_in_f32[idx] = static_cast<float>(
+                                r * (dy * w_f32[c] - inv_gs * (db + x_hat * ds)));
                         }
                     }
 
                     for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                         for (int64_t s = 0; s < spatial_size; ++s) {
                             int64_t idx = (n * C + c) * spatial_size + s;
-                            float x_hat = (in_f32[idx] - m) * r;
-                            t_gw[c] += grad_out_f32[idx] * x_hat;
-                            t_gb[c] += grad_out_f32[idx];
+                            double x_hat = (static_cast<double>(in_f32[idx]) - m) * r;
+                            t_gw[c] += static_cast<double>(grad_out_f32[idx]) * x_hat;
+                            t_gb[c] += static_cast<double>(grad_out_f32[idx]);
                         }
                     }
                 }
@@ -2680,8 +2730,8 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             #pragma omp critical
             {
                 for (int64_t c = 0; c < C; ++c) {
-                    grad_w_f32[c] += t_gw[c];
-                    grad_b_f32[c] += t_gb[c];
+                    grad_w_f32[c] += static_cast<float>(t_gw[c]);
+                    grad_b_f32[c] += static_cast<float>(t_gb[c]);
                 }
             }
         }
@@ -2883,8 +2933,11 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
 
         #pragma omp parallel if(N * C > 16)
         {
-            std::vector<float> t_gw(C, 0.0f);
-            std::vector<float> t_gb(C, 0.0f);
+            // Accumulate reductions in double to match the file's double-
+            // accumulation policy for normalization statistics; narrow only
+            // when writing the (float) grad buffers.
+            std::vector<double> t_gw(C, 0.0);
+            std::vector<double> t_gb(C, 0.0);
 
             #pragma omp for collapse(2)
             for (int64_t n = 0; n < N; ++n) {
@@ -2893,28 +2946,29 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
                     float r = rstd_data[n * C + c];
                     float w = w_f32[c];
 
-                    float ds = 0.0f, db = 0.0f;
+                    double ds = 0.0, db = 0.0;
                     for (int64_t s = 0; s < spatial_size; ++s) {
                         int64_t idx = (n * C + c) * spatial_size + s;
-                        float dy = grad_out_f32[idx];
-                        float x_hat = (in_f32[idx] - m) * r;
+                        double dy = grad_out_f32[idx];
+                        double x_hat = (static_cast<double>(in_f32[idx]) - m) * r;
                         ds += dy * w * x_hat;
                         db += dy * w;
                     }
 
-                    float inv_ss = 1.0f / static_cast<float>(spatial_size);
+                    double inv_ss = 1.0 / static_cast<double>(spatial_size);
                     for (int64_t s = 0; s < spatial_size; ++s) {
                         int64_t idx = (n * C + c) * spatial_size + s;
-                        float dy = grad_out_f32[idx];
-                        float x_hat = (in_f32[idx] - m) * r;
-                        grad_in_f32[idx] = r * (dy * w - inv_ss * (db + x_hat * ds));
+                        double dy = grad_out_f32[idx];
+                        double x_hat = (static_cast<double>(in_f32[idx]) - m) * r;
+                        grad_in_f32[idx] = static_cast<float>(
+                            r * (dy * w - inv_ss * (db + x_hat * ds)));
                     }
 
                     for (int64_t s = 0; s < spatial_size; ++s) {
                         int64_t idx = (n * C + c) * spatial_size + s;
-                        float x_hat = (in_f32[idx] - m) * r;
-                        t_gw[c] += grad_out_f32[idx] * x_hat;
-                        t_gb[c] += grad_out_f32[idx];
+                        double x_hat = (static_cast<double>(in_f32[idx]) - m) * r;
+                        t_gw[c] += static_cast<double>(grad_out_f32[idx]) * x_hat;
+                        t_gb[c] += static_cast<double>(grad_out_f32[idx]);
                     }
                 }
             }
@@ -2922,8 +2976,8 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
             #pragma omp critical
             {
                 for (int64_t c = 0; c < C; ++c) {
-                    grad_w_f32[c] += t_gw[c];
-                    grad_b_f32[c] += t_gb[c];
+                    grad_w_f32[c] += static_cast<float>(t_gw[c]);
+                    grad_b_f32[c] += static_cast<float>(t_gb[c]);
                 }
             }
         }

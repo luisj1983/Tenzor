@@ -24,6 +24,8 @@ enum class AMDArch {
     CDNA,     // MI100 (gfx908)
     CDNA2,    // MI210/MI250 (gfx90a)
     CDNA3,    // MI300 (gfx942)
+    CDNA4,    // MI350 (gfx950)
+    RDNA1,    // RX 5000 series (gfx101x)
     RDNA2,    // RX 6000 series (gfx1030)
     RDNA3,    // RX 7000 series (gfx1100/gfx1150)
     RDNA4     // RX 9000 series (gfx12xx)
@@ -38,6 +40,11 @@ inline auto parse_arch_from_name(const char* gcn_arch_name) -> AMDArch {
     auto colon_pos = name.find(':');
     if (colon_pos != std::string::npos) {
         name = name.substr(0, colon_pos);
+    }
+
+    // CDNA4: MI350 series
+    if (name == "gfx950") {
+        return AMDArch::CDNA4;
     }
 
     // CDNA3: MI300 series
@@ -69,6 +76,11 @@ inline auto parse_arch_from_name(const char* gcn_arch_name) -> AMDArch {
     // RDNA2: RX 6000 series (gfx1030, gfx1031, gfx1032, gfx1033, gfx1034, gfx1035, gfx1036)
     if (name.size() >= 7 && name.substr(0, 6) == "gfx103") {
         return AMDArch::RDNA2;
+    }
+
+    // RDNA1: RX 5000 series (gfx1010, gfx1011, gfx1012, gfx1013)
+    if (name.size() >= 7 && name.substr(0, 6) == "gfx101") {
+        return AMDArch::RDNA1;
     }
 
     // Older GCN architectures (gfx8xx, gfx900, gfx902, gfx906)

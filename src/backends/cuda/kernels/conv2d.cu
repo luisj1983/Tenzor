@@ -28,7 +28,8 @@ __global__ void im2col_kernel(
     const T* input, T* output,
     int64_t batch, int64_t channels, int64_t height, int64_t width,
     int64_t kernel_h, int64_t kernel_w, int64_t stride, int64_t padding,
-    int64_t dilation, int64_t out_h, int64_t out_w);
+    int64_t dilation, int64_t out_h, int64_t out_w,
+    int64_t total_channels, int64_t channel_offset);
 
 // compute_launch_config_1d() is now in cuda_launch_utils.cuh
 
@@ -96,6 +97,96 @@ __global__ void nhwc_to_nchw_kernel(
     }
 }
 
+/**
+ * @brief Gather one group's grad_output (true NCHW) into a contiguous NHWC
+ *        matrix for the per-group backward GEMMs.
+ *
+ * The forward path stores conv output in NCHW (it transposes its NHWC GEMM
+ * result via nhwc_to_nchw_kernel), so grad_output arrives in NCHW
+ * (batch, out_channels, out_h, out_w). The backward GEMMs, however, consume
+ * grad_output as a row-major (batch*out_h*out_w, out_channels_per_group) NHWC
+ * matrix (leading dimension out_channels_per_group). This kernel performs that
+ * NCHW -> per-group NHWC gather so the GEMM sees the layout it actually
+ * assumes. It is the exact inverse of nhwc_to_nchw_kernel.
+ */
+template<typename T>
+__global__ void nchw_to_nhwc_grad_kernel(
+    const T* nchw_input,       // [batch, out_channels, out_h, out_w] (full grad_output)
+    T* nhwc_output,            // (batch * out_h * out_w, channels_per_group)
+    int64_t batch,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t out_channels,      // Total output channels (NCHW channel stride)
+    int64_t channels_per_group,
+    int64_t channel_offset     // Starting channel index (out_start)
+) {
+    int64_t total_spatial = batch * out_h * out_w;
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_spatial * channels_per_group) {
+        // Decode flat NHWC index to (spatial_idx, c)
+        int64_t c = idx % channels_per_group;
+        int64_t spatial_idx = idx / channels_per_group;
+
+        // Decode spatial_idx to (b, h, w)
+        int64_t b = spatial_idx / (out_h * out_w);
+        int64_t hw = spatial_idx % (out_h * out_w);
+        int64_t h = hw / out_w;
+        int64_t w = hw % out_w;
+
+        // Global channel index in the full grad_output tensor
+        int64_t global_c = channel_offset + c;
+
+        // NCHW index: [b][global_c][h][w]
+        int64_t nchw_idx = ((b * out_channels + global_c) * out_h + h) * out_w + w;
+
+        // Copy from NCHW to contiguous per-group NHWC
+        nhwc_output[idx] = nchw_input[nchw_idx];
+    }
+}
+
+/**
+ * @brief Gather one group's grad_output (true NCHW) into a contiguous
+ *        channel-major (out_channels_per_group, batch*out_h*out_w) matrix.
+ *
+ * The FP16 backward GEMMs (matmul_f16) consume grad_output as a row-major
+ * (out_channels_per_group, batch*out_h*out_w) matrix where the channel is the
+ * slow index and (batch, spatial) is the fast index. In NCHW the per-batch
+ * channel stride is out_h*out_w but the batch stride is out_channels*out_h*out_w
+ * (not out_channels_per_group*out_h*out_w), so feeding the pointer-offset NCHW
+ * tensor directly collapses the batch stride for batch>1. This kernel performs
+ * the NCHW -> contiguous channel-major gather expected by matmul_f16.
+ */
+template<typename T>
+__global__ void nchw_to_channel_major_grad_kernel(
+    const T* nchw_input,       // [batch, out_channels, out_h, out_w] (full grad_output)
+    T* cm_output,              // (channels_per_group, batch * out_h * out_w)
+    int64_t batch,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t out_channels,      // Total output channels (NCHW channel stride)
+    int64_t channels_per_group,
+    int64_t channel_offset     // Starting channel index (out_start)
+) {
+    int64_t spatial_size = out_h * out_w;
+    int64_t col_rows = batch * spatial_size;
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, channels_per_group * col_rows) {
+        // Decode flat channel-major index to (c, m) where m = b*spatial + s
+        int64_t m = idx % col_rows;
+        int64_t c = idx / col_rows;
+
+        int64_t b = m / spatial_size;
+        int64_t s = m % spatial_size;  // oh * out_w + ow
+
+        int64_t global_c = channel_offset + c;
+
+        // NCHW index: [b][global_c][oh][ow] == b*out_channels*spatial + global_c*spatial + s
+        int64_t nchw_idx = (b * out_channels + global_c) * spatial_size + s;
+
+        cm_output[idx] = nchw_input[nchw_idx];
+    }
+}
+
 // ============================================================================
 // im2col CUDA Kernel
 // ============================================================================
@@ -108,7 +199,7 @@ __global__ void im2col_kernel(
     const T* input,
     T* output,
     int64_t batch,
-    int64_t channels,
+    int64_t channels,          // in_channels_per_group (col-matrix channel count)
     int64_t height,
     int64_t width,
     int64_t kernel_h,
@@ -117,7 +208,9 @@ __global__ void im2col_kernel(
     int64_t padding,
     int64_t dilation,
     int64_t out_h,
-    int64_t out_w
+    int64_t out_w,
+    int64_t total_channels,    // full in_channels (NCHW batch/channel stride)
+    int64_t channel_offset     // in_start = g * in_channels_per_group
 ) {
     int64_t total_elements = batch * out_h * out_w * channels * kernel_h * kernel_w;
 
@@ -143,8 +236,11 @@ __global__ void im2col_kernel(
 
         // Check bounds and apply padding
         if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-            int64_t input_idx = b * (channels * height * width) +
-                               c * (height * width) +
+            // Index the full NCHW input: batch stride uses total_channels and the
+            // group's channel offset, NOT the per-group channel count. Using the
+            // per-group count would collapse the batch stride for groups>1/batch>1.
+            int64_t input_idx = b * (total_channels * height * width) +
+                               (channel_offset + c) * (height * width) +
                                ih * width + iw;
             output[out_idx] = input[input_idx];
         } else {
@@ -163,7 +259,7 @@ __global__ void im2col_kernel_f16(
     const __half* input,
     __half* output,
     int64_t batch,
-    int64_t channels,
+    int64_t channels,          // in_channels_per_group (col-matrix channel count)
     int64_t height,
     int64_t width,
     int64_t kernel_h,
@@ -172,7 +268,9 @@ __global__ void im2col_kernel_f16(
     int64_t padding,
     int64_t dilation,
     int64_t out_h,
-    int64_t out_w
+    int64_t out_w,
+    int64_t total_channels,    // full in_channels (NCHW batch/channel stride)
+    int64_t channel_offset     // in_start = g * in_channels_per_group
 ) {
     int64_t total_elements = batch * out_h * out_w * channels * kernel_h * kernel_w;
 
@@ -197,8 +295,10 @@ __global__ void im2col_kernel_f16(
 
         // Check bounds and apply padding
         if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-            int64_t input_idx = b * (channels * height * width) +
-                               c * (height * width) +
+            // Full NCHW input indexing: batch stride uses total_channels and the
+            // group's channel offset (see im2col_kernel for rationale).
+            int64_t input_idx = b * (total_channels * height * width) +
+                               (channel_offset + c) * (height * width) +
                                ih * width + iw;
             output[out_idx] = input[input_idx];
         } else {
@@ -223,7 +323,7 @@ __global__ void col2im_kernel_output_centric(
     const T* col,
     T* output,
     int64_t batch,
-    int64_t channels,
+    int64_t channels,          // in_channels_per_group (col-matrix channel count)
     int64_t height,
     int64_t width,
     int64_t kernel_h,
@@ -232,14 +332,16 @@ __global__ void col2im_kernel_output_centric(
     int64_t padding,
     int64_t dilation,
     int64_t out_h,
-    int64_t out_w
+    int64_t out_w,
+    int64_t total_channels,    // full in_channels (NCHW batch/channel stride)
+    int64_t channel_offset     // in_start = g * in_channels_per_group
 ) {
-    // Each thread processes one output element
+    // Each thread processes one output element (per-group slice)
     int64_t total_output = batch * channels * height * width;
 
-    TENZOR_CUDA_KERNEL_LOOP(output_idx, total_output) {
-        // Decode output index to (b, c, ih, iw)
-        int64_t temp = output_idx;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_output) {
+        // Decode flat per-group index to (b, c, ih, iw)
+        int64_t temp = idx;
         int64_t iw = temp % width; temp /= width;
         int64_t ih = temp % height; temp /= height;
         int64_t c = temp % channels; temp /= channels;
@@ -274,6 +376,13 @@ __global__ void col2im_kernel_output_centric(
             }
         }
 
+        // Write into the full NCHW grad_input: batch stride uses total_channels
+        // and the group's channel offset (per-group count would collapse the
+        // batch stride for groups>1/batch>1).
+        int64_t output_idx = b * (total_channels * height * width) +
+                             (channel_offset + c) * (height * width) +
+                             ih * width + iw;
+
         // Direct write, no atomics needed!
         output[output_idx] = sum;
     }
@@ -286,7 +395,7 @@ __global__ void col2im_kernel(
     const T* col,
     T* output,
     int64_t batch,
-    int64_t channels,
+    int64_t channels,          // in_channels_per_group (col-matrix channel count)
     int64_t height,
     int64_t width,
     int64_t kernel_h,
@@ -295,7 +404,9 @@ __global__ void col2im_kernel(
     int64_t padding,
     int64_t dilation,
     int64_t out_h,
-    int64_t out_w
+    int64_t out_w,
+    int64_t total_channels,    // full in_channels (NCHW batch/channel stride)
+    int64_t channel_offset     // in_start = g * in_channels_per_group
 ) {
     // PERFORMANCE OPTIMIZATION - ELIMINATING ATOMIC BOTTLENECK:
     //
@@ -316,12 +427,12 @@ __global__ void col2im_kernel(
     // - Benefit: ZERO atomic contention (was causing 2-5x slowdown)
     // - Result: Net speedup despite more work per thread
 
-    // Each thread processes one output element
+    // Each thread processes one output element (per-group slice)
     int64_t total_output = batch * channels * height * width;
 
-    TENZOR_CUDA_KERNEL_LOOP(output_idx, total_output) {
-        // Decode output index to (b, c, ih, iw)
-        int64_t temp = output_idx;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_output) {
+        // Decode flat per-group index to (b, c, ih, iw)
+        int64_t temp = idx;
         int64_t iw = temp % width; temp /= width;
         int64_t ih = temp % height; temp /= height;
         int64_t c = temp % channels; temp /= channels;
@@ -361,6 +472,13 @@ __global__ void col2im_kernel(
             }
         }
 
+        // Write into the full NCHW grad_input: batch stride uses total_channels
+        // and the group's channel offset (per-group count would collapse the
+        // batch stride for groups>1/batch>1).
+        int64_t output_idx = b * (total_channels * height * width) +
+                             (channel_offset + c) * (height * width) +
+                             ih * width + iw;
+
         // Direct write - NO ATOMIC NEEDED!
         // This is the key optimization that eliminates the bottleneck
         output[output_idx] = sum;
@@ -377,7 +495,7 @@ __global__ void col2im_kernel_f16(
     const __half* col,
     __half* output,
     int64_t batch,
-    int64_t channels,
+    int64_t channels,          // in_channels_per_group (col-matrix channel count)
     int64_t height,
     int64_t width,
     int64_t kernel_h,
@@ -386,14 +504,16 @@ __global__ void col2im_kernel_f16(
     int64_t padding,
     int64_t dilation,
     int64_t out_h,
-    int64_t out_w
+    int64_t out_w,
+    int64_t total_channels,    // full in_channels (NCHW batch/channel stride)
+    int64_t channel_offset     // in_start = g * in_channels_per_group
 ) {
-    // Each thread processes one output element
+    // Each thread processes one output element (per-group slice)
     int64_t total_output = batch * channels * height * width;
 
-    TENZOR_CUDA_KERNEL_LOOP(output_idx, total_output) {
-        // Decode output index to (b, c, ih, iw)
-        int64_t temp = output_idx;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_output) {
+        // Decode flat per-group index to (b, c, ih, iw)
+        int64_t temp = idx;
         int64_t iw = temp % width; temp /= width;
         int64_t ih = temp % height; temp /= height;
         int64_t c = temp % channels; temp /= channels;
@@ -427,6 +547,12 @@ __global__ void col2im_kernel_f16(
                 }
             }
         }
+
+        // Write into the full NCHW grad_input: batch stride uses total_channels
+        // and the group's channel offset (see col2im_kernel for rationale).
+        int64_t output_idx = b * (total_channels * height * width) +
+                             (channel_offset + c) * (height * width) +
+                             ih * width + iw;
 
         // Direct write - NO ATOMIC NEEDED!
         output[output_idx] = float2half_sat(sum);
@@ -637,12 +763,13 @@ auto conv2d_forward_kernel(
             compute_launch_config_1d(total_elements, grid, block);
 
             const __half* input_ptr = reinterpret_cast<const __half*>(
-                input.data<Float16>() + in_start * height * width
+                input.data<Float16>()
             );
 
             im2col_kernel_f16<<<grid, block, 0, stream>>>(
                 input_ptr, col_buffer, batch, in_channels_per_group,
-                height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w,
+                in_channels, in_start
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
 
@@ -726,11 +853,12 @@ auto conv2d_forward_kernel(
             int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
             compute_launch_config_1d(total_elements, grid, block);
 
-            const double* input_ptr = input.data<double>() + in_start * height * width;
+            const double* input_ptr = input.data<double>();
             im2col_kernel<double><<<grid, block, 0, stream>>>(
                 input_ptr, col_buffer,
                 batch, in_channels_per_group, height, width,
-                kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                kernel_h, kernel_w, stride, padding, dilation, out_h, out_w,
+                in_channels, in_start
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
 
@@ -812,8 +940,10 @@ auto conv2d_forward_kernel(
         int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
         compute_launch_config_1d(total_elements, grid, block);
 
-        // Launch im2col for this group (offset input pointer)
-        const float* input_ptr = input.data<float>() + in_start * height * width;
+        // Launch im2col for this group. The base pointer is the full NCHW input;
+        // the group's channel offset and the full channel count are threaded into
+        // the kernel so the batch stride stays correct for groups>1/batch>1.
+        const float* input_ptr = input.data<float>();
         im2col_kernel<<<grid, block, 0, stream>>>(
             input_ptr,
             col_buffer,
@@ -827,7 +957,9 @@ auto conv2d_forward_kernel(
             padding,
             dilation,
             out_h,
-            out_w
+            out_w,
+            in_channels,
+            in_start
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
 
@@ -994,9 +1126,25 @@ auto conv2d_backward_f16(
             // weight: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
             // grad_col: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
 
-            const __half* grad_out_ptr = reinterpret_cast<const __half*>(
-                grad_output.data<Float16>() + out_start * out_h * out_w
-            );
+            // Gather this group's grad_output (true NCHW) into a contiguous
+            // channel-major (out_channels_per_group, batch*out_h*out_w) buffer.
+            // matmul_f16 below treats grad_out as (ocpg, col_rows) row-major;
+            // feeding the pointer-offset NCHW tensor directly collapses the
+            // batch stride for batch>1.
+            backend::CachedMemoryGuard grad_out_cm_guard(
+                out_channels_per_group * col_rows * sizeof(__half));
+            auto* grad_out_cm = static_cast<__half*>(grad_out_cm_guard.get());
+            {
+                dim3 g_grid, g_block;
+                compute_launch_config_1d(out_channels_per_group * col_rows, g_grid, g_block);
+                nchw_to_channel_major_grad_kernel<__half><<<g_grid, g_block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                    grad_out_cm,
+                    batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                );
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+
             const __half* weight_ptr = reinterpret_cast<const __half*>(
                 weight.data<Float16>() + out_start * in_channels_per_group * kernel_h * kernel_w
             );
@@ -1007,15 +1155,17 @@ auto conv2d_backward_f16(
 
             // Compute: grad_col^T = weight^T @ grad_output^T
             // This gives us (K, N) which is what we want transposed
-            matmul_f16(weight_ptr, grad_out_ptr, grad_col, col_cols, col_rows, out_channels_per_group, stream);
+            matmul_f16(weight_ptr, grad_out_cm, grad_col, col_cols, col_rows, out_channels_per_group, stream);
 
-            // Apply col2im to accumulate gradients
+            // Apply col2im to accumulate gradients. The base pointer is the full
+            // NCHW grad_input; the group's channel offset and full channel count
+            // are threaded into the kernel so the batch stride stays correct.
             dim3 grid, block;
             int64_t total_output = batch * in_channels_per_group * height * width;
             compute_launch_config_1d(total_output, grid, block);
 
             __half* grad_input_ptr = reinterpret_cast<__half*>(
-                grad_input.data<Float16>() + in_start * height * width
+                grad_input.data<Float16>()
             );
 
             col2im_kernel_f16<<<grid, block, 0, stream>>>(
@@ -1031,7 +1181,9 @@ auto conv2d_backward_f16(
                 padding,
                 dilation,
                 out_h,
-                out_w
+                out_w,
+                in_channels,
+                in_start
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
@@ -1047,7 +1199,7 @@ auto conv2d_backward_f16(
             compute_launch_config_1d(total_elements, grid, block);
 
             const __half* input_ptr = reinterpret_cast<const __half*>(
-                input.data<Float16>() + in_start * height * width
+                input.data<Float16>()
             );
 
             im2col_kernel_f16<<<grid, block, 0, stream>>>(
@@ -1063,18 +1215,33 @@ auto conv2d_backward_f16(
                 padding,
                 dilation,
                 out_h,
-                out_w
+                out_w,
+                in_channels,
+                in_start
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
 
-            // Compute grad_weight = grad_output^T @ input_col
-            // grad_output: (batch * out_h * out_w, out_channels_per_group)
+            // Compute grad_weight = grad_output @ input_col
+            // grad_output: (out_channels_per_group, batch * out_h * out_w) channel-major
             // input_col: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
             // grad_weight: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
 
-            const __half* grad_out_ptr = reinterpret_cast<const __half*>(
-                grad_output.data<Float16>() + out_start * out_h * out_w
-            );
+            // Gather this group's grad_output (true NCHW) into a contiguous
+            // channel-major (ocpg, col_rows) buffer (see grad_input path).
+            backend::CachedMemoryGuard grad_out_cm_guard(
+                out_channels_per_group * col_rows * sizeof(__half));
+            auto* grad_out_cm = static_cast<__half*>(grad_out_cm_guard.get());
+            {
+                dim3 g_grid, g_block;
+                compute_launch_config_1d(out_channels_per_group * col_rows, g_grid, g_block);
+                nchw_to_channel_major_grad_kernel<__half><<<g_grid, g_block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                    grad_out_cm,
+                    batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                );
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+
             __half* grad_weight_ptr = reinterpret_cast<__half*>(
                 grad_weight.data<Float16>() + out_start * in_channels_per_group * kernel_h * kernel_w
             );
@@ -1083,8 +1250,8 @@ auto conv2d_backward_f16(
             int64_t N = col_cols;
             int64_t K = col_rows;
 
-            // Compute: grad_weight = grad_output^T @ input_col
-            matmul_f16(grad_out_ptr, input_col, grad_weight_ptr, M, N, K, stream);
+            // Compute: grad_weight = grad_output @ input_col
+            matmul_f16(grad_out_cm, input_col, grad_weight_ptr, M, N, K, stream);
         }
     }
 
@@ -1189,21 +1356,35 @@ auto conv2d_backward_kernel(
                 int64_t M = col_rows, K = out_channels_per_group, N = col_cols;
                 double alpha = 1.0, beta = 0.0;
 
-                const double* grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                // Gather this group's grad_output (true NCHW) into a contiguous
+                // (col_rows, out_channels_per_group) NHWC buffer; the GEMM treats
+                // grad_out as NHWC with leading dim out_channels_per_group.
+                backend::CachedMemoryGuard grad_out_nhwc_guard(col_rows * out_channels_per_group * sizeof(double));
+                auto* grad_out_nhwc = static_cast<double*>(grad_out_nhwc_guard.get());
+                {
+                    dim3 g_grid, g_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, g_grid, g_block);
+                    nchw_to_nhwc_grad_kernel<double><<<g_grid, g_block, 0, stream>>>(
+                        grad_output.data<double>(), grad_out_nhwc,
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start);
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
+                }
+
                 const double* weight_ptr = weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
                 TENZOR_CUBLAS_CHECK(cublasDgemm(
                     cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                    N, M, K, &alpha, weight_ptr, N, grad_out_ptr, K, &beta, grad_col, N));
+                    N, M, K, &alpha, weight_ptr, N, grad_out_nhwc, K, &beta, grad_col, N));
 
                 dim3 grid, block;
                 int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
                 compute_launch_config_1d(total_elements, grid, block);
 
-                double* grad_input_ptr = grad_input.data<double>() + in_start * height * width;
+                double* grad_input_ptr = grad_input.data<double>();
                 col2im_kernel<double><<<grid, block, 0, stream>>>(
                     grad_col, grad_input_ptr, batch, in_channels_per_group,
-                    height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w);
+                    height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w,
+                    in_channels, in_start);
                 TENZOR_CUDA_POST_LAUNCH_CHECK();
             }
 
@@ -1215,21 +1396,35 @@ auto conv2d_backward_kernel(
                 int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
                 compute_launch_config_1d(total_elements, grid, block);
 
-                const double* input_ptr = input.data<double>() + in_start * height * width;
+                const double* input_ptr = input.data<double>();
                 im2col_kernel<double><<<grid, block, 0, stream>>>(
                     input_ptr, input_col, batch, in_channels_per_group,
-                    height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w);
+                    height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w,
+                    in_channels, in_start);
                 TENZOR_CUDA_POST_LAUNCH_CHECK();
 
                 int64_t M = out_channels_per_group, K = col_rows, N = col_cols;
                 double alpha = 1.0, beta = 0.0;
 
-                const double* grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                // Gather this group's grad_output (true NCHW) into a contiguous
+                // (col_rows, out_channels_per_group) NHWC buffer; the GEMM reads
+                // grad_out (transposed) with leading dim out_channels_per_group.
+                backend::CachedMemoryGuard grad_out_nhwc_guard(col_rows * out_channels_per_group * sizeof(double));
+                auto* grad_out_nhwc = static_cast<double*>(grad_out_nhwc_guard.get());
+                {
+                    dim3 g_grid, g_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, g_grid, g_block);
+                    nchw_to_nhwc_grad_kernel<double><<<g_grid, g_block, 0, stream>>>(
+                        grad_output.data<double>(), grad_out_nhwc,
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start);
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
+                }
+
                 double* grad_weight_ptr = grad_weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
                 TENZOR_CUBLAS_CHECK(cublasDgemm(
                     cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                    N, M, K, &alpha, input_col, N, grad_out_ptr, out_channels_per_group, &beta, grad_weight_ptr, N));
+                    N, M, K, &alpha, input_col, N, grad_out_nhwc, out_channels_per_group, &beta, grad_weight_ptr, N));
             }
         }
 
@@ -1293,7 +1488,22 @@ auto conv2d_backward_kernel(
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            const float* grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+            // Gather this group's grad_output (true NCHW) into a contiguous
+            // (col_rows, out_channels_per_group) NHWC buffer; the GEMM treats
+            // grad_out as NHWC with leading dim out_channels_per_group. Feeding
+            // the pointer-offset NCHW tensor directly mis-strides batch and
+            // channels for groups>1/batch>1.
+            backend::CachedMemoryGuard grad_out_nhwc_guard(col_rows * out_channels_per_group * sizeof(float));
+            auto* grad_out_nhwc = static_cast<float*>(grad_out_nhwc_guard.get());
+            {
+                dim3 g_grid, g_block;
+                compute_launch_config_1d(col_rows * out_channels_per_group, g_grid, g_block);
+                nchw_to_nhwc_grad_kernel<float><<<g_grid, g_block, 0, stream>>>(
+                    grad_output.data<float>(), grad_out_nhwc,
+                    batch, out_h, out_w, out_channels, out_channels_per_group, out_start);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+
             const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
             TENZOR_CUBLAS_CHECK(cublasSgemm(
@@ -1306,19 +1516,20 @@ auto conv2d_backward_kernel(
                 &alpha,
                 weight_ptr,     // (K, N) in col-major
                 N,              // leading dim
-                grad_out_ptr,   // (M, K) in row-major = (K, M) in col-major
+                grad_out_nhwc,  // (M, K) in row-major = (K, M) in col-major
                 K,              // leading dim
                 &beta,
                 grad_col,       // (M, N) in row-major = (N, M) in col-major
                 N               // leading dim
             ));
 
-            // Apply col2im to accumulate gradients
+            // Apply col2im to accumulate gradients. Base pointer is full NCHW
+            // grad_input; group channel offset / full channel count threaded in.
             dim3 grid, block;
             int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
             compute_launch_config_1d(total_elements, grid, block);
 
-            float* grad_input_ptr = grad_input.data<float>() + in_start * height * width;
+            float* grad_input_ptr = grad_input.data<float>();
             col2im_kernel<<<grid, block, 0, stream>>>(
                 grad_col,
                 grad_input_ptr,
@@ -1332,7 +1543,9 @@ auto conv2d_backward_kernel(
                 padding,
                 dilation,
                 out_h,
-                out_w
+                out_w,
+                in_channels,
+                in_start
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
@@ -1347,7 +1560,7 @@ auto conv2d_backward_kernel(
             int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
             compute_launch_config_1d(total_elements, grid, block);
 
-            const float* input_ptr = input.data<float>() + in_start * height * width;
+            const float* input_ptr = input.data<float>();
             im2col_kernel<<<grid, block, 0, stream>>>(
                 input_ptr,
                 input_col,
@@ -1361,7 +1574,9 @@ auto conv2d_backward_kernel(
                 padding,
                 dilation,
                 out_h,
-                out_w
+                out_w,
+                in_channels,
+                in_start
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
 
@@ -1377,7 +1592,20 @@ auto conv2d_backward_kernel(
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            const float* grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+            // Gather this group's grad_output (true NCHW) into a contiguous
+            // (col_rows, out_channels_per_group) NHWC buffer; the GEMM reads
+            // grad_out (transposed) with leading dim out_channels_per_group.
+            backend::CachedMemoryGuard grad_out_nhwc_guard(col_rows * out_channels_per_group * sizeof(float));
+            auto* grad_out_nhwc = static_cast<float*>(grad_out_nhwc_guard.get());
+            {
+                dim3 g_grid, g_block;
+                compute_launch_config_1d(col_rows * out_channels_per_group, g_grid, g_block);
+                nchw_to_nhwc_grad_kernel<float><<<g_grid, g_block, 0, stream>>>(
+                    grad_output.data<float>(), grad_out_nhwc,
+                    batch, out_h, out_w, out_channels, out_channels_per_group, out_start);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+
             float* grad_weight_ptr = grad_weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
             TENZOR_CUBLAS_CHECK(cublasSgemm(
@@ -1390,7 +1618,7 @@ auto conv2d_backward_kernel(
                 &alpha,
                 input_col,      // (K, N) in col-major
                 N,              // leading dim
-                grad_out_ptr,   // (K, M) in col-major (transposed)
+                grad_out_nhwc,  // (K, M) in col-major (transposed)
                 out_channels_per_group,  // leading dim of original (M, K) in row-major
                 &beta,
                 grad_weight_ptr, // (M, N) in row-major = (N, M) in col-major

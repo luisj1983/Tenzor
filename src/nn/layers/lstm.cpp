@@ -196,10 +196,27 @@ auto LSTMCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variabl
                           gates_ih.dtype(), gates_ih.device()), false);
     }
 
+    // For Float16/BFloat16, run the gate matmul, sigmoid/tanh, and cell/hidden
+    // state updates in Float32, then cast the new states back to the original
+    // dtype. This mirrors the upcast in forward(): half-precision gate
+    // activations and state recurrence lose precision and some elementwise
+    // kernels lack half dispatch. Widening gates_ih/h/c to Float32 makes
+    // weight_hh_ cast its weights to Float32 (Linear's compute dtype follows
+    // input), so the whole cell runs at Float32 just like forward().
+    const DType orig_dtype = gates_ih.dtype();
+    const bool needs_upcast =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor gates_ih_compute =
+        needs_upcast ? gates_ih.to(DType::Float32) : gates_ih;
+    if (needs_upcast) {
+        h = variable_cast(h, DType::Float32);
+        c = variable_cast(c, DType::Float32);
+    }
+
     auto gates_hh = weight_hh_->forward(h);  // Variable with grad_fn
 
     // Non-autograd constant for the input-side contribution.
-    Variable gates_ih_var(gates_ih, false);
+    Variable gates_ih_var(gates_ih_compute, false);
     auto gates = gates_ih_var + gates_hh;                 // Variable + Variable
 
     // No autograd-aware chunk yet; use slice (which is autograd-aware) to
@@ -215,6 +232,12 @@ auto LSTMCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variabl
     // grad_fn back to f_t/i_t/g_t/o_t → gates → gates_hh → weight_hh_/h.
     auto c_new = f_t * c + i_t * g_t;
     auto h_new = o_t * nn::tanh(c_new);
+
+    // Narrow the new states back to the caller's original dtype.
+    if (needs_upcast) {
+        h_new = variable_cast(h_new, orig_dtype);
+        c_new = variable_cast(c_new, orig_dtype);
+    }
     return {h_new, c_new};
 }
 

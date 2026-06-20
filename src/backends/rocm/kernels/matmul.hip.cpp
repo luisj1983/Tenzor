@@ -23,6 +23,8 @@
 #include <stdexcept>
 #include <vector>
 #include <memory>
+#include <limits>
+#include <string>
 #include "fp16_saturate.h"
 #include "../rocm_error.hpp"
 #include "tenzor/utils/logging.hpp"
@@ -32,6 +34,37 @@ namespace rocm {
 
 // Forward declaration for FP8 emulation (defined in transform.hip.cpp)
 auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) -> Tensor;
+
+// ============================================================================
+// rocBLAS dimension bounds checking
+// ============================================================================
+
+/**
+ * @brief Safely narrow a 64-bit GEMM dimension to rocblas_int.
+ *
+ * rocBLAS exposes matrix dimensions and leading dimensions as rocblas_int,
+ * which is a signed 32-bit integer. A plain static_cast of a value exceeding
+ * INT_MAX would silently truncate (and may even become negative), causing
+ * out-of-bounds device access or silently wrong results with no diagnostic.
+ * This guard turns that silent truncation into a clear runtime_error so the
+ * caller can react (e.g. tile the GEMM) instead of corrupting memory.
+ *
+ * @param value The 64-bit dimension/leading dimension to narrow.
+ * @param name  Human-readable name of the parameter (for the error message).
+ * @return The value safely narrowed to rocblas_int.
+ * @throws std::runtime_error if value does not fit in a rocblas_int.
+ */
+inline rocblas_int to_rocblas_int(int64_t value, const char* name) {
+    if (value < 0 ||
+        value > static_cast<int64_t>(std::numeric_limits<rocblas_int>::max())) {
+        throw std::runtime_error(
+            std::string("ROCm matmul: GEMM parameter '") + name + "' = " +
+            std::to_string(value) +
+            " exceeds rocBLAS 32-bit dimension limit (" +
+            std::to_string(std::numeric_limits<rocblas_int>::max()) + ")");
+    }
+    return static_cast<rocblas_int>(value);
+}
 
 // ============================================================================
 // rocBLAS Handle Management
@@ -726,13 +759,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
             rocblas_operation trans_a = rocblas_operation_none;
             rocblas_operation trans_b = rocblas_operation_none;
 
-            rocblas_int lda = static_cast<rocblas_int>(K);  // A is 1 x K
-            rocblas_int ldb = static_cast<rocblas_int>(N);  // B is K x N
-            rocblas_int ldc = static_cast<rocblas_int>(N);  // C is 1 x N
+            rocblas_int lda = to_rocblas_int(K, "lda");  // A is 1 x K
+            rocblas_int ldb = to_rocblas_int(N, "ldb");  // B is K x N
+            rocblas_int ldc = to_rocblas_int(N, "ldc");  // C is 1 x N
 
-            rocblas_int m = static_cast<rocblas_int>(N);  // Swapped for transpose
-            rocblas_int n = static_cast<rocblas_int>(M);  // Swapped for transpose
-            rocblas_int k = static_cast<rocblas_int>(K);
+            rocblas_int m = to_rocblas_int(N, "m");  // Swapped for transpose
+            rocblas_int n = to_rocblas_int(M, "n");  // Swapped for transpose
+            rocblas_int k = to_rocblas_int(K, "k");
 
             if (a_contig.dtype() == DType::Float32) {
                 const float* a_data = a_contig.data<float>();
@@ -874,13 +907,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
             rocblas_operation trans_a = rocblas_operation_none;
             rocblas_operation trans_b = rocblas_operation_none;
 
-            rocblas_int lda = static_cast<rocblas_int>(K);  // A is M x K
-            rocblas_int ldb = static_cast<rocblas_int>(N);  // B is K x 1
-            rocblas_int ldc = static_cast<rocblas_int>(N);  // C is M x 1
+            rocblas_int lda = to_rocblas_int(K, "lda");  // A is M x K
+            rocblas_int ldb = to_rocblas_int(N, "ldb");  // B is K x 1
+            rocblas_int ldc = to_rocblas_int(N, "ldc");  // C is M x 1
 
-            rocblas_int m = static_cast<rocblas_int>(N);  // Swapped for transpose
-            rocblas_int n = static_cast<rocblas_int>(M);  // Swapped for transpose
-            rocblas_int k = static_cast<rocblas_int>(K);
+            rocblas_int m = to_rocblas_int(N, "m");  // Swapped for transpose
+            rocblas_int n = to_rocblas_int(M, "n");  // Swapped for transpose
+            rocblas_int k = to_rocblas_int(K, "k");
 
             if (a_contig.dtype() == DType::Float32) {
                 const float* a_data = a_contig.data<float>();
@@ -1065,14 +1098,14 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
 
         // Leading dimensions (stride of major dimension)
         // In row-major: ld = number of columns (stride to next row)
-        rocblas_int lda = static_cast<rocblas_int>(K);  // A is M x K, stride = K
-        rocblas_int ldb = static_cast<rocblas_int>(N);  // B is K x N, stride = N
-        rocblas_int ldc = static_cast<rocblas_int>(N);  // C is M x N, stride = N
+        rocblas_int lda = to_rocblas_int(K, "lda");  // A is M x K, stride = K
+        rocblas_int ldb = to_rocblas_int(N, "ldb");  // B is K x N, stride = N
+        rocblas_int ldc = to_rocblas_int(N, "ldc");  // C is M x N, stride = N
 
-        // Cast dimensions to rocblas_int
-        rocblas_int m = static_cast<rocblas_int>(N);  // Swapped for transpose
-        rocblas_int n = static_cast<rocblas_int>(M);  // Swapped for transpose
-        rocblas_int k = static_cast<rocblas_int>(K);
+        // Cast dimensions to rocblas_int (guarded against 32-bit overflow)
+        rocblas_int m = to_rocblas_int(N, "m");  // Swapped for transpose
+        rocblas_int n = to_rocblas_int(M, "n");  // Swapped for transpose
+        rocblas_int k = to_rocblas_int(K, "k");
 
         // Stride between matrices in batch (for batched operations)
         rocblas_stride stride_a = M * K;
@@ -1105,7 +1138,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                 ));
             } else {
                 // Batched matrix multiplication
-                rocblas_int batch_count = static_cast<rocblas_int>(batch_size);
+                rocblas_int batch_count = to_rocblas_int(batch_size, "batch_count");
 
                 // Handle broadcasting: if one tensor has batch_size=1, replicate it
                 rocblas_stride actual_stride_a = (batch_size_a == 1) ? 0 : stride_a;
@@ -1145,7 +1178,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                 ));
             } else {
                 // Batched matrix multiplication
-                rocblas_int batch_count = static_cast<rocblas_int>(batch_size);
+                rocblas_int batch_count = to_rocblas_int(batch_size, "batch_count");
 
                 rocblas_stride actual_stride_a = (batch_size_a == 1) ? 0 : stride_a;
                 rocblas_stride actual_stride_b = (batch_size_b == 1) ? 0 : stride_b;
@@ -1192,7 +1225,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                 ));
             } else {
                 // Batched matrix multiplication
-                rocblas_int batch_count = static_cast<rocblas_int>(batch_size);
+                rocblas_int batch_count = to_rocblas_int(batch_size, "batch_count");
 
                 rocblas_stride actual_stride_a = (batch_size_a == 1) ? 0 : stride_a;
                 rocblas_stride actual_stride_b = (batch_size_b == 1) ? 0 : stride_b;
@@ -1238,7 +1271,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                     c_data, ldc
                 ));
             } else {
-                rocblas_int batch_count = static_cast<rocblas_int>(batch_size);
+                rocblas_int batch_count = to_rocblas_int(batch_size, "batch_count");
                 rocblas_stride actual_stride_a = (batch_size_a == 1) ? 0 : stride_a;
                 rocblas_stride actual_stride_b = (batch_size_b == 1) ? 0 : stride_b;
 

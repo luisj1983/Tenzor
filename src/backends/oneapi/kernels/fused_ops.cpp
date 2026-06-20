@@ -713,8 +713,10 @@ auto fused_layer_norm_backward_kernel(
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
-        const uint16_t* mean_ptr = get_data_ptr<const uint16_t>(mean);
-        const uint16_t* inv_std_ptr = get_data_ptr<const uint16_t>(inv_std);
+        // Forward stores mean/inv_std as Float32 for BFloat16 inputs (rstd dynamic
+        // range exceeds BF16 max), so read them through const float* here.
+        const float* mean_ptr = get_data_ptr<const float>(mean);
+        const float* inv_std_ptr = get_data_ptr<const float>(inv_std);
         const uint16_t* weight_ptr = get_data_ptr<const uint16_t>(weight);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
         uint16_t* grad_weight_ptr = get_data_ptr<uint16_t>(grad_weight);
@@ -723,8 +725,8 @@ auto fused_layer_norm_backward_kernel(
         dispatch_backward.template operator()<float>(
             [=](int64_t i) { return bf16_to_f32(grad_out_ptr[i]); },
             [=](int64_t i) { return bf16_to_f32(in_ptr[i]); },
-            [=](int64_t i) { return bf16_to_f32(mean_ptr[i]); },
-            [=](int64_t i) { return bf16_to_f32(inv_std_ptr[i]); },
+            [=](int64_t i) { return mean_ptr[i]; },
+            [=](int64_t i) { return inv_std_ptr[i]; },
             [=](int64_t i) { return bf16_to_f32(weight_ptr[i]); },
             [=](int64_t i, float v) { grad_weight_ptr[i] = f32_to_bf16(v); },
             [=](int64_t i, float v) { grad_bias_ptr[i] = f32_to_bf16(v); },
@@ -734,8 +736,10 @@ auto fused_layer_norm_backward_kernel(
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(mean);
-        const sycl::half* inv_std_ptr = get_data_ptr<const sycl::half>(inv_std);
+        // Forward stores mean/inv_std as Float32 for Float16 inputs (rstd dynamic
+        // range exceeds FP16 max), so read them through const float* here.
+        const float* mean_ptr = get_data_ptr<const float>(mean);
+        const float* inv_std_ptr = get_data_ptr<const float>(inv_std);
         const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
         sycl::half* grad_weight_ptr = get_data_ptr<sycl::half>(grad_weight);
@@ -744,8 +748,8 @@ auto fused_layer_norm_backward_kernel(
         dispatch_backward.template operator()<float>(
             [=](int64_t i) { return static_cast<float>(grad_out_ptr[i]); },
             [=](int64_t i) { return static_cast<float>(in_ptr[i]); },
-            [=](int64_t i) { return static_cast<float>(mean_ptr[i]); },
-            [=](int64_t i) { return static_cast<float>(inv_std_ptr[i]); },
+            [=](int64_t i) { return mean_ptr[i]; },
+            [=](int64_t i) { return inv_std_ptr[i]; },
             [=](int64_t i) { return static_cast<float>(weight_ptr[i]); },
             [=](int64_t i, float v) { grad_weight_ptr[i] = sycl::half(v); },
             [=](int64_t i, float v) { grad_bias_ptr[i] = sycl::half(v); },
@@ -1271,6 +1275,10 @@ auto fused_softmax_cross_entropy_kernel(
             int64_t b = static_cast<int64_t>(idx[0]);
             const sycl::half* row = logits_ptr + b * nc;
             int64_t target = targets_ptr[b];
+            if (target < 0 || target >= nc) {
+                losses_ptr[b] = sycl::half(sycl::nan(0u));
+                return;
+            }
 
             float max_val = static_cast<float>(row[0]);
             for (int64_t i = 1; i < nc; ++i) {
@@ -1294,6 +1302,10 @@ auto fused_softmax_cross_entropy_kernel(
             int64_t b = static_cast<int64_t>(idx[0]);
             const uint16_t* row = logits_ptr + b * nc;
             int64_t target = targets_ptr[b];
+            if (target < 0 || target >= nc) {
+                losses_ptr[b] = f32_to_bf16(sycl::nan(0u));
+                return;
+            }
 
             float max_val = bf16_to_f32(row[0]);
             for (int64_t i = 1; i < nc; ++i) {
@@ -2273,9 +2285,41 @@ auto flash_attention_impl(
     const int K_STRIDE = static_cast<int>(head_dim) + 4;
     const int BLOCK_SIZE = 128;
 
+    // The per-thread output accumulator o_local[MAX_D_PER_THREAD] together with
+    // BLOCK_SIZE threads covers output dims d in [0, MAX_D_PER_THREAD*BLOCK_SIZE).
+    // Reject head_dim beyond that bound up front: otherwise O_row[d] for the
+    // excess dims would never be written (uninitialised output / silently
+    // dropped contributions) instead of producing a clear error. Mirrors the
+    // backward kernel's explicit head_dim validation.
+    constexpr int MAX_D_PER_THREAD = 8;  // must match the kernel's accumulator
+    const int MAX_HEAD_DIM = MAX_D_PER_THREAD * BLOCK_SIZE;
+    if (head_dim > MAX_HEAD_DIM) {
+        throw std::invalid_argument(
+            "FlashAttention OneAPI: head_dim must be <= "
+            + std::to_string(MAX_HEAD_DIM) + ". Got "
+            + std::to_string(head_dim));
+    }
+
     // Local memory: K_tile[Bc][K_STRIDE] + V_tile[Bc][K_STRIDE] + scores[Bc]
     const size_t local_mem_size = static_cast<size_t>(
         2 * Bc * K_STRIDE + Bc) * sizeof(ComputeT);
+
+    // Preflight the device's shared-local-memory capacity. local_mem_size grows
+    // linearly with head_dim (K_STRIDE = head_dim + 4); for large head_dim it
+    // can exceed the device SLM limit (e.g. 64KB on common Intel iGPU/Arc),
+    // which would otherwise fail at kernel submission with an opaque SYCL
+    // exception. Check here and throw a clear, attributed diagnostic instead.
+    const size_t device_local_mem =
+        queue.get_device().get_info<sycl::info::device::local_mem_size>();
+    if (local_mem_size > device_local_mem) {
+        throw std::runtime_error(
+            "FlashAttention OneAPI: required shared local memory ("
+            + std::to_string(local_mem_size)
+            + " bytes for head_dim=" + std::to_string(head_dim)
+            + ") exceeds device local_mem_size ("
+            + std::to_string(device_local_mem)
+            + " bytes). Reduce head_dim or use a device with more local memory.");
+    }
 
     const DataT* q_ptr = get_data_ptr<const DataT>(Q);
     const DataT* k_ptr = get_data_ptr<const DataT>(K);
@@ -2362,11 +2406,17 @@ auto flash_attention_impl(
                 ComputeT* V_tile = lmem + Bc * ks;           // [Bc][ks]
                 ComputeT* scores  = lmem + 2 * Bc * ks;      // [Bc]
 
-                // Base pointers for this batch_head
-                const DataT* Q_row  = q_ptr + batch_head * slq * hd + query_idx * hd;
-                const DataT* K_base = k_ptr + batch_head * slk * hd;
-                const DataT* V_base = v_ptr + batch_head * slk * hd;
-                DataT* O_row        = o_ptr + batch_head * slq * hd + query_idx * hd;
+                // Base pointers for this batch_head. Offsets are computed in
+                // int64_t so that batch_heads*seq_len*head_dim products beyond
+                // 2^31 (large-memory GPUs, >8GB Q/K/V buffers) do not wrap to a
+                // negative int and index out of bounds.
+                const int64_t q_off = static_cast<int64_t>(batch_head) * slq * hd
+                                    + static_cast<int64_t>(query_idx) * hd;
+                const int64_t kv_off = static_cast<int64_t>(batch_head) * slk * hd;
+                const DataT* Q_row  = q_ptr + q_off;
+                const DataT* K_base = k_ptr + kv_off;
+                const DataT* V_base = v_ptr + kv_off;
+                DataT* O_row        = o_ptr + q_off;
 
                 // Each thread handles multiple output dimensions
                 // Max elements per thread: ceil(head_dim / BLOCK_SIZE)
@@ -2696,15 +2746,21 @@ auto flash_attention_backward_oneapi_f32(
                 if (kv_start >= sl_k) return;
                 const int actual_Bc = sycl::min(Bc, sl_k - kv_start);
 
-                const float* Q_base  = q_ptr  + batch_head * sl_k * hd_k;
-                const float* K_base  = k_ptr  + batch_head * sl_k * hd_k;
-                const float* V_base  = v_ptr  + batch_head * sl_k * hd_k;
-                const float* O_base  = o_ptr  + batch_head * sl_k * hd_k;
-                const float* dO_base = do_ptr + batch_head * sl_k * hd_k;
-                const float* L_base  = l_ptr  + batch_head * sl_k;
-                float* dQ_base = dq_ptr + batch_head * sl_k * hd_k;
-                float* dK_base = dk_ptr + batch_head * sl_k * hd_k;
-                float* dV_base = dv_ptr + batch_head * sl_k * hd_k;
+                // Per-batch_head base offset in int64_t: batch_head*sl_k*hd_k can
+                // exceed 2^31 for large batch_heads*seq_len even with bounded
+                // head_dim, and int*int*int arithmetic would wrap negative and
+                // index out of bounds.
+                const int64_t bh_off = static_cast<int64_t>(batch_head)
+                                     * sl_k * hd_k;
+                const float* Q_base  = q_ptr  + bh_off;
+                const float* K_base  = k_ptr  + bh_off;
+                const float* V_base  = v_ptr  + bh_off;
+                const float* O_base  = o_ptr  + bh_off;
+                const float* dO_base = do_ptr + bh_off;
+                const float* L_base  = l_ptr  + static_cast<int64_t>(batch_head) * sl_k;
+                float* dQ_base = dq_ptr + bh_off;
+                float* dK_base = dk_ptr + bh_off;
+                float* dV_base = dv_ptr + bh_off;
 
                 float* slm = lmem.template get_multi_ptr<sycl::access::decorated::no>().get();
                 float* K_tile  = slm;

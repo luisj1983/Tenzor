@@ -36,20 +36,48 @@ float readF16CPrev(uint idx) {
     return (idx & 1u) == 0u ? pair.x : pair.y;
 }
 
+// Write a single float16 value using a bounded atomicCompSwap. The dispatch
+// launches one thread per (b,h) element, so two distinct concurrent threads
+// (even idx and idx+1) target the same packed 32-bit word. A plain
+// read-modify-write would let the last writer clobber the neighbouring
+// half-word, corrupting h_out/c_out for half the hidden units. Mirror the
+// safe pattern from log_softmax_backward_f16.comp.
 void writeF16HOut(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = h_out[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    h_out[word_idx] = packHalf2x16(pair);
+    uint half_idx = idx & 1u;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = h_out[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(h_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: do NOT add a non-atomic fallback store -- it would clobber
+    // the neighbouring packed half-word.
 }
 
 void writeF16COut(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = c_out[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    c_out[word_idx] = packHalf2x16(pair);
+    uint half_idx = idx & 1u;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = c_out[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(c_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: do NOT add a non-atomic fallback store -- it would clobber
+    // the neighbouring packed half-word.
 }
 
 float sigmoid(float x) {

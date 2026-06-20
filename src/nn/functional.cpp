@@ -542,27 +542,28 @@ auto adaptive_avg_pool2d(const Variable& input,
             "F::adaptive_avg_pool2d expects 4D input [N, C, H, W]");
     }
 
-    int64_t in_h = shape[2];
-    int64_t in_w = shape[3];
     int64_t out_h = output_size.first;
     int64_t out_w = output_size.second;
 
-    // Validate output size up front: the kernel/stride computation below
-    // divides by out_h/out_w, so a non-positive output size would trigger an
-    // integer divide-by-zero (SIGFPE) or produce a nonsensical negative stride.
+    // Validate output size up front.
     if (out_h <= 0 || out_w <= 0) {
         throw std::invalid_argument(
             "F::adaptive_avg_pool2d expects positive output_size (H > 0, W > 0)");
     }
 
-    // Use kernel_size = ceil(in/out), stride = floor(in/out) for exact output size.
-    // Division is now safe because out_h/out_w are guaranteed positive above.
-    int64_t stride_h = in_h / out_h;
-    int64_t stride_w = in_w / out_w;
-    int64_t kernel_h = in_h - (out_h - 1) * stride_h;
-    int64_t kernel_w = in_w - (out_w - 1) * stride_w;
-
-    return avg_pool2d(input, {kernel_h, kernel_w}, {stride_h, stride_w}, {0, 0});
+    // Route to the true adaptive kernel (OpId::AdaptiveAvgPool2d) via the
+    // AdaptiveAvgPool2d Module. That kernel uses per-cell windows
+    // start = floor(i * in / out), end = ceil((i + 1) * in / out), which:
+    //   - yields the exact requested output size for any in/out ratio,
+    //   - handles the upsampling case (out > in) correctly, and
+    //   - never performs an integer division by a zero stride.
+    // The previous stride/kernel approximation computed stride = in / out, which
+    // became 0 whenever out > in (a legal PyTorch adaptive-pooling case) and was
+    // then forwarded to avg_pool2d -> AvgPool2d -> the CPU avgpool kernel, where
+    // H_out = (H - kernel) / stride + 1 triggered an integer divide-by-zero
+    // (SIGFPE). The dedicated adaptive kernel removes that hazard entirely.
+    ::tenzor::nn::AdaptiveAvgPool2d pool(out_h, out_w);
+    return pool.forward(input);
 }
 
 // ----------------------------------------------------------------------------
@@ -873,8 +874,12 @@ auto dropout(const Variable& input, double p, bool training) -> Variable {
     auto mask_tensor = tenzor::where(mask_bool, ones_t, zeros_t);
     Variable mask_var(mask_tensor, /*requires_grad=*/false);
 
-    // Inverted dropout: scale by 1/(1-p)
-    float scale = static_cast<float>(1.0 / (1.0 - p));
+    // Inverted dropout: scale by 1/(1-p). Keep the scale in double so the
+    // Variable::operator*(double) overload is selected and make_scalar_var
+    // constructs the scalar at full precision for the input dtype. Narrowing to
+    // float here would lock in ~1e-7 relative error for Float64 inputs (and can
+    // surface in gradcheck); Float32/Float16 results are unchanged.
+    double scale = 1.0 / (1.0 - p);
     return (input * mask_var) * scale;
 }
 

@@ -27,14 +27,23 @@ float readF16Input(uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Write a single float16 element to output buffer
+// Write a single float16 element to output buffer.
+// Two float16 elements share one 32-bit word, and neighbouring elements are
+// written by independent invocations, so the packed read-modify-write must be
+// done atomically (CAS loop) to avoid one invocation's update being lost.
 void writeF16Output(uint element_idx, float val) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
-    uint existing = result[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    result[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = result[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint observed = atomicCompSwap(result[word_idx], old_word, new_word);
+        if (observed == old_word) return;
+        old_word = observed;
+    }
 }
 
 void main() {

@@ -51,6 +51,65 @@ inline cudaStream_t get_cuda_stream(const OpAttributes& attrs) {
     return nullptr;  // Default stream
 }
 
+// Copy a contiguous device buffer (`src`, n elements) into a (possibly
+// non-contiguous) destination view described by `dst_shape` / `dst_strides`
+// (strides in elements). Issued asynchronously on `stream` so the writes are
+// ordered against producing/consuming work on the op's dispatch stream rather
+// than the default stream. The innermost contiguous run (dst stride == 1) is
+// coalesced into a single cudaMemcpyAsync, so a typical strided slice scatter
+// issues O(numel / inner_extent) copies instead of one per element.
+inline void scatter_strided_copy_d2d(char* dst_base, const char* src_base,
+                                     std::span<const int64_t> dst_shape,
+                                     std::span<const int64_t> dst_strides,
+                                     bool dst_contiguous,
+                                     int64_t n, int64_t elem_size,
+                                     cudaStream_t stream) {
+    if (n == 0) return;
+    if (dst_contiguous) {
+        CUDA_CHECK(cudaMemcpyAsync(dst_base, src_base,
+                                   static_cast<size_t>(n) * elem_size,
+                                   cudaMemcpyDeviceToDevice, stream));
+        return;
+    }
+    int64_t ndims = static_cast<int64_t>(dst_shape.size());
+    if (ndims == 0) {
+        CUDA_CHECK(cudaMemcpyAsync(dst_base, src_base,
+                                   static_cast<size_t>(elem_size),
+                                   cudaMemcpyDeviceToDevice, stream));
+        return;
+    }
+    // Determine the innermost contiguous run length. The source is contiguous,
+    // so a run is coalescible iff the destination's trailing stride is 1.
+    int64_t inner_extent = 1;
+    if (dst_strides[ndims - 1] == 1) {
+        inner_extent = dst_shape[ndims - 1];
+    }
+    if (inner_extent <= 0) inner_extent = 1;
+    int64_t outer = n / inner_extent;
+
+    std::vector<int64_t> coord(ndims, 0);
+    int64_t src_off = 0;
+    for (int64_t o = 0; o < outer; o++) {
+        int64_t byte_offset = 0;
+        for (int64_t d = 0; d < ndims; d++) {
+            byte_offset += coord[d] * dst_strides[d] * elem_size;
+        }
+        CUDA_CHECK(cudaMemcpyAsync(dst_base + byte_offset,
+                                   src_base + src_off * elem_size,
+                                   static_cast<size_t>(inner_extent) * elem_size,
+                                   cudaMemcpyDeviceToDevice, stream));
+        src_off += inner_extent;
+        // Advance the coordinate over all dims except the coalesced innermost
+        // run (when inner_extent > 1, the last dim is fully consumed per copy).
+        int64_t carry_from = (inner_extent > 1) ? (ndims - 2) : (ndims - 1);
+        for (int64_t d = carry_from; d >= 0; d--) {
+            coord[d]++;
+            if (coord[d] < dst_shape[d]) break;
+            coord[d] = 0;
+        }
+    }
+}
+
 // Forward declarations for CUDA kernels
 namespace cuda {
     // Binary operations
@@ -416,7 +475,7 @@ namespace cuda {
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
                            int64_t output_h, int64_t output_w,
                            float spatial_scale, int64_t sampling_ratio,
-                           bool aligned) -> Tensor;
+                           bool aligned, cudaStream_t stream) -> Tensor;
     auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                             int64_t batch_size, int64_t feat_height, int64_t feat_width,
                             float spatial_scale, int64_t sampling_ratio,
@@ -1968,11 +2027,43 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             orig_q_shape.assign(inputs[0].shape().begin(), inputs[0].shape().end());
             int64_t b = orig_q_shape[0], h = orig_q_shape[1];
             int64_t sq = orig_q_shape[2], d = orig_q_shape[3];
+            int64_t h_kv = inputs[1].shape()[1];
             int64_t sk = inputs[1].shape()[2];
             int64_t dv = inputs[2].shape()[3];
+
+            // GQA/MQA: when H_kv < H_q, broadcast K/V along the head dim before
+            // collapsing to [B*H_q, S_k, D] so the kernel — which has no GQA
+            // index math — sees matching head counts for Q and K/V. Mirrors the
+            // FusedAttention branch above (unsqueeze + expand + reshape).
+            Tensor Kb = inputs[1].is_contiguous() ? inputs[1] : inputs[1].contiguous();
+            Tensor Vb = inputs[2].is_contiguous() ? inputs[2] : inputs[2].contiguous();
+            if (h_kv != h) {
+                if (h % h_kv != 0) {
+                    throw std::invalid_argument(
+                        "FlashAttention CUDA: H_q must be a multiple of H_kv; got " +
+                        std::to_string(h) + " and " + std::to_string(h_kv));
+                }
+                int64_t reps = h / h_kv;
+                NewOpAttributes us_attrs;
+                us_attrs.set(AttrKey::Dim, static_cast<int64_t>(2));
+                Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Kb}, us_attrs)[0];
+                Tensor Vu = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Vb}, us_attrs)[0];
+                std::vector<int64_t> exp_k = {b, h_kv, reps, sk, d};
+                std::vector<int64_t> exp_v = {b, h_kv, reps, sk, dv};
+                std::string s_k, s_v;
+                for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+                for (size_t i = 0; i < exp_v.size(); ++i) { if (i) s_v += ","; s_v += std::to_string(exp_v[i]); }
+                NewOpAttributes ek_attrs; ek_attrs.set(AttrKey::Shape, s_k);
+                NewOpAttributes ev_attrs; ev_attrs.set(AttrKey::Shape, s_v);
+                Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek_attrs)[0];
+                Tensor Ve = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Vu}, ev_attrs)[0];
+                Kb = Ke.contiguous().reshape({b, h, sk, d});
+                Vb = Ve.contiguous().reshape({b, h, sk, dv});
+            }
+
             Qi = tenzor::reshape(inputs[0], std::vector<int64_t>{b * h, sq, d});
-            Ki = tenzor::reshape(inputs[1], std::vector<int64_t>{b * h, sk, d});
-            Vi = tenzor::reshape(inputs[2], std::vector<int64_t>{b * h, sk, dv});
+            Ki = tenzor::reshape(Kb, std::vector<int64_t>{b * h, sk, d});
+            Vi = tenzor::reshape(Vb, std::vector<int64_t>{b * h, sk, dv});
         }
 
         // Audit A.11 — Float64 path: route to the native FP64 CUDA kernel
@@ -2847,7 +2938,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
         return {cuda::roi_align_forward(inputs[0], inputs[1],
                                         output_h, output_w, spatial_scale,
-                                        sampling_ratio, aligned)};
+                                        sampling_ratio, aligned, get_cuda_stream(attrs))};
     });
 
     table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -5171,26 +5262,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
             auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
             const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
-            if (dst_slice.is_contiguous()) {
-                cudaMemcpy(dst_ptr, src_ptr, n * elem_size, cudaMemcpyDeviceToDevice);
-            } else {
-                auto dst_shape_v = dst_slice.shape();
-                auto dst_strides = dst_slice.strides();
-                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
-                std::vector<int64_t> coord(ndims, 0);
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t byte_offset = 0;
-                    for (int64_t d = 0; d < ndims; d++) {
-                        byte_offset += coord[d] * dst_strides[d] * elem_size;
-                    }
-                    cudaMemcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, cudaMemcpyDeviceToDevice);
-                    for (int64_t d = ndims - 1; d >= 0; d--) {
-                        coord[d]++;
-                        if (coord[d] < dst_shape_v[d]) break;
-                        coord[d] = 0;
-                    }
-                }
-            }
+            cudaStream_t stream = get_cuda_stream(attrs);
+            scatter_strided_copy_d2d(dst_ptr, src_ptr, dst_slice.shape(),
+                                     dst_slice.strides(), dst_slice.is_contiguous(),
+                                     n, elem_size, stream);
             return output;
         });
 
@@ -5222,26 +5297,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
             auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
             const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
-            if (dst_slice.is_contiguous()) {
-                cudaMemcpy(dst_ptr, src_ptr, n * elem_size, cudaMemcpyDeviceToDevice);
-            } else {
-                auto dst_shape_v = dst_slice.shape();
-                auto dst_strides = dst_slice.strides();
-                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
-                std::vector<int64_t> coord(ndims, 0);
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t byte_offset = 0;
-                    for (int64_t d = 0; d < ndims; d++) {
-                        byte_offset += coord[d] * dst_strides[d] * elem_size;
-                    }
-                    cudaMemcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, cudaMemcpyDeviceToDevice);
-                    for (int64_t d = ndims - 1; d >= 0; d--) {
-                        coord[d]++;
-                        if (coord[d] < dst_shape_v[d]) break;
-                        coord[d] = 0;
-                    }
-                }
-            }
+            cudaStream_t stream = get_cuda_stream(attrs);
+            scatter_strided_copy_d2d(dst_ptr, src_ptr, dst_slice.shape(),
+                                     dst_slice.strides(), dst_slice.is_contiguous(),
+                                     n, elem_size, stream);
             return output;
         });
 
@@ -5276,6 +5335,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             auto* out_ptr = static_cast<char*>(output.data_ptr());
             auto src = src_in.contiguous();
             const auto* src_ptr = static_cast<const char*>(src.data_ptr());
+            cudaStream_t stream = get_cuda_stream(attrs);
 
             int64_t batch_size = 1;
             std::vector<int64_t> batch_dims;
@@ -5286,6 +5346,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 }
             }
 
+            // The diagonal scatter writes one element per (batch, k) at offset
+            // base + (r0+k)*stride[dim1] + (c0+k)*stride[dim2]. These targets are
+            // generally non-adjacent, so each is a single-element copy. Issue them
+            // asynchronously on the op's stream so the writes are ordered against
+            // producing/consuming work and the host is not blocked per element.
             std::vector<int64_t> batch_coord(batch_dims.size(), 0);
             for (int64_t b = 0; b < batch_size; b++) {
                 int64_t base = 0;
@@ -5295,11 +5360,25 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
                 int64_t r0 = (offset >= 0) ? 0 : -offset;
                 int64_t c0 = (offset >= 0) ? offset : 0;
-                for (int64_t k = 0; k < diag_len; k++) {
-                    int64_t out_elem_offset = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
-                    int64_t src_elem_idx = b * diag_len + k;
-                    cudaMemcpy(out_ptr + out_elem_offset * elem_size,
-                               src_ptr + src_elem_idx * elem_size, elem_size, cudaMemcpyDeviceToDevice);
+                // The diagonal step in element units is constant: when it equals 1
+                // (both axes innermost-contiguous, common for a 2D matrix diagonal
+                // with offset 0 on a row-major tensor where stride[dim1]+stride[dim2]
+                // happens to be 1 is impossible, so coalescing is only valid when the
+                // combined step is exactly 1). Otherwise copy element-by-element.
+                int64_t diag_step = strides[dim1] + strides[dim2];
+                int64_t base0 = base + r0 * strides[dim1] + c0 * strides[dim2];
+                if (diag_step == 1) {
+                    cudaMemcpyAsync(out_ptr + base0 * elem_size,
+                                    src_ptr + (b * diag_len) * elem_size,
+                                    diag_len * elem_size, cudaMemcpyDeviceToDevice, stream);
+                } else {
+                    for (int64_t k = 0; k < diag_len; k++) {
+                        int64_t out_elem_offset = base0 + k * diag_step;
+                        int64_t src_elem_idx = b * diag_len + k;
+                        cudaMemcpyAsync(out_ptr + out_elem_offset * elem_size,
+                                        src_ptr + src_elem_idx * elem_size, elem_size,
+                                        cudaMemcpyDeviceToDevice, stream);
+                    }
                 }
 
                 for (int64_t i = static_cast<int64_t>(batch_dims.size()) - 1; i >= 0; i--) {

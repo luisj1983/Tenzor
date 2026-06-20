@@ -124,6 +124,16 @@ auto InceptionAux::forward_impl(const Variable& x) -> Variable {
     conv_out = bn_->forward(conv_out);
     conv_out = nn::relu(conv_out);
 
+    // Force a fixed 4x4 spatial size before flatten so the flattened feature
+    // count is always 128*4*4 = 2048, matching fc1_'s in_features regardless of
+    // the network's input resolution. Without this, any input other than the
+    // canonical 224x224 yields a flattened size != 2048 and fc1_->forward hits a
+    // matmul shape mismatch. AdaptiveAvgPool2d is parameter-free, so constructing
+    // it here (rather than as a registered member) does not affect the module's
+    // parameters or state_dict.
+    nn::AdaptiveAvgPool2d adaptive_pool(4, 4);
+    conv_out = adaptive_pool.forward(conv_out);
+
     // Flatten using autograd-aware reshape
     auto& conv_out_tensor = conv_out.tensor();
     auto batch_size = conv_out_tensor.shape()[0];

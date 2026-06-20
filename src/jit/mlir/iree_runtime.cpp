@@ -42,6 +42,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 
 namespace tenzor::jit::mlir_jit {
 
@@ -281,28 +282,95 @@ auto run_subprocess(const std::vector<std::string>& argv) -> SubprocessResult {
     close(out_pipe[1]);
     close(err_pipe[1]);
 
-    auto drain = [](int fd) {
-        std::string s;
-        char buf[4096];
-        while (true) {
-            const ssize_t r = read(fd, buf, sizeof(buf));
-            if (r > 0) {
-                s.append(buf, static_cast<std::size_t>(r));
-            } else if (r == 0) {
-                break;
-            } else {
-                if (errno == EINTR) continue;
-                break;
+    SubprocessResult res;
+
+    // Drain stdout and stderr concurrently. A sequential drain (read stdout to
+    // EOF, then read stderr) can deadlock: the child can block writing to the
+    // stderr pipe once its ~64KB kernel buffer fills while it is still emitting
+    // stdout, but the parent would be blocked reading stdout (EOF only arrives
+    // on child exit, which never happens because the child is blocked). With
+    // --output_max_element_count=2147483647 stdout can be very large, so this is
+    // reachable. poll() over both fds, reading whichever is ready, prevents
+    // either pipe from filling.
+    //
+    // Use non-blocking reads so that a ready fd is fully drained without ever
+    // blocking on a partially-filled buffer.
+    auto set_nonblocking = [](int fd) {
+        const int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) {
+            (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        }
+    };
+    set_nonblocking(out_pipe[0]);
+    set_nonblocking(err_pipe[0]);
+
+    std::array<struct pollfd, 2> pfds{};
+    pfds[0].fd = out_pipe[0];
+    pfds[0].events = POLLIN;
+    pfds[1].fd = err_pipe[0];
+    pfds[1].events = POLLIN;
+
+    std::array<std::string*, 2> sinks{&res.stdout_text, &res.stderr_text};
+
+    int open_count = 2;
+    char buf[4096];
+    while (open_count > 0) {
+        int npfds = 0;
+        std::array<int, 2> idx_map{-1, -1};
+        for (int i = 0; i < 2; ++i) {
+            if (pfds[i].fd >= 0) {
+                idx_map[npfds] = i;
+                ++npfds;
             }
         }
-        return s;
-    };
+        // Compact poll array to the still-open fds.
+        std::array<struct pollfd, 2> active{};
+        for (int j = 0; j < npfds; ++j) {
+            active[j] = pfds[idx_map[j]];
+        }
 
-    SubprocessResult res;
-    res.stdout_text = drain(out_pipe[0]);
-    res.stderr_text = drain(err_pipe[0]);
-    close(out_pipe[0]);
-    close(err_pipe[0]);
+        const int pr = poll(active.data(), static_cast<nfds_t>(npfds), -1);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        for (int j = 0; j < npfds; ++j) {
+            const int i = idx_map[j];
+            const short revents = active[j].revents;
+            if (revents == 0) continue;
+
+            if (revents & (POLLIN | POLLHUP | POLLERR)) {
+                bool closed = false;
+                while (true) {
+                    const ssize_t r = read(pfds[i].fd, buf, sizeof(buf));
+                    if (r > 0) {
+                        sinks[i]->append(buf, static_cast<std::size_t>(r));
+                    } else if (r == 0) {
+                        closed = true;  // EOF
+                        break;
+                    } else {
+                        if (errno == EINTR) continue;
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        closed = true;  // unrecoverable error
+                        break;
+                    }
+                }
+                if (closed) {
+                    close(pfds[i].fd);
+                    pfds[i].fd = -1;
+                    --open_count;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        if (pfds[i].fd >= 0) {
+            close(pfds[i].fd);
+            pfds[i].fd = -1;
+        }
+    }
 
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {

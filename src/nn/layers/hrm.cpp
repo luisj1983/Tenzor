@@ -546,9 +546,19 @@ auto QLearningACT::select_action(const Variable& q_halt, const Variable& q_conti
                                   bool training) -> bool {
     stats_.total_decisions++;
 
-    // Get mean Q-values across batch for decision
-    float mean_q_halt = tenzor::mean(q_halt.tensor()).item<float>();
-    float mean_q_continue = tenzor::mean(q_continue.tensor()).item<float>();
+    // Get mean Q-values across batch for decision. Stack the two scalar means
+    // into a single length-2 tensor and copy to host once, so the per-cycle
+    // call site incurs a single device->host sync instead of two separate
+    // blocking item<float>() reads (one per Q-value) that would serialize the
+    // GPU forward loop twice per high-level cycle.
+    std::vector<Tensor> means{tenzor::mean(q_halt.tensor()),
+                              tenzor::mean(q_continue.tensor())};
+    Tensor means_host =
+        tenzor::stack(std::span<const Tensor>(means.data(), means.size()))
+            .to(Device::cpu(), DType::Float32);
+    const float* means_ptr = means_host.data<float>();
+    float mean_q_halt = means_ptr[0];
+    float mean_q_continue = means_ptr[1];
 
     // Update statistics
     stats_.avg_q_halt = 0.9 * stats_.avg_q_halt + 0.1 * mean_q_halt;
@@ -893,8 +903,14 @@ auto HRM::forward_with_aux(const Variable& input, const Tensor& mask)
     Variable cumulative_halt_prob;
     if (act_) {
         auto shape = h_state.shape();
+        // Track the model dtype: compute_halt_prob() returns probs whose dtype
+        // follows h_state (e.g. Float64 in double precision, Float16 in half).
+        // Allocating the accumulator with a hardcoded Float32 would mix dtypes
+        // in the per-cycle add below and perturb the halt decision relative to
+        // a pure-dtype reference.
         cumulative_halt_prob = Variable(
-            zeros({shape[0], shape[1]}, DType::Float32, h_state.tensor().device()),
+            zeros({shape[0], shape[1]}, h_state.tensor().dtype(),
+                  h_state.tensor().device()),
             false);
     }
 

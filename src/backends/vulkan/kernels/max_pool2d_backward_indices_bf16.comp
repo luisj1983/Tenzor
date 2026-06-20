@@ -16,30 +16,9 @@ layout(push_constant) uniform PushConstants {
     uint in_plane;    // H * W
 } params;
 
-// Convert half to float
-float half_to_float(uint h) {
-    uint sign = (h & 0x8000u) << 16;
-    uint exp = (h >> 10) & 0x1Fu;
-    uint mant = h & 0x3FFu;
-
-    if (exp == 0u) {
-        if (mant == 0u) {
-            return uintBitsToFloat(sign);
-        }
-        // Denormalized
-        while ((mant & 0x400u) == 0u) {
-            mant <<= 1;
-            exp--;
-        }
-        exp++;
-        mant &= ~0x400u;
-        exp += 127u - 15u;
-        return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
-    } else if (exp == 31u) {
-        return uintBitsToFloat(sign | 0x7F800000u | (mant << 13));
-    }
-    exp += 127u - 15u;
-    return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
+// Convert bfloat16 (low 16 bits) to float32 by zero-extending the mantissa.
+float bf16_to_float(uint bits) {
+    return uintBitsToFloat((bits & 0xFFFFu) << 16);
 }
 
 void main() {
@@ -54,7 +33,7 @@ void main() {
     uint grad_half_idx = idx % 2;
     uint grad_packed = grad_output[grad_word_idx];
     uint grad_half = (grad_half_idx == 0) ? (grad_packed & 0xFFFFu) : (grad_packed >> 16);
-    float grad = half_to_float(grad_half);
+    float grad = bf16_to_float(grad_half);
 
     // Plane-local index (in_y*W + in_x) -> global offset via the (n,c) plane base.
     int plane_local = indices_data[idx];

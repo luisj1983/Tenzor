@@ -27,7 +27,7 @@ void main() {
     float g = grad_data[gid];
 
     // Weight decay
-    if (params.weight_decay > 0.0) {
+    if (params.weight_decay != 0.0) {
         g += params.weight_decay * param_data[gid];
     }
 

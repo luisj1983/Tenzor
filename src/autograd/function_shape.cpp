@@ -230,16 +230,23 @@ auto BmmBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& b = saved_tensors_[1];
     const auto& grad_output = grad_outputs[0];
 
+    // For complex inputs the Wirtinger derivative requires the conjugate
+    // transpose (matching MatMulBackward): grad_a = grad_out @ conj(B^T),
+    // grad_b = conj(A^T) @ grad_out.
+    const bool complex_inputs = a.is_complex() || b.is_complex();
+
     // Transpose last two dimensions: (batch, m, p) -> (batch, p, m)
     auto b_transposed = permute(b, {0, 2, 1});
+    if (complex_inputs) b_transposed = conj(b_transposed);
 
-    // grad_a = grad_output @ b^T
+    // grad_a = grad_output @ b^T (conjugated for complex)
     auto grad_a = bmm(grad_output, b_transposed);
 
     // Transpose a: (batch, n, m) -> (batch, m, n)
     auto a_transposed = permute(a, {0, 2, 1});
+    if (complex_inputs) a_transposed = conj(a_transposed);
 
-    // grad_b = a^T @ grad_output
+    // grad_b = a^T @ grad_output (conjugated for complex)
     auto grad_b = bmm(a_transposed, grad_output);
 
     // audit-11 RR.2 (MM.1 sibling): reduce broadcasted batch axes back to
@@ -271,6 +278,12 @@ auto BmmBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     const auto& grad_out = grad_outputs[0];
     auto b_t = tenzor::transpose(saved_b, saved_b.shape().size() - 2, saved_b.shape().size() - 1);
     auto a_t = tenzor::transpose(saved_a, saved_a.shape().size() - 2, saved_a.shape().size() - 1);
+    // Conjugate transpose for complex inputs (Wirtinger), matching the
+    // Tensor-level backward and MatMulBackward.
+    if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
+        b_t = tenzor::conj(b_t);
+        a_t = tenzor::conj(a_t);
+    }
     auto grad_a = tenzor::bmm(grad_out, b_t);
     auto grad_b = tenzor::bmm(a_t, grad_out);
 

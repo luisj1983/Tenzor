@@ -1,8 +1,11 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Complex128 sin. Uses float transcendentals since GLSL sin/cos/sinh/cosh
-// only accept float; inputs are downcast and outputs widened back.
+// Complex128 sin: sin(a + bi) = sin(a)cosh(b) + i cos(a)sinh(b).
+// GLSL's builtin sin/cos/sinh/cosh accept only `float`, which would cap
+// Complex128 accuracy at Float32 and break parity/gradcheck against the CPU
+// f64 reference. We therefore use double-precision range-reduced polynomial
+// implementations (mirroring trigonometric_f64.comp / hyperbolic_f64.comp).
 
 layout(local_size_x_id = 0) in;
 
@@ -13,11 +16,109 @@ layout(push_constant) uniform PushConstants {
     uint num_elements;
 };
 
+// --- Double-precision trig (Cody-Waite range reduction + minimax poly) ---
+
+// Reduce x to [-pi/4, pi/4]; returns reduced value r and quadrant q (0-3).
+void trig_reduce(double x, out double r, out int q) {
+    double two_over_pi = 0.6366197723675814;
+    double pi_over_2_hi = 1.5707963267948966;     // High part of pi/2
+    double pi_over_2_lo = 6.123233995736766e-17;  // Low part of pi/2
+
+    double j = floor(x * two_over_pi + 0.5);
+    q = int(j) & 3;
+
+    // Cody-Waite reduction: r = x - j * (pi/2) in two extended-precision steps
+    r = x - j * pi_over_2_hi;
+    r = r - j * pi_over_2_lo;
+}
+
+double sin_poly(double x) {
+    double x2 = x * x;
+    return x * (1.0 - x2 * (1.0/6.0 - x2 * (1.0/120.0 - x2 * (1.0/5040.0 - x2 / 362880.0))));
+}
+
+double cos_poly(double x) {
+    double x2 = x * x;
+    return 1.0 - x2 * (0.5 - x2 * (1.0/24.0 - x2 * (1.0/720.0 - x2 / 40320.0)));
+}
+
+double sin_d(double x) {
+    if (x != x) return x;  // NaN
+    double r;
+    int q;
+    trig_reduce(x, r, q);
+    switch (q) {
+        case 0: return sin_poly(r);
+        case 1: return cos_poly(r);
+        case 2: return -sin_poly(r);
+        case 3: return -cos_poly(r);
+    }
+    return 0.0;
+}
+
+double cos_d(double x) {
+    if (x != x) return x;  // NaN
+    double r;
+    int q;
+    trig_reduce(x, r, q);
+    switch (q) {
+        case 0: return cos_poly(r);
+        case 1: return -sin_poly(r);
+        case 2: return -cos_poly(r);
+        case 3: return sin_poly(r);
+    }
+    return 0.0;
+}
+
+// --- Double-precision exp / hyperbolic ---
+
+double exp_d(double x) {
+    if (x != x) return x;  // NaN
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+
+    // exp(r) via degree-13 Taylor polynomial (Horner), |r| <= ln(2)/2
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0 +
+        r * (1.0/6227020800.0)))))))))))));
+
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+double sinh_d(double x) {
+    if (x != x) return x;  // NaN
+    double ep = exp_d(x);
+    double em = exp_d(-x);
+    return (ep - em) * 0.5;
+}
+
+double cosh_d(double x) {
+    if (x != x) return x;  // NaN
+    double ep = exp_d(x);
+    double em = exp_d(-x);
+    return (ep + em) * 0.5;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= num_elements) return;
-    float a = float(data_in[idx * 2u]);
-    float b = float(data_in[idx * 2u + 1u]);
-    data_out[idx * 2u]      = double(sin(a) * cosh(b));
-    data_out[idx * 2u + 1u] = double(cos(a) * sinh(b));
+    double a = data_in[idx * 2u];
+    double b = data_in[idx * 2u + 1u];
+    data_out[idx * 2u]      = sin_d(a) * cosh_d(b);
+    data_out[idx * 2u + 1u] = cos_d(a) * sinh_d(b);
 }

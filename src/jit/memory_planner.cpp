@@ -496,6 +496,18 @@ auto RematerializationPlanner::apply(
     size_t count = 0;
     size_t memory_freed = 0;
 
+    // Build the node->index map once. It is used only to locate the last
+    // pre-existing CONSUMER of a value (drawn from value->uses()). The
+    // recompute nodes we append below via graph.add_node are never looked up
+    // as consumers, so the original (pre-loop) index map remains correct for
+    // every candidate and rebuilding it per iteration would be wasted work.
+    const auto& nodes = graph.nodes();
+    std::unordered_map<const Node*, size_t> node_index;
+    node_index.reserve(nodes.size());
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        node_index[nodes[i].get()] = i;
+    }
+
     for (const auto& candidate : candidates) {
         // If we have a memory budget, stop once we're under it
         if (memory_budget_ > 0 && memory_freed >= memory_budget_) break;
@@ -508,12 +520,6 @@ auto RematerializationPlanner::apply(
 
         // Find the last consumer of this value
         size_t last_use_idx = 0;
-        const auto& nodes = graph.nodes();
-        std::unordered_map<const Node*, size_t> node_index;
-        for (size_t i = 0; i < nodes.size(); ++i) {
-            node_index[nodes[i].get()] = i;
-        }
-
         std::shared_ptr<Node> last_consumer;
         size_t live_consumer_count = 0;
         for (const auto& use : value->uses()) {
@@ -663,6 +669,19 @@ auto MemorySwapPlanner::apply(Graph& graph,
                                const std::vector<SwapSchedule>& schedules) -> size_t {
     size_t count = 0;
 
+    // Build the node->index map once. It is used only to locate the last
+    // pre-existing CONSUMER of a value (drawn from value->uses()). The
+    // swap_out/swap_in nodes we append below via graph.add_node are never
+    // looked up as consumers (and SwapOut uses are explicitly skipped), so the
+    // original (pre-loop) index map stays correct for every schedule and
+    // rebuilding it per iteration would be wasted work.
+    const auto& nodes = graph.nodes();
+    std::unordered_map<const Node*, size_t> node_index;
+    node_index.reserve(nodes.size());
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        node_index[nodes[i].get()] = i;
+    }
+
     for (const auto& sched : schedules) {
         auto value = graph.get_value(sched.value_id);
         if (!value) continue;
@@ -697,13 +716,7 @@ auto MemorySwapPlanner::apply(Graph& graph,
         graph.add_node(swap_in);
 
         // Redirect the last consumer to use the swapped-in value
-        // Find the last consumer node
-        const auto& nodes = graph.nodes();
-        std::unordered_map<const Node*, size_t> node_index;
-        for (size_t i = 0; i < nodes.size(); ++i) {
-            node_index[nodes[i].get()] = i;
-        }
-
+        // Find the last consumer node (node_index built once above)
         size_t last_idx = 0;
         std::shared_ptr<Node> last_consumer;
         for (const auto& use : value->uses()) {

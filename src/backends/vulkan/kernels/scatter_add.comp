@@ -38,6 +38,9 @@ void main() {
 
     // Get destination dim index from index tensor
     int dest_dim_idx = idx_data[i];
+    // Normalize negative indices like the CPU reference (idx += dim_size) before the
+    // bounds check, so a valid negative index wraps instead of being silently dropped.
+    if (dest_dim_idx < 0) dest_dim_idx += int(params.dim_size);
 
     // Bounds check
     if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;

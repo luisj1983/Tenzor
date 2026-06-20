@@ -678,62 +678,39 @@ __global__ void nested_layer_norm_kernel(
     int64_t end = offsets[b + 1];
     if (start >= end) return;
 
-    // Block is launched with at most 256 threads (min(D, 256)). Cooperative
-    // tree reductions over shared memory compute each row's mean/var once for the
-    // whole block instead of having every thread recompute the full O(D) sums.
-    // The two-pass formulation (sum, then sum of squared diffs about the mean) is
-    // kept verbatim from the original so results match CPU/other backends.
-    __shared__ T s_red[256];
-    __shared__ T s_mean;
-    __shared__ T s_inv_std;
-    const int tid = static_cast<int>(threadIdx.x);
-
+    // Block is launched with at most 256 threads (min(D, 256)). Each thread
+    // computes the row's mean and variance independently over the full O(D)
+    // range (no cross-thread reduction), then threads cooperatively write the
+    // normalized output. This mirrors the CUDA reference
+    // (nested_layer_norm_kernel_t) and is always correct regardless of whether
+    // blockDim.x is a power of two. A shared-memory tree reduction was avoided
+    // here because the halving recurrence double-counts elements for non-pow2
+    // block sizes (e.g. D = 96, 100, 192, 200, 250), silently corrupting both
+    // mean and variance. The two-pass formulation (sum, then sum of squared
+    // diffs about the mean) matches CPU/other backends.
     for (int64_t row = start; row < end; ++row) {
-        // Pass 1: cooperative sum -> mean.
-        T psum = T(0);
-        for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
-            psum += values[row * D + d];
+        // Pass 1: mean (T-precision accumulator, full-range per thread).
+        T mean = T(0);
+        for (int64_t d = 0; d < D; ++d) {
+            mean += values[row * D + d];
         }
-        s_red[tid] = psum;
-        __syncthreads();
-        // Halving reduction; the bound check makes it correct for block sizes
-        // that are not a power of two (threads = min(D, 256)).
-        for (int stride = (static_cast<int>(blockDim.x) + 1) / 2; stride > 0; stride = (stride > 1) ? (stride + 1) / 2 : 0) {
-            if (tid < stride && tid + stride < static_cast<int>(blockDim.x)) {
-                s_red[tid] += s_red[tid + stride];
-            }
-            __syncthreads();
-        }
-        if (tid == 0) s_mean = s_red[0] / static_cast<T>(D);
-        __syncthreads();
-        T mean = s_mean;
+        mean /= static_cast<T>(D);
 
-        // Pass 2: cooperative sum of squared deviations -> variance.
-        T pvar = T(0);
-        for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
+        // Pass 2: variance (sum of squared deviations, full-range per thread).
+        T var = T(0);
+        for (int64_t d = 0; d < D; ++d) {
             T diff = values[row * D + d] - mean;
-            pvar += diff * diff;
+            var += diff * diff;
         }
-        s_red[tid] = pvar;
-        __syncthreads();
-        for (int stride = (static_cast<int>(blockDim.x) + 1) / 2; stride > 0; stride = (stride > 1) ? (stride + 1) / 2 : 0) {
-            if (tid < stride && tid + stride < static_cast<int>(blockDim.x)) {
-                s_red[tid] += s_red[tid + stride];
-            }
-            __syncthreads();
-        }
-        if (tid == 0) {
-            T var = s_red[0] / static_cast<T>(D);
-            s_inv_std = T(1) / sqrt(var + eps);
-        }
-        __syncthreads();
-        T inv_std = s_inv_std;
+        var /= static_cast<T>(D);
 
+        T inv_std = T(1) / sqrt(var + eps);
+
+        // Normalize and apply affine cooperatively across threads.
         for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
             T normalized = (values[row * D + d] - mean) * inv_std;
             output[row * D + d] = normalized * weight[d] + bias[d];
         }
-        __syncthreads();
     }
 }
 

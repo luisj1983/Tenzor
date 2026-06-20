@@ -122,6 +122,52 @@ double atan2_double(double y, double x) {
     return 0.0;
 }
 
+// Exact double-precision 2^n for n an integer-valued double (ldexp scaling).
+// Powers of two are exactly representable in binary64, and squaring 2.0
+// stays exact, so binary exponentiation yields a bit-exact result with no
+// Taylor/clamp error (unlike exp_double(n*ln2)). Mirrors math_f64.comp's
+// exp2_int_double so the broadcast ldexp path matches std::ldexp / same-shape
+// Float64 results. Handles the full normal exponent range and saturates to
+// ±inf / 0 like std::ldexp for out-of-range n.
+double exp2_int_double(double n_dbl) {
+    if (n_dbl != n_dbl) return n_dbl;  // NaN
+    // Round toward nearest integer; ldexp's n is integral by contract, but
+    // tolerate float representations like 3.0 exactly.
+    double rn = round(n_dbl);
+    // Saturate: 2^1024 overflows to +inf, 2^-1075 underflows to 0.
+    if (rn > 1023.0) return 1.0 / 0.0;     // +inf
+    if (rn < -1074.0) return 0.0;          // below smallest subnormal → 0
+    int k = int(rn);
+    if (k >= 0) {
+        int abs_k = k;
+        double pow2 = 1.0;
+        double base = 2.0;
+        while (abs_k > 0) {
+            if ((abs_k & 1) != 0) pow2 *= base;
+            base *= base;
+            abs_k >>= 1;
+        }
+        return pow2;
+    }
+    // k < 0: build 2^k = (2^k1) * (2^k2) with each |ki| <= 537 so neither
+    // intermediate overflows; the product underflows gracefully to
+    // subnormals/zero exactly as a hardware multiply would.
+    int neg = -k;            // neg in (0, 1074]
+    int neg1 = neg / 2;
+    int neg2 = neg - neg1;   // neg1 + neg2 == neg, both <= 537
+    double s1 = 1.0;
+    double s2 = 1.0;
+    {
+        int e = neg1; double base = 0.5;       // 0.5 = 2^-1
+        while (e > 0) { if ((e & 1) != 0) s1 *= base; base *= base; e >>= 1; }
+    }
+    {
+        int e = neg2; double base = 0.5;
+        while (e > 0) { if ((e & 1) != 0) s2 *= base; base *= base; e >>= 1; }
+    }
+    return s1 * s2;
+}
+
 void main() {
     uint out_idx = gl_GlobalInvocationID.x;
 
@@ -150,7 +196,7 @@ void main() {
     // Float64 operations
     double val_a = a[idx_a];
     double val_b = b[idx_b];
-    double res;
+    double res = 0.0;
 
     switch (params.op) {
         case 0: // add
@@ -208,8 +254,11 @@ void main() {
             if (val_a == 0.0) res = 0.0;
             else res = val_a * log_double(1.0 + val_b);
             break;
-        case 49: // ldexp (binary): x * 2^n in double (n is val_b as int)
-            res = val_a * exp_double(val_b * 0.6931471805599453);
+        case 49: // ldexp (binary): x * 2^n in double — exact power-of-two scaling
+            res = val_a * exp2_int_double(val_b);
+            break;
+        default:
+            res = 0.0;
             break;
     }
     result[out_idx] = res;

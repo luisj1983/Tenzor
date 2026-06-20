@@ -728,15 +728,15 @@ auto batchnorm2d_forward(const Tensor& input,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int num_blocks = get_num_blocks(total_size);
-        hipLaunchKernelGGL(batchnorm_normalize_kernel<__half>, dim3(num_blocks), dim3(BLOCK_SIZE),
-                          0, stream,
-                          reinterpret_cast<const __half*>(input.data<Float16>()),
-                          reinterpret_cast<__half*>(output.data<Float16>()),
-                          reinterpret_cast<const __half*>(mean.data<Float16>()),
-                          reinterpret_cast<const __half*>(variance.data<Float16>()),
-                          epsilon, N, C, H, W);
-        HIP_CHECK(hipGetLastError());
+        // invstd = rsqrt(var + epsilon) and the normalization are unstable in
+        // half precision (epsilon ~1e-5 underflows in __half for small var).
+        // Widen to Float32, normalize, narrow back — mirrors the BFloat16
+        // branch below and the Float16 mean/var widening convention.
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto variance_f32 = variance.to(DType::Float32);
+        auto result_f32 = batchnorm2d_forward(input_f32, mean_f32, variance_f32, epsilon, stream);
+        return result_f32.to(DType::Float16);
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto mean_f32 = mean.to(DType::Float32);
@@ -787,17 +787,17 @@ auto batchnorm2d_forward_affine(const Tensor& input,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int num_blocks = get_num_blocks(total_size);
-        hipLaunchKernelGGL(batchnorm_forward_affine_kernel<__half>, dim3(num_blocks), dim3(BLOCK_SIZE),
-                          0, stream,
-                          reinterpret_cast<const __half*>(input.data<Float16>()),
-                          reinterpret_cast<__half*>(output.data<Float16>()),
-                          reinterpret_cast<const __half*>(mean.data<Float16>()),
-                          reinterpret_cast<const __half*>(variance.data<Float16>()),
-                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
-                          reinterpret_cast<const __half*>(beta.data<Float16>()),
-                          epsilon, N, C, H, W);
-        HIP_CHECK(hipGetLastError());
+        // invstd = rsqrt(var + epsilon) and the affine normalization are
+        // unstable in half precision (epsilon ~1e-5 underflows in __half for
+        // small var). Widen to Float32, compute, narrow back — mirrors the
+        // BFloat16 branch below and the Float16 mean/var widening convention.
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto variance_f32 = variance.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto beta_f32 = beta.to(DType::Float32);
+        auto result_f32 = batchnorm2d_forward_affine(input_f32, mean_f32, variance_f32, gamma_f32, beta_f32, epsilon, stream);
+        return result_f32.to(DType::Float16);
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto mean_f32 = mean.to(DType::Float32);

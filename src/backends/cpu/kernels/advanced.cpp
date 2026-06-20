@@ -1083,6 +1083,8 @@ auto quantile_impl(const T* data, int64_t dim_size,
             // Linear interpolation at the q-th position
             double idx_f = q * static_cast<double>(dim_size - 1);
             int64_t lo = static_cast<int64_t>(idx_f);
+            if (lo < 0) lo = 0;
+            if (lo >= dim_size) lo = dim_size - 1;
             int64_t hi = lo + 1;
             if (hi >= dim_size) hi = dim_size - 1;
             double frac_part = idx_f - static_cast<double>(lo);
@@ -1124,6 +1126,8 @@ auto nanquantile_impl(const T* data, int64_t dim_size,
 
             double idx_f = q * static_cast<double>(n - 1);
             int64_t lo = static_cast<int64_t>(idx_f);
+            if (lo < 0) lo = 0;
+            if (lo >= n) lo = n - 1;
             int64_t hi = lo + 1;
             if (hi >= n) hi = n - 1;
             double frac_part = idx_f - static_cast<double>(lo);
@@ -1552,6 +1556,21 @@ auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
     }
 
     const int64_t* offsets_ptr = offs.data<int64_t>();
+    // Validate the (untrusted) offsets so segment_reduce_impl cannot index the
+    // input out of bounds: in-range endpoints and non-decreasing.
+    if (num_segments < 0) {
+        throw std::invalid_argument("segment_reduce: offsets must have at least 1 element");
+    }
+    if (num_segments > 0) {
+        if (offsets_ptr[0] < 0 || offsets_ptr[num_segments] > axis_size) {
+            throw std::invalid_argument("segment_reduce: offsets out of range [0, axis_size]");
+        }
+        for (int64_t i = 0; i < num_segments; ++i) {
+            if (offsets_ptr[i] > offsets_ptr[i + 1]) {
+                throw std::invalid_argument("segment_reduce: offsets must be non-decreasing");
+            }
+        }
+    }
     auto dtype = cont.dtype();
     auto device = cont.device();
 

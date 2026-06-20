@@ -79,12 +79,26 @@ public:
         param_shape[channel_axis] = C;
         Tensor mean_t = from_data(mean_.data(), param_shape, input.device());
         Tensor std_t  = from_data(std_.data(),  param_shape, input.device());
-        if (input.dtype() != DType::Float32) {
-            mean_t = mean_t.to(input.dtype());
-            std_t  = std_t.to(input.dtype());
-        }
-        Tensor normalized = (input - mean_t) / std_t;
 
+        // Normalization (x - mean) / std is inherently fractional. For an
+        // integer-dtype input the division would otherwise dispatch to
+        // truncating integer division and silently produce meaningless values.
+        // Promote integral inputs to Float32 so the result holds the genuine
+        // fractional normalized values (matching the float behaviour); the
+        // mean/std params are already Float32 in this branch. For floating
+        // inputs, cast the params to the input dtype and compute in-place so
+        // Float16/BFloat16/Float64 keep their precision and dtype.
+        if (is_floating_type(input.dtype())) {
+            if (input.dtype() != DType::Float32) {
+                mean_t = mean_t.to(input.dtype());
+                std_t  = std_t.to(input.dtype());
+            }
+            Tensor normalized = (input - mean_t) / std_t;
+            return {normalized, target};
+        }
+
+        Tensor input_f = input.to(DType::Float32);
+        Tensor normalized = (input_f - mean_t) / std_t;
         return {normalized, target};
     }
 

@@ -423,16 +423,21 @@ auto create_shifted_window_mask(int64_t H, int64_t W,
     auto img_mask = zeros({1, H, W, 1}, DType::Float32, Device::cpu());
     auto mask_data = img_mask.data<float>();
 
-    // Partition into regions based on shift
-    int64_t cnt = 0;
-    for (int64_t h_start : {int64_t(0), H - window_size, H - shift_size}) {
-        for (int64_t w_start : {int64_t(0), W - window_size, W - shift_size}) {
-            for (int64_t h = h_start; h < std::min(h_start + window_size, H); ++h) {
-                for (int64_t w = w_start; w < std::min(w_start + window_size, W); ++w) {
-                    mask_data[h * W + w] = static_cast<float>(cnt);
-                }
-            }
-            cnt++;
+    // Partition into regions based on shift using per-cell classification.
+    // This matches the standard Swin slice-based partition (and the CUDA
+    // create_window_mask_kernel): each cell is labelled exactly once by its
+    // (h_region, w_region) pair, where region 2 is the [size-shift, size)
+    // slice, region 1 is the [size-window, size-shift) slice, and region 0 is
+    // the leading [0, size-window) slice.
+    for (int64_t h = 0; h < H; ++h) {
+        int64_t h_region = 0;
+        if (h >= H - shift_size) h_region = 2;
+        else if (h >= H - window_size) h_region = 1;
+        for (int64_t w = 0; w < W; ++w) {
+            int64_t w_region = 0;
+            if (w >= W - shift_size) w_region = 2;
+            else if (w >= W - window_size) w_region = 1;
+            mask_data[h * W + w] = static_cast<float>(h_region * 3 + w_region);
         }
     }
 

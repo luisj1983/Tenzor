@@ -78,6 +78,18 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // The conv2d_forward shaders index input/output flat offsets and n_elements
+    // in 32-bit uint; a tensor with >UINT32_MAX elements would wrap the index
+    // and read/write out of bounds. shaderInt64 is not enabled on the device,
+    // so reject oversized tensors up front rather than overflow silently.
+    if (input.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        output.numel() > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan conv2d_forward: tensor too large for 32-bit indexing "
+            "(input elements " + std::to_string(input.numel()) +
+            ", output elements " + std::to_string(output.numel()) + ")");
+    }
+
     // Materialize operands to zero-offset contiguous storage before binding.
     // Tensor views (slice/narrow) carry a non-zero storage offset; the shaders
     // index from element 0 and the descriptor-offset alignment guard rejects
@@ -434,6 +446,18 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
     std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // The winograd shaders index input/output flat offsets in 32-bit uint and
+    // dispatch with a uint32 tile count; a tensor with >UINT32_MAX elements
+    // would wrap the index and read/write out of bounds. shaderInt64 is not
+    // enabled on the device, so reject oversized tensors up front.
+    if (input.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        output.numel() > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan conv2d_winograd: tensor too large for 32-bit indexing "
+            "(input elements " + std::to_string(input.numel()) +
+            ", output elements " + std::to_string(output.numel()) + ")");
+    }
+
     {
         Tensor M_reordered = M;  // Already in correct layout
 
@@ -541,6 +565,18 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
+
+    // The conv_transpose2d_forward shaders index input/output flat offsets and
+    // n_elements in 32-bit uint; a tensor with >UINT32_MAX elements would wrap
+    // the index and read/write out of bounds. shaderInt64 is not enabled on the
+    // device, so reject oversized tensors up front rather than overflow silently.
+    if (input.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        output.numel() > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan conv_transpose2d_forward: tensor too large for 32-bit indexing "
+            "(input elements " + std::to_string(input.numel()) +
+            ", output elements " + std::to_string(output.numel()) + ")");
+    }
 
     // Materialize operands to zero-offset contiguous storage before binding
     // (views with a non-zero storage offset would trip the descriptor-offset
@@ -722,6 +758,18 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, out_channels, out_depth, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
+
+    // The conv3d_forward shaders index input/output flat offsets and n_elements
+    // in 32-bit uint; a tensor with >UINT32_MAX elements would wrap the index
+    // and read/write out of bounds. shaderInt64 is not enabled on the device,
+    // so reject oversized tensors up front rather than overflow silently.
+    if (input.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        output.numel() > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan conv3d_forward: tensor too large for 32-bit indexing "
+            "(input elements " + std::to_string(input.numel()) +
+            ", output elements " + std::to_string(output.numel()) + ")");
+    }
 
     // Materialize operands to zero-offset contiguous storage before binding
     // (views with a non-zero storage offset would trip the descriptor-offset
@@ -1416,6 +1464,21 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
 
     std::vector<int64_t> output_shape = {batch, out_channels, H_out, W_out};
     Tensor output(output_shape, input.dtype(), input.device());
+
+    // The deformable_conv2d shader indexes input/offset/mask/output flat offsets
+    // and n_elements in 32-bit uint; a tensor with >UINT32_MAX elements would
+    // wrap the index and read/write out of bounds. shaderInt64 is not enabled on
+    // the device, so reject oversized tensors up front rather than overflow.
+    if (input.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        offset.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        (use_mask && mask.numel() > static_cast<int64_t>(UINT32_MAX)) ||
+        output.numel() > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan deformable_conv2d: tensor too large for 32-bit indexing "
+            "(input elements " + std::to_string(input.numel()) +
+            ", offset elements " + std::to_string(offset.numel()) +
+            ", output elements " + std::to_string(output.numel()) + ")");
+    }
 
     // Materialize read operands to zero-offset contiguous storage (views with a
     // non-zero offset would trip the descriptor-offset alignment guard).

@@ -276,6 +276,10 @@ auto Module::unregister_buffer(const std::string& name) -> void {
     buffers_.erase(it);
 }
 
+auto Module::replace_module(const std::string& name, std::shared_ptr<Module> module) -> void {
+    submodules_[name] = std::move(module);
+}
+
 auto Module::unregister_module(const std::string& name) -> void {
     auto it = submodules_.find(name);
     if (it == submodules_.end()) {
@@ -796,7 +800,11 @@ auto ParameterList::append(Variable param) -> ParameterList& {
     auto param_ptr = std::make_shared<Variable>(std::move(param));
     param_ptr->make_thread_safe();
     params_.push_back(param_ptr);
-    register_parameter(name, *param_ptr);
+    // Alias the SAME shared_ptr into the base parameters_ map so that
+    // Module::to(Device)/to(DType) (which mutate parameters_) and params_
+    // refer to one Variable object. register_parameter() would store a copy,
+    // leaving params_ stale after a device/dtype move.
+    register_parameter_shared(name, param_ptr);
     return *this;
 }
 
@@ -856,7 +864,11 @@ auto ParameterDict::insert(const std::string& key, Variable param) -> ParameterD
         order_.push_back(key);
         params_[key] = param_ptr;
     }
-    register_parameter(key, *param_ptr);
+    // Alias the SAME shared_ptr into the base parameters_ map so that
+    // Module::to(Device)/to(DType) (which mutate parameters_) and params_
+    // refer to one Variable object. register_parameter() would store a copy,
+    // leaving params_ stale after a device/dtype move.
+    register_parameter_shared(key, param_ptr);
     return *this;
 }
 

@@ -33,6 +33,7 @@ layout(push_constant) uniform PushConstants {
     uint groups;
     uint offset_groups;
     uint use_mask;
+    uint use_bias;
     uint n_elements;
 } params;
 
@@ -130,8 +131,10 @@ void main() {
         }
     }
 
-    // Add bias
-    sum += bias_data[oc];
+    // Add bias (only when a bias tensor was supplied; otherwise bias_data is a
+    // dummy binding and must not be read at oc).
+    if (params.use_bias == 1)
+        sum += bias_data[oc];
 
     output_data[idx] = sum;
 }

@@ -11,6 +11,8 @@
 
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -37,13 +39,36 @@ namespace cuda {
 class CudaDeviceGuard {
 public:
     explicit CudaDeviceGuard(int device) : prev_(0), cur_(device) {
-        cudaGetDevice(&prev_);
+        // Capture the previously-current device so it can be restored. If this
+        // fails, the destructor's restore would be meaningless, so fail fast.
+        cudaError_t err = cudaGetDevice(&prev_);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("CudaDeviceGuard: cudaGetDevice failed: ") +
+                cudaGetErrorString(err));
+        }
         if (device >= 0 && device != prev_) {
-            cudaSetDevice(device);
+            // A failed switch must abort here. The class contract is that the
+            // tensor's device is current before handles/workspaces/launches are
+            // fetched; swallowing this error would run the op on the wrong
+            // device, exactly the silent multi-GPU corruption this guard exists
+            // to prevent. Reset cur_ so the destructor does not attempt a
+            // restore predicated on a switch that never happened.
+            err = cudaSetDevice(device);
+            if (err != cudaSuccess) {
+                cur_ = prev_;
+                throw std::runtime_error(
+                    std::string("CudaDeviceGuard: cudaSetDevice(") +
+                    std::to_string(device) + ") failed: " +
+                    cudaGetErrorString(err));
+            }
         }
     }
     ~CudaDeviceGuard() {
         if (cur_ >= 0 && cur_ != prev_) {
+            // Best-effort restore in a destructor: cannot throw. Discarding the
+            // status is acceptable here because the constructor already proved
+            // prev_ is a valid current device.
             cudaSetDevice(prev_);
         }
     }
@@ -120,9 +145,11 @@ inline std::pair<int, int> optimal_launch_config(
  * @return Number of blocks to launch
  */
 inline int compute_grid_size(int64_t num_elements, int block_size = 256) {
-    int num_blocks = static_cast<int>(
-        (num_elements + block_size - 1) / block_size);
-    return std::max(1, std::min(num_blocks, 2147483647));  // CUDA x-dim max: 2^31-1
+    // Clamp in int64 BEFORE narrowing; computing the block count in `int`
+    // overflows for very large tensors (> ~2^31 * block_size elements).
+    int64_t nb = std::min<int64_t>((num_elements + block_size - 1) / block_size,
+                                   2147483647LL);  // CUDA x-dim max: 2^31-1
+    return static_cast<int>(std::max<int64_t>(1, nb));
 }
 
 /**

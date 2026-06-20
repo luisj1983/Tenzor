@@ -105,6 +105,10 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         throw std::invalid_argument("Transpose: invalid dimensions");
     }
 
+    if (ndim > 8) {
+        throw std::invalid_argument("oneapi transpose: tensor rank > 8 is unsupported (on-device stride arrays are fixed at 8 dims)");
+    }
+
     // Convert spans to vectors
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     std::vector<int64_t> in_actual_strides(input_strides_span.begin(), input_strides_span.end());
@@ -1031,7 +1035,7 @@ auto fill_kernel(const Tensor& tensor, double value, sycl::queue& queue) -> Tens
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<FillKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = value_h;
-        });
+        }).wait();
     }
     else if (tensor.dtype() == DType::BFloat16) {
         // BFloat16 is stored as raw uint16_t; fill the bit pattern directly.
@@ -1681,7 +1685,9 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, sycl::queue& q
     // Normalize shift to [0, dim_size)
     shift = ((shift % dim_size) + dim_size) % dim_size;
 
-    if (shift == 0) return in_cont;
+    // Return independent storage (matching the CPU reference), not an alias of
+    // the input: an in-place mutation of the result must not corrupt the input.
+    if (shift == 0) return clone_kernel(in_cont, queue);
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
                   in_cont.dtype(), in_cont.device());

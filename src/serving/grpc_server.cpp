@@ -114,8 +114,16 @@ public:
             auto future = model->batcher->submit(input);
             auto output = future.get();
 
-            // Serialize output
-            auto output_cont = output.contiguous();
+            // Serialize output. Pull the result back to host first: a
+            // GPU-resident model returns device-storage output, and
+            // protobuf set_data() below does a host-side memcpy from
+            // storage()->data(). Without the copy to CPU that reads a raw
+            // device pointer as host memory (garbage/crash). Mirror the HTTP
+            // path (server.cpp). contiguous() after to(cpu) guarantees the
+            // bytes are tight-packed; it is a cheap no-op when already on CPU.
+            auto output_cont = (output.device().type == tenzor::Device::Type::CPU)
+                                   ? output.contiguous()
+                                   : output.to(tenzor::Device::cpu()).contiguous();
             auto* out_tensor = response->mutable_output();
             for (auto dim : output_cont.shape()) {
                 out_tensor->add_shape(dim);

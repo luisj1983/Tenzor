@@ -183,92 +183,101 @@ kernel void topk_per_row_kernel(
 // Median / Mode (per-row)
 // ============================================================================
 
+// NOTE: scratch_values/scratch_indices (buffers 1/2) are per-row in-place sort
+// scratch of full input shape (num_rows*row_size). The single per-row answer is
+// written to dedicated result buffers (result_values/result_indices, buffers
+// 4/5) of size num_rows. Keeping the result destination separate from the sort
+// scratch is essential: with one thread per row and grid=num_rows, writing the
+// result into scratch[row] would alias row 0's active scratch region
+// [0, row_size) for any row in [1, row_size), producing a concurrent data race.
 kernel void median_per_row_kernel(
     device const float* input    [[buffer(0)]],
-    device float* output_values  [[buffer(1)]],
-    device int* output_indices   [[buffer(2)]],
+    device float* scratch_values [[buffer(1)]],
+    device int* scratch_indices  [[buffer(2)]],
     constant uint& row_size      [[buffer(3)]],
+    device float* result_values  [[buffer(4)]],
+    device int* result_indices   [[buffer(5)]],
     uint row                     [[thread_position_in_grid]])
 {
     uint base = row * row_size;
 
-    // We need to sort to find median — use a copy + insertion sort
-    // For production: use shared memory + bitonic, but this is correct
-    // Allocate thread-local array on stack for small sizes
-    // Metal doesn't support dynamic stack arrays, so we do in-place sort on output
-    // Copy values to a temporary region (reuse output space)
+    // We need to sort to find median — use a copy + insertion sort.
+    // Metal doesn't support dynamic stack arrays, so we do an in-place sort in
+    // this row's private scratch region [base, base+row_size).
     for (uint i = 0; i < row_size; ++i) {
-        output_values[base + i] = input[base + i];
-        output_indices[base + i] = int(i);
+        scratch_values[base + i] = input[base + i];
+        scratch_indices[base + i] = int(i);
     }
 
-    // Sort
+    // Sort (ascending)
     for (uint i = 1; i < row_size; ++i) {
-        float key = output_values[base + i];
-        int idx = output_indices[base + i];
+        float key = scratch_values[base + i];
+        int idx = scratch_indices[base + i];
         int j = int(i) - 1;
-        while (j >= 0 && output_values[base + uint(j)] > key) {
-            output_values[base + uint(j+1)] = output_values[base + uint(j)];
-            output_indices[base + uint(j+1)] = output_indices[base + uint(j)];
+        while (j >= 0 && scratch_values[base + uint(j)] > key) {
+            scratch_values[base + uint(j+1)] = scratch_values[base + uint(j)];
+            scratch_indices[base + uint(j+1)] = scratch_indices[base + uint(j)];
             j--;
         }
-        output_values[base + uint(j+1)] = key;
-        output_indices[base + uint(j+1)] = idx;
+        scratch_values[base + uint(j+1)] = key;
+        scratch_indices[base + uint(j+1)] = idx;
     }
 
-    // Extract median
-    uint mid = row_size / 2;
-    float median_val = output_values[base + mid];
-    int median_idx = output_indices[base + mid];
-    output_values[row] = median_val;
-    output_indices[row] = median_idx;
+    // Extract median. Use the lower-median convention for even row_size to match
+    // the CPU backend (src/backends/cpu/kernels/reduction.cpp:4180, mid =
+    // (dim_size - 1) / 2, "lower median for even sizes").
+    uint mid = (row_size - 1) / 2;
+    result_values[row] = scratch_values[base + mid];
+    result_indices[row] = scratch_indices[base + mid];
 }
 
 kernel void mode_per_row_kernel(
     device const float* input    [[buffer(0)]],
-    device float* output_values  [[buffer(1)]],
-    device int* output_indices   [[buffer(2)]],
+    device float* scratch_values [[buffer(1)]],
+    device int* scratch_indices  [[buffer(2)]],
     constant uint& row_size      [[buffer(3)]],
+    device float* result_values  [[buffer(4)]],
+    device int* result_indices   [[buffer(5)]],
     uint row                     [[thread_position_in_grid]])
 {
     uint base = row * row_size;
 
-    // Sort first (reusing output buffers as scratch)
+    // Sort first (using this row's private scratch region as scratch).
     for (uint i = 0; i < row_size; ++i) {
-        output_values[base + i] = input[base + i];
-        output_indices[base + i] = int(i);
+        scratch_values[base + i] = input[base + i];
+        scratch_indices[base + i] = int(i);
     }
     for (uint i = 1; i < row_size; ++i) {
-        float key = output_values[base + i];
-        int idx = output_indices[base + i];
+        float key = scratch_values[base + i];
+        int idx = scratch_indices[base + i];
         int j = int(i) - 1;
-        while (j >= 0 && output_values[base + uint(j)] > key) {
-            output_values[base + uint(j+1)] = output_values[base + uint(j)];
-            output_indices[base + uint(j+1)] = output_indices[base + uint(j)];
+        while (j >= 0 && scratch_values[base + uint(j)] > key) {
+            scratch_values[base + uint(j+1)] = scratch_values[base + uint(j)];
+            scratch_indices[base + uint(j+1)] = scratch_indices[base + uint(j)];
             j--;
         }
-        output_values[base + uint(j+1)] = key;
-        output_indices[base + uint(j+1)] = idx;
+        scratch_values[base + uint(j+1)] = key;
+        scratch_indices[base + uint(j+1)] = idx;
     }
 
     // Find mode (most frequent value)
-    float mode_val = output_values[base];
-    int mode_idx = output_indices[base];
+    float mode_val = scratch_values[base];
+    int mode_idx = scratch_indices[base];
     uint best_count = 1, cur_count = 1;
     for (uint i = 1; i < row_size; ++i) {
-        if (output_values[base + i] == output_values[base + i - 1]) {
+        if (scratch_values[base + i] == scratch_values[base + i - 1]) {
             cur_count++;
         } else {
             cur_count = 1;
         }
         if (cur_count > best_count) {
             best_count = cur_count;
-            mode_val = output_values[base + i];
-            mode_idx = output_indices[base + i];
+            mode_val = scratch_values[base + i];
+            mode_idx = scratch_indices[base + i];
         }
     }
-    output_values[row] = mode_val;
-    output_indices[row] = mode_idx;
+    result_values[row] = mode_val;
+    result_indices[row] = mode_idx;
 }
 
 // ============================================================================

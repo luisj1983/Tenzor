@@ -587,8 +587,15 @@ auto LiteRuntime::create_input(const std::vector<int64_t>& shape, DType dtype) -
 
     int64_t numel = 1;
     for (int32_t i = 0; i < tensor.ndim; ++i) {
+        if (shape[i] < 0) {
+            throw std::invalid_argument(
+                "LiteRuntime::create_input: negative shape dimension");
+        }
         tensor.shape[i] = shape[i];
-        numel *= shape[i];
+        if (__builtin_mul_overflow(numel, static_cast<int64_t>(shape[i]), &numel)) {
+            throw std::overflow_error(
+                "LiteRuntime::create_input: shape element count overflows int64");
+        }
     }
 
     // Compute strides (row-major)
@@ -596,7 +603,11 @@ auto LiteRuntime::create_input(const std::vector<int64_t>& shape, DType dtype) -
         tensor.strides[i] = (i == tensor.ndim - 1) ? 1 : tensor.strides[i + 1] * tensor.shape[i + 1];
     }
 
-    auto bytes = numel * dtype_size(dtype);
+    int64_t bytes;
+    if (__builtin_mul_overflow(numel, static_cast<int64_t>(dtype_size(dtype)), &bytes)) {
+        throw std::overflow_error(
+            "LiteRuntime::create_input: tensor byte size overflows int64");
+    }
     tensor.data = std::calloc(1, static_cast<size_t>(bytes));
     // A failed/over-large allocation otherwise yields a LiteTensor with
     // data==nullptr and owns_data=true that callers write into (null deref).

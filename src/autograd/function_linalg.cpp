@@ -1445,30 +1445,52 @@ auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
     if (saved_tensors_.size() > 2) {
         const auto& pivots = saved_tensors_[2];
         Tensor pivots_cpu = pivots.to(Device::cpu()).contiguous();
-        if (pivots_cpu.ndim() == 1 && pivots_cpu.dtype() == DType::Int32) {
+        if (pivots_cpu.ndim() >= 1 && pivots_cpu.dtype() == DType::Int32) {
+            // Pivots are shaped batch_dims + [M] (lu forward builds
+            // piv_shape = batch_dims + [n]). The per-matrix pivot length is
+            // the trailing dim; everything before it is a batch index. The
+            // earlier code gated on ndim()==1, silently dropping the P^T row
+            // permutation for batched LU and returning a wrong grad_A. Loop
+            // over the leading batch dims and apply the per-(n,n)-slice row
+            // permutation to each grad_A matrix.
             const int32_t* piv_data = pivots_cpu.data<int32_t>();
-            int64_t M = pivots_cpu.shape()[0];
-
-            // Detect convention: if any value equals M, it's 1-indexed.
-            bool one_indexed = false;
-            for (int64_t i = 0; i < M; ++i) {
-                if (piv_data[i] >= static_cast<int32_t>(M)) { one_indexed = true; break; }
-                if (piv_data[i] < 0) { one_indexed = true; break; }
-            }
-            std::vector<int32_t> piv0(M);
-            for (int64_t i = 0; i < M; ++i) {
-                piv0[i] = one_indexed ? (piv_data[i] - 1) : piv_data[i];
+            int64_t M = pivots_cpu.shape().back();
+            int64_t nbatch = 1;
+            for (int64_t d = 0; d + 1 < pivots_cpu.ndim(); ++d) {
+                nbatch *= pivots_cpu.shape()[d];
             }
 
-            bool identity = true;
-            for (int64_t i = 0; i < M; ++i) {
-                if (piv0[i] != static_cast<int32_t>(i)) { identity = false; break; }
-            }
-            if (!identity) {
-                Tensor g_cpu = grad_A.to(Device::cpu()).contiguous();
-                int64_t Nc = g_cpu.shape().back();
+            Tensor g_cpu = grad_A.to(Device::cpu()).contiguous();
+            int64_t Nc = g_cpu.shape().back();           // columns of each slice
+            int64_t Nr = g_cpu.shape()[g_cpu.ndim() - 2]; // rows of each slice
+            int64_t slice_elems = Nr * Nc;
 
-                auto do_swap = [&](auto* mat) {
+            bool any_swapped = false;
+
+            auto process_batch = [&](auto* mat_base) {
+                for (int64_t b = 0; b < nbatch; ++b) {
+                    const int32_t* piv_b = piv_data + b * M;
+
+                    // Detect convention per batch: 1-indexed (LAPACK/CPU,
+                    // values in [1..M]) vs 0-indexed (Vulkan, [0..M-1]).
+                    bool one_indexed = false;
+                    for (int64_t i = 0; i < M; ++i) {
+                        if (piv_b[i] >= static_cast<int32_t>(M)) { one_indexed = true; break; }
+                        if (piv_b[i] < 0) { one_indexed = true; break; }
+                    }
+                    std::vector<int32_t> piv0(M);
+                    for (int64_t i = 0; i < M; ++i) {
+                        piv0[i] = one_indexed ? (piv_b[i] - 1) : piv_b[i];
+                    }
+
+                    bool identity = true;
+                    for (int64_t i = 0; i < M; ++i) {
+                        if (piv0[i] != static_cast<int32_t>(i)) { identity = false; break; }
+                    }
+                    if (identity) continue;
+                    any_swapped = true;
+
+                    auto* mat = mat_base + b * slice_elems;
                     for (int64_t i = M - 1; i >= 0; --i) {
                         int64_t target = static_cast<int64_t>(piv0[i]);
                         if (target != i) {
@@ -1477,12 +1499,15 @@ auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
                             }
                         }
                     }
-                };
-                if (g_cpu.dtype() == DType::Float64) {
-                    do_swap(g_cpu.data<double>());
-                } else {
-                    do_swap(g_cpu.data<float>());
                 }
+            };
+
+            if (g_cpu.dtype() == DType::Float64) {
+                process_batch(g_cpu.data<double>());
+            } else {
+                process_batch(g_cpu.data<float>());
+            }
+            if (any_swapped) {
                 grad_A = g_cpu.to(L.device());
             }
         }
@@ -1559,51 +1584,77 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     if (saved_tensors_.size() > 2) {
         const auto& pivots = saved_tensors_[2];
         Tensor pivots_cpu = pivots.to(Device::cpu()).contiguous();
-        if (pivots_cpu.ndim() == 1 && pivots_cpu.dtype() == DType::Int32) {
+        if (pivots_cpu.ndim() >= 1 && pivots_cpu.dtype() == DType::Int32) {
+            // Pivots are shaped batch_dims + [M]. The earlier code gated on
+            // ndim()==1, silently dropping P^T for batched LU. Build a batched
+            // permutation matrix Pt shaped batch_dims + [Nn, Nn] and left-
+            // multiply; matmul broadcasts the batch dims and keeps grad_A's
+            // graph intact so higher-order gradients still flow.
             const int32_t* piv_data = pivots_cpu.data<int32_t>();
-            int64_t M = pivots_cpu.shape()[0];
+            int64_t M = pivots_cpu.shape().back();
             int64_t Nn = L_t.shape().back();
-
-            bool one_indexed = false;
-            for (int64_t i = 0; i < M; ++i) {
-                if (piv_data[i] >= static_cast<int32_t>(Nn)) { one_indexed = true; break; }
-                if (piv_data[i] < 0) { one_indexed = true; break; }
-            }
-            std::vector<int32_t> piv0(M);
-            for (int64_t i = 0; i < M; ++i) {
-                piv0[i] = one_indexed ? (piv_data[i] - 1) : piv_data[i];
+            int64_t nbatch = 1;
+            std::vector<int64_t> batch_dims;
+            for (int64_t d = 0; d + 1 < pivots_cpu.ndim(); ++d) {
+                batch_dims.push_back(pivots_cpu.shape()[d]);
+                nbatch *= pivots_cpu.shape()[d];
             }
 
-            // Determine the row permutation produced by the first-order
-            // backward's do_swap (which applies swap(i, piv0[i]) for
-            // i = M-1 .. 0, i.e. P^T). Simulate it on an index array:
-            // src[r] is the original row index that lands in output row r.
-            std::vector<int64_t> src(Nn);
-            for (int64_t i = 0; i < Nn; ++i) src[i] = i;
-            for (int64_t i = M - 1; i >= 0; --i) {
-                int64_t target = static_cast<int64_t>(piv0[i]);
-                if (target != i && target >= 0 && target < Nn) {
-                    std::swap(src[i], src[target]);
+            std::vector<int64_t> pt_shape = batch_dims;
+            pt_shape.push_back(Nn);
+            pt_shape.push_back(Nn);
+            auto pt = zeros(pt_shape, L_t.dtype(), Device::cpu());
+
+            bool any_perm = false;
+            int64_t slice_elems = Nn * Nn;
+
+            auto build_pt = [&](auto* pd) {
+                for (int64_t b = 0; b < nbatch; ++b) {
+                    const int32_t* piv_b = piv_data + b * M;
+
+                    bool one_indexed = false;
+                    for (int64_t i = 0; i < M; ++i) {
+                        if (piv_b[i] >= static_cast<int32_t>(Nn)) { one_indexed = true; break; }
+                        if (piv_b[i] < 0) { one_indexed = true; break; }
+                    }
+                    std::vector<int32_t> piv0(M);
+                    for (int64_t i = 0; i < M; ++i) {
+                        piv0[i] = one_indexed ? (piv_b[i] - 1) : piv_b[i];
+                    }
+
+                    // Determine the row permutation produced by the first-order
+                    // backward's do_swap (swap(i, piv0[i]) for i = M-1 .. 0,
+                    // i.e. P^T). src[r] is the original row index that lands in
+                    // output row r.
+                    std::vector<int64_t> src(Nn);
+                    for (int64_t i = 0; i < Nn; ++i) src[i] = i;
+                    for (int64_t i = M - 1; i >= 0; --i) {
+                        int64_t target = static_cast<int64_t>(piv0[i]);
+                        if (target != i && target >= 0 && target < Nn) {
+                            std::swap(src[i], src[target]);
+                        }
+                    }
+
+                    for (int64_t i = 0; i < Nn; ++i) {
+                        if (src[i] != i) { any_perm = true; }
+                    }
+
+                    // Build slice Pt with (Pt M)[r] = M[src[r]], i.e.
+                    // Pt[r, src[r]] = 1. Reproduces do_swap exactly (= P^T).
+                    auto* pslice = pd + b * slice_elems;
+                    for (int64_t r = 0; r < Nn; ++r) {
+                        pslice[r * Nn + src[r]] = 1;
+                    }
                 }
+            };
+
+            if (L_t.dtype() == DType::Float64) {
+                build_pt(pt.data<double>());
+            } else {
+                build_pt(pt.data<float>());
             }
 
-            bool identity = true;
-            for (int64_t i = 0; i < Nn; ++i) {
-                if (src[i] != i) { identity = false; break; }
-            }
-            if (!identity) {
-                // Build the permutation matrix Pt with (Pt M)[r] = M[src[r]],
-                // i.e. Pt[r, src[r]] = 1. Left-multiplying keeps grad_A's graph
-                // intact so higher-order gradients flow. This reproduces
-                // do_swap exactly (= P^T).
-                auto pt = zeros({Nn, Nn}, L_t.dtype(), Device::cpu());
-                if (L_t.dtype() == DType::Float64) {
-                    double* pd = pt.data<double>();
-                    for (int64_t r = 0; r < Nn; ++r) pd[r * Nn + src[r]] = 1.0;
-                } else {
-                    float* pd = pt.data<float>();
-                    for (int64_t r = 0; r < Nn; ++r) pd[r * Nn + src[r]] = 1.0f;
-                }
+            if (any_perm) {
                 auto Pt = Variable(pt.to(L_t.device()), false);
                 grad_A = tenzor::matmul(Pt, grad_A);
             }
@@ -2040,7 +2091,11 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         auto VT_gradV = matmul(Vt, grad_V);
         auto eigvec_term = mul(VT_gradV, F);
 
-        auto diag_grad_W = diag(grad_W_real);
+        // Batch-aware: diag(grad_W_real) threw "diag: input must be 1D or 2D"
+        // on batched eig (grad_W_real is (..., n) with ndim > 2). diag_embed
+        // places grad_W_real on the main diagonal of a (..., n, n) tensor for
+        // any leading batch shape, matching the batched eig forward.
+        auto diag_grad_W = linalg::diag_embed(grad_W_real, 0, -2, -1);
         auto inner = tenzor::add(diag_grad_W, eigvec_term);
 
         auto rhs = matmul(inner, Vt);

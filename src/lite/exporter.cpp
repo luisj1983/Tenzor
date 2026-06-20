@@ -28,6 +28,7 @@
 #include "tenzor/nn/module.hpp"
 #include "tenzor/ops/op_id.hpp"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <typeinfo>
@@ -44,7 +45,11 @@ namespace {
 struct GraphBuilder {
     LiteGraph graph;
     WriteOptions opts;
-    int16_t next_id{0};
+    // Wide counter so a model with >32767 tensors triggers a clean export-time
+    // error in fresh() rather than silently wrapping an int16_t id (signed
+    // overflow -> negative/aliased tensor ids). The on-disk id space remains
+    // int16_t; fresh() enforces the bound before narrowing.
+    int32_t next_id{0};
     // C.3 audit batch 3: cache the graph-input shape so emitters that need
     // to resolve relative sizes (Upsample.scale_factor) can do so at export
     // time. Captured by declare_input(); empty before that call.
@@ -57,7 +62,13 @@ struct GraphBuilder {
     // require an absolute size rather than emit a silently wrong target size.
     bool spatial_shape_dirty{false};
 
-    auto fresh() -> int16_t { return next_id++; }
+    auto fresh() -> int16_t {
+        if (next_id > std::numeric_limits<int16_t>::max()) {
+            throw std::runtime_error(
+                "export_to_tzlite: too many tensors for int16 id space");
+        }
+        return static_cast<int16_t>(next_id++);
+    }
 
     auto declare_input(const std::vector<int64_t>& shape, DType dtype) -> int16_t {
         auto id = fresh();

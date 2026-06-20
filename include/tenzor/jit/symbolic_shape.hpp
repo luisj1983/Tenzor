@@ -417,17 +417,34 @@ inline auto broadcast_symbolic_shapes(const SymbolicShape& shape1,
             }
         }
         else if (dim1.is_concrete() && dim1.value() == 1) {
+            // dim1 is the broadcastable unit dim: result takes the other operand.
             result[ndim - 1 - i] = dim2;
         }
         else if (dim2.is_concrete() && dim2.value() == 1) {
+            // dim2 is the broadcastable unit dim: result takes the other operand.
             result[ndim - 1 - i] = dim1;
+        }
+        else if (dim1.is_concrete()) {
+            // Exactly one side is concrete with value != 1 (the other is symbolic).
+            // NumPy broadcasting requires the symbolic side to equal this concrete
+            // value (or be 1) at runtime, so the result is the concrete dim. Emitting
+            // a synthetic "broadcast(...)" symbol here would be unbindable and throw at
+            // resolve()-time.
+            result[ndim - 1 - i] = dim1;
+        }
+        else if (dim2.is_concrete()) {
+            // Symmetric case: dim2 concrete (!= 1), dim1 symbolic. Result is dim2.
+            result[ndim - 1 - i] = dim2;
         }
         else if (dim1 == dim2) {
             result[ndim - 1 - i] = dim1;
         }
         else {
-            result[ndim - 1 - i] = SymbolicDim::symbolic(
-                "broadcast(" + dim1.to_string() + ", " + dim2.to_string() + ")");
+            // Both sides non-concrete and structurally different. Prefer one operand
+            // (dim1) rather than fabricating an unbindable "broadcast(...)" symbol;
+            // the two are constrained to be equal (or one == 1) at runtime by
+            // broadcasting rules.
+            result[ndim - 1 - i] = dim1;
         }
     }
 

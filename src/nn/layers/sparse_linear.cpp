@@ -274,8 +274,13 @@ auto SparseLinear::reset_parameters() -> void {
     int64_t nnz = static_cast<int64_t>(density_ * total);
     if (nnz < 1) nnz = 1;
 
-    // Generate random non-zero positions
-    std::mt19937 gen(42);
+    // Generate random non-zero positions. Route every draw through the
+    // library's seeded global RNG (the same engine rand()/randn() and the bias
+    // init below pull from). This keeps init reproducible under manual_seed()
+    // while ensuring each SparseLinear instance gets a distinct sparsity mask
+    // and distinct initial values — a hard-coded mt19937(42) made every layer
+    // identical.
+    std::mt19937& gen = tenzor::detail::get_global_rng_engine();
     std::uniform_int_distribution<int64_t> row_dist(0, out_features_ - 1);
     std::uniform_int_distribution<int64_t> col_dist(0, in_features_ - 1);
     std::uniform_real_distribution<float> val_dist(-bound, bound);

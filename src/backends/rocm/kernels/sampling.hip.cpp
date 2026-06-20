@@ -690,18 +690,18 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
 
 __global__ void trapezoid_kernel_impl(
     const float* __restrict__ y, const float* __restrict__ x,
-    float* __restrict__ output, uint32_t outer, uint32_t inner,
-    uint32_t n, float dx, bool has_x) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    float* __restrict__ output, int64_t outer, int64_t inner,
+    int64_t n, float dx, bool has_x) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= outer * inner) return;
 
-    uint32_t o = idx / inner;
-    uint32_t i_inner = idx % inner;
+    int64_t o = idx / inner;
+    int64_t i_inner = idx % inner;
 
     float sum = 0.0f;
-    for (uint32_t k = 0; k < n - 1; k++) {
-        uint32_t idx_k  = (o * n + k) * inner + i_inner;
-        uint32_t idx_k1 = (o * n + k + 1) * inner + i_inner;
+    for (int64_t k = 0; k < n - 1; k++) {
+        int64_t idx_k  = (o * n + k) * inner + i_inner;
+        int64_t idx_k1 = (o * n + k + 1) * inner + i_inner;
         float h = has_x ? (x[idx_k1] - x[idx_k]) : dx;
         sum += 0.5f * (y[idx_k] + y[idx_k1]) * h;
     }
@@ -738,11 +738,10 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
     }
 
     int threads = 256;
-    int blocks = (total + threads - 1) / threads;
-    hipLaunchKernelGGL(trapezoid_kernel_impl, dim3(blocks), dim3(threads), 0, stream,
+    int64_t blocks = (total + threads - 1) / threads;
+    hipLaunchKernelGGL(trapezoid_kernel_impl, dim3(static_cast<unsigned>(blocks)), dim3(threads), 0, stream,
         yf.data<float>(), x_data, result.data<float>(),
-        static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
-        static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
+        outer, inner, n, static_cast<float>(dx), x_ptr != nullptr);
     HIP_CHECK(hipGetLastError());
     return (y.dtype() == DType::Float32) ? result : result.to(y.dtype());
 }
@@ -753,18 +752,18 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
 
 __global__ void cumulative_trapezoid_kernel_impl(
     const float* __restrict__ y, const float* __restrict__ x,
-    float* __restrict__ output, uint32_t outer, uint32_t inner,
-    uint32_t n, float dx, bool has_x) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    float* __restrict__ output, int64_t outer, int64_t inner,
+    int64_t n, float dx, bool has_x) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= outer * inner) return;
 
-    uint32_t o = idx / inner;
-    uint32_t i_inner = idx % inner;
+    int64_t o = idx / inner;
+    int64_t i_inner = idx % inner;
 
     float cumsum = 0.0f;
-    for (uint32_t k = 0; k < n - 1; k++) {
-        uint32_t idx_k  = (o * n + k) * inner + i_inner;
-        uint32_t idx_k1 = (o * n + k + 1) * inner + i_inner;
+    for (int64_t k = 0; k < n - 1; k++) {
+        int64_t idx_k  = (o * n + k) * inner + i_inner;
+        int64_t idx_k1 = (o * n + k + 1) * inner + i_inner;
         float h = has_x ? (x[idx_k1] - x[idx_k]) : dx;
         cumsum += 0.5f * (y[idx_k] + y[idx_k1]) * h;
         output[(o * (n - 1) + k) * inner + i_inner] = cumsum;
@@ -798,11 +797,10 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
     }
 
     int threads = 256;
-    int blocks = (total + threads - 1) / threads;
-    hipLaunchKernelGGL(cumulative_trapezoid_kernel_impl, dim3(blocks), dim3(threads), 0, stream,
+    int64_t blocks = (total + threads - 1) / threads;
+    hipLaunchKernelGGL(cumulative_trapezoid_kernel_impl, dim3(static_cast<unsigned>(blocks)), dim3(threads), 0, stream,
         yf.data<float>(), x_data, result.data<float>(),
-        static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
-        static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
+        outer, inner, n, static_cast<float>(dx), x_ptr != nullptr);
     HIP_CHECK(hipGetLastError());
     return (y.dtype() == DType::Float32) ? result : result.to(y.dtype());
 }
@@ -813,19 +811,19 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
 
 __global__ void gradient_kernel_impl(
     const float* __restrict__ input, float* __restrict__ output,
-    uint32_t outer, uint32_t inner, uint32_t n, float spacing) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t outer, int64_t inner, int64_t n, float spacing) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= outer * inner) return;
 
-    uint32_t o = idx / inner;
-    uint32_t i_inner = idx % inner;
+    int64_t o = idx / inner;
+    int64_t i_inner = idx % inner;
 
-    auto at = [&](uint32_t k) -> float {
+    auto at = [&](int64_t k) -> float {
         return input[(o * n + k) * inner + i_inner];
     };
 
     output[(o * n + 0) * inner + i_inner] = (at(1) - at(0)) / spacing;
-    for (uint32_t k = 1; k < n - 1; k++) {
+    for (int64_t k = 1; k < n - 1; k++) {
         output[(o * n + k) * inner + i_inner] = (at(k + 1) - at(k - 1)) / (2.0f * spacing);
     }
     output[(o * n + n - 1) * inner + i_inner] = (at(n - 1) - at(n - 2)) / spacing;
@@ -848,11 +846,10 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
     if (n < 2 || total == 0) return result;
 
     int threads = 256;
-    int blocks = (total + threads - 1) / threads;
-    hipLaunchKernelGGL(gradient_kernel_impl, dim3(blocks), dim3(threads), 0, stream,
+    int64_t blocks = (total + threads - 1) / threads;
+    hipLaunchKernelGGL(gradient_kernel_impl, dim3(static_cast<unsigned>(blocks)), dim3(threads), 0, stream,
         inf.data<float>(), result.data<float>(),
-        static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
-        static_cast<uint32_t>(n), static_cast<float>(spacing));
+        outer, inner, n, static_cast<float>(spacing));
     HIP_CHECK(hipGetLastError());
     return (input.dtype() == DType::Float32) ? result : result.to(input.dtype());
 }
@@ -911,31 +908,31 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
 
 __global__ void pdist_kernel_impl(
     const float* __restrict__ data, float* __restrict__ output,
-    uint32_t N, uint32_t D, uint32_t num_pairs, float p) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t N, int64_t D, int64_t num_pairs, float p) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= num_pairs) return;
 
-    uint32_t i = 0, offset = 0;
+    int64_t i = 0, offset = 0;
     while (offset + (N - 1 - i) <= idx) {
         offset += (N - 1 - i);
         i++;
     }
-    uint32_t j = idx - offset + i + 1;
+    int64_t j = idx - offset + i + 1;
 
     float sum = 0.0f;
     if (p == 2.0f) {
-        for (uint32_t d = 0; d < D; d++) {
+        for (int64_t d = 0; d < D; d++) {
             float diff = data[i * D + d] - data[j * D + d];
             sum += diff * diff;
         }
         output[idx] = sqrtf(sum);
     } else if (p == 1.0f) {
-        for (uint32_t d = 0; d < D; d++) {
+        for (int64_t d = 0; d < D; d++) {
             sum += fabsf(data[i * D + d] - data[j * D + d]);
         }
         output[idx] = sum;
     } else {
-        for (uint32_t d = 0; d < D; d++) {
+        for (int64_t d = 0; d < D; d++) {
             sum += powf(fabsf(data[i * D + d] - data[j * D + d]), p);
         }
         output[idx] = powf(sum, 1.0f / p);
@@ -951,11 +948,10 @@ auto pdist_kernel(const Tensor& input, double p, hipStream_t stream) -> Tensor {
     if (num_pairs == 0) return result;
 
     int threads = 256;
-    int blocks = (num_pairs + threads - 1) / threads;
-    hipLaunchKernelGGL(pdist_kernel_impl, dim3(blocks), dim3(threads), 0, stream,
+    int64_t blocks = (num_pairs + threads - 1) / threads;
+    hipLaunchKernelGGL(pdist_kernel_impl, dim3(static_cast<unsigned>(blocks)), dim3(threads), 0, stream,
         inf.data<float>(), result.data<float>(),
-        static_cast<uint32_t>(N), static_cast<uint32_t>(D),
-        static_cast<uint32_t>(num_pairs), static_cast<float>(p));
+        N, D, num_pairs, static_cast<float>(p));
     HIP_CHECK(hipGetLastError());
     return (input.dtype() == DType::Float32) ? result : result.to(input.dtype());
 }

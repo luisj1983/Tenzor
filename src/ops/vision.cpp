@@ -35,6 +35,25 @@ auto unfold(const Tensor& input,
             std::to_string(shape.size()) + "D");
     }
 
+    // Validate positivity of structural parameters before any division/modulo
+    // (division by stride happens in the backend; guard here for a clean error).
+    if (kernel_size <= 0) {
+        throw std::invalid_argument(
+            "unfold: kernel_size must be positive, got " + std::to_string(kernel_size));
+    }
+    if (stride <= 0) {
+        throw std::invalid_argument(
+            "unfold: stride must be positive, got " + std::to_string(stride));
+    }
+    if (dilation <= 0) {
+        throw std::invalid_argument(
+            "unfold: dilation must be positive, got " + std::to_string(dilation));
+    }
+    if (padding < 0) {
+        throw std::invalid_argument(
+            "unfold: padding must be non-negative, got " + std::to_string(padding));
+    }
+
     // Set up operation attributes
     NewOpAttributes attrs;
     attrs.set(AttrKey::KernelSize, kernel_size);
@@ -64,6 +83,26 @@ auto fold(const Tensor& input,
         throw std::invalid_argument(
             "output_size must have 2 elements (H, W), got " +
             std::to_string(output_size.size()));
+    }
+
+    // Validate positivity of structural parameters before any division/modulo.
+    // kernel_size guards the modulo on col_channels and the output-size formula;
+    // stride/dilation guard the integer division in calculate_unfold_output_size().
+    if (kernel_size <= 0) {
+        throw std::invalid_argument(
+            "fold: kernel_size must be positive, got " + std::to_string(kernel_size));
+    }
+    if (stride <= 0) {
+        throw std::invalid_argument(
+            "fold: stride must be positive, got " + std::to_string(stride));
+    }
+    if (dilation <= 0) {
+        throw std::invalid_argument(
+            "fold: dilation must be positive, got " + std::to_string(dilation));
+    }
+    if (padding < 0) {
+        throw std::invalid_argument(
+            "fold: padding must be non-negative, got " + std::to_string(padding));
     }
 
     int64_t col_channels = shape[1];

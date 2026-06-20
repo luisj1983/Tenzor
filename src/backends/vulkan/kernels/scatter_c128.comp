@@ -33,11 +33,19 @@ void main() {
     uint inner_idx = remainder % params.inner_size;
 
     int scatter_idx = indices[idx];
+    if (scatter_idx < 0) scatter_idx += int(params.dim_size);
     if (scatter_idx < 0 || scatter_idx >= int(params.dim_size)) return;
 
     uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
                    uint(scatter_idx) * params.inner_size +
                    inner_idx;
+
+    // Guard the computed output offset against the destination size. The non-scatter
+    // dims of the values/index tensor can exceed the output's, yielding out_idx >=
+    // output_size; without this guard the two-lane (re/im) write below is an
+    // out-of-bounds device write. output_size counts complex elements, so guarding
+    // out_idx covers both 2u*out_idx and 2u*out_idx+1u.
+    if (out_idx >= params.output_size) return;
 
     float64_t re = (params.use_values > 0u) ? values[2u * idx]      : input_data[2u * idx];
     float64_t im = (params.use_values > 0u) ? values[2u * idx + 1u] : input_data[2u * idx + 1u];

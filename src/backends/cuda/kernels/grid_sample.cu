@@ -396,8 +396,8 @@ auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
     // dtypes have fewer mantissa bits than Float32 so this is mathematically
     // lossless at element granularity (no widen of the whole tensor; each
     // load/store is the natural cast).
-    Tensor input_f32 = input.to(DType::Float32);
-    Tensor grid_f32 = grid.to(DType::Float32);
+    Tensor input_f32 = input.to(DType::Float32).contiguous();
+    Tensor grid_f32 = grid.to(DType::Float32).contiguous();
     Tensor output_f32({N, C, H_out, W_out}, DType::Float32, input.device());
 
     if (mode == "nearest") {
@@ -431,7 +431,7 @@ auto affine_grid_cuda(const Tensor& theta, const std::vector<int64_t>& size,
     int H = static_cast<int>(size[2]);
     int W = static_cast<int>(size[3]);
 
-    Tensor theta_f32 = theta.to(DType::Float32);
+    Tensor theta_f32 = theta.to(DType::Float32).contiguous();
     Tensor grid({N, H, W, 2}, DType::Float32, theta.device());
 
     int total = N * H * W;

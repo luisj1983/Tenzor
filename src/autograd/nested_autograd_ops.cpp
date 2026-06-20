@@ -179,10 +179,27 @@ public:
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& saved = saved_tensors();
-        auto& input = saved[0];
-        auto& weight = saved[1];
+        auto& input_orig = saved[0];
+        auto& weight_orig = saved[1];
         [[maybe_unused]] auto& output = saved[2];
-        auto& grad = grad_outputs[0];
+        auto& grad_orig = grad_outputs[0];
+
+        // Widen Float16/BFloat16 to Float32 for the whole backward: the LN
+        // backward sums seg_grad / seg_grad*normalized into grad_weight/grad_bias
+        // across B segments, and a half-precision running accumulator suffers
+        // low-precision-accumulator error growth. The per-segment (input-mean)
+        // centering also loses subtractive cancellation in half precision.
+        // PyTorch accumulates LN parameter grads in fp32; mirror StdBackward's
+        // is_half pattern and narrow the results back at the end.
+        const DType orig_dtype = input_orig.dtype();
+        const bool is_half =
+            (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) ||
+            (weight_orig.dtype() == DType::Float16 || weight_orig.dtype() == DType::BFloat16);
+        const DType compute_dtype = is_half ? DType::Float32 : orig_dtype;
+
+        const Tensor input  = is_half ? input_orig.to(DType::Float32)  : input_orig;
+        const Tensor weight = is_half ? weight_orig.to(DType::Float32) : weight_orig;
+        const Tensor grad   = is_half ? grad_orig.to(DType::Float32)   : grad_orig;
 
         // LayerNorm backward: standard formulas applied per-segment.
         // For simplicity, we unbind by segment and apply the standard LN backward.
@@ -192,8 +209,8 @@ public:
         int64_t D = (input.shape().size() > 1) ? input.shape()[1] : 1;
 
         int64_t total_len = (input.shape().size() > 0) ? input.shape()[0] : 0;
-        auto grad_weight = tenzor::zeros({D}, weight.dtype(), weight.device());
-        auto grad_bias = tenzor::zeros({D}, weight.dtype(), weight.device());
+        auto grad_weight = tenzor::zeros({D}, compute_dtype, weight.device());
+        auto grad_bias = tenzor::zeros({D}, compute_dtype, weight.device());
 
         // Collect per-segment grad_input rows to cat at the end. Using cat
         // instead of std::memcpy is backend-safe; the previous memcpy approach
@@ -254,6 +271,14 @@ public:
             grad_input = tenzor::cat(std::span<const Tensor>(grad_input_parts), 0);
         }
 
+        // Narrow the Float32-widened gradients back to the original dtype so the
+        // returned grads match the dtype of the Variable inputs.
+        if (is_half) {
+            grad_input  = grad_input.to(orig_dtype);
+            grad_weight = grad_weight.to(weight_orig.dtype());
+            grad_bias   = grad_bias.to(weight_orig.dtype());
+        }
+
         // NestedLayerNorm takes 3 Variable inputs (values, weight, bias);
         // offsets is a Tensor passed separately and has no grad slot, so
         // returning grad_input / grad_weight / grad_bias — three entries —
@@ -288,11 +313,26 @@ public:
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& saved = saved_tensors();
-        auto& Q = saved[0];
-        auto& K = saved[1];
-        auto& V = saved[2];
+        auto& Q_orig = saved[0];
+        auto& K_orig = saved[1];
+        auto& V_orig = saved[2];
         [[maybe_unused]] auto& out = saved[3];
-        auto& grad_out = grad_outputs[0];
+        auto& grad_out_orig = grad_outputs[0];
+
+        // Widen Float16/BFloat16 to Float32 for the recompute: the softmax
+        // normalization sum, the d_scores correction sum(d_attn*attn), and the
+        // matmul accumulations all lose precision in half precision and risk
+        // backend-parity divergence with backends that compute attention in
+        // fp32 internally. Compute in Float32 and narrow gQ/gK/gV back.
+        const DType orig_dtype = Q_orig.dtype();
+        const bool is_half =
+            (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+        const DType compute_dtype = is_half ? DType::Float32 : orig_dtype;
+
+        const Tensor Q        = is_half ? Q_orig.to(DType::Float32)        : Q_orig;
+        const Tensor K        = is_half ? K_orig.to(DType::Float32)        : K_orig;
+        const Tensor V        = is_half ? V_orig.to(DType::Float32)        : V_orig;
+        const Tensor grad_out = is_half ? grad_out_orig.to(DType::Float32) : grad_out_orig;
 
         auto q_off_cpu = q_offsets_.device().type == Device::Type::CPU ? q_offsets_ : q_offsets_.to(Device::cpu());
         auto kv_off_cpu = kv_offsets_.device().type == Device::Type::CPU ? kv_offsets_ : kv_offsets_.to(Device::cpu());
@@ -320,7 +360,7 @@ public:
             // Recompute attention weights: scores = Qb @ Kb^T * scale
             auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
                                        tenzor::full({1}, static_cast<double>(scale_),
-                                                     Q.dtype(), Q.device()));
+                                                     compute_dtype, Q.device()));
             // Causal mask: positions (qi, ki) with ki > qi must contribute
             // softmax weight 0 so the recomputed attention matches the
             // forward path.  Build an additive mask whose upper-triangular
@@ -337,7 +377,7 @@ public:
                 // (`triu(ones, 1) * -inf` would propagate NaN below the
                 // diagonal because IEEE 754 `0 * -inf = NaN`.)
                 Tensor neg_inf_mat = tenzor::full(
-                    {Lq, Lkv}, neg_inf, Q.dtype(), Q.device());
+                    {Lq, Lkv}, neg_inf, compute_dtype, Q.device());
                 Tensor mask = tenzor::triu(neg_inf_mat, /*diagonal=*/1);
                 scores = tenzor::add(scores, mask);
             }
@@ -362,7 +402,7 @@ public:
 
             // Scale the gradient
             d_scores = tenzor::mul(d_scores,
-                tenzor::full({1}, static_cast<double>(scale_), Q.dtype(), Q.device()));
+                tenzor::full({1}, static_cast<double>(scale_), compute_dtype, Q.device()));
 
             // grad_Q = d_scores @ K
             auto gQ = tenzor::matmul(d_scores, Kb);
@@ -385,6 +425,13 @@ public:
         auto grad_Q = assemble(gQ_parts, total_q, Q);
         auto grad_K = assemble(gK_parts, total_kv, K);
         auto grad_V = assemble(gV_parts, total_kv, V);
+
+        // Narrow the Float32-widened gradients back to the original dtype.
+        if (is_half) {
+            grad_Q = grad_Q.to(orig_dtype);
+            grad_K = grad_K.to(orig_dtype);
+            grad_V = grad_V.to(orig_dtype);
+        }
 
         // NestedAttention takes 3 Variable inputs (Q, K, V). q_offsets and
         // kv_offsets are Tensors, not Variables, so they have no grad slots.

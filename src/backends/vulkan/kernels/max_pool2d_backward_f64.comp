@@ -44,15 +44,18 @@ uint64_t f64ToBits(float64_t val) {
 
 void atomicAddF64(uint idx, float64_t val) {
     uint64_t old_bits = grad_input[idx];
-    uint64_t new_bits;
     for (int attempt = 0; attempt < 65536; ++attempt) {
         float64_t old_val = bitsToF64(old_bits);
-        new_bits = f64ToBits(old_val + val);
+        uint64_t new_bits = f64ToBits(old_val + val);
         uint64_t result = atomicCompSwap(grad_input[idx], old_bits, new_bits);
         if (result == old_bits) return;
         old_bits = result;
     }
-    grad_input[idx] = new_bits;
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: new_bits is derived from a
+    // stale read, so the plain store would clobber concurrent CAS winners
+    // targeting the same max element. Matches the policy in
+    // avg_pool3d_backward_f16/_f64 in this directory.
 }
 
 void main() {

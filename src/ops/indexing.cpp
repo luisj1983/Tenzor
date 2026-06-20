@@ -444,11 +444,40 @@ void index_put(Tensor& input,
             broadcast_shape, indices[non_null_dims[k]].value().shape());
     }
 
+    // Compute the full output element layout that every backend's
+    // AdvancedIndexPut kernel writes / reads `values` against. Both the CPU
+    // reference and the Vulkan/CUDA kernels iterate every output element as a
+    // flat index over `broadcast_shape` followed by the passthrough dims
+    // (non-indexed leading dims, then all trailing dims past num_indices), and
+    // read vals_data[gid] for gid in [0, total_out). The op layer therefore
+    // MUST broadcast/expand `values` to exactly this layout before dispatch;
+    // otherwise a scalar or under-sized `values` (e.g. a[idx] = 1.0) causes an
+    // out-of-bounds read on every backend (heap OOB on CPU, SSBO OOB on Vulkan).
+    const auto& input_shape = input.shape();
+    const int64_t input_ndim = input.ndim();
+    const int64_t num_indices = static_cast<int64_t>(indices.size());
+    std::vector<int64_t> output_shape(broadcast_shape.begin(), broadcast_shape.end());
+    for (int64_t i = 0; i < num_indices; ++i) {
+        if (!indices[i].has_value()) {
+            output_shape.push_back(input_shape[i]);  // non-indexed leading dim
+        }
+    }
+    for (int64_t i = num_indices; i < input_ndim; ++i) {
+        output_shape.push_back(input_shape[i]);  // trailing passthrough dim
+    }
+
+    // Right-aligned broadcast `values` to the output layout (numpy/PyTorch
+    // index_put semantics): scalar and rank-reduced `values` broadcast up,
+    // already-correct `values` is a no-op (expand() returns the input
+    // unchanged when shapes already match). expand() left-pads and replicates
+    // size-1 dims, matching how the index tensors are expanded above.
+    Tensor values_expanded = values.expand(output_shape);
+
     // Pack inputs: [input, values, idx0, idx1, ...]
     std::vector<Tensor> dispatch_inputs;
     dispatch_inputs.reserve(2 + indices.size());
     dispatch_inputs.push_back(input);
-    dispatch_inputs.push_back(values);
+    dispatch_inputs.push_back(values_expanded);
 
     for (size_t i = 0; i < indices.size(); ++i) {
         if (indices[i].has_value()) {

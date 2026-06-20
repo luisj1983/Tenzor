@@ -13,6 +13,7 @@
 
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/math.hpp"  // round() for integer ReduceOp::AVG rounding
 #include <stdexcept>
 #include <cstdlib>
 #include <cstring>
@@ -56,6 +57,37 @@ auto checked_mpi_count(int64_t numel, const char* op) -> int {
             " elements require MPI large-count APIs or chunking");
     }
     return static_cast<int>(numel);
+}
+
+// ReduceOp::AVG has no native MPI collective; it is implemented as MPI_SUM
+// followed by an element-wise division by world_size. Divide IN PLACE through
+// the caller's existing storage so aliased Variables/views/grads are preserved
+// (the H6 aliasing fix). For floating/complex dtypes a same-dtype scalar divide
+// keeps full precision. For integer dtypes a same-dtype divide would truncate
+// toward zero (integer division), so widen to Float64, divide, round to nearest,
+// then narrow back and write the result through the original storage.
+auto apply_avg_in_place(Tensor& tensor, int world_size) -> void {
+    if (world_size <= 0) {
+        return;
+    }
+
+    if (is_integer_type(tensor.dtype())) {
+        const DType orig = tensor.dtype();
+        Tensor widened = tensor.to(DType::Float64);
+        auto divisor = tenzor::full({1}, static_cast<double>(world_size),
+                                    DType::Float64, widened.device());
+        widened /= divisor;
+        Tensor rounded = tenzor::round(widened).to(orig);
+        // Write back through existing storage (zero_() + operator+=) to preserve
+        // aliasing; plain assignment would rebind the impl and detach views.
+        tensor.zero_();
+        tensor += rounded.to(tensor.device());
+        return;
+    }
+
+    auto scalar = tenzor::full({1}, static_cast<double>(world_size),
+                               tensor.dtype(), tensor.device());
+    tensor /= scalar;
 }
 
 } // anonymous namespace
@@ -177,15 +209,13 @@ auto MPIBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 
     copy_back_if_staged(tensor, host_buf);
 
-    // Handle AVG: MPI doesn't have a native average op. Divide IN PLACE through a
-    // dtype/device-matched scalar so Float64 keeps full precision and the
-    // caller's storage (aliased Variables/views) is preserved — `tensor = tensor
-    // / float` allocated a new buffer and detached aliases (the H6 fix already
-    // applied to MPIProcessGroup/NCCLProcessGroup).
-    if (op == ReduceOp::AVG && world_size_ > 0) {
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   tensor.dtype(), tensor.device());
-        tensor /= scalar;
+    // Handle AVG: MPI doesn't have a native average op. apply_avg_in_place
+    // divides IN PLACE through the caller's storage (preserving aliased
+    // Variables/views — the H6 fix) and computes integer averages in a Float64
+    // accumulator with round-to-nearest instead of truncating via integer
+    // division.
+    if (op == ReduceOp::AVG) {
+        apply_avg_in_place(tensor, world_size_);
     }
 }
 
@@ -221,11 +251,10 @@ auto MPIBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
 
     // MPI has no AVG collective (ReduceOp::AVG maps to MPI_SUM); only the
     // destination rank holds the reduced result, so divide there to get the
-    // mean. Non-root ranks keep their unchanged local tensor.
-    if (op == ReduceOp::AVG && rank_ == dst_rank && world_size_ > 0) {
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   tensor.dtype(), tensor.device());
-        tensor /= scalar;
+    // mean. Non-root ranks keep their unchanged local tensor. apply_avg_in_place
+    // preserves aliasing and rounds integer averages instead of truncating.
+    if (op == ReduceOp::AVG && rank_ == dst_rank) {
+        apply_avg_in_place(tensor, world_size_);
     }
 }
 
@@ -447,12 +476,11 @@ auto MPIBackend::reduce_scatter(const std::vector<Tensor>& tensors,
     copy_back_if_staged(output, recv_host_buf);
 
     // MPI has no AVG collective (ReduceOp::AVG maps to MPI_SUM); divide IN PLACE
-    // through a dtype/device-matched scalar afterwards, mirroring
-    // MPIBackend::all_reduce (preserves precision and caller aliasing).
-    if (op == ReduceOp::AVG && world_size_ > 0) {
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   output.dtype(), output.device());
-        output /= scalar;
+    // afterwards, mirroring MPIBackend::all_reduce. apply_avg_in_place preserves
+    // precision and caller aliasing, and rounds integer averages instead of
+    // truncating via integer division.
+    if (op == ReduceOp::AVG) {
+        apply_avg_in_place(output, world_size_);
     }
 }
 
@@ -620,7 +648,14 @@ auto MPIBackend::get_send_ptr(const Tensor& tensor, Tensor& host_buf) -> const v
 
 auto MPIBackend::get_recv_ptr(Tensor& tensor, Tensor& host_buf) -> void* {
     if (tensor.device().type == Device::Type::CPU || cuda_aware_) {
-        return tensor.data_ptr();
+        if (tensor.is_contiguous()) {
+            return tensor.data_ptr();
+        }
+        // Non-contiguous: MPI treats the buffer as flat-contiguous, so a
+        // strided view would be read/written incorrectly. Stage a contiguous
+        // copy (preserving the current values for in-place ops) and copy back.
+        host_buf = tensor.contiguous();
+        return host_buf.data_ptr();
     }
 
     // Allocate host buffer for receiving; caller must copy back after MPI call
@@ -630,10 +665,22 @@ auto MPIBackend::get_recv_ptr(Tensor& tensor, Tensor& host_buf) -> void* {
 }
 
 auto MPIBackend::copy_back_if_staged(Tensor& tensor, const Tensor& host_buf) -> void {
-    // If host_buf was populated (i.e., we staged), copy back to device
-    if (host_buf.data_ptr() != nullptr &&
-        tensor.device().type != Device::Type::CPU && !cuda_aware_) {
-        tensor = host_buf.to(tensor.device());
+    // Copy back whenever we staged into host_buf — either to return data from
+    // the host bounce (non-cuda-aware GPU) or from the contiguous copy made
+    // for a non-contiguous input.
+    //
+    // Write the staged result back THROUGH the caller's existing storage rather
+    // than rebinding the reference (`tensor = host_buf.to(...)`). Tensor's
+    // copy-assignment is defaulted and rebinds the intrusive_ptr<TensorImpl> to
+    // a fresh impl/storage, which detaches any Variable/view/grad aliasing the
+    // original buffer (the same H6 aliasing hazard the all_reduce AVG path was
+    // rewritten to avoid). Tenzor's Tensor does not expose `copy_`, so use the
+    // established in-place primitive pair (zero_() + operator+=) — both write
+    // through the existing strides/storage, preserving aliases, and handle every
+    // supported dtype the collectives accept.
+    if (host_buf.data_ptr() != nullptr) {
+        tensor.zero_();
+        tensor += host_buf.to(tensor.device());
     }
 }
 

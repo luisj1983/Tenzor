@@ -280,7 +280,11 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
         return result_f32.to(orig_dtype);
     }
 
-    auto shape = features.shape();
+    // Kernel addresses the feature map with dense NCHW strides derived from
+    // shape, so the input must be contiguous.
+    const Tensor feat = features.is_contiguous() ? features : features.contiguous();
+
+    auto shape = feat.shape();
     int64_t batch_size = shape[0];
     int64_t channels = shape[1];
     int64_t feat_height = shape[2];
@@ -288,7 +292,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
     int64_t num_rois = rois.shape()[0];
 
     std::vector<int64_t> output_shape = {num_rois, channels, output_h, output_w};
-    Tensor output(output_shape, orig_dtype, features.device());
+    Tensor output(output_shape, orig_dtype, feat.device());
 
     int64_t total_outputs = num_rois * channels * output_h * output_w;
     if (total_outputs == 0) return output;
@@ -312,12 +316,12 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
 
     if (orig_dtype == DType::Float32) {
         hipLaunchKernelGGL(roi_align_forward_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
-                          features.data<float>(), rois_ptr, output.data<float>(),
+                          feat.data<float>(), rois_ptr, output.data<float>(),
                           num_rois, channels, feat_height, feat_width,
                           output_h, output_w, spatial_scale, sampling_ratio, aligned, batch_size);
     } else {
         hipLaunchKernelGGL(roi_align_forward_kernel<double>, dim3(blocks), dim3(threads), 0, stream,
-                          features.data<double>(), rois_ptr, output.data<double>(),
+                          feat.data<double>(), rois_ptr, output.data<double>(),
                           num_rois, channels, feat_height, feat_width,
                           output_h, output_w, spatial_scale, sampling_ratio, aligned, batch_size);
     }
@@ -339,16 +343,20 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         return result_f32.to(orig_dtype);
     }
 
+    // Kernel addresses grad_output with dense NCHW strides derived from shape,
+    // so the input must be contiguous.
+    const Tensor go = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
     int64_t num_rois = rois.shape()[0];
-    int64_t channels = grad_output.shape()[1];
-    int64_t output_h = grad_output.shape()[2];
-    int64_t output_w = grad_output.shape()[3];
+    int64_t channels = go.shape()[1];
+    int64_t output_h = go.shape()[2];
+    int64_t output_w = go.shape()[3];
 
     std::vector<int64_t> grad_shape = {batch_size, channels, feat_height, feat_width};
     int64_t total_features = batch_size * channels * feat_height * feat_width;
     int64_t total_grads = num_rois * channels * output_h * output_w;
 
-    Tensor grad_features(grad_shape, orig_dtype, grad_output.device());
+    Tensor grad_features(grad_shape, orig_dtype, go.device());
     HIP_ROI_CHECK(hipMemsetAsync(grad_features.data_ptr(), 0,
                                  total_features * dtype_size(orig_dtype), stream));
 
@@ -370,12 +378,12 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
 
     if (orig_dtype == DType::Float32) {
         hipLaunchKernelGGL(roi_align_backward_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
-                          grad_output.data<float>(), rois_ptr, grad_features.data<float>(),
+                          go.data<float>(), rois_ptr, grad_features.data<float>(),
                           num_rois, channels, feat_height, feat_width,
                           output_h, output_w, spatial_scale, sampling_ratio, aligned, batch_size);
     } else {
         hipLaunchKernelGGL(roi_align_backward_kernel<double>, dim3(blocks), dim3(threads), 0, stream,
-                          grad_output.data<double>(), rois_ptr, grad_features.data<double>(),
+                          go.data<double>(), rois_ptr, grad_features.data<double>(),
                           num_rois, channels, feat_height, feat_width,
                           output_h, output_w, spatial_scale, sampling_ratio, aligned, batch_size);
     }

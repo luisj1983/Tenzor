@@ -441,23 +441,40 @@ __global__ void batchnorm_forward_affine_vec4_inline_kernel(
 
     // Decode channel from NCHW layout (for vec4, multiply by 4)
     int64_t scalar_idx = idx * 4;
-    int64_t c = (scalar_idx / HW) % C;
-
-    // Load parameters for this channel
-    float m = mean[c];
-    float invstd = rsqrtf(variance[c] + epsilon);
-    float g = gamma[c];
-    float b = beta[c];
+    int64_t c0 = (scalar_idx / HW) % C;
 
     // Load 4 elements
     float4 in = input[idx];
 
-    // Apply transformation: y = gamma * (x - mean) * invstd + beta
+    // A float4 group can straddle a channel boundary when HW is not a multiple
+    // of 4 (or when the group simply spans the end of one channel and the start
+    // of the next). Compute the channel per-lane so each lane is normalized with
+    // its own channel's statistics, matching the scalar/parallel/CPU path.
+    int64_t c1 = ((scalar_idx + 1) / HW) % C;
+    int64_t c2 = ((scalar_idx + 2) / HW) % C;
+    int64_t c3 = ((scalar_idx + 3) / HW) % C;
+
     float4 out;
-    out.x = g * (in.x - m) * invstd + b;
-    out.y = g * (in.y - m) * invstd + b;
-    out.z = g * (in.z - m) * invstd + b;
-    out.w = g * (in.w - m) * invstd + b;
+    {
+        float m = mean[c0];
+        float invstd = rsqrtf(variance[c0] + epsilon);
+        out.x = gamma[c0] * (in.x - m) * invstd + beta[c0];
+    }
+    {
+        float m = mean[c1];
+        float invstd = rsqrtf(variance[c1] + epsilon);
+        out.y = gamma[c1] * (in.y - m) * invstd + beta[c1];
+    }
+    {
+        float m = mean[c2];
+        float invstd = rsqrtf(variance[c2] + epsilon);
+        out.z = gamma[c2] * (in.z - m) * invstd + beta[c2];
+    }
+    {
+        float m = mean[c3];
+        float invstd = rsqrtf(variance[c3] + epsilon);
+        out.w = gamma[c3] * (in.w - m) * invstd + beta[c3];
+    }
 
     output[idx] = out;
 }
@@ -1052,27 +1069,17 @@ auto batchnorm2d_backward(const Tensor& grad_output,
             epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
-
-        // Compute grad_gamma and grad_beta
-        batchnorm_backward_gamma_beta_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
-            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-            reinterpret_cast<const __half*>(normalized.data<Float16>()),
-            reinterpret_cast<__half*>(grad_gamma.data<Float16>()),
-            reinterpret_cast<__half*>(grad_beta.data<Float16>()),
-            N, C, H, W);
-        CUDA_CHECK(cudaGetLastError());
-
-        // Compute grad_input
-        batchnorm_backward_input_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
-            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-            reinterpret_cast<const __half*>(input.data<Float16>()),
-            reinterpret_cast<__half*>(grad_input.data<Float16>()),
-            reinterpret_cast<const __half*>(mean.data<Float16>()),
-            reinterpret_cast<const __half*>(variance.data<Float16>()),
-            reinterpret_cast<const __half*>(gamma.data<Float16>()),
-            __float2half(epsilon), N, C, H, W);
-        CUDA_CHECK(cudaGetLastError());
+        // Widen to Float32, recurse (float accumulators / block_reduce_sum<float>),
+        // then narrow back. The native __half path reduced gradients in half
+        // precision (narrow accumulator), diverging from CPU and from the
+        // forward pass. Mirrors the ROCm widen-narrow pattern.
+        auto [gi, gg, gb] = batchnorm2d_backward(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            mean.to(DType::Float32), variance.to(DType::Float32),
+            gamma.to(DType::Float32), epsilon, stream);
+        return std::make_tuple(gi.to(DType::Float16),
+                               gg.to(DType::Float16),
+                               gb.to(DType::Float16));
     } else {
         throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
@@ -1097,37 +1104,10 @@ __device__ inline void gn_store(float* p, int64_t i, float v) { p[i] = v; }
 __device__ inline void gn_store(__half* p, int64_t i, float v) { p[i] = __float2half(v); }
 __device__ inline void gn_store(__nv_bfloat16* p, int64_t i, float v) { p[i] = __float2bfloat16(v); }
 
-__device__ inline void gn_atomic_add(float* p, float v) { atomicAdd(p, v); }
-__device__ inline void gn_atomic_add(__half* p, float v) {
-    // CAS loop on the underlying short: load old value, compute new in float,
-    // CAS back. Memcpy used to avoid taking the address of a temporary.
-    auto* addr = reinterpret_cast<unsigned short*>(p);
-    unsigned short old = *addr;
-    unsigned short assumed;
-    do {
-        assumed = old;
-        __half h_old;
-        memcpy(&h_old, &assumed, sizeof(__half));
-        __half h_new = __float2half(__half2float(h_old) + v);
-        unsigned short s_new;
-        memcpy(&s_new, &h_new, sizeof(__half));
-        old = atomicCAS(addr, assumed, s_new);
-    } while (assumed != old);
-}
-__device__ inline void gn_atomic_add(__nv_bfloat16* p, float v) {
-    auto* addr = reinterpret_cast<unsigned short*>(p);
-    unsigned short old = *addr;
-    unsigned short assumed;
-    do {
-        assumed = old;
-        __nv_bfloat16 b_old;
-        memcpy(&b_old, &assumed, sizeof(__nv_bfloat16));
-        __nv_bfloat16 b_new = __float2bfloat16(__bfloat162float(b_old) + v);
-        unsigned short s_new;
-        memcpy(&s_new, &b_new, sizeof(__nv_bfloat16));
-        old = atomicCAS(addr, assumed, s_new);
-    } while (assumed != old);
-}
+// Per-channel grad_weight/grad_bias accumulation is done in Float32 only (the
+// FP16/BF16 backward path widens to Float32 first), so no half-precision atomic
+// add helpers are needed here — accumulating across N*HW contributions in half
+// precision lost accuracy and could saturate.
 
 // Mixed-precision GroupNorm forward: storage type StorageT (Float16/BFloat16),
 // float32 internal accumulation, fused load/compute/store in a single kernel.
@@ -1137,8 +1117,8 @@ __global__ void group_norm_forward_kernel_mixed(
     const StorageT* __restrict__ weight,
     const StorageT* __restrict__ bias,
     StorageT* __restrict__ output,
-    StorageT* __restrict__ mean_out,
-    StorageT* __restrict__ inv_std_out,
+    float* __restrict__ mean_out,
+    float* __restrict__ inv_std_out,
     int64_t N, int64_t C, int64_t HW,
     int64_t num_groups, int64_t channels_per_group,
     float eps) {
@@ -1211,8 +1191,12 @@ __global__ void group_norm_forward_kernel_mixed(
             float variance = local_var / static_cast<float>(group_size);
             inv_std = rsqrtf(variance + eps);
             shared_sum[0] = inv_std;
-            if (mean_out) gn_store(mean_out, group_idx, mean);
-            if (inv_std_out) gn_store(inv_std_out, group_idx, inv_std);
+            // Save per-group statistics in float32 (matches the CPU reference,
+            // which stores mean/inv_std as Float32 for the FP16/BF16 path). The
+            // backward pass reads these back at full precision, avoiding the
+            // ~3-significant-digit loss of FP16-saved stats.
+            if (mean_out) mean_out[group_idx] = mean;
+            if (inv_std_out) inv_std_out[group_idx] = inv_std;
         }
     }
     __syncthreads();
@@ -1234,107 +1218,12 @@ __global__ void group_norm_forward_kernel_mixed(
     }
 }
 
-// Mixed-precision GroupNorm backward: storage type StorageT, float32 accumulation.
-template<typename StorageT>
-__global__ void group_norm_backward_kernel_mixed(
-    const StorageT* __restrict__ grad_output,
-    const StorageT* __restrict__ input,
-    const StorageT* __restrict__ weight,
-    const StorageT* __restrict__ mean_saved,
-    const StorageT* __restrict__ inv_std_saved,
-    StorageT* __restrict__ grad_input,
-    StorageT* __restrict__ grad_weight,
-    StorageT* __restrict__ grad_bias,
-    int64_t N, int64_t C, int64_t HW,
-    int64_t num_groups, int64_t channels_per_group) {
-
-    int64_t group_idx = blockIdx.x;
-    int64_t n = group_idx / num_groups;
-    int64_t g = group_idx % num_groups;
-    if (n >= N || g >= num_groups) return;
-
-    int64_t c_start = g * channels_per_group;
-    int64_t group_size = channels_per_group * HW;
-
-    float mean = gn_load(mean_saved, group_idx);
-    float inv_std = gn_load(inv_std_saved, group_idx);
-
-    float local_sum_dy = 0.0f;
-    float local_sum_dy_xhat = 0.0f;
-
-    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
-        int64_t c_offset = i / HW;
-        int64_t hw = i % HW;
-        int64_t c = c_start + c_offset;
-        int64_t idx = (n * C + c) * HW + hw;
-        float dy = gn_load(grad_output, idx);
-        if (weight) dy = dy * gn_load(weight, c);
-        float xhat = (gn_load(input, idx) - mean) * inv_std;
-        local_sum_dy += dy;
-        local_sum_dy_xhat += dy * xhat;
-    }
-
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        local_sum_dy += __shfl_down_sync(0xFFFFFFFF, local_sum_dy, offset);
-        local_sum_dy_xhat += __shfl_down_sync(0xFFFFFFFF, local_sum_dy_xhat, offset);
-    }
-
-    __shared__ float shared_dy[32];
-    __shared__ float shared_dy_xhat[32];
-    int lane = threadIdx.x % warpSize;
-    int warp_id = threadIdx.x / warpSize;
-
-    if (lane == 0) {
-        shared_dy[warp_id] = local_sum_dy;
-        shared_dy_xhat[warp_id] = local_sum_dy_xhat;
-    }
-    __syncthreads();
-
-    float sum_dy = 0.0f, sum_dy_xhat = 0.0f;
-    if (warp_id == 0) {
-        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
-        local_sum_dy = (lane < num_warps) ? shared_dy[lane] : 0.0f;
-        local_sum_dy_xhat = (lane < num_warps) ? shared_dy_xhat[lane] : 0.0f;
-        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            local_sum_dy += __shfl_down_sync(0xFFFFFFFF, local_sum_dy, offset);
-            local_sum_dy_xhat += __shfl_down_sync(0xFFFFFFFF, local_sum_dy_xhat, offset);
-        }
-        if (lane == 0) {
-            shared_dy[0] = local_sum_dy;
-            shared_dy_xhat[0] = local_sum_dy_xhat;
-        }
-    }
-    __syncthreads();
-    sum_dy = shared_dy[0];
-    sum_dy_xhat = shared_dy_xhat[0];
-
-    float inv_group_size = 1.0f / static_cast<float>(group_size);
-
-    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
-        int64_t c_offset = i / HW;
-        int64_t hw = i % HW;
-        int64_t c = c_start + c_offset;
-        int64_t idx = (n * C + c) * HW + hw;
-        float dy = gn_load(grad_output, idx);
-        if (weight) dy = dy * gn_load(weight, c);
-        float xhat = (gn_load(input, idx) - mean) * inv_std;
-        float result = inv_std * (dy - inv_group_size * (sum_dy + xhat * sum_dy_xhat));
-        gn_store(grad_input, idx, result);
-    }
-
-    if (weight && grad_weight && grad_bias) {
-        for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
-            int64_t c_offset = i / HW;
-            int64_t hw = i % HW;
-            int64_t c = c_start + c_offset;
-            int64_t idx = (n * C + c) * HW + hw;
-            float xhat = (gn_load(input, idx) - mean) * inv_std;
-            float go = gn_load(grad_output, idx);
-            gn_atomic_add(&grad_weight[c], go * xhat);
-            gn_atomic_add(&grad_bias[c], go);
-        }
-    }
-}
+// Note: the mixed-precision GroupNorm backward is no longer a dedicated kernel.
+// The FP16/BF16 backward path widens its inputs to Float32, runs the Float32
+// kernel (which accumulates grad_weight/grad_bias via atomicAdd<float>), then
+// narrows the results — see group_norm_backward_kernel launcher. This avoids
+// accumulating per-channel gradients in half precision (a CAS read-modify-write
+// in FP16/BF16 lost precision and saturated for large N*HW).
 
 template<typename T>
 __global__ void group_norm_forward_kernel(
@@ -1570,8 +1459,13 @@ auto group_norm_forward_kernel(
     int64_t channels_per_group = C / num_groups;
 
     Tensor output(shape, input.dtype(), input.device());
-    Tensor mean_out({N * num_groups}, input.dtype(), input.device());
-    Tensor inv_std_out({N * num_groups}, input.dtype(), input.device());
+    // Saved statistics precision: full precision for Float64, otherwise Float32.
+    // For FP16/BF16 inputs the stats are stored in Float32 (matching the CPU
+    // reference group_norm_kernel_with_stats), so the backward pass recovers
+    // mean/inv_std at full precision instead of ~3 decimal digits.
+    DType stats_dtype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor mean_out({N * num_groups}, stats_dtype, input.device());
+    Tensor inv_std_out({N * num_groups}, stats_dtype, input.device());
 
     int64_t num_group_instances = N * num_groups;
     int block_size = 256;
@@ -1596,8 +1490,8 @@ auto group_norm_forward_kernel(
             reinterpret_cast<const __half*>(weight.data<Float16>()),
             reinterpret_cast<const __half*>(bias.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            reinterpret_cast<__half*>(mean_out.data<Float16>()),
-            reinterpret_cast<__half*>(inv_std_out.data<Float16>()),
+            mean_out.data<float>(),
+            inv_std_out.data<float>(),
             N, C, HW, num_groups, channels_per_group, eps);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
@@ -1606,8 +1500,8 @@ auto group_norm_forward_kernel(
             reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(bias.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
-            reinterpret_cast<__nv_bfloat16*>(mean_out.data<BFloat16>()),
-            reinterpret_cast<__nv_bfloat16*>(inv_std_out.data<BFloat16>()),
+            mean_out.data<float>(),
+            inv_std_out.data<float>(),
             N, C, HW, num_groups, channels_per_group, eps);
             CUDA_CHECK(cudaGetLastError());
     } else {
@@ -1636,6 +1530,22 @@ auto group_norm_backward_kernel(
     for (size_t i = 2; i < shape.size(); ++i) HW *= shape[i];
     int64_t channels_per_group = C / num_groups;
 
+    // FP16/BF16: widen all data tensors to Float32, run the float32 backward
+    // (float accumulators / atomicAdd<float> for grad_weight/grad_bias), then
+    // narrow the results back. The saved mean/inv_std are already Float32
+    // (group_norm_forward_kernel stores stats in Float32 for the half path), so
+    // they pass straight through. This mirrors the BatchNorm2D widen-narrow
+    // path above and the ROCm LayerNorm reference, and avoids accumulating the
+    // N*HW per-channel grad_weight/grad_bias contributions in half precision.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto [gi, gw, gb] = group_norm_backward_kernel(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            weight.to(DType::Float32), mean_saved, inv_std_saved,
+            num_groups, stream);
+        return std::make_tuple(gi.to(orig), gw.to(orig), gb.to(orig));
+    }
+
     Tensor grad_input(shape, input.dtype(), input.device());
     Tensor grad_weight({C}, input.dtype(), input.device());
     Tensor grad_bias({C}, input.dtype(), input.device());
@@ -1661,31 +1571,8 @@ auto group_norm_backward_kernel(
             grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
             N, C, HW, num_groups, channels_per_group);
             CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float16) {
-        group_norm_backward_kernel_mixed<__half><<<num_group_instances, block_size, 0, stream>>>(
-            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-            reinterpret_cast<const __half*>(input.data<Float16>()),
-            reinterpret_cast<const __half*>(weight.data<Float16>()),
-            reinterpret_cast<const __half*>(mean_saved.data<Float16>()),
-            reinterpret_cast<const __half*>(inv_std_saved.data<Float16>()),
-            reinterpret_cast<__half*>(grad_input.data<Float16>()),
-            reinterpret_cast<__half*>(grad_weight.data<Float16>()),
-            reinterpret_cast<__half*>(grad_bias.data<Float16>()),
-            N, C, HW, num_groups, channels_per_group);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::BFloat16) {
-        group_norm_backward_kernel_mixed<__nv_bfloat16><<<num_group_instances, block_size, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(grad_output.data<BFloat16>()),
-            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
-            reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
-            reinterpret_cast<const __nv_bfloat16*>(mean_saved.data<BFloat16>()),
-            reinterpret_cast<const __nv_bfloat16*>(inv_std_saved.data<BFloat16>()),
-            reinterpret_cast<__nv_bfloat16*>(grad_input.data<BFloat16>()),
-            reinterpret_cast<__nv_bfloat16*>(grad_weight.data<BFloat16>()),
-            reinterpret_cast<__nv_bfloat16*>(grad_bias.data<BFloat16>()),
-            N, C, HW, num_groups, channels_per_group);
-            CUDA_CHECK(cudaGetLastError());
     } else {
+        // FP16/BF16 handled above via widen-recurse-narrow.
         throw std::runtime_error("group_norm_backward: unsupported dtype");
     }
 

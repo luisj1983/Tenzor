@@ -22,7 +22,7 @@ void main() {
     if (tid == 0) local_count = 0;
     barrier();
 
-    for (uint col = tid; col < n_cols; col += 256) {
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
         if (dense[row * n_cols + col] != 0.0lf) {
             atomicAdd(local_count, 1);
         }

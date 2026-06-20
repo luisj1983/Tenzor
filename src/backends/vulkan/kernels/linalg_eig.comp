@@ -17,7 +17,6 @@ layout(push_constant) uniform PushConstants {
 };
 
 shared float H[32][32];   // Hessenberg matrix
-shared float converged;
 
 void main() {
     uint batch_idx = gl_WorkGroupID.x;
@@ -26,25 +25,40 @@ void main() {
 
     uint mat_offset = batch_idx * n * n;
 
-    // Load matrix into shared memory
+    // Load matrix into shared memory (parallel column load by all invocations)
     for (uint row = 0; row < n; row++) {
         if (tid < n) {
             H[row][tid] = data_in[mat_offset + row * n + tid];
         }
     }
-    barrier();
+    barrier();  // reached uniformly by every invocation before tid==0 reads H
 
-    // Step 1: Reduce to upper Hessenberg form via Householder reflections
-    // H[i][j] = 0 for i > j+1 after reduction
-    for (uint k = 0; k + 2 < n; k++) {
-        if (tid == 0) {
+    // All of the eigenvalue computation below is performed exclusively by
+    // invocation 0 and touches only shared memory it owns. The previous version
+    // executed barrier() at the end of each loop iteration *outside* the
+    // `if (tid == 0)` block while using `continue` *inside* it (Hessenberg loop
+    // and the QR-deflation loop). That made invocation 0 skip the trailing
+    // barrier on some iterations while invocations 1..31 still blocked on it —
+    // divergent (non-dynamically-uniform) barrier execution, which is undefined
+    // behaviour in Vulkan/SPIR-V and deadlocks real drivers. The same divergence
+    // also arose from `nn` being a per-invocation variable: only invocation 0
+    // updated it, so the loop trip count differed across invocations.
+    //
+    // Since no cross-invocation communication is needed after the load barrier,
+    // the entire single-threaded computation is wrapped in one `if (tid == 0)`
+    // block with no internal barriers. Every invocation reaches the load barrier
+    // uniformly; invocations 1..31 then fall through to the end of main().
+    if (tid == 0) {
+        // Step 1: Reduce to upper Hessenberg form via Householder reflections
+        // H[i][j] = 0 for i > j+1 after reduction
+        for (uint k = 0; k + 2 < n; k++) {
             // Compute Householder vector for column k, rows k+1..n-1
             float sigma = 0.0;
             for (uint i = k + 1; i < n; i++) {
                 sigma += H[i][k] * H[i][k];
             }
             float norm_x = sqrt(sigma);
-            if (norm_x < 1e-30) continue;  // skip if already zero
+            if (norm_x < 1e-30) continue;  // already zero column; nothing to reduce
 
             float alpha = -sign(H[k+1][k]) * norm_x;
             float v0 = H[k+1][k] - alpha;
@@ -90,15 +104,12 @@ void main() {
                 H[i][k] = 0.0;
             }
         }
-        barrier();
-    }
 
-    // Step 2: QR iteration with implicit double shifts on Hessenberg matrix
-    // Extract eigenvalues from quasi-upper triangular result
-    uint nn = n;  // active matrix size
+        // Step 2: QR iteration with implicit double shifts on Hessenberg matrix
+        // Extract eigenvalues from quasi-upper triangular result
+        uint nn = n;  // active matrix size
 
-    for (uint iter = 0; iter < max_iterations && nn > 0; iter++) {
-        if (tid == 0) {
+        for (uint iter = 0; iter < max_iterations && nn > 0; iter++) {
             // Check for deflation: if H[nn-1][nn-2] is small, eigenvalue found
             if (nn >= 2) {
                 float tst = abs(H[nn-2][nn-2]) + abs(H[nn-1][nn-1]);
@@ -175,7 +186,6 @@ void main() {
                 if (v_sq < 1e-30) { x = H[k+1][k]; y = (k+2 < nn) ? H[k+2][k] : 0.0; z = (k+3 < nn) ? H[k+3][k] : 0.0; continue; }
                 float tau_h = 2.0 / v_sq;
 
-                uint r = (k == 0) ? 0 : k;  // apply from row r
                 uint m = min(k + 4, nn);     // apply up to row m
 
                 // Left multiplication: H = (I - tau * v * v^T) * H
@@ -231,11 +241,8 @@ void main() {
                 }
             }
         }
-        barrier();
-    }
 
-    // Handle remaining 1x1 or 2x2 blocks
-    if (tid == 0) {
+        // Handle remaining 1x1 or 2x2 blocks
         if (nn == 1) {
             data_wr[batch_idx * n] = H[0][0];
             data_wi[batch_idx * n] = 0.0;

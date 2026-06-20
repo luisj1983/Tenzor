@@ -62,13 +62,17 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
         // Pass 1: Histogram
         histo_buf = dispatchFill(histo_buf, 0.0f);
         {
-            struct { uint32_t n; uint32_t digit; uint32_t n_wgs; } pc;
+            struct { uint32_t n; uint32_t digit; uint32_t n_wgs; uint32_t descending; } pc;
             pc.n = static_cast<uint32_t>(n);
             // LSD radix sort must process digits least-significant-first regardless
-            // of direction; descending order is realized by the final dispatchFlip
-            // below. Reversing the pass order here corrupts multi-pass (>1 digit) sorts.
+            // of direction. Descending order is realized natively by inverting the
+            // sortable key (descending push-constant) in the histogram/scatter
+            // shaders, NOT by reversing the digit-pass order (which would corrupt
+            // multi-pass sorts) and NOT by a post-sort flip (which reverses the
+            // order of equal-key elements, breaking stable tie order vs CPU).
             pc.digit = digit;
             pc.n_wgs = n_wgs;
+            pc.descending = descending ? 1u : 0u;
 
             std::vector<std::pair<uint32_t, const void*>> bindings = {
                 {0, keys_a.data_ptr()}, {1, histo_buf.data_ptr()}
@@ -111,13 +115,14 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
 
         // Pass 3: Scatter
         {
-            struct { uint32_t n; uint32_t digit; uint32_t n_wgs; } pc;
+            struct { uint32_t n; uint32_t digit; uint32_t n_wgs; uint32_t descending; } pc;
             pc.n = static_cast<uint32_t>(n);
-            // LSD radix sort must process digits least-significant-first regardless
-            // of direction; descending order is realized by the final dispatchFlip
-            // below. Reversing the pass order here corrupts multi-pass (>1 digit) sorts.
+            // The scatter pass must derive the SAME digit as the histogram pass,
+            // so it receives the identical descending flag (key inversion applied
+            // in the shader). LSD digit order is still least-significant-first.
             pc.digit = digit;
             pc.n_wgs = n_wgs;
+            pc.descending = descending ? 1u : 0u;
 
             std::vector<std::pair<uint32_t, const void*>> bindings = {
                 {0, keys_a.data_ptr()}, {1, idx_a.data_ptr()},
@@ -142,12 +147,11 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
         std::swap(idx_a, idx_b);
     }
 
-    // If descending, reverse the result
-    if (descending) {
-        // The sign-bit flip encoding produces ascending order; reverse for descending
-        keys_a = dispatchFlip(keys_a, 0);
-        idx_a = dispatchFlip(idx_a, 0);
-    }
+    // Descending order is produced natively by the key-inversion path in the
+    // histogram/scatter shaders (driven by the 'descending' push-constant), so
+    // the result is already in descending order with stable (ascending original
+    // index) tie ordering — matching the CPU reference. No post-sort flip, which
+    // would reverse the order of equal-key elements and break tie stability.
 
     // Convert Int32 indices to Int64
     Tensor indices_i64 = idx_a.to(DType::Int64);
@@ -546,8 +550,11 @@ auto VulkanBackend::dispatchMedian(const Tensor& input, int64_t dim, bool keepdi
     // Median index: N/2 for even-length (lower median), (N-1)/2 same thing
     int64_t median_idx = (dim_size - 1) / 2;
 
-    // Extract the median element using index_select along dim
-    Tensor idx_tensor = dispatchFull({1}, static_cast<float>(median_idx), DType::Int64);
+    // Extract the median element using index_select along dim.
+    // dispatchFull hardcodes Vulkan device 0, so move the index tensor onto the
+    // input's device to support sorting on a non-zero GPU (mirrors dispatchMode).
+    Tensor idx_tensor = dispatchFull({1}, static_cast<double>(median_idx), DType::Int64)
+                            .to(input.device());
 
     Tensor median_values = dispatchIndexSelect(sorted_values, dim, idx_tensor);
     Tensor median_indices = dispatchIndexSelect(sorted_indices, dim, idx_tensor);

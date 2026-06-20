@@ -148,7 +148,7 @@ inline auto legacy_log_format(std::string_view fmt_str, Args&&... args) -> std::
 #define TENZOR_WARN_ONCE(msg)                                           \
     do {                                                                \
         static ::std::once_flag _tenzor_warn_once_flag;                 \
-        ::std::call_once(_tenzor_warn_once_flag, []() {                 \
+        ::std::call_once(_tenzor_warn_once_flag, [&]() {                \
             ::tenzor::Logger::instance().warning(msg);                  \
         });                                                             \
     } while (0)

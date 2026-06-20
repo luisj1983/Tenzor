@@ -2770,6 +2770,10 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         throw std::runtime_error("triu: input must be at least 2D");
     }
 
+    // The kernel indexes by flat contiguous offset, so materialize a contiguous
+    // input for non-contiguous (e.g. transposed/strided) views to match CPU.
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
     Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                   input.dtype(), input.device());
 
@@ -2788,28 +2792,28 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(triu_kernel_impl<float>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<float>(), result.data<float>(),
+            cont.data<float>(), result.data<float>(),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(triu_kernel_impl<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<double>(), result.data<double>(),
+            cont.data<double>(), result.data<double>(),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(triu_kernel_impl<__half>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(cont.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(triu_kernel_impl<int32_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int32_t>(), result.data<int32_t>(),
+            cont.data<int32_t>(), result.data<int32_t>(),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(triu_kernel_impl<int64_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int64_t>(), result.data<int64_t>(),
+            cont.data<int64_t>(), result.data<int64_t>(),
             batch_size, rows, cols, diagonal);
     } else {
         throw std::runtime_error("triu: unsupported dtype");
@@ -2855,6 +2859,10 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         throw std::runtime_error("tril: input must be at least 2D");
     }
 
+    // The kernel indexes by flat contiguous offset, so materialize a contiguous
+    // input for non-contiguous (e.g. transposed/strided) views to match CPU.
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
     Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                   input.dtype(), input.device());
 
@@ -2872,28 +2880,28 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(tril_kernel_impl<float>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<float>(), result.data<float>(),
+            cont.data<float>(), result.data<float>(),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(tril_kernel_impl<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<double>(), result.data<double>(),
+            cont.data<double>(), result.data<double>(),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(tril_kernel_impl<__half>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(cont.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(tril_kernel_impl<int32_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int32_t>(), result.data<int32_t>(),
+            cont.data<int32_t>(), result.data<int32_t>(),
             batch_size, rows, cols, diagonal);
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(tril_kernel_impl<int64_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int64_t>(), result.data<int64_t>(),
+            cont.data<int64_t>(), result.data<int64_t>(),
             batch_size, rows, cols, diagonal);
     } else {
         throw std::runtime_error("tril: unsupported dtype");
@@ -2969,6 +2977,11 @@ auto diag_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
     auto input_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(input_shape.size());
 
+    // Both the 2D-extract and 1D-construct paths index by flat contiguous
+    // offset, so materialize a contiguous input for strided/transposed views
+    // to match CPU (src/ops/transform.cpp:797,818).
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
     if (ndim == 2) {
         // Extract diagonal from 2D matrix -> 1D vector
         int64_t rows = input_shape[0];
@@ -2991,28 +3004,28 @@ auto diag_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         if (input.dtype() == DType::Float32) {
             hipLaunchKernelGGL(diag_extract_kernel_impl<float>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<float>(), result.data<float>(),
+                cont.data<float>(), result.data<float>(),
                 diag_size, rows, cols, diagonal);
         } else if (input.dtype() == DType::Float64) {
             hipLaunchKernelGGL(diag_extract_kernel_impl<double>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<double>(), result.data<double>(),
+                cont.data<double>(), result.data<double>(),
                 diag_size, rows, cols, diagonal);
         } else if (input.dtype() == DType::Float16) {
             hipLaunchKernelGGL(diag_extract_kernel_impl<__half>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                reinterpret_cast<const __half*>(input.data<Float16>()),
+                reinterpret_cast<const __half*>(cont.data<Float16>()),
                 reinterpret_cast<__half*>(result.data<Float16>()),
                 diag_size, rows, cols, diagonal);
         } else if (input.dtype() == DType::Int32) {
             hipLaunchKernelGGL(diag_extract_kernel_impl<int32_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<int32_t>(), result.data<int32_t>(),
+                cont.data<int32_t>(), result.data<int32_t>(),
                 diag_size, rows, cols, diagonal);
         } else if (input.dtype() == DType::Int64) {
             hipLaunchKernelGGL(diag_extract_kernel_impl<int64_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<int64_t>(), result.data<int64_t>(),
+                cont.data<int64_t>(), result.data<int64_t>(),
                 diag_size, rows, cols, diagonal);
         } else {
             throw std::runtime_error("diag: unsupported dtype");
@@ -3033,28 +3046,28 @@ auto diag_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         if (input.dtype() == DType::Float32) {
             hipLaunchKernelGGL(diag_construct_simple_kernel<float>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<float>(), result.data<float>(),
+                cont.data<float>(), result.data<float>(),
                 n, diag_size, diagonal);
         } else if (input.dtype() == DType::Float64) {
             hipLaunchKernelGGL(diag_construct_simple_kernel<double>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<double>(), result.data<double>(),
+                cont.data<double>(), result.data<double>(),
                 n, diag_size, diagonal);
         } else if (input.dtype() == DType::Float16) {
             hipLaunchKernelGGL(diag_construct_simple_kernel<__half>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                reinterpret_cast<const __half*>(input.data<Float16>()),
+                reinterpret_cast<const __half*>(cont.data<Float16>()),
                 reinterpret_cast<__half*>(result.data<Float16>()),
                 n, diag_size, diagonal);
         } else if (input.dtype() == DType::Int32) {
             hipLaunchKernelGGL(diag_construct_simple_kernel<int32_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<int32_t>(), result.data<int32_t>(),
+                cont.data<int32_t>(), result.data<int32_t>(),
                 n, diag_size, diagonal);
         } else if (input.dtype() == DType::Int64) {
             hipLaunchKernelGGL(diag_construct_simple_kernel<int64_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<int64_t>(), result.data<int64_t>(),
+                cont.data<int64_t>(), result.data<int64_t>(),
                 n, diag_size, diagonal);
         } else {
             throw std::runtime_error("diag: unsupported dtype");
@@ -3205,6 +3218,11 @@ auto trace_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t cols = input_shape[1];
     int64_t diag_size = std::min(rows, cols);
 
+    // The kernel sums input[i*cols+i] using contiguous addressing, so
+    // materialize a contiguous input for strided/sliced square views to
+    // match CPU (trace()->diag()->contiguous).
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
     // Output is a scalar
     Tensor result({}, input.dtype(), input.device());
 
@@ -3223,22 +3241,22 @@ auto trace_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(trace_kernel_impl<float>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<float>(), result.data<float>(),
+            cont.data<float>(), result.data<float>(),
             diag_size, cols);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(trace_kernel_impl_f64,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<double>(), result.data<double>(),
+            cont.data<double>(), result.data<double>(),
             diag_size, cols);
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(trace_kernel_impl<int32_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int32_t>(), result.data<int32_t>(),
+            cont.data<int32_t>(), result.data<int32_t>(),
             diag_size, cols);
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(trace_kernel_impl_i64,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int64_t>(), result.data<int64_t>(),
+            cont.data<int64_t>(), result.data<int64_t>(),
             diag_size, cols);
     } else {
         throw std::runtime_error("trace: unsupported dtype (supports Float32, Float64, Int32, Int64)");
@@ -3561,6 +3579,11 @@ auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_
     int64_t diag_size = input_shape[ndim - 1];
     int64_t mat_size = diag_size + std::abs(offset);
 
+    // The kernel reads input[b*diag_size+diag_idx] assuming a contiguous
+    // (batch, diag_size) buffer, so materialize a contiguous input for
+    // strided views to match CPU/CUDA.
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
     // Compute batch size (product of all dims except last)
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 1; ++i) batch_size *= input_shape[i];
@@ -3579,28 +3602,28 @@ auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(diag_embed_kernel_impl<float>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<float>(), result.data<float>(),
+            cont.data<float>(), result.data<float>(),
             batch_size, diag_size, mat_size, offset, dim1, dim2);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(diag_embed_kernel_impl<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<double>(), result.data<double>(),
+            cont.data<double>(), result.data<double>(),
             batch_size, diag_size, mat_size, offset, dim1, dim2);
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(diag_embed_kernel_impl<__half>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(cont.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
             batch_size, diag_size, mat_size, offset, dim1, dim2);
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(diag_embed_kernel_impl<int32_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int32_t>(), result.data<int32_t>(),
+            cont.data<int32_t>(), result.data<int32_t>(),
             batch_size, diag_size, mat_size, offset, dim1, dim2);
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(diag_embed_kernel_impl<int64_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            input.data<int64_t>(), result.data<int64_t>(),
+            cont.data<int64_t>(), result.data<int64_t>(),
             batch_size, diag_size, mat_size, offset, dim1, dim2);
     } else {
         throw std::runtime_error("diag_embed: unsupported dtype");

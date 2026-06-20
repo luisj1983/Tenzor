@@ -1102,6 +1102,15 @@ auto VulkanBackend::dispatchMaxPool1dForward(const Tensor& input, const OpAttrib
     int64_t padding = attrs.get_int(AttrKey::Padding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
+    // PyTorch-style validation. Reject configurations that could otherwise
+    // produce an all-padding pooling window (shader writes -inf and index 0).
+    if (kernel_size <= 0 || stride <= 0 || dilation <= 0) {
+        throw std::invalid_argument("Vulkan max_pool1d: kernel_size, stride and dilation must be positive");
+    }
+    if (padding < 0 || padding > kernel_size / 2) {
+        throw std::invalid_argument("max_pool1d: padding must be <= kernel_size/2");
+    }
+
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
     int64_t in_length = input_shape[2];

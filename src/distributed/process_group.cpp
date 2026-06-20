@@ -702,10 +702,17 @@ auto NCCLProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
     ncclRedOp_t nccl_op = to_nccl_reduce_op(op);
 
+    // NCCL treats data_ptr() as a flat contiguous buffer; a non-contiguous
+    // input/output would be read/written as if contiguous and corrupt the
+    // result. Stage a contiguous copy and propagate the reduced values back
+    // (mirrors NCCLBackend::all_reduce).
+    const bool staged = !tensor.is_contiguous();
+    Tensor work = staged ? tensor.contiguous() : tensor;
+
     NCCL_PG_CHECK(ncclAllReduce(
-        tensor.data_ptr(),
-        tensor.data_ptr(),
-        tensor.numel(),
+        work.data_ptr(),
+        work.data_ptr(),
+        work.numel(),
         nccl_dtype,
         nccl_op,
         nccl_comm,
@@ -717,14 +724,15 @@ auto NCCLProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     // AVG = SUM followed by division
     if (op == ReduceOp::AVG && world_size_ > 1) {
         // H6 fix (mirroring MPIProcessGroup::all_reduce): in-place divide
-        // preserves the caller's storage pointer so any aliased Variable /
-        // view / external buffer (the common DDP gradient-averaging case)
-        // observes the averaged result. Construct a dtype/device-matched
+        // preserves the staged buffer's storage so the averaged result is
+        // written back to the caller below. Construct a dtype/device-matched
         // scalar divisor so Float64 keeps full precision; `/=` writes through.
         auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                    tensor.dtype(), tensor.device());
-        tensor /= scalar;
+                                    work.dtype(), work.device());
+        work /= scalar;
     }
+
+    if (staged) tensor = work;
 #else
     (void)tensor;
     (void)op;
@@ -774,10 +782,16 @@ auto NCCLProcessGroup::broadcast(Tensor& tensor, int src_rank) -> void {
     ncclComm_t nccl_comm = static_cast<ncclComm_t>(comm_);
     ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
 
+    // Stage a contiguous buffer: a non-contiguous receive buffer would
+    // otherwise be written as if contiguous and corrupted (mirrors
+    // NCCLBackend::broadcast).
+    const bool staged = !tensor.is_contiguous();
+    Tensor work = staged ? tensor.contiguous() : tensor;
+
     NCCL_PG_CHECK(ncclBroadcast(
-        tensor.data_ptr(),
-        tensor.data_ptr(),
-        tensor.numel(),
+        work.data_ptr(),
+        work.data_ptr(),
+        work.numel(),
         nccl_dtype,
         src_rank,
         nccl_comm,
@@ -785,6 +799,8 @@ auto NCCLProcessGroup::broadcast(Tensor& tensor, int src_rank) -> void {
     ));
 
     NCCL_PG_GPU_CHECK(cudaDeviceSynchronize());
+
+    if (staged) tensor = work;
 #else
     (void)tensor;
     (void)src_rank;
@@ -808,6 +824,11 @@ auto NCCLProcessGroup::all_gather(std::vector<Tensor>& output,
     ncclComm_t nccl_comm = static_cast<ncclComm_t>(comm_);
     ncclDataType_t nccl_dtype = to_nccl_datatype(input.dtype());
 
+    // NCCL reads input.data_ptr() as a flat contiguous block; a non-contiguous
+    // input would be read as if contiguous and gather corrupted data. Stage a
+    // contiguous send buffer.
+    Tensor send = input.is_contiguous() ? input : input.contiguous();
+
     // NCCL all-gather writes into a contiguous buffer; allocate one
     size_t total_elements = input.numel() * world_size_;
     Tensor gathered = empty(
@@ -817,9 +838,9 @@ auto NCCLProcessGroup::all_gather(std::vector<Tensor>& output,
     );
 
     NCCL_PG_CHECK(ncclAllGather(
-        input.data_ptr(),
+        send.data_ptr(),
         gathered.data_ptr(),
-        input.numel(),
+        send.numel(),
         nccl_dtype,
         nccl_comm,
         nullptr  // default CUDA stream
@@ -860,10 +881,16 @@ auto NCCLProcessGroup::reduce_scatter(Tensor& output,
     std::vector<Tensor> input_vec(input.begin(), input.end());
     Tensor concatenated = cat(input_vec, 0);
 
+    // NCCL writes output.data_ptr() as a flat contiguous block; a
+    // non-contiguous output would be written as if contiguous and corrupted.
+    // Stage a contiguous receive buffer and propagate the result back.
+    const bool staged = !output.is_contiguous();
+    Tensor work = staged ? output.contiguous() : output;
+
     NCCL_PG_CHECK(ncclReduceScatter(
         concatenated.data_ptr(),
-        output.data_ptr(),
-        output.numel(),
+        work.data_ptr(),
+        work.numel(),
         nccl_dtype,
         ncclSum,
         nccl_comm,
@@ -871,6 +898,8 @@ auto NCCLProcessGroup::reduce_scatter(Tensor& output,
     ));
 
     NCCL_PG_GPU_CHECK(cudaDeviceSynchronize());
+
+    if (staged) output = work;
 #else
     (void)output;
     (void)input;

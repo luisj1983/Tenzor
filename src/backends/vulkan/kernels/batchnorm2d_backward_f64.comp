@@ -1,10 +1,22 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Batch Normalization 2D Backward Pass - Float64 variant (two-pass, no atomics)
-// Pass 1: Each workgroup computes grad_input directly and writes per-workgroup
-// partial sums for grad_gamma and grad_beta into intermediate buffers.
-// Pass 2 uses reduce_partial_sums_f64.comp to sum partials across workgroups.
+// Batch Normalization 2D Backward Pass - Float64 variant (three-pass, no atomics)
+// Pass 1 (this shader): each workgroup writes per-workgroup partial sums for
+//   grad_gamma and grad_beta into intermediate buffers. It does NOT compute
+//   grad_input — the training-mode input gradient depends on the per-channel
+//   sums of grad_out and grad_out*x_hat over the ENTIRE (N, H, W), which span
+//   every workgroup of a channel and are therefore unknown until after the
+//   reduction (pass 2). The previous single-pass form wrote
+//   grad_out * gamma * invstd, which is the *inference-mode* backward and
+//   drops the two mean-correction terms required during training.
+// Pass 2 uses reduce_partial_sums_f64.comp to sum partials across workgroups
+//   into final per-channel grad_gamma[c] / grad_beta[c].
+// Pass 3 (batchnorm2d_backward_grad_input_f64.comp) consumes those final
+//   per-channel sums and computes the correct training-mode grad_input:
+//     grad_in = gamma * invstd *
+//               (grad_out - grad_beta[c]/N - x_hat * grad_gamma[c]/N)
+//   with N = batch * spatial_size.
 //
 // Dispatch: one workgroup per (batch, channel) pair.
 //   gl_WorkGroupID.x = batch_idx * channels + channel_idx
@@ -50,10 +62,10 @@ void main() {
 
     double mean = mean_data[c];
     double inv_std = invstd_data[c];
-    double gamma = 1.0lf;
-    if (params.has_gamma != 0) {
-        gamma = gamma_data[c];
-    }
+    // gamma / has_gamma are unused in pass 1 (grad_gamma/grad_beta do not
+    // depend on gamma). The Gamma binding is still declared above so the
+    // descriptor layout matches the host (which binds all 8 buffers). gamma is
+    // applied in the grad_input pass.
 
     // Each thread accumulates over a strided portion of the spatial dimension
     double local_gg = 0.0lf;
@@ -65,9 +77,10 @@ void main() {
         double grad_out = grad_output[idx];
         double x_normalized = (x - mean) * inv_std;
 
-        // grad_input: no contention, one thread per element
-        double grad_x_normalized = grad_out * gamma;
-        grad_input[idx] = grad_x_normalized * inv_std;
+        // grad_input is intentionally NOT written here: it requires the full
+        // per-channel sums (computed in pass 2) and is produced by the
+        // dedicated grad_input pass (pass 3). Writing it here would only give
+        // the inference-mode gradient, which is wrong during training.
 
         // Accumulate partial sums for grad_gamma and grad_beta
         local_gg += grad_out * x_normalized;

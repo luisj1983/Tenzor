@@ -2,12 +2,16 @@
 
 // CountNonzero: count elements != 0 across all elements.
 // Dispatched as a single workgroup for full reduction.
-// Output: float containing the count (converted to Int64 on host).
+// Output: uint containing the exact count (reinterpreted as UInt32 then
+// converted to Int64 on host). Storing the count as a uint instead of a
+// float avoids the 2^24 mantissa-rounding limit of float32, so tensors with
+// more than 16,777,216 nonzeros report an exact count. The count cannot
+// exceed num_elements, which is itself a uint, so uint32 is always sufficient.
 layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input  { float input_data[]; };
-layout(binding = 1) buffer Output { float output_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint num_elements;
@@ -38,6 +42,6 @@ void main() {
     }
 
     if (tid == 0) {
-        output_data[0] = float(sdata[0]);
+        output_data[0] = sdata[0];
     }
 }

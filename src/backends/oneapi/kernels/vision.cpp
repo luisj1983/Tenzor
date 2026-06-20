@@ -931,6 +931,32 @@ auto gather_relative_position_bias_kernel(
 
     int64_t total = num_positions * num_positions * num_heads;
 
+    // Bounds-check every relative-position index up front. Each index is used as
+    // an unchecked offset into the position-bias table (table_ptr[table_idx *
+    // num_heads + h]); a negative or out-of-range value (e.g. from an untrusted
+    // checkpoint or mismatched shapes) would otherwise be an out-of-bounds device
+    // read / information-disclosure vector. This mirrors the CPU reference
+    // (src/backends/cpu/kernels/vision.cpp) which throws std::out_of_range. The
+    // OneAPI table layout is [table_size, num_heads], so valid indices lie in
+    // [0, table.shape()[0]).
+    const int64_t table_size = table.shape()[0];
+    const int64_t num_index = num_positions * num_positions;
+    {
+        std::vector<int64_t> host_indices(static_cast<size_t>(num_index));
+        const int64_t* indices_dev = get_data_ptr<const int64_t>(indices);
+        queue.memcpy(host_indices.data(), indices_dev,
+                     static_cast<size_t>(num_index) * sizeof(int64_t)).wait();
+        for (int64_t pos = 0; pos < num_index; ++pos) {
+            int64_t table_idx = host_indices[pos];
+            if (table_idx < 0 || table_idx >= table_size) {
+                throw std::out_of_range(
+                    "gather_relative_position_bias: rel_pos_index value " +
+                    std::to_string(table_idx) + " out of range [0, " +
+                    std::to_string(table_size) + ")");
+            }
+        }
+    }
+
     if (table.dtype() == DType::Float32) {
         const float* table_ptr = get_data_ptr<const float>(table);
         const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
@@ -1915,7 +1941,10 @@ auto box_iou_kernel(
             out_ptr[i * M + j] = f32_to_bf16(iou);
         });
     } else {
-        throw std::runtime_error("box_iou_kernel: unsupported dtype (need Float32 or Float64)");
+        throw std::runtime_error(
+            "box_iou_kernel: unsupported dtype " +
+            std::string(dtype_name(boxes1.dtype())) +
+            " (need Float32, Float64, Float16, or BFloat16)");
     }
 
     return output;

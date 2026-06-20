@@ -48,10 +48,14 @@ uvec4 philox4x32(uvec4 ctr, uvec2 key) {
     return ctr;
 }
 
-// Convert two uint32s to double in [0, 1) with higher precision
+// Convert two uint32s to double in [0, 1) with ~53-bit mantissa precision.
+// Combine the high 32 bits with the top 21 bits of the low word to form a
+// 53-bit integer mantissa, then scale by 2^-53. This uses the full entropy
+// available in a double's mantissa instead of only 32 bits.
 double uints_to_double01(uint hi, uint lo) {
-    // Use 32 bits for simplicity (still gives good precision)
-    return double(hi) / 4294967296.0LF;
+    // mantissa = (hi << 21) | (lo >> 11), a 53-bit value in [0, 2^53).
+    double mantissa = double(hi) * 2097152.0LF + double(lo >> 11);
+    return mantissa / 9007199254740992.0LF; // 2^53
 }
 
 dvec2 box_muller_double(double u1, double u2) {

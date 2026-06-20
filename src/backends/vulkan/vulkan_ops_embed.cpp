@@ -37,6 +37,13 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
     }
     int64_t total_nc = N * C;
 
+    // One workgroup per (N, C) pair: total_nc must not exceed the device's
+    // X-dimension workgroup-count limit (Vulkan guarantees only 65535). For
+    // large batch x channel counts this would otherwise truncate the dispatch
+    // (some channels never normalized) or trigger device-lost on
+    // conformant-minimum drivers, so fail loudly with a clear message.
+    checkSparseRowDispatch(device_id, "InstanceNorm", total_nc);
+
     bool has_affine = (weight.numel() > 0 && bias.numel() > 0);
 
     // Materialize read operands to packed offset-0 buffers before binding.
@@ -148,6 +155,12 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
         spatial_size *= input_shape[d];
     }
     int64_t total_nc = N * C;
+
+    // One workgroup per (N, C) pair: total_nc must not exceed the device's
+    // X-dimension workgroup-count limit (Vulkan guarantees only 65535). Match
+    // the forward path's guard so large batch x channel counts fail loudly
+    // instead of silently dropping channel gradients or causing device-lost.
+    checkSparseRowDispatch(device_id, "InstanceNormBackward", total_nc);
 
     bool has_affine = (weight.numel() > 0);
 
@@ -373,6 +386,7 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
 auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
                                                    const Tensor& indices,
                                                    const Tensor& offsets,
+                                                   const Tensor& max_indices,
                                                    int64_t num_embeddings,
                                                    int64_t embedding_dim,
                                                    const std::string& mode,
@@ -413,6 +427,26 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
     uint32_t mode_int = 0;  // sum
     if (mode == "mean") mode_int = 1;
     else if (mode == "max") mode_int = 2;
+
+    // Exact max-mode backward requires the per-(bag,feature) argmax indices
+    // produced by EmbeddingBagForward, scattering grad only to the winning
+    // element's row (see the CPU reference embedding_bag_backward_kernel). The
+    // forward saves these as `max_indices` (Int64, shape (num_bags,
+    // embedding_dim)); the autograd node forwards them as the 4th input and the
+    // registry threads them into this dispatch. They are bound at binding=4 of
+    // every backward shader (Float32/Float16/BFloat16/Float64), which reads
+    // max_idx_data[bag*embedding_dim + j] and routes the gradient only to that
+    // winning element's vocabulary row. The f16/bf16/f64 sibling shaders mirror
+    // the Float32 shader's argmax routing exactly.
+    if (mode_int == 2) {
+        if (max_indices.numel() == 0) {
+            throw std::runtime_error(
+                "EmbeddingBagBackward (Vulkan): mode=\"max\" requires the "
+                "per-(bag,feature) argmax indices from EmbeddingBagForward "
+                "(saved as max_indices) to route the gradient to the winning "
+                "element only, but an empty max_indices tensor was passed.");
+        }
+    }
 
     // Materialize read operands to packed offset-0 buffers before binding.
     const Tensor indices_packed = dispatchContiguous(indices);
@@ -504,6 +538,20 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
         {3, grad_weight.data_ptr()},
     };
     std::vector<size_t> sizes = {go_buf_size, idx_buf_size, offs_buf_size, gw_buf_size};
+
+    // Max mode (all dtypes): bind the per-(bag,feature) argmax element
+    // indices at binding=4. The shader declares this buffer as int64_t and
+    // reads max_idx_data[bag*embedding_dim + j] to route the gradient to the
+    // winning element's vocabulary row only. Sum/mean mode never touches
+    // binding 4, so it is left unbound for those modes (the shader does not
+    // read it and the fixed descriptor-set layout already declares the slot).
+    Tensor max_indices_packed;
+    if (mode_int == 2) {
+        max_indices_packed = dispatchContiguous(max_indices.to(DType::Int64));
+        size_t max_idx_buf_size = max_indices_packed.numel() * sizeof(int64_t);
+        bindings.push_back({4, max_indices_packed.data_ptr()});
+        sizes.push_back(max_idx_buf_size);
+    }
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 

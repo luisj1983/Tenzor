@@ -26,6 +26,10 @@ void main() {
     uint outer_idx = i / (params.inner_size * params.src_dim_size);
 
     int dest_dim_idx = idx_data[i];
+    // Normalize negative indices like the CPU reference (idx += dim_size) before the
+    // bounds check, so a valid negative index wraps instead of being silently dropped.
+    if (dest_dim_idx < 0) dest_dim_idx += int(params.dim_size);
+
     if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;
 
     uint out_idx = outer_idx * (params.dim_size * params.inner_size) +

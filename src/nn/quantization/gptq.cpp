@@ -269,8 +269,16 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
             packed = pack_int4(Q);
         }
     } else {
-        // 8-bit: store as Int8 directly
-        packed = Q.to(DType::Int8);
+        // 8-bit: choose storage dtype by signedness so codes are not corrupted.
+        // Symmetric quantization produces codes in [-128, 127] (signed), which
+        // fit DType::Int8. Asymmetric quantization produces codes in [0, 255]
+        // (unsigned) via quant_range()/quantize_value(); casting a code >= 128
+        // into a signed Int8 (range [-128, 127]) wraps it to a negative value
+        // and corrupts the weight. Store those as DType::UInt8 instead.
+        //
+        // The storage dtype is recoverable by consumers from config().sym (and
+        // directly from packed_weight.dtype()): sym -> Int8, asym -> UInt8.
+        packed = config_.sym ? Q.to(DType::Int8) : Q.to(DType::UInt8);
     }
 
     // Move results back to the caller's original device.

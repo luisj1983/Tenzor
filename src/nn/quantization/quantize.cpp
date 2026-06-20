@@ -141,7 +141,14 @@ auto compute_quantization_params(
 
     if (scheme == QuantizationScheme::PerTensorSymmetric ||
         scheme == QuantizationScheme::PerChannelSymmetric) {
-        // Symmetric quantization
+        // Symmetric quantization is only well-defined for signed integer
+        // ranges; with an unsigned dtype zero_point=0 maps every negative
+        // input to 0 (silent clamp). Reject the unsupported combination.
+        if (dtype == QuantDType::UINT8 || dtype == QuantDType::UINT4) {
+            throw std::runtime_error(
+                "Symmetric quantization is not supported for unsigned dtypes "
+                "(UINT8/UINT4); use an affine/asymmetric scheme or a signed dtype");
+        }
         for (int64_t i = 0; i < n; ++i) {
             float abs_max = std::max(std::abs(min_data[i]), std::abs(max_data[i]));
             scale_data[i] = compute_symmetric_scale(abs_max, dtype);
@@ -567,20 +574,24 @@ auto compute_quantization_error(const Tensor& original, const QuantizedTensor& q
             "compute_quantization_error: original tensor is empty (numel == 0)");
     }
 
-    float mae = 0.0f;
-    float mse = 0.0f;
-    float signal_power = 0.0f;
+    // Accumulate in double precision to avoid the float-accumulator-in-a-loop
+    // precision loss across up to numel elements (signal_power/mse can otherwise
+    // drift several percent for large tensors, distorting the reported SNR).
+    double mae_acc = 0.0;
+    double mse_acc = 0.0;
+    double signal_power_acc = 0.0;
 
     for (int64_t i = 0; i < n; ++i) {
-        float error = orig_data[i] - deq_data[i];
-        mae += std::abs(error);
-        mse += error * error;
-        signal_power += orig_data[i] * orig_data[i];
+        double error = static_cast<double>(orig_data[i]) - static_cast<double>(deq_data[i]);
+        mae_acc += std::abs(error);
+        mse_acc += error * error;
+        signal_power_acc += static_cast<double>(orig_data[i]) * static_cast<double>(orig_data[i]);
     }
 
-    mae /= n;
-    mse /= n;
-    signal_power /= n;
+    double nd = static_cast<double>(n);
+    float mae = static_cast<float>(mae_acc / nd);
+    float mse = static_cast<float>(mse_acc / nd);
+    float signal_power = static_cast<float>(signal_power_acc / nd);
 
     // Signal-to-noise ratio in dB
     // Handle edge cases: when signal is near zero or when quantization is perfect

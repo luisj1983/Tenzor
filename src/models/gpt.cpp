@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <chrono>
 
@@ -46,6 +47,15 @@ GPTEmbeddings::GPTEmbeddings(const GPT2Config& config)
 
 auto GPTEmbeddings::forward(const Variable& input_ids, const Variable& position_ids) -> Variable {
     auto seq_len = input_ids.tensor().shape()[1];
+
+    // Position embeddings are a learned table of size n_positions_. A sequence
+    // longer than the trained context length would gather position ids past the
+    // end of that table (OOB read / silently wrong embeddings), so reject it.
+    if (seq_len > n_positions_) {
+        throw std::invalid_argument(
+            "GPTEmbeddings::forward: sequence length (" + std::to_string(seq_len) +
+            ") exceeds n_positions (" + std::to_string(n_positions_) + ")");
+    }
 
     // Get token embeddings
     auto token_embeds = token_embedding_->forward(input_ids);
@@ -284,14 +294,33 @@ TextGenerator::TextGenerator(GPT2LMHeadModel& model, const GenerationConfig& con
 }
 
 auto TextGenerator::apply_temperature(const Variable& logits, double temperature) const -> Variable {
+    // Negative temperature would silently reverse the logit ranking, and
+    // temperature == 0 (the common "deterministic/greedy" convention) would
+    // divide by zero, producing inf/NaN logits and breaking softmax/sampling.
+    if (temperature < 0.0) {
+        throw std::invalid_argument(
+            "apply_temperature: temperature must be >= 0 (got " +
+            std::to_string(temperature) + ")");
+    }
     if (temperature == 1.0) {
         return logits;
+    }
+    // temperature == 0 means greedy/deterministic: the resulting softmax must be
+    // a one-hot at the argmax. We approximate this by dividing by a small
+    // positive value, which sharpens the distribution to (numerically) one-hot
+    // on the largest logit — equivalent to argmax once passed through softmax.
+    // 1e-4 is small enough to collapse softmax onto the max logit yet large
+    // enough to stay representable in Float16/BFloat16 (and avoid overflowing
+    // the scaled logits to +inf), keeping the result finite across dtypes.
+    double effective_temp = temperature;
+    if (effective_temp == 0.0) {
+        effective_temp = 1e-4;
     }
     // Scale logits by dividing by temperature
     // Create temperature tensor with same dtype as logits
     auto dtype = logits.tensor().dtype();
     auto temp_tensor_cpu = Tensor(std::vector<int64_t>{1}, DType::Float32, Device::cpu());
-    temp_tensor_cpu.data<float>()[0] = static_cast<float>(temperature);
+    temp_tensor_cpu.data<float>()[0] = static_cast<float>(effective_temp);
     // Convert to logits dtype if needed
     if (dtype != DType::Float32) {
         temp_tensor_cpu = temp_tensor_cpu.to(dtype);
@@ -446,6 +475,15 @@ auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
 
+    // The output buffer is sized [batch_size, config_.max_length]; the prompt is
+    // copied into the first current_len columns. A prompt longer than max_length
+    // would write past the end of the buffer (OOB heap write), so reject it.
+    if (current_len > config_.max_length) {
+        throw std::invalid_argument(
+            "greedy_search: prompt length (" + std::to_string(current_len) +
+            ") exceeds config.max_length (" + std::to_string(config_.max_length) + ")");
+    }
+
     // Work on CPU for data manipulation
     Tensor input_cpu = input_ids.to(Device::cpu());
 
@@ -538,6 +576,15 @@ auto TextGenerator::top_k_sampling(const Tensor& input_ids, int64_t top_k, doubl
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
 
+    // The output buffer is sized [batch_size, config_.max_length]; the prompt is
+    // copied into the first current_len columns. A prompt longer than max_length
+    // would write past the end of the buffer (OOB heap write), so reject it.
+    if (current_len > config_.max_length) {
+        throw std::invalid_argument(
+            "top_k_sampling: prompt length (" + std::to_string(current_len) +
+            ") exceeds config.max_length (" + std::to_string(config_.max_length) + ")");
+    }
+
     // Work on CPU for data manipulation
     Tensor input_cpu = input_ids.to(Device::cpu());
 
@@ -627,6 +674,15 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
     auto original_device = input_ids.device();
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
+
+    // The output buffer is sized [batch_size, config_.max_length]; the prompt is
+    // copied into the first current_len columns. A prompt longer than max_length
+    // would write past the end of the buffer (OOB heap write), so reject it.
+    if (current_len > config_.max_length) {
+        throw std::invalid_argument(
+            "top_p_sampling: prompt length (" + std::to_string(current_len) +
+            ") exceeds config.max_length (" + std::to_string(config_.max_length) + ")");
+    }
 
     // Work on CPU for data manipulation
     Tensor input_cpu = input_ids.to(Device::cpu());
@@ -731,6 +787,19 @@ auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> T
     // vector indexed as `bat * num_beams + b`.
     std::vector<std::vector<int64_t>> beam_tokens(flat_n);
     std::vector<float> beam_scores(flat_n, 0.0f);
+
+    // Seed diversity: all num_beams beams per batch start as identical copies of
+    // the prompt, so on the first step every beam row produces an identical
+    // log-prob distribution. If all beams had score 0, the top-num_beams
+    // candidates would be num_beams duplicate copies of the few highest-logprob
+    // tokens (beam search degenerating toward greedy). Initialize beams
+    // 1..num_beams-1 with score -inf so on the first step only beam 0's
+    // candidates can be selected, yielding num_beams *distinct* continuations.
+    for (int64_t bat = 0; bat < batch_size; ++bat) {
+        for (int64_t b = 1; b < num_beams; ++b) {
+            beam_scores[bat * num_beams + b] = -std::numeric_limits<float>::infinity();
+        }
+    }
 
     Tensor input_cpu = input_ids.to(Device::cpu());
     const int64_t* input_data = input_cpu.data<int64_t>();

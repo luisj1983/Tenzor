@@ -381,10 +381,21 @@ auto Graph::infer_types() -> void {
             // ================================================================
             case OpType::MatMul:
                 if (input_shapes.size() >= 2 && input_shapes[0].size() >= 2 && input_shapes[1].size() >= 2) {
-                    auto N = input_shapes[1][input_shapes[1].size() - 1];
-                    std::vector<int64_t> out_shape = input_shapes[0];
-                    out_shape[out_shape.size() - 1] = N;
-                    output_shapes.push_back(out_shape);
+                    const auto& a = input_shapes[0];
+                    const auto& b = input_shapes[1];
+                    const int64_t M = a[a.size() - 2];
+                    const int64_t N = b[b.size() - 1];
+                    // Broadcast the leading batch dims (everything but the last
+                    // two) of both operands, mirroring torch.matmul. The naive
+                    // "out = a with last dim replaced" form is wrong when b has
+                    // more batch dims than a (e.g. (M,K) @ (B,K,N) -> (B,M,N)).
+                    std::span<const int64_t> a_batch(a.data(), a.size() - 2);
+                    std::span<const int64_t> b_batch(b.data(), b.size() - 2);
+                    std::vector<int64_t> out_shape =
+                        broadcast_shapes(a_batch, b_batch);
+                    out_shape.push_back(M);
+                    out_shape.push_back(N);
+                    output_shapes.push_back(std::move(out_shape));
                 }
                 break;
 
@@ -695,11 +706,16 @@ auto Graph::infer_types() -> void {
             case OpType::Slice:
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
+                    int64_t rank = static_cast<int64_t>(shape.size());
                     int64_t dim = node->get_int_attr("dim");
                     int64_t start = node->get_int_attr("start");
                     int64_t end = node->get_int_attr("end");
                     int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
-                    if (dim < static_cast<int64_t>(shape.size())) {
+                    // Normalize negative dim before indexing (PyTorch-legal,
+                    // e.g. dim=-1). A bare signed `dim < size` check passes for
+                    // negatives and then indexes shape[dim] out of bounds.
+                    if (dim < 0) dim += rank;
+                    if (dim >= 0 && dim < rank) {
                         const int64_t dim_size = shape[dim];
                         // Normalize negative indices and clamp to [0, dim_size]
                         // to mirror Tensor::slice's runtime semantics, so the
@@ -722,7 +738,12 @@ auto Graph::infer_types() -> void {
                 if (!input_shapes.empty()) {
                     int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
                     auto out_shape = input_shapes[0];
-                    if (dim < static_cast<int64_t>(out_shape.size())) {
+                    int64_t rank = static_cast<int64_t>(out_shape.size());
+                    // Normalize negative concat dim (torch.cat(..., dim=-1) is
+                    // common); a raw negative dim passes the signed `< size`
+                    // check and then indexes out_shape[dim] out of bounds.
+                    if (dim < 0) dim += rank;
+                    if (dim >= 0 && dim < rank) {
                         int64_t total = 0;
                         for (auto& s : input_shapes) {
                             if (dim < static_cast<int64_t>(s.size())) {
@@ -755,8 +776,13 @@ auto Graph::infer_types() -> void {
 
             case OpType::Where:
                 if (input_shapes.size() >= 3) {
+                    // torch.where broadcasts all three operands, including the
+                    // condition. When the condition is broadcast-larger than the
+                    // value tensors, dropping it would under-size the output.
+                    auto val_shape =
+                        broadcast_shapes(input_shapes[1], input_shapes[2]);
                     output_shapes.push_back(
-                        broadcast_shapes(input_shapes[1], input_shapes[2]));
+                        broadcast_shapes(input_shapes[0], val_shape));
                 }
                 break;
 
@@ -1074,10 +1100,23 @@ auto Graph::infer_symbolic_types() -> void {
                 if (input_sym_shapes.size() >= 2 &&
                     input_sym_shapes[0].rank() >= 2 &&
                     input_sym_shapes[1].rank() >= 2) {
-                    // Output shape: same as input[0] except last dim = input[1]'s last dim
-                    SymbolicShape out_shape(input_sym_shapes[0].dims());
-                    out_shape[out_shape.rank() - 1] =
-                        input_sym_shapes[1][input_sym_shapes[1].rank() - 1];
+                    const auto& a = input_sym_shapes[0];
+                    const auto& b = input_sym_shapes[1];
+                    const SymbolicDim M = a[a.rank() - 2];
+                    const SymbolicDim N = b[b.rank() - 1];
+                    // Broadcast the leading batch dims (everything but the last
+                    // two) of both operands, mirroring torch.matmul and the
+                    // concrete infer_types path. The naive "input[0] with last
+                    // dim replaced" form is wrong when input[1] has more batch
+                    // dims (e.g. (M,K) @ (B,K,N) -> (B,M,N)).
+                    SymbolicShape a_batch(std::vector<SymbolicDim>(
+                        a.dims().begin(), a.dims().end() - 2));
+                    SymbolicShape b_batch(std::vector<SymbolicDim>(
+                        b.dims().begin(), b.dims().end() - 2));
+                    SymbolicShape out_shape =
+                        broadcast_symbolic_shapes(a_batch, b_batch);
+                    out_shape.push_back(M);
+                    out_shape.push_back(N);
                     output_sym_shapes.push_back(std::move(out_shape));
                 }
                 break;
@@ -1141,10 +1180,16 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Transpose:
                 if (!input_sym_shapes.empty()) {
                     auto sym_shape = input_sym_shapes[0];
+                    int64_t rank = static_cast<int64_t>(sym_shape.rank());
                     int64_t dim0 = node->get_int_attr("dim0");
                     int64_t dim1 = node->get_int_attr("dim1");
-                    if (dim0 < static_cast<int64_t>(sym_shape.rank()) &&
-                        dim1 < static_cast<int64_t>(sym_shape.rank())) {
+                    // Normalize negative dims before indexing (mirrors the
+                    // concrete infer_types Transpose path). The common
+                    // transpose(-1,-2) otherwise passes the signed `< rank`
+                    // check and indexes out of bounds.
+                    if (dim0 < 0) dim0 += rank;
+                    if (dim1 < 0) dim1 += rank;
+                    if (dim0 >= 0 && dim0 < rank && dim1 >= 0 && dim1 < rank) {
                         std::swap(sym_shape[static_cast<size_t>(dim0)],
                                   sym_shape[static_cast<size_t>(dim1)]);
                     }
@@ -1268,12 +1313,46 @@ auto Graph::infer_symbolic_types() -> void {
                     int64_t out_channels = node->get_int_attr("out_channels");
                     int64_t kernel_h = node->get_int_attr("kernel_h");
                     int64_t kernel_w = node->get_int_attr("kernel_w");
-                    int64_t stride_h = node->has_attr("stride_h") ? node->get_int_attr("stride_h") : 1;
-                    int64_t stride_w = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : 1;
-                    int64_t padding_h = node->has_attr("padding_h") ? node->get_int_attr("padding_h") : 0;
-                    int64_t padding_w = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : 0;
-                    int64_t dilation_h = node->has_attr("dilation_h") ? node->get_int_attr("dilation_h") : 1;
-                    int64_t dilation_w = node->has_attr("dilation_w") ? node->get_int_attr("dilation_w") : 1;
+                    // Prefer the weight tensor's shape (input 1:
+                    // [out_channels, in_channels/groups, kernel_h, kernel_w]),
+                    // mirroring the concrete infer_types Conv2d path, since the
+                    // dispatch interceptor does not push out_channels/kernel_*
+                    // as attrs for traced graphs.
+                    if (input_sym_shapes.size() >= 2 &&
+                        input_sym_shapes[1].rank() == 4) {
+                        const auto& w = input_sym_shapes[1];
+                        if (w[0].is_concrete()) out_channels = w[0].value();
+                        if (w[2].is_concrete()) kernel_h = w[2].value();
+                        if (w[3].is_concrete()) kernel_w = w[3].value();
+                    }
+                    // Honor both the paired per-axis form (stride_h/stride_w
+                    // from the dispatch interceptor's hw-pair copy) and the
+                    // pair-as-vec form ("stride"/"padding"/"dilation" = {h, w})
+                    // that the interceptor populates from AttrKey scalars. A
+                    // bare has_attr("stride_h") check silently defaults traced
+                    // graphs (which only carry the vec form) to 1/0/1, diverging
+                    // from the concrete infer_types result.
+                    auto pair_from = [&](const char* h_key, const char* w_key,
+                                          const char* vec_key,
+                                          int64_t default_v)
+                            -> std::pair<int64_t, int64_t> {
+                        if (node->has_attr(h_key) && node->has_attr(w_key)) {
+                            return {node->get_int_attr(h_key),
+                                    node->get_int_attr(w_key)};
+                        }
+                        if (node->has_attr(vec_key)) {
+                            auto v = node->get_vec_attr(vec_key);
+                            if (v.size() == 2) return {v[0], v[1]};
+                            if (v.size() == 1) return {v[0], v[0]};
+                        }
+                        return {default_v, default_v};
+                    };
+                    auto [stride_h, stride_w]     = pair_from(
+                        "stride_h",   "stride_w",   "stride",   1);
+                    auto [padding_h, padding_w]   = pair_from(
+                        "padding_h",  "padding_w",  "padding",  0);
+                    auto [dilation_h, dilation_w] = pair_from(
+                        "dilation_h", "dilation_w", "dilation", 1);
 
                     // Batch dim (N) is symbolic, spatial dims may be symbolic too
                     SymbolicDim N_dim = in_shape[0];
@@ -1418,11 +1497,16 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Slice:
                 if (!input_sym_shapes.empty()) {
                     auto sym_shape = input_sym_shapes[0];
+                    int64_t rank = static_cast<int64_t>(sym_shape.rank());
                     int64_t dim = node->get_int_attr("dim");
                     int64_t start = node->get_int_attr("start");
                     int64_t end = node->get_int_attr("end");
                     int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
-                    if (dim < static_cast<int64_t>(sym_shape.rank())) {
+                    // Normalize negative dim before indexing (mirrors the
+                    // concrete infer_types Slice path); a raw negative dim
+                    // promoted to size_t indexes the shape out of bounds.
+                    if (dim < 0) dim += rank;
+                    if (dim >= 0 && dim < rank) {
                         if (step <= 0) step = 1;
                         const SymbolicDim& cur = sym_shape[static_cast<size_t>(dim)];
                         if (cur.is_concrete()) {
@@ -1457,7 +1541,12 @@ auto Graph::infer_symbolic_types() -> void {
                 if (!input_sym_shapes.empty()) {
                     int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
                     auto out_shape = input_sym_shapes[0];
-                    if (dim < static_cast<int64_t>(out_shape.rank())) {
+                    int64_t rank = static_cast<int64_t>(out_shape.rank());
+                    // Normalize negative concat dim (mirrors the concrete path);
+                    // a raw negative dim promoted to size_t indexes the shape
+                    // out of bounds.
+                    if (dim < 0) dim += rank;
+                    if (dim >= 0 && dim < rank) {
                         // Sum all dimensions along the cat axis
                         SymbolicDim total = SymbolicDim::concrete(0);
                         for (auto& s : input_sym_shapes) {
@@ -1494,9 +1583,13 @@ auto Graph::infer_symbolic_types() -> void {
 
 	            case OpType::Where:
 	                if (input_sym_shapes.size() >= 3) {
+	                    // Broadcast all three operands (condition included),
+	                    // mirroring torch.where and the concrete infer_types path.
+	                    auto val_shape = broadcast_symbolic_shapes(
+	                        input_sym_shapes[1], input_sym_shapes[2]);
 	                    output_sym_shapes.push_back(
-	                        broadcast_symbolic_shapes(input_sym_shapes[1],
-	                                                  input_sym_shapes[2]));
+	                        broadcast_symbolic_shapes(input_sym_shapes[0],
+	                                                  val_shape));
 	                }
 	                break;
 
@@ -2995,29 +3088,90 @@ auto Graph::partition_at(const std::vector<size_t>& break_indices)
         ranges.push_back({start, total});
     }
 
-    // Track which values are produced by which partition
+    // Map every value id to the partition that produces it. Values not produced
+    // by any node are external (graph inputs / constants).
     std::unordered_map<std::string, size_t> value_to_partition;
 
+    // Values that are outputs of the overall graph must remain outputs of
+    // whichever partition produces them.
+    std::unordered_set<std::string> graph_output_ids;
+    for (const auto& out : outputs_) {
+        if (out) graph_output_ids.insert(out->id());
+    }
+
+    // First pass: which partition produces each value.
+    for (size_t p = 0; p < ranges.size(); ++p) {
+        auto [range_start, range_end] = ranges[p];
+        for (size_t i = range_start; i < range_end; ++i) {
+            for (const auto& output : all_nodes[i]->outputs()) {
+                value_to_partition[output->id()] = p;
+            }
+        }
+    }
+
+    // Second pass: build each sub-graph and wire its boundary inputs/outputs.
     for (size_t p = 0; p < ranges.size(); ++p) {
         auto sub_graph = std::make_shared<Graph>();
         auto [range_start, range_end] = ranges[p];
 
-        // Collect all value IDs produced by nodes in this range
-        std::unordered_set<std::string> local_values;
+        std::unordered_set<std::string> local_values;   // produced in this partition
+        std::unordered_set<std::string> input_ids_seen;
+        std::vector<std::shared_ptr<Value>> sub_inputs;
+        std::vector<std::shared_ptr<Value>> sub_outputs;
+        std::unordered_set<std::string> output_ids_seen;
 
+        // Boundary inputs: a value consumed by a node in this partition that is
+        // produced by an earlier partition or is external to the graph.
         for (size_t i = range_start; i < range_end; ++i) {
-            auto& node = all_nodes[i];
-
-            // Copy the node to the sub-graph
+            const auto& node = all_nodes[i];
             sub_graph->add_node(node);
 
-            // Track outputs
-            for (auto& output : node->outputs()) {
+            for (const auto& input : node->inputs()) {
+                const auto& id = input->id();
+                if (local_values.count(id)) {
+                    continue;  // produced inside this partition already
+                }
+                auto prod = value_to_partition.find(id);
+                if (prod == value_to_partition.end() || prod->second != p) {
+                    // Produced by another partition, or a graph input/constant.
+                    if (input_ids_seen.insert(id).second) {
+                        sub_inputs.push_back(input);
+                    }
+                }
+            }
+
+            for (const auto& output : node->outputs()) {
                 local_values.insert(output->id());
-                value_to_partition[output->id()] = p;
             }
         }
 
+        // Boundary outputs: a value produced here that is consumed by a later
+        // partition, or that is an output of the overall graph.
+        for (size_t i = range_start; i < range_end; ++i) {
+            for (const auto& output : all_nodes[i]->outputs()) {
+                const auto& id = output->id();
+                bool is_graph_output = graph_output_ids.count(id) != 0;
+                bool consumed_later = false;
+                if (!is_graph_output) {
+                    for (size_t q = p + 1; q < ranges.size() && !consumed_later; ++q) {
+                        auto [qs, qe] = ranges[q];
+                        for (size_t j = qs; j < qe; ++j) {
+                            for (const auto& in : all_nodes[j]->inputs()) {
+                                if (in->id() == id) { consumed_later = true; break; }
+                            }
+                            if (consumed_later) break;
+                        }
+                    }
+                }
+                if ((is_graph_output || consumed_later) &&
+                    output_ids_seen.insert(id).second) {
+                    sub_outputs.push_back(output);
+                }
+            }
+        }
+
+        sub_graph->set_inputs(std::move(sub_inputs));
+        sub_graph->set_outputs(std::move(sub_outputs));
         partitions.push_back(sub_graph);
     }
 

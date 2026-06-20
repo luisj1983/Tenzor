@@ -6,6 +6,7 @@
 #include "tenzor/ops/transform.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -84,7 +85,15 @@ auto LazyNode::is_materialized() const -> bool {
     return materialized_.has_value();
 }
 
-auto LazyNode::materialized() const -> const Tensor& {
+auto LazyNode::materialized() const -> Tensor {
+    // Return BY VALUE while the lock is held. A Tensor is a cheap refcounted
+    // handle, so the copy here merely bumps the storage refcount — but it must
+    // happen under materialize_mutex_, otherwise a concurrent set_materialized()
+    // (materialized_ = std::move(t)) could destroy the previously stored Tensor
+    // and free its backing storage out from under a reference the caller is
+    // still reading. Returning const Tensor& released the lock at function exit
+    // and exposed exactly that use-after-free under the cross-graph concurrent
+    // materialization scenario (shared nodes reachable from two graphs).
     std::lock_guard<std::mutex> lock(materialize_mutex_);
     if (!materialized_) {
         throw std::runtime_error("LazyNode: not materialized");
@@ -95,6 +104,31 @@ auto LazyNode::materialized() const -> const Tensor& {
 void LazyNode::set_materialized(Tensor t) {
     std::lock_guard<std::mutex> lock(materialize_mutex_);
     materialized_ = std::move(t);
+}
+
+auto LazyNode::materialize_with(const std::function<Tensor()>& compute) -> Tensor {
+    // Per-node compute-once primitive. The node's own materialize_mutex_ is the
+    // unit of execution serialisation, which gives three guarantees that a
+    // graph-wide lock could not:
+    //   1. At-most-once execution even when the SAME LazyNode is reachable from
+    //      two distinct LazyGraph objects (the post-merge_graphs case): both
+    //      graphs lock THIS node's mutex, not their own per-graph mutex, so the
+    //      shared node is computed exactly once and the cached result wins
+    //      deterministically (critical for dropout/random kernels).
+    //   2. The result is copied out (refcount bump) while the lock is still
+    //      held, so it can never alias storage a concurrent writer frees.
+    //   3. Independent (disjoint) nodes lock different mutexes and therefore
+    //      compute concurrently — no graph-wide serialisation of unrelated work.
+    //
+    // compute() is invoked at most once per node for its lifetime. It must not
+    // re-enter materialize_with()/materialized() on THIS node (it does not: the
+    // executor materialises every input before a node's compute runs, so during
+    // compute() only OTHER nodes' mutexes are taken).
+    std::lock_guard<std::mutex> lock(materialize_mutex_);
+    if (!materialized_) {
+        materialized_ = compute();
+    }
+    return *materialized_;
 }
 
 // ============================================================================
@@ -175,9 +209,12 @@ void LazyGraph::flush() {
     // node that references it), iterating nodes_ in insertion order is a
     // valid topological order. Each node's inputs are guaranteed to already
     // be materialised by the time we reach it.
-    // Graph-level lock: serialise against execute() so a node is computed at
-    // most once even if another thread is materialising concurrently.
-    std::lock_guard<std::mutex> exec_lock(execute_mutex_);
+    //
+    // Synchronisation is per-node (LazyNode::materialize_with) rather than
+    // graph-wide: each node is computed at most once even under concurrent
+    // materialize()/flush() on this OR any other graph that shares the node
+    // (the post-merge_graphs case), while disjoint nodes may compute
+    // concurrently.
     for (auto& node : nodes_) {
         if (node->is_materialized()) continue;
         if (node->is_input() || !node->op()) {
@@ -189,20 +226,22 @@ void LazyGraph::flush() {
             }
             continue;
         }
-        auto result = execute_node(node);
-        node->set_materialized(std::move(result));
+        node->materialize_with([this, &node] { return execute_node(node); });
     }
 }
 
 auto LazyGraph::execute(const std::shared_ptr<LazyNode>& target) -> Tensor {
-    // Graph-level lock closes the check-then-act TOCTOU window: between the
-    // is_materialized() test below and set_materialized() during traversal,
-    // two concurrent materialize() callers on LazyTensors sharing this graph
-    // would otherwise both execute the same node. The per-node
-    // materialize_mutex_ only guards the optional, not the compute itself, so
-    // serialising the whole traversal here is what actually guarantees
-    // at-most-once execution. flush() takes the same lock.
-    std::lock_guard<std::mutex> exec_lock(execute_mutex_);
+    // At-most-once execution is enforced per node (LazyNode::materialize_with),
+    // NOT by a graph-wide lock. The per-node compute lock lives on the LazyNode
+    // itself, so it is shared across every LazyGraph that references the node —
+    // which is exactly what makes the post-merge_graphs case correct: after
+    // merge_graphs() appends operand B's nodes into base A in place, the same
+    // LazyNode objects are reachable from two distinct LazyGraph objects. A
+    // graph-wide execute_mutex_ would let A->execute(sharedNode) and an older
+    // B->execute(...) lock DIFFERENT mutexes and both run the shared node's
+    // kernel (duplicate execution, last-writer-wins caching for dropout/random).
+    // Serialising on the node's own mutex closes that cross-graph race while
+    // still allowing disjoint nodes to compute concurrently.
     if (target->is_materialized()) {
         return target->materialized();
     }
@@ -243,9 +282,12 @@ auto LazyGraph::execute(const std::shared_ptr<LazyNode>& target) -> Tensor {
                 }
             }
         } else {
-            // All inputs are materialized at this point.
-            auto result = execute_node(node);
-            node->set_materialized(std::move(result));
+            // All inputs are materialized at this point. materialize_with()
+            // computes the node at most once under the node's own lock (even if
+            // another thread, possibly via a different graph that shares this
+            // node, is racing to materialize it) and copies the result out
+            // while the lock is held.
+            node->materialize_with([this, &node] { return execute_node(node); });
             in_progress.erase(node.get());
         }
     }

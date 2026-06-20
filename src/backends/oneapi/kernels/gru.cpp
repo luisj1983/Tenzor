@@ -82,9 +82,13 @@ auto gru_cell_forward_kernel(
                 float n_hidden = new_hidden_ptr[idx];
                 float h_prev_val = h_prev_ptr[idx];
 
-                // Apply sigmoid activation to reset and update gates
-                float r_t = 1.0f / (1.0f + sycl::exp(-r_gate));
-                float z_t = 1.0f / (1.0f + sycl::exp(-z_gate));
+                // Apply sigmoid activation to reset and update gates.
+                // Clamp pre-activations to [-20, 20] for parity with the
+                // OneAPI LSTM cell, preventing exp() overflow on extreme inputs.
+                float r_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, r_gate));
+                float z_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, z_gate));
+                float r_t = 1.0f / (1.0f + sycl::exp(-r_clamped));
+                float z_t = 1.0f / (1.0f + sycl::exp(-z_clamped));
 
                 // Apply reset gate to hidden part and compute new gate
                 float n_combined = n_input + r_t * n_hidden;
@@ -115,8 +119,10 @@ auto gru_cell_forward_kernel(
                 double n_hidden = new_hidden_ptr[idx];
                 double h_prev_val = h_prev_ptr[idx];
 
-                double r_t = 1.0 / (1.0 + sycl::exp(-r_gate));
-                double z_t = 1.0 / (1.0 + sycl::exp(-z_gate));
+                double r_clamped = sycl::fmax(-20.0, sycl::fmin(20.0, r_gate));
+                double z_clamped = sycl::fmax(-20.0, sycl::fmin(20.0, z_gate));
+                double r_t = 1.0 / (1.0 + sycl::exp(-r_clamped));
+                double z_t = 1.0 / (1.0 + sycl::exp(-z_clamped));
 
                 double n_combined = n_input + r_t * n_hidden;
                 double n_t = sycl::tanh(n_combined);
@@ -144,8 +150,10 @@ auto gru_cell_forward_kernel(
                 float n_hidden = bf16_to_f32(new_hidden_ptr[idx]);
                 float h_prev_val = bf16_to_f32(h_prev_ptr[idx]);
 
-                float r_t = 1.0f / (1.0f + sycl::exp(-r_gate));
-                float z_t = 1.0f / (1.0f + sycl::exp(-z_gate));
+                float r_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, r_gate));
+                float z_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, z_gate));
+                float r_t = 1.0f / (1.0f + sycl::exp(-r_clamped));
+                float z_t = 1.0f / (1.0f + sycl::exp(-z_clamped));
 
                 float n_combined = n_input + r_t * n_hidden;
                 float n_t = sycl::tanh(n_combined);
@@ -249,8 +257,12 @@ auto gru_cell_backward_kernel(
                 float n_hidden = new_hidden_ptr[idx];
                 float h_prev_val = h_prev_ptr[idx];
 
-                float r_t = 1.0f / (1.0f + sycl::exp(-r_gate));
-                float z_t = 1.0f / (1.0f + sycl::exp(-z_gate));
+                // Recompute activations with the SAME ±20 clamp the forward
+                // applies to the sigmoid gates, so derivatives match the forward.
+                float r_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, r_gate));
+                float z_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, z_gate));
+                float r_t = 1.0f / (1.0f + sycl::exp(-r_clamped));
+                float z_t = 1.0f / (1.0f + sycl::exp(-z_clamped));
 
                 float n_combined = n_input + r_t * n_hidden;
                 float n_t = sycl::tanh(n_combined);
@@ -311,8 +323,12 @@ auto gru_cell_backward_kernel(
                 double n_hidden = new_hidden_ptr[idx];
                 double h_prev_val = h_prev_ptr[idx];
 
-                double r_t = 1.0 / (1.0 + sycl::exp(-r_gate));
-                double z_t = 1.0 / (1.0 + sycl::exp(-z_gate));
+                // Recompute activations with the SAME ±20 clamp the forward
+                // applies to the sigmoid gates, so derivatives match the forward.
+                double r_clamped = sycl::fmax(-20.0, sycl::fmin(20.0, r_gate));
+                double z_clamped = sycl::fmax(-20.0, sycl::fmin(20.0, z_gate));
+                double r_t = 1.0 / (1.0 + sycl::exp(-r_clamped));
+                double z_t = 1.0 / (1.0 + sycl::exp(-z_clamped));
 
                 double n_combined = n_input + r_t * n_hidden;
                 double n_t = sycl::tanh(n_combined);
@@ -363,8 +379,12 @@ auto gru_cell_backward_kernel(
                 float n_hidden = bf16_to_f32(new_hidden_ptr[idx]);
                 float h_prev_val = bf16_to_f32(h_prev_ptr[idx]);
 
-                float r_t = 1.0f / (1.0f + sycl::exp(-r_gate));
-                float z_t = 1.0f / (1.0f + sycl::exp(-z_gate));
+                // Recompute activations with the SAME ±20 clamp the forward
+                // applies to the sigmoid gates, so derivatives match the forward.
+                float r_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, r_gate));
+                float z_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, z_gate));
+                float r_t = 1.0f / (1.0f + sycl::exp(-r_clamped));
+                float z_t = 1.0f / (1.0f + sycl::exp(-z_clamped));
 
                 float n_combined = n_input + r_t * n_hidden;
                 float n_t = sycl::tanh(n_combined);

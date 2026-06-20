@@ -231,7 +231,7 @@ auto VulkanBackend::dispatchAdvancedIndex(const Tensor& src,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    uint32_t groups = div_wg(static_cast<uint32_t>(prep.total), devices_[device_id].workgroupSize);
+    uint32_t groups = div_wg(static_cast<uint64_t>(prep.total), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmd, groups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -278,6 +278,22 @@ auto VulkanBackend::dispatchAdvancedIndexPut(const Tensor& src,
 
     synchronize(device_id);
 
+    // Contract (shared with CPU/CUDA backends): the put shader reads
+    // vals_data[gid] for every output element gid in [0, prep.total), so the
+    // values buffer MUST already contain at least prep.total elements. The op
+    // layer is responsible for expanding/broadcasting `values` to the full
+    // output element layout before dispatch. Guard here to turn a silent
+    // out-of-bounds SSBO read (garbage writes / validation errors) into a
+    // deterministic error if that contract is violated.
+    if (values_contig.numel() < prep.total) {
+        throw std::runtime_error(
+            "Vulkan AdvancedIndexPut: values has " +
+            std::to_string(values_contig.numel()) +
+            " elements but the indexed assignment requires " +
+            std::to_string(prep.total) +
+            " (values must be broadcast/expanded to the output layout before dispatch)");
+    }
+
     const char* shader_name = select_put_shader(src.dtype());
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -299,7 +315,7 @@ auto VulkanBackend::dispatchAdvancedIndexPut(const Tensor& src,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    uint32_t groups = div_wg(static_cast<uint32_t>(prep.total), devices_[device_id].workgroupSize);
+    uint32_t groups = div_wg(static_cast<uint64_t>(prep.total), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmd, groups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);

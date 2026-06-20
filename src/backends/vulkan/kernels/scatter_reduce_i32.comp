@@ -46,6 +46,12 @@ void main() {
     if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
 
     uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;
+
+    // Guard the computed output offset against the destination size before any
+    // atomic write. There is no single output_size push constant here; the total
+    // output element count is outer * dim_size * inner.
+    if (out_pos >= params.outer * params.dim_size * params.inner) return;
+
     int val = src_data[idx_pos];
 
     if (params.mode == 0u || params.mode == 2u) {

@@ -22,15 +22,20 @@ void main() {
     }
 
     if (params.op == 0) {
-        // Gather: output[i] = input[indices[i]]
+        // Gather: output[i] = input[indices[i]].
+        // Bound the source index by the actual INPUT buffer length, not the
+        // output element count (params.n): the input may have a different number
+        // of elements, so checking against params.n would both drop valid
+        // indices and allow out-of-bounds reads.
         int src_idx = indices_data[idx];
-        if (src_idx >= 0 && src_idx < int(params.n)) {
+        if (src_idx >= 0 && src_idx < int(input_data.length())) {
             output_data[idx] = input_data[src_idx];
         }
     } else {
-        // Scatter: output[indices[i]] = input[i]
+        // Scatter: output[indices[i]] = input[i].
+        // Bound the destination index by the actual OUTPUT buffer length.
         int dst_idx = indices_data[idx];
-        if (dst_idx >= 0 && dst_idx < int(params.n)) {
+        if (dst_idx >= 0 && dst_idx < int(output_data.length())) {
             output_data[dst_idx] = input_data[idx];
         }
     }

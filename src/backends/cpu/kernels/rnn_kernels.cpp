@@ -669,6 +669,11 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
 
                 std::vector<T> n_ih(hidden_size);
                 std::vector<T> n_hh(hidden_size);
+                // Pre-reset hidden-hidden term (b_hn + W_hn @ hx), before the
+                // *= r_gate[h] scaling. Saved here so the backward block below can
+                // reuse it for the dr_from_n term instead of recomputing the
+                // O(hidden) inner product per output unit (O(hidden^2) per batch).
+                std::vector<T> n_hh_pre(hidden_size);
                 std::vector<T> n_gate(hidden_size);
 
                 for (int64_t h = 0; h < hidden_size; ++h) {
@@ -681,6 +686,7 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                         n_hh[h] += hx_data[b * hidden_size + hh] *
                                    w_hh_data[(2 * hidden_size + h) * hidden_size + hh];
                     }
+                    n_hh_pre[h] = n_hh[h];
                     n_hh[h] *= r_gate[h];
                     n_gate[h] = std::tanh(n_ih[h] + n_hh[h]);
                 }
@@ -697,12 +703,7 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
 
                     T dn_pre = dn * (T(1) - n_gate[h] * n_gate[h]);
 
-                    T n_hh_pre_reset = (b_hh_data ? b_hh_data[2 * hidden_size + h] : T(0));
-                    for (int64_t hh = 0; hh < hidden_size; ++hh) {
-                        n_hh_pre_reset += hx_data[b * hidden_size + hh] *
-                                          w_hh_data[(2 * hidden_size + h) * hidden_size + hh];
-                    }
-                    T dr_from_n = dn_pre * n_hh_pre_reset;
+                    T dr_from_n = dn_pre * n_hh_pre[h];
                     for (int64_t hh = 0; hh < hidden_size; ++hh) {
                         d_hx[b * hidden_size + hh] += dn_pre * r_gate[h] *
                                                        w_hh_data[(2 * hidden_size + h) * hidden_size + hh];

@@ -1244,7 +1244,8 @@ static void launch_dim_reduction_sum(
     T* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -1265,7 +1266,7 @@ static void launch_dim_reduction_sum(
 
     // Launch kernel
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    sum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    sum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -1277,7 +1278,8 @@ static void launch_dim_reduction_max(
     T* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -1296,7 +1298,7 @@ static void launch_dim_reduction_max(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    max_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    max_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -1308,7 +1310,8 @@ static void launch_dim_reduction_min(
     T* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -1327,7 +1330,7 @@ static void launch_dim_reduction_min(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    min_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    min_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -1392,7 +1395,8 @@ static void launch_dim_reduction_max_half(
     __half* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -1411,7 +1415,7 @@ static void launch_dim_reduction_max_half(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    max_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    max_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -1422,7 +1426,8 @@ static void launch_dim_reduction_min_half(
     __half* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -1441,7 +1446,7 @@ static void launch_dim_reduction_min_half(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    min_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    min_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -1506,7 +1511,8 @@ static void launch_dim_reduction_max_bf16(
     __nv_bfloat16* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -1525,7 +1531,7 @@ static void launch_dim_reduction_max_bf16(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    max_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    max_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -1536,7 +1542,8 @@ static void launch_dim_reduction_min_bf16(
     __nv_bfloat16* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -1555,7 +1562,7 @@ static void launch_dim_reduction_min_bf16(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    min_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    min_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -1611,7 +1618,7 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -1627,7 +1634,7 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -1643,7 +1650,7 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -1659,7 +1666,7 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -1675,7 +1682,7 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -1691,17 +1698,17 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
         }
-        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int8_t>();   if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int16_t>();  if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<uint8_t>();  if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<uint16_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<uint32_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<uint64_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int8_t>();   if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int16_t>();  if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<uint8_t>();  if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<uint16_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<uint32_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<uint64_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
         case DType::Complex64:
         case DType::Complex128: {
             // Complex sum: reduce real and imaginary parts independently. This
@@ -1722,7 +1729,7 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     std::vector<int64_t> view_strides = {int64_t(2), int64_t(1)};
                     launch_dim_reduction_sum(
                         in_re_im, out_re_im,
-                        view_shape, view_strides, /*dim=*/0);
+                        view_shape, view_strides, /*dim=*/0, stream);
                 } else {
                     // Dim reduction: add a trailing "2" dim of stride 1, and
                     // double every other stride so the existing real-valued
@@ -1735,7 +1742,7 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     view_strides.push_back(1);
                     launch_dim_reduction_sum(
                         in_re_im, out_re_im,
-                        view_shape, view_strides, normalized_dim);
+                        view_shape, view_strides, normalized_dim, stream);
                 }
             };
             if (is64) run(double{});
@@ -1863,7 +1870,12 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
     return sum_result;
 }
 
-auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path reads the buffer via a
+    // flat pointer, so non-contiguous slice/expand/transpose views would skip
+    // logical elements and produce wrong results.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -1990,7 +2002,11 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
     return output;
 }
 
-auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path reads the buffer via a
+    // flat pointer, so non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -2966,7 +2982,8 @@ static void launch_dim_argmax(
     int64_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -2985,7 +3002,7 @@ static void launch_dim_argmax(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    argmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    argmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -2998,7 +3015,8 @@ static void launch_dim_argmin(
     int64_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -3017,7 +3035,7 @@ static void launch_dim_argmin(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    argmin_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    argmin_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3091,7 +3109,8 @@ static void launch_dim_argmax_half(
     int64_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -3110,7 +3129,7 @@ static void launch_dim_argmax_half(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    argmax_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    argmax_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3121,7 +3140,8 @@ static void launch_dim_argmin_half(
     int64_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -3140,7 +3160,7 @@ static void launch_dim_argmin_half(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    argmin_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    argmin_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3213,7 +3233,8 @@ static void launch_dim_argmax_bf16(
     int64_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -3232,7 +3253,7 @@ static void launch_dim_argmax_bf16(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    argmax_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    argmax_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3243,7 +3264,8 @@ static void launch_dim_argmin_bf16(
     int64_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -3262,14 +3284,19 @@ static void launch_dim_argmin_bf16(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    argmin_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    argmin_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
 }
 
 // Public API for argmax
-auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path reads the buffer via a
+    // flat pointer; for non-contiguous views the value AND the returned flat
+    // index would be meaningless.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -3307,7 +3334,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3323,7 +3350,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3339,7 +3366,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3355,7 +3382,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3371,7 +3398,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3387,18 +3414,18 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
         }
-        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
         default:
             throw std::runtime_error("argmax: unsupported dtype");
     }
@@ -3409,7 +3436,12 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
 }
 
 // Public API for argmin
-auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path reads the buffer via a
+    // flat pointer; for non-contiguous views the value AND the returned flat
+    // index would be meaningless.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -3447,7 +3479,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3463,7 +3495,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3479,7 +3511,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3495,7 +3527,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3511,7 +3543,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3527,18 +3559,18 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
         }
-        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
-        case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
+        case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim, stream); break; }
         default:
             throw std::runtime_error("argmin: unsupported dtype");
     }
@@ -3680,7 +3712,8 @@ static void launch_dim_reduction_prod(
     T* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -3699,14 +3732,18 @@ static void launch_dim_reduction_prod(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    prod_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    prod_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
 }
 
 // Public API for prod (product reduction)
-auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto prod_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path reads the buffer via a
+    // flat pointer, so non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -3751,7 +3788,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3767,7 +3804,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3783,7 +3820,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -3799,7 +3836,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    normalized_dim
+                    normalized_dim, stream
                 );
             }
             break;
@@ -4038,7 +4075,12 @@ __global__ void var_along_dim_kernel(
 }
 
 // Public API for variance
-auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
+auto var_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path feeds input.numel() to
+    // launch_variance_computation, which reads the buffer via a flat pointer, so
+    // non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -4209,7 +4251,12 @@ __global__ void elementwise_sqrt_kernel(const T* input, T* output, int64_t n) {
 }
 
 // Public API for standard deviation
-auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
+auto std_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path feeds input.numel() to
+    // launch_variance_computation, which reads the buffer via a flat pointer, so
+    // non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -4478,7 +4525,12 @@ __global__ void norm_along_dim_kernel(
 }
 
 // Norm kernel implementation
-auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path feeds input.numel() to
+    // l1_norm_kernel / lp_norm_kernel, which read the buffer via a flat pointer,
+    // so non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     // Float16/BFloat16: upcast to Float32, compute norm, downcast result
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
@@ -5473,7 +5525,8 @@ static void launch_dim_reduction_any(
     uint8_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -5487,7 +5540,7 @@ static void launch_dim_reduction_any(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    any_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    any_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -5500,7 +5553,8 @@ static void launch_dim_reduction_all(
     uint8_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream = nullptr
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -5514,13 +5568,18 @@ static void launch_dim_reduction_all(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    all_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    all_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
 }
 
-auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto any_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path feeds input.numel() to
+    // any_full_reduce_kernel, which reads the buffer via a flat pointer, so
+    // non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -5559,7 +5618,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_any(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5568,7 +5627,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_any(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5577,7 +5636,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_any(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5586,7 +5645,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_any(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5595,7 +5654,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_any(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5604,7 +5663,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_any(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5613,7 +5672,7 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_any(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5625,7 +5684,12 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
     return output;
 }
 
-auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto all_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path feeds input.numel() to
+    // all_full_reduce_kernel, which reads the buffer via a flat pointer, so
+    // non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
@@ -5663,7 +5727,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_all(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5672,7 +5736,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_all(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5681,7 +5745,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_all(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5690,7 +5754,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_all(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5699,7 +5763,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_all(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5708,7 +5772,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_all(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5717,7 +5781,7 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             if (dim == INT64_MIN) {
                 launch_full_reduction_all(input_data, output_data, input.numel(), stream);
             } else {
-                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
             break;
         }
@@ -5940,7 +6004,12 @@ __global__ void logsumexp_full_kernel(
     }
 }
 
-auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Ensure contiguous input — same root cause as the sum_kernel fix
+    // (audit-2026-05-03 bug #2). The full-reduction path feeds input.numel() to
+    // logsumexp_full_kernel, which reads the buffer via a flat pointer, so
+    // non-contiguous views would skip logical elements.
+    auto input = input_raw.contiguous();
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 

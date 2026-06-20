@@ -6,6 +6,7 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -97,13 +98,27 @@ struct MklSparseGuard {
 };
 
 /// Convert Int64 indices to MKL_INT.
-/// With MKL_ILP64, MKL_INT is long long (64-bit), so this is a reinterpret.
+/// NOTE: the build uses the LP64 interface (cmake/FindMKL.cmake: intel_lp64),
+/// so MKL_INT is a 32-bit int. Callers MUST verify the indices/dimensions fit
+/// (see mkl_index_fits) before taking the MKL path — values exceeding
+/// INT32_MAX would be silently truncated here, producing wrong results.
 std::vector<MKL_INT> to_mkl_int(const int64_t* src, int64_t n) {
     std::vector<MKL_INT> dst(n);
     for (int64_t i = 0; i < n; ++i) {
         dst[i] = static_cast<MKL_INT>(src[i]);
     }
     return dst;
+}
+
+/// True iff every index/dimension magnitude fits in MKL_INT (32-bit under
+/// LP64). When false the caller must use the int64-correct scalar fallback,
+/// otherwise to_mkl_int / dimension casts would truncate.
+inline bool mkl_index_fits(const SparseTensor& sparse, int64_t M, int64_t K, int64_t N) {
+    const int64_t mx = static_cast<int64_t>(std::numeric_limits<MKL_INT>::max());
+    if (M > mx || K > mx || N > mx) return false;
+    if (M + 1 > mx) return false;          // crow_indices length
+    if (sparse.nnz() > mx) return false;   // col_indices / values length
+    return true;
 }
 
 /// Create MKL Float32 CSR handle from SparseTensor.
@@ -394,6 +409,12 @@ void fallback_coo_spmv(const int64_t* idx_ptr, const T* vals, const T* x, T* y,
             prev_row = r;
         }
         if (is_row_sorted) {
+            // valid_end marks one-past the last in-range entry. Because the COO
+            // is row-sorted, out-of-range entries with r<0 sit at the front and
+            // r>=M at the tail; valid_end excludes the trailing r>=M block so the
+            // last valid row's sweep does not read out-of-range columns (matching
+            // the serial path, which skips every out-of-range entry).
+            int64_t valid_end = nnz;
             std::vector<int64_t> row_start(static_cast<size_t>(M) + 1, nnz);
             for (int64_t i = 0; i < nnz; ++i) {
                 int64_t r = idx_ptr[i];
@@ -401,7 +422,11 @@ void fallback_coo_spmv(const int64_t* idx_ptr, const T* vals, const T* x, T* y,
                 if (row_start[static_cast<size_t>(r)] == nnz) {
                     row_start[static_cast<size_t>(r)] = i;
                 }
+                valid_end = i + 1;
             }
+            // The sentinel row_start[M] bounds the last valid row's sweep; clamp
+            // it to valid_end so trailing r>=M entries are not swept.
+            row_start[static_cast<size_t>(M)] = valid_end;
             // Fill forward: rows with no entries inherit the next row's start.
             for (int64_t r = M - 1; r >= 0; --r) {
                 if (row_start[static_cast<size_t>(r)] == nnz) {
@@ -479,6 +504,10 @@ void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
             prev_row = r;
         }
         if (is_row_sorted) {
+            // valid_end excludes the trailing r>=M block (see fallback_coo_spmv)
+            // so the last valid row's sweep stays in range, matching the serial
+            // path which skips every out-of-range entry.
+            int64_t valid_end = nnz;
             std::vector<int64_t> row_start(static_cast<size_t>(M) + 1, nnz);
             for (int64_t i = 0; i < nnz; ++i) {
                 int64_t r = idx_ptr[i];
@@ -486,7 +515,9 @@ void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
                 if (row_start[static_cast<size_t>(r)] == nnz) {
                     row_start[static_cast<size_t>(r)] = i;
                 }
+                valid_end = i + 1;
             }
+            row_start[static_cast<size_t>(M)] = valid_end;
             for (int64_t r = M - 1; r >= 0; --r) {
                 if (row_start[static_cast<size_t>(r)] == nnz) {
                     row_start[static_cast<size_t>(r)] = row_start[static_cast<size_t>(r) + 1];
@@ -560,11 +591,15 @@ Tensor cpu_spmm(const SparseTensor& sparse, const Tensor& dense,
     // For CSR, try MKL first
     if (sparse.layout() == SparseLayout::CSR) {
 #ifdef TENZOR_USE_MKL
-        if (dtype == DType::Float32) {
-            return mkl_csr_spmm_f32(sparse, dense_c, M, K, N);
-        } else if (dtype == DType::Float64) {
-            return mkl_csr_spmm_f64(sparse, dense_c, M, K, N);
+        if (mkl_index_fits(sparse, M, K, N)) {
+            if (dtype == DType::Float32) {
+                return mkl_csr_spmm_f32(sparse, dense_c, M, K, N);
+            } else if (dtype == DType::Float64) {
+                return mkl_csr_spmm_f64(sparse, dense_c, M, K, N);
+            }
         }
+        // else: indices exceed MKL_INT (LP64 32-bit) — fall through to the
+        // int64-correct scalar CSR path below to avoid silent truncation.
 #endif
         // Fallback scalar CSR — natively supports F16/BF16/Int32/Int64 via
         // sparse_acc_type<T> traits in the kernel templates.
@@ -619,7 +654,8 @@ Tensor cpu_spmm(const SparseTensor& sparse, const Tensor& dense,
     if (sparse.layout() == SparseLayout::COO) {
         // For COO with MKL: convert to CSR first, then use MKL
 #ifdef TENZOR_USE_MKL
-        if (dtype == DType::Float32 || dtype == DType::Float64) {
+        if ((dtype == DType::Float32 || dtype == DType::Float64) &&
+            mkl_index_fits(sparse, M, K, N)) {
             auto csr = sparse.to_csr();
             if (dtype == DType::Float32) {
                 return mkl_csr_spmm_f32(csr, dense_c, M, K, N);
@@ -686,11 +722,14 @@ Tensor cpu_spmv(const SparseTensor& sparse, const Tensor& vec,
     // For CSR, try MKL first
     if (sparse.layout() == SparseLayout::CSR) {
 #ifdef TENZOR_USE_MKL
-        if (dtype == DType::Float32) {
-            return mkl_csr_spmv_f32(sparse, vec_c, M, K);
-        } else if (dtype == DType::Float64) {
-            return mkl_csr_spmv_f64(sparse, vec_c, M, K);
+        if (mkl_index_fits(sparse, M, K, /*N=*/1)) {
+            if (dtype == DType::Float32) {
+                return mkl_csr_spmv_f32(sparse, vec_c, M, K);
+            } else if (dtype == DType::Float64) {
+                return mkl_csr_spmv_f64(sparse, vec_c, M, K);
+            }
         }
+        // else: indices exceed MKL_INT (LP64 32-bit) — use scalar fallback.
 #endif
         // Fallback scalar CSR
         auto result = zeros({M}, dtype, Device::cpu());
@@ -745,7 +784,8 @@ Tensor cpu_spmv(const SparseTensor& sparse, const Tensor& vec,
     if (sparse.layout() == SparseLayout::COO) {
         // For COO with MKL: convert to CSR first
 #ifdef TENZOR_USE_MKL
-        if (dtype == DType::Float32 || dtype == DType::Float64) {
+        if ((dtype == DType::Float32 || dtype == DType::Float64) &&
+            mkl_index_fits(sparse, M, K, /*N=*/1)) {
             auto csr = sparse.to_csr();
             if (dtype == DType::Float32) {
                 return mkl_csr_spmv_f32(csr, vec_c, M, K);
@@ -822,11 +862,14 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         throw std::runtime_error("spmm: inner dimensions must match");
     }
 
-    DType orig_dtype = dense.dtype();
+    // Promote across both operands (PyTorch semantics) so a higher-precision
+    // sparse operand is not silently downcast to the dense operand's dtype.
+    // orig_dtype is the result dtype the returns below cast back to.
+    DType orig_dtype = promote_types(sparse.dtype(), dense.dtype());
     DType comp_dtype = compute_dtype_for(orig_dtype);
 
     // Cast dense and sparse values to compute dtype if needed
-    Tensor dense_compute = (orig_dtype != comp_dtype) ? dense.to(comp_dtype) : dense;
+    Tensor dense_compute = (dense.dtype() != comp_dtype) ? dense.to(comp_dtype) : dense;
     SparseTensor sparse_compute = sparse;
     if (sparse.dtype() != comp_dtype) {
         // Cast only the value buffer; the sparsity structure is unchanged.
@@ -850,15 +893,21 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         // otherwise the CSR components stay on CPU and the backend kernel
         // receives a mix of CPU and device pointers, which either fails the
         // device-consistency check or crashes when dereferenced on-device.
-        Device target_dev{dev_type, 0};
-        SparseTensor sparse_on_dev = (sparse_compute.device().type == dev_type)
+        // Preserve the on-device operand's full Device (type AND index) so a
+        // non-zero GPU index (e.g. cuda:1) is honoured; hardcoding index 0 would
+        // send moved operands to cuda:0 while on-device operands stay on cuda:1,
+        // handing the kernel pointers from two physical devices.
+        Device target_dev = (sparse_compute.device().type == dev_type)
+                                 ? sparse_compute.device()
+                                 : dense_compute.device();
+        SparseTensor sparse_on_dev = (sparse_compute.device() == target_dev)
                                          ? sparse_compute
                                          : sparse_compute.to(target_dev);
         auto ac = extract_csr_on_device(sparse_on_dev);
-        Tensor crow = (ac.crow.device().type == dev_type) ? ac.crow : ac.crow.to(target_dev);
-        Tensor col  = (ac.col.device().type  == dev_type) ? ac.col  : ac.col.to(target_dev);
-        Tensor vals = (ac.values.device().type == dev_type) ? ac.values : ac.values.to(target_dev);
-        Tensor dense_on_dev = (dense_compute.device().type == dev_type)
+        Tensor crow = (ac.crow.device() == target_dev) ? ac.crow : ac.crow.to(target_dev);
+        Tensor col  = (ac.col.device()  == target_dev) ? ac.col  : ac.col.to(target_dev);
+        Tensor vals = (ac.values.device() == target_dev) ? ac.values : ac.values.to(target_dev);
+        Tensor dense_on_dev = (dense_compute.device() == target_dev)
                                  ? dense_compute
                                  : dense_compute.to(target_dev);
         std::vector<Tensor> inputs = {crow, col, vals, dense_on_dev};
@@ -920,11 +969,13 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
         throw std::runtime_error("spmv: dimensions must match");
     }
 
-    DType orig_dtype = vec.dtype();
+    // Promote across both operands (see spmm) so a higher-precision sparse
+    // operand is not silently downcast to the vector's dtype.
+    DType orig_dtype = promote_types(sparse.dtype(), vec.dtype());
     DType comp_dtype = compute_dtype_for(orig_dtype);
 
     // Cast to compute dtype if needed
-    Tensor vec_compute = (orig_dtype != comp_dtype) ? vec.to(comp_dtype) : vec;
+    Tensor vec_compute = (vec.dtype() != comp_dtype) ? vec.to(comp_dtype) : vec;
     SparseTensor sparse_compute = sparse;
     if (sparse.dtype() != comp_dtype) {
         // Cast only the value buffer; structure is preserved. with_values()
@@ -940,15 +991,20 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
         if (!table.has_kernel(OpId::SparseSpMV)) return std::nullopt;
         // Move sparse to device first so CSR components don't stay on CPU.
         // See dispatch_gpu_spmm for the full rationale.
-        Device target_dev{dev_type, 0};
-        SparseTensor sparse_on_dev = (sparse_compute.device().type == dev_type)
+        // Preserve the on-device operand's full Device (type AND index) so a
+        // non-zero GPU index (e.g. cuda:1) is honoured rather than collapsing
+        // moved operands onto index 0. See dispatch_gpu_spmm.
+        Device target_dev = (sparse_compute.device().type == dev_type)
+                                 ? sparse_compute.device()
+                                 : vec_compute.device();
+        SparseTensor sparse_on_dev = (sparse_compute.device() == target_dev)
                                          ? sparse_compute
                                          : sparse_compute.to(target_dev);
         auto sc = extract_csr_on_device(sparse_on_dev);
-        Tensor crow = (sc.crow.device().type == dev_type) ? sc.crow : sc.crow.to(target_dev);
-        Tensor col  = (sc.col.device().type  == dev_type) ? sc.col  : sc.col.to(target_dev);
-        Tensor vals = (sc.values.device().type == dev_type) ? sc.values : sc.values.to(target_dev);
-        Tensor vec_on_dev = (vec_compute.device().type == dev_type)
+        Tensor crow = (sc.crow.device() == target_dev) ? sc.crow : sc.crow.to(target_dev);
+        Tensor col  = (sc.col.device()  == target_dev) ? sc.col  : sc.col.to(target_dev);
+        Tensor vals = (sc.values.device() == target_dev) ? sc.values : sc.values.to(target_dev);
+        Tensor vec_on_dev = (vec_compute.device() == target_dev)
                                 ? vec_compute
                                 : vec_compute.to(target_dev);
         std::vector<Tensor> inputs = {crow, col, vals, vec_on_dev};
@@ -1050,17 +1106,22 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         // otherwise the CPU→CSR path may invoke ops that reject non-Float32/64
         // values (e.g. Float16 coalesce), and we'd produce CPU CSR components
         // that then have to be individually shipped to the device.
-        Device target_dev{dev_type, 0};
-        SparseTensor sparse_on_dev = (sparse.device().type == dev_type)
+        // Preserve the on-device operand's full Device (type AND index) so a
+        // non-zero GPU index (e.g. cuda:1) is honoured rather than collapsing
+        // moved operands onto index 0. See dispatch_gpu_spmm.
+        Device target_dev = (sparse.device().type == dev_type)
+                                ? sparse.device()
+                                : dense.device();
+        SparseTensor sparse_on_dev = (sparse.device() == target_dev)
                                          ? sparse
                                          : sparse.to(target_dev);
         auto sc = extract_csr_on_device(sparse_on_dev);
         // Guard rail: ensure everything really is on the target device before
         // dispatching — a belt-and-braces check, as to_csr is device-native.
-        Tensor crow = (sc.crow.device().type == dev_type) ? sc.crow : sc.crow.to(target_dev);
-        Tensor col  = (sc.col.device().type  == dev_type) ? sc.col  : sc.col.to(target_dev);
-        Tensor vals = (sc.values.device().type == dev_type) ? sc.values : sc.values.to(target_dev);
-        Tensor dense_on_dev = (dense.device().type == dev_type) ? dense : dense.to(target_dev);
+        Tensor crow = (sc.crow.device() == target_dev) ? sc.crow : sc.crow.to(target_dev);
+        Tensor col  = (sc.col.device()  == target_dev) ? sc.col  : sc.col.to(target_dev);
+        Tensor vals = (sc.values.device() == target_dev) ? sc.values : sc.values.to(target_dev);
+        Tensor dense_on_dev = (dense.device() == target_dev) ? dense : dense.to(target_dev);
         std::vector<Tensor> inputs = {crow, col, vals, dense_on_dev};
         OpAttributes attrs;
         attrs.set(AttrKey::M, sp_shape[0]);
@@ -1304,8 +1365,12 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
     // Supports CUDA, ROCm, Vulkan, OneAPI.
     auto dev_type = a.device().type;
     if (dev_type != Device::Type::CPU) {
+        // A and B must reside on the same device; otherwise the kernel would
+        // receive CSR pointers from two different devices (consistency failure
+        // / out-of-bounds device dereference). Move B onto A's device.
+        SparseTensor b_on_dev = (b.device() == a.device()) ? b : b.to(a.device());
         auto ac = extract_csr_on_device(a);
-        auto bc = extract_csr_on_device(b);
+        auto bc = extract_csr_on_device(b_on_dev);
         std::vector<Tensor> inputs = {
             ac.crow, ac.col, ac.values,
             bc.crow, bc.col, bc.values,
@@ -1364,6 +1429,21 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
             c_w.crow_indices(), c_w.col_indices(),
             c_w.values().to(orig),
             std::vector<int64_t>{M, N});
+    }
+    // Integer and complex dtypes: cpu_spgemm_typed<T> is generic (T(0), acc[col]
+    // += a_val*b_data, val != T(0) all valid for these T), so support the same
+    // coverage as cpu_spmm / cpu_spmv for API consistency.
+    if (a.dtype() == DType::Int32) {
+        return cpu_spgemm_typed<int32_t>(a_csr, b_csr, M, K, N);
+    }
+    if (a.dtype() == DType::Int64) {
+        return cpu_spgemm_typed<int64_t>(a_csr, b_csr, M, K, N);
+    }
+    if (a.dtype() == DType::Complex64) {
+        return cpu_spgemm_typed<std::complex<float>>(a_csr, b_csr, M, K, N);
+    }
+    if (a.dtype() == DType::Complex128) {
+        return cpu_spgemm_typed<std::complex<double>>(a_csr, b_csr, M, K, N);
     }
     throw std::runtime_error("spgemm: unsupported dtype " +
         std::string(dtype_name(a.dtype())));
@@ -1516,11 +1596,16 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
         // on one device and b on another. Reconcile by moving both onto the
         // device chosen by b (the previous `b.to(b.device())` ternary was a
         // no-op and never transferred anything).
-        Device target_dev{dev_type, 0};
+        // b is passed to the kernel as-is, so b's full Device (type AND index)
+        // is the target. Moving L's CSR components onto b.device() preserves a
+        // non-zero GPU index (e.g. cuda:1) and rules out the case where L sits on
+        // cuda:0 while b sits on cuda:1 (the .type-only guard above would let
+        // that through, handing the kernel pointers on two physical devices).
+        Device target_dev = b.device();
         auto Lc = extract_csr_on_device(L);
-        Tensor L_crow = (Lc.crow.device().type == dev_type) ? Lc.crow : Lc.crow.to(target_dev);
-        Tensor L_col  = (Lc.col.device().type  == dev_type) ? Lc.col  : Lc.col.to(target_dev);
-        Tensor L_vals = (Lc.values.device().type == dev_type) ? Lc.values : Lc.values.to(target_dev);
+        Tensor L_crow = (Lc.crow.device() == target_dev) ? Lc.crow : Lc.crow.to(target_dev);
+        Tensor L_col  = (Lc.col.device()  == target_dev) ? Lc.col  : Lc.col.to(target_dev);
+        Tensor L_vals = (Lc.values.device() == target_dev) ? Lc.values : Lc.values.to(target_dev);
         std::vector<Tensor> inputs = {L_crow, L_col, L_vals, b};
         OpAttributes attrs;
         attrs.set(AttrKey::N, N);

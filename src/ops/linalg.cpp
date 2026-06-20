@@ -479,6 +479,58 @@ auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitria
                 }
             }
         }
+    } else if (work_a.dtype() == DType::Complex64) {
+        const auto* a_data = work_a.data<std::complex<float>>();
+        auto* b_data = work_b.data<std::complex<float>>();
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            const std::complex<float>* A_mat = a_data + batch * n * n;
+            std::complex<float>* X_mat = b_data + batch * n * nrhs;
+            if (upper) {
+                for (int64_t i = n - 1; i >= 0; --i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        std::complex<float> sum = X_mat[i * nrhs + j];
+                        for (int64_t k = i + 1; k < n; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        std::complex<float> sum = X_mat[i * nrhs + j];
+                        for (int64_t k = 0; k < i; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            }
+        }
+    } else if (work_a.dtype() == DType::Complex128) {
+        const auto* a_data = work_a.data<std::complex<double>>();
+        auto* b_data = work_b.data<std::complex<double>>();
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            const std::complex<double>* A_mat = a_data + batch * n * n;
+            std::complex<double>* X_mat = b_data + batch * n * nrhs;
+            if (upper) {
+                for (int64_t i = n - 1; i >= 0; --i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        std::complex<double> sum = X_mat[i * nrhs + j];
+                        for (int64_t k = i + 1; k < n; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        std::complex<double> sum = X_mat[i * nrhs + j];
+                        for (int64_t k = 0; k < i; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            }
+        }
     } else {
         const double* a_data = work_a.data<double>();
         double* b_data = work_b.data<double>();
@@ -726,6 +778,66 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     auto shape = A.shape();
     for (size_t i = 0; i + 2 < shape.size(); ++i) {
         out_shape.push_back(shape[i]);
+    }
+
+    // For complex input the sign is complex (det/|det|) while logabsdet is the
+    // real log|det|, matching torch.linalg.slogdet and the GPU path above
+    // (sign(d) is complex, log(abs(d)) is real). Compute via LU like det().
+    if (work.dtype() == DType::Complex64 || work.dtype() == DType::Complex128) {
+        std::vector<lapack_int> ipiv_c(n);
+        if (work.dtype() == DType::Complex64) {
+            auto sign_c = zeros(out_shape, DType::Complex64, Device::cpu());
+            auto logabs_r = zeros(out_shape, DType::Float32, Device::cpu());
+            auto* sign_data = sign_c.data<std::complex<float>>();
+            auto* logabs_data = logabs_r.data<float>();
+            for (int64_t b = 0; b < nbatch; ++b) {
+                lapack_complex_float* mat = c64_ptr(work) + b * n * n;
+                auto ln = static_cast<lapack_int>(n);
+                lapack_int info = LAPACKE_cgetrf(LAPACK_ROW_MAJOR, ln, ln, mat, ln, ipiv_c.data());
+                if (info < 0) throw std::runtime_error("linalg::slogdet: invalid argument (complex64)");
+                std::complex<float> d{1.f, 0.f};
+                const auto* row = reinterpret_cast<const std::complex<float>*>(mat);
+                for (int64_t i = 0; i < n; ++i) {
+                    d *= row[i * n + i];
+                    if (ipiv_c[i] != static_cast<lapack_int>(i + 1)) d = -d;
+                }
+                float mag = std::abs(d);
+                if (mag == 0.0f) {
+                    sign_data[b] = std::complex<float>{0.f, 0.f};
+                    logabs_data[b] = -std::numeric_limits<float>::infinity();
+                } else {
+                    sign_data[b] = d / mag;
+                    logabs_data[b] = std::log(mag);
+                }
+            }
+            return {sign_c, logabs_r};
+        } else {
+            auto sign_c = zeros(out_shape, DType::Complex128, Device::cpu());
+            auto logabs_r = zeros(out_shape, DType::Float64, Device::cpu());
+            auto* sign_data = sign_c.data<std::complex<double>>();
+            auto* logabs_data = logabs_r.data<double>();
+            for (int64_t b = 0; b < nbatch; ++b) {
+                lapack_complex_double* mat = c128_ptr(work) + b * n * n;
+                auto ln = static_cast<lapack_int>(n);
+                lapack_int info = LAPACKE_zgetrf(LAPACK_ROW_MAJOR, ln, ln, mat, ln, ipiv_c.data());
+                if (info < 0) throw std::runtime_error("linalg::slogdet: invalid argument (complex128)");
+                std::complex<double> d{1., 0.};
+                const auto* row = reinterpret_cast<const std::complex<double>*>(mat);
+                for (int64_t i = 0; i < n; ++i) {
+                    d *= row[i * n + i];
+                    if (ipiv_c[i] != static_cast<lapack_int>(i + 1)) d = -d;
+                }
+                double mag = std::abs(d);
+                if (mag == 0.0) {
+                    sign_data[b] = std::complex<double>{0., 0.};
+                    logabs_data[b] = -std::numeric_limits<double>::infinity();
+                } else {
+                    sign_data[b] = d / mag;
+                    logabs_data[b] = std::log(mag);
+                }
+            }
+            return {sign_c, logabs_r};
+        }
     }
 
     auto sign_result = zeros(out_shape, work.dtype(), Device::cpu());
@@ -1247,7 +1359,12 @@ auto eigvalsh(const Tensor& A) -> Tensor {
 
     std::vector<int64_t> w_shape = batch_dims;
     w_shape.push_back(n);
-    auto W = zeros(w_shape, work.dtype(), Device::cpu());
+    // For complex Hermitian input the eigenvalues are real: Float32 for
+    // Complex64, Float64 for Complex128 (mirrors eigh()).
+    DType w_dtype = work.dtype();
+    if (w_dtype == DType::Complex64)  w_dtype = DType::Float32;
+    if (w_dtype == DType::Complex128) w_dtype = DType::Float64;
+    auto W = zeros(w_shape, w_dtype, Device::cpu());
 
     if (work.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
@@ -1260,6 +1377,26 @@ auto eigvalsh(const Tensor& A) -> Tensor {
 
             lapack_int info = LAPACKE_ssyev(LAPACK_ROW_MAJOR, 'N', 'U', ln, mat, ln, w_vec);
             if (info != 0) throw std::runtime_error("linalg::eigvalsh: computation failed");
+        }
+    } else if (work.dtype() == DType::Complex64) {
+        // cheev with jobz='N' computes only the (real) eigenvalues of a
+        // Hermitian matrix; mat is overwritten with intermediate data.
+        float* w_data = W.data<float>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_float* mat = c64_ptr(work) + b * n * n;
+            float* w_vec = w_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_cheev(LAPACK_ROW_MAJOR, 'N', 'U', ln, mat, ln, w_vec);
+            if (info != 0) throw std::runtime_error("linalg::eigvalsh: cheev failed (info=" + std::to_string(info) + ")");
+        }
+    } else if (work.dtype() == DType::Complex128) {
+        double* w_data = W.data<double>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            lapack_complex_double* mat = c128_ptr(work) + b * n * n;
+            double* w_vec = w_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+            lapack_int info = LAPACKE_zheev(LAPACK_ROW_MAJOR, 'N', 'U', ln, mat, ln, w_vec);
+            if (info != 0) throw std::runtime_error("linalg::eigvalsh: zheev failed (info=" + std::to_string(info) + ")");
         }
     } else {
         double* a_data = work.data<double>();
@@ -1275,6 +1412,10 @@ auto eigvalsh(const Tensor& A) -> Tensor {
         }
     }
 
+    // For complex input W already has the correct real dtype; no downcast.
+    if (original_dtype == DType::Complex64 || original_dtype == DType::Complex128) {
+        return W;
+    }
     return maybe_downcast(W, original_dtype);
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
@@ -1309,6 +1450,61 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
     std::vector<int64_t> v_shape = batch_dims;
     v_shape.push_back(n);
     v_shape.push_back(n);
+
+    // For a genuinely complex matrix use cgeev/zgeev, which return complex
+    // eigenvalues (single array) and complex right eigenvectors. To keep the
+    // {W_real, W_imag, V} contract used by callers (autograd EigBackward,
+    // CPU kernel registry), split the complex eigenvalues into real/imag
+    // real-typed tensors and return complex eigenvectors in V.
+    if (work.dtype() == DType::Complex64 || work.dtype() == DType::Complex128) {
+        DType real_dtype = (work.dtype() == DType::Complex64) ? DType::Float32 : DType::Float64;
+        auto Wr = zeros(w_shape, real_dtype, Device::cpu());
+        auto Wi = zeros(w_shape, real_dtype, Device::cpu());
+        auto V  = zeros(v_shape, work.dtype(), Device::cpu());
+
+        if (work.dtype() == DType::Complex64) {
+            std::vector<std::complex<float>> w_buf(n);
+            float* wr_data = Wr.data<float>();
+            float* wi_data = Wi.data<float>();
+            for (int64_t b = 0; b < nbatch; ++b) {
+                lapack_complex_float* mat = c64_ptr(work) + b * n * n;
+                lapack_complex_float* v_mat = c64_ptr(V) + b * n * n;
+                auto* w_ptr = reinterpret_cast<lapack_complex_float*>(w_buf.data());
+                auto ln = static_cast<lapack_int>(n);
+                lapack_int info = LAPACKE_cgeev(LAPACK_ROW_MAJOR, 'N', 'V',
+                    ln, mat, ln, w_ptr, nullptr, ln, v_mat, ln);
+                if (info != 0) {
+                    throw std::runtime_error("linalg::eig: cgeev failed (info=" +
+                        std::to_string(info) + ")");
+                }
+                for (int64_t i = 0; i < n; ++i) {
+                    wr_data[b * n + i] = w_buf[i].real();
+                    wi_data[b * n + i] = w_buf[i].imag();
+                }
+            }
+        } else {
+            std::vector<std::complex<double>> w_buf(n);
+            double* wr_data = Wr.data<double>();
+            double* wi_data = Wi.data<double>();
+            for (int64_t b = 0; b < nbatch; ++b) {
+                lapack_complex_double* mat = c128_ptr(work) + b * n * n;
+                lapack_complex_double* v_mat = c128_ptr(V) + b * n * n;
+                auto* w_ptr = reinterpret_cast<lapack_complex_double*>(w_buf.data());
+                auto ln = static_cast<lapack_int>(n);
+                lapack_int info = LAPACKE_zgeev(LAPACK_ROW_MAJOR, 'N', 'V',
+                    ln, mat, ln, w_ptr, nullptr, ln, v_mat, ln);
+                if (info != 0) {
+                    throw std::runtime_error("linalg::eig: zgeev failed (info=" +
+                        std::to_string(info) + ")");
+                }
+                for (int64_t i = 0; i < n; ++i) {
+                    wr_data[b * n + i] = w_buf[i].real();
+                    wi_data[b * n + i] = w_buf[i].imag();
+                }
+            }
+        }
+        return {Wr, Wi, V};
+    }
 
     auto Wr = zeros(w_shape, work.dtype(), Device::cpu());  // real part of eigenvalues
     auto Wi = zeros(w_shape, work.dtype(), Device::cpu());  // imaginary part of eigenvalues

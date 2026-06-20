@@ -68,6 +68,19 @@ auto MinMaxObserver::observe(const Tensor& tensor) -> void {
             // Element-wise min/max with existing values
             auto shape = min_val_.shape();
             int64_t num_channels = shape[0];
+            // Guard against a later observe() supplying a tensor whose channel
+            // count differs from the first observation. new_min/new_max are the
+            // freshly reduced per-channel vectors; if they are shorter than the
+            // stored channel count, the indexing loop below would read out of
+            // bounds. Require an exact match.
+            if (new_min.numel() != num_channels || new_max.numel() != num_channels) {
+                throw std::runtime_error(
+                    "MinMaxObserver: per-channel update channel count (" +
+                    std::to_string(new_min.numel()) +
+                    ") does not match the channel count from the first observation (" +
+                    std::to_string(num_channels) +
+                    "); all observed tensors must share the same size along the channel axis");
+            }
             float* min_data = min_val_.data<float>();
             float* max_data = max_val_.data<float>();
             const float* new_min_data = new_min.data<float>();
@@ -167,6 +180,17 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
             // EMA update on CPU (small per-channel vectors)
             auto shape = min_val_.shape();
             int64_t num_channels = shape[0];
+            // Guard against a later observe() supplying a tensor whose channel
+            // count differs from the first observation; otherwise the indexing
+            // loop below would read past the freshly reduced per-channel vectors.
+            if (new_min.numel() != num_channels || new_max.numel() != num_channels) {
+                throw std::runtime_error(
+                    "MovingAverageMinMaxObserver: per-channel update channel count (" +
+                    std::to_string(new_min.numel()) +
+                    ") does not match the channel count from the first observation (" +
+                    std::to_string(num_channels) +
+                    "); all observed tensors must share the same size along the channel axis");
+            }
             float* min_data = min_val_.data<float>();
             float* max_data = max_val_.data<float>();
             const float* new_min_data = new_min.data<float>();
@@ -253,54 +277,56 @@ auto HistogramObserver::update_histogram(const Tensor& tensor) -> void {
     // step (the previous "simplified" behaviour), old counts stay stuck at
     // their old indices and silently corrupt the calibration distribution
     // for any non-stationary input.
-    float bin_width = (max_val_ - min_val_) / num_bins_;
-
+    // Expand the histogram range to cover this tensor AT MOST ONCE (re-binning
+    // existing counts a single time), instead of re-binning inside the
+    // per-element loop, which was O(n * num_bins) with per-element heap
+    // allocations. First find this tensor's min/max.
+    float tmin = min_val_;
+    float tmax = max_val_;
     for (int64_t i = 0; i < n; ++i) {
-        float val = data[i];
+        tmin = std::min(tmin, data[i]);
+        tmax = std::max(tmax, data[i]);
+    }
 
-        // Update range if needed
-        if (val < min_val_ || val > max_val_) {
-            // Compute expanded range with a small slack so future values
-            // close to the new boundary still bin cleanly.
-            float new_min = std::min(min_val_, val);
-            float new_max = std::max(max_val_, val);
-            float range = new_max - new_min;
-            new_min -= range * 0.01f;
-            new_max += range * 0.01f;
-            float new_bin_width = (new_max - new_min) / num_bins_;
+    if (tmin < min_val_ || tmax > max_val_) {
+        float new_min = std::min(min_val_, tmin);
+        float new_max = std::max(max_val_, tmax);
+        float range = new_max - new_min;
+        new_min -= range * 0.01f;
+        new_max += range * 0.01f;
+        float new_bin_width = (new_max - new_min) / num_bins_;
 
-            // Re-bin existing histogram counts using each old bin's midpoint.
-            // The midpoint of old bin k is old_min + (k + 0.5) * old_bin_width;
-            // route that count into whatever bin index it falls into under
-            // the new (wider) range. This is the standard streaming-histogram
-            // resize step and preserves total_count exactly.
-            std::vector<int64_t> new_histogram(num_bins_, 0);
-            const float old_min = min_val_;
-            const float old_bin_width = bin_width;
-            if (new_bin_width > 0.0f) {
-                for (int64_t k = 0; k < num_bins_; ++k) {
-                    int64_t count = histogram_[k];
-                    if (count == 0) continue;
-                    float midpoint = old_min + (static_cast<float>(k) + 0.5f) * old_bin_width;
-                    int64_t new_bin = static_cast<int64_t>((midpoint - new_min) / new_bin_width);
-                    new_bin = std::clamp(new_bin, int64_t(0), num_bins_ - 1);
-                    new_histogram[new_bin] += count;
-                }
-            } else {
-                // Degenerate range (all values identical so far); funnel all
-                // existing counts into bin 0 of the new histogram.
-                int64_t carry = 0;
-                for (int64_t k = 0; k < num_bins_; ++k) carry += histogram_[k];
-                new_histogram[0] = carry;
+        // Re-bin existing counts once, routing each old bin's midpoint into
+        // the new range. Preserves total_count exactly.
+        std::vector<int64_t> new_histogram(num_bins_, 0);
+        const float old_min = min_val_;
+        const float old_bin_width = (max_val_ - min_val_) / num_bins_;
+        if (new_bin_width > 0.0f && old_bin_width > 0.0f) {
+            for (int64_t k = 0; k < num_bins_; ++k) {
+                int64_t count = histogram_[k];
+                if (count == 0) continue;
+                float midpoint = old_min + (static_cast<float>(k) + 0.5f) * old_bin_width;
+                int64_t new_bin = static_cast<int64_t>((midpoint - new_min) / new_bin_width);
+                new_bin = std::clamp(new_bin, int64_t(0), num_bins_ - 1);
+                new_histogram[new_bin] += count;
             }
-
-            histogram_.swap(new_histogram);
-            min_val_ = new_min;
-            max_val_ = new_max;
-            bin_width = new_bin_width;
+        } else {
+            // Degenerate old range (all values identical so far): funnel all
+            // existing counts into bin 0.
+            int64_t carry = 0;
+            for (int64_t k = 0; k < num_bins_; ++k) carry += histogram_[k];
+            new_histogram[0] = carry;
         }
 
-        // Add to histogram
+        histogram_.swap(new_histogram);
+        min_val_ = new_min;
+        max_val_ = new_max;
+    }
+
+    // Bin every element against the now-fixed range (no further resize).
+    const float bin_width = (max_val_ - min_val_) / num_bins_;
+    for (int64_t i = 0; i < n; ++i) {
+        float val = data[i];
         if (bin_width > 0.0f) {
             int64_t bin = static_cast<int64_t>((val - min_val_) / bin_width);
             bin = std::clamp(bin, int64_t(0), num_bins_ - 1);

@@ -1541,18 +1541,18 @@ auto jvp_logcumsumexp(const DualTensor& x, int64_t dim) -> DualTensor {
     //   dl[t]/dx[k] = w[k] / sum_cum[t]   for k <= t, else 0
     // So  dl[t] = sum_{k<=t} (w[k] * dx[k]) / sum_cum[t]
     //          = cumsum(w * dx, dim)[t] / cumsum(w, dim)[t]
-    //          = cumsum(exp(x - m) * dx, dim) / cumsum(exp(x - m), dim)
-    // where m is any per-element constant for stability; using m = x.max(dim)
-    // would force a global reduction so we instead piggy-back on the
-    // backend-stable Logcumsumexp output: l = log(cumsum(exp(x))) and we have
-    //   exp(x - l[t]) summed cumulatively to 1 → directly,
-    //   dl[t] = cumsum(exp(x) * dx, dim)[t] / exp(l[t])
-    //         = cumsum(exp(x - l[t]) * dx, dim)[t]
-    // The latter form is *not* in general identical because l[t] depends on t;
-    // the equivalent stable expression uses cumsum/exp directly:
-    //   dl = cumsum(exp(x - shifted) * dx, dim) / exp(l - shifted)
-    // We compute the simple (numerically robust enough for typical inputs)
-    // form using a per-row shift = primal output l (broadcast back).
+    //
+    // CRITICAL: every numerator term for a given output position t shares the
+    // *same* per-output denominator sum_cum[t] = exp(l[t]).  Dividing the whole
+    // cumulative sum by exp(l[t]) (a per-output constant) is correct; dividing
+    // each term k by its own exp(l[k]) is NOT — that is the bug we are fixing.
+    //
+    // For numerical stability we subtract a per-output constant m[t] (the
+    // running max along `dim`) from x before exponentiating.  m cancels exactly:
+    //   dl[t] = cumsum(exp(x - m) * dx, dim)[t] / cumsum(exp(x - m), dim)[t]
+    // because cumsum(exp(x - m), dim)[t] = exp(l[t] - m[t]) and the m[t] factor
+    // appears identically in numerator and denominator.  Using the cumulative
+    // max (rather than a global reduction) keeps every entry of (x - m) <= 0.
     auto primal = tenzor::dispatch(OpId::Logcumsumexp,
                                    std::vector<Tensor>{x.primal()},
                                    [&]() {
@@ -1560,19 +1560,13 @@ auto jvp_logcumsumexp(const DualTensor& x, int64_t dim) -> DualTensor {
                                        a.set(AttrKey::Dim, dim);
                                        return a;
                                    }())[0];
-    // Use the LSE stability shift: subtract l (the cumulative LSE so far) from
-    // x, exponentiate, multiply by dx, cumsum, then "divide" by exp(0)==1.
-    // exp(x[k] - l[t]) is only well defined for k<=t; for k>t the multiplier
-    // is bounded above by 1 since x[k] - l[t] - log(... up to k) etc.  In
-    // practice cumsum already truncates the contribution at k>t, so the
-    // factor for k<=t reads exp(x[k] - l[t]) and the partial-sum identity
-    //   sum_{k<=t} exp(x[k] - l[t]) = 1
-    // makes the divisor cancel.  We therefore compute:
-    //   tangent = cumsum(exp(x - l) * dx, dim)
-    // which is mathematically identical to the closed form above.
-    auto w_shifted = tenzor::exp(tenzor::sub(x.primal(), primal));
-    auto tangent_pre = tenzor::mul(w_shifted, x.tangent());
-    auto tangent = tenzor::cumsum(tangent_pre, dim);
+    // Per-output cumulative-max shift for stability.  m has the same shape as x
+    // (cummax does not reduce the axis), so exp(x - m) keeps each term <= 1.
+    auto m = tenzor::cummax(x.primal(), dim).first;
+    auto w = tenzor::exp(tenzor::sub(x.primal(), m));            // exp(x - m), <= 1
+    auto num = tenzor::cumsum(tenzor::mul(w, x.tangent()), dim);  // sum_{k<=t} w[k] dx[k]
+    auto den = tenzor::cumsum(w, dim);                            // = exp(l[t] - m[t])
+    auto tangent = tenzor::div(num, den);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
@@ -4106,7 +4100,13 @@ JvpMultiResult jvp_adapter_median(std::span<const Tensor> primals,
             std::vector<int64_t> kshape(dx.ndim(), 1);
             values_t = tenzor::reshape(values_t, kshape);
         } else {
-            values_t = tenzor::reshape(values_t, std::vector<int64_t>{1});
+            // Full-reduction non-keepdim returns a 0-dim scalar (shape {}),
+            // matching the Median kernel's primal output; match it exactly
+            // rather than hardcoding {1} so primal/tangent shapes agree.
+            values_t = tenzor::reshape(
+                values_t,
+                std::vector<int64_t>(values_p.shape().begin(),
+                                     values_p.shape().end()));
         }
     } else {
         Tensor idx_kd = keepdim ? indices_p

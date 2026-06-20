@@ -309,6 +309,55 @@ double atan2_double(double y, double x) {
     return 0.0;
 }
 
+// Exact double-precision 2^n for n an integer-valued double (ldexp scaling).
+// Powers of two are exactly representable in binary64, and squaring 2.0
+// stays exact, so binary exponentiation yields a bit-exact result with no
+// Taylor/clamp error (unlike exp_double(n*ln2)). Mirrors the F32 exp2 path.
+// Handles the full normal exponent range and saturates to ±inf / 0 like
+// std::ldexp for out-of-range n.
+double exp2_int_double(double n_dbl) {
+    if (n_dbl != n_dbl) return n_dbl;  // NaN
+    // Round toward nearest integer; ldexp's n is integral by contract, but
+    // tolerate float representations like 3.0 exactly.
+    double rn = round(n_dbl);
+    // Saturate: 2^1024 overflows to +inf, 2^-1075 underflows to 0.
+    if (rn > 1023.0) return 1.0 / 0.0;     // +inf
+    if (rn < -1074.0) return 0.0;          // below smallest subnormal → 0
+    int k = int(rn);
+    // For deeply negative exponents the magnitude 2^|k| would overflow to
+    // +inf (so 1/inf would wrongly give 0 in the subnormal range). Build the
+    // scale directly as a positive power and, when negative, split into two
+    // exact multiplications so the intermediate never overflows.
+    if (k >= 0) {
+        int abs_k = k;
+        double pow2 = 1.0;
+        double base = 2.0;
+        while (abs_k > 0) {
+            if ((abs_k & 1) != 0) pow2 *= base;
+            base *= base;
+            abs_k >>= 1;
+        }
+        return pow2;
+    }
+    // k < 0: result is 2^k. Compute 2^k = (2^k1) * (2^k2) with k1+k2 == k and
+    // each |ki| <= 1022 so neither 2^(-ki) overflows; the product underflows
+    // gracefully to subnormals/zero exactly as hardware multiply would.
+    int neg = -k;            // neg in (0, 1074]
+    int neg1 = neg / 2;
+    int neg2 = neg - neg1;   // neg1 + neg2 == neg, both <= 537
+    double s1 = 1.0;
+    double s2 = 1.0;
+    {
+        int e = neg1; double base = 0.5;       // 0.5 = 2^-1
+        while (e > 0) { if ((e & 1) != 0) s1 *= base; base *= base; e >>= 1; }
+    }
+    {
+        int e = neg2; double base = 0.5;
+        while (e > 0) { if ((e & 1) != 0) s2 *= base; base *= base; e >>= 1; }
+    }
+    return s1 * s2;
+}
+
 // Double-precision pow approximation
 double pow_double(double base, double exp_val) {
     // Fast paths for common integer exponents keep x^n finite when x<0
@@ -318,9 +367,23 @@ double pow_double(double base, double exp_val) {
     if (exp_val == 2.0) return base * base;
     if (exp_val == 3.0) return base * base * base;
     if (exp_val == -1.0) return 1.0 / base;
-    if (base <= 0.0) {
-        if (base == 0.0) return 0.0;
-        return 0.0;  // Negative base with non-integer exp is undefined
+    if (base < 0.0) {
+        // Negative base: std::pow is finite only for integer exponents.
+        // pow(-2,4)=16, pow(-2,3)=-8; non-integer exponent → NaN.
+        double rexp = round(exp_val);
+        if (rexp == exp_val) {
+            // Integer exponent: compute |base|^exp, then restore sign for
+            // odd exponents (sign = -1 when the integer exponent is odd).
+            double mag = exp_double(exp_val * log_double(-base));
+            // mod(round(exp_val), 2) is 0 for even, ±1 for odd integers.
+            bool is_odd = (mod(rexp, 2.0) != 0.0);
+            return is_odd ? -mag : mag;
+        }
+        return 0.0 / 0.0;  // NaN: negative base with non-integer exponent
+    }
+    if (base == 0.0) {
+        // 0^positive = 0, 0^negative = +inf (exp_val==0 handled above).
+        return (exp_val > 0.0) ? 0.0 : (1.0 / 0.0);
     }
     // pow(base, exp) = exp(exp * log(base))
     return exp_double(exp_val * log_double(base));
@@ -570,8 +633,8 @@ void main() {
             result[idx] = res;
             break;
         }
-        case 49: // ldexp (binary): x * 2^n (n is val_b as int)
-            result[idx] = val_a * exp_double(val_b * 0.6931471805599453);
+        case 49: // ldexp (binary): x * 2^n (n is val_b as int) — exact power-of-two scaling
+            result[idx] = val_a * exp2_int_double(val_b);
             break;
         case 50: // frac (unary): x - trunc(x) — sign-preserving (PyTorch convention)
             result[idx] = val_a - trunc(val_a);

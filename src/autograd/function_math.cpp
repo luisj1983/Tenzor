@@ -581,10 +581,16 @@ auto SincBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto x_sq = mul(input, input);
     auto numer = sub(mul(pi_x, cos_px), sin_px);
     auto denom = mul(x_sq, M_PI);
-    auto deriv = div(numer, denom);
     // x = 0 is a removable singularity (derivative is 0); mask it out.
+    // The denominator is 0 at x==0 and so is the numerator, so a naive
+    // div(numer, denom) yields 0/0 = NaN there. Since NaN * 0 == NaN under
+    // IEEE-754, masking afterwards would not remove the NaN. Replace the
+    // singular denominator positions with a safe nonzero value (1) *before*
+    // dividing so the masked-out elements never carry NaN.
     auto zero = tenzor::zeros_like(input);
     auto mask = tenzor::ne(input, zero);
+    auto denom_safe = tenzor::where(mask, denom, tenzor::ones_like(input));
+    auto deriv = div(numer, denom_safe);
     return {mul(grad, mul(deriv, mask))};
 }
 
@@ -600,7 +606,13 @@ auto SincBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     auto zero_t = tenzor::zeros_like(input_var.tensor());
     auto mask_tensor = tenzor::ne(input_var.tensor(), zero_t);
     Variable mask_var(mask_tensor, false);
-    auto deriv = numer / denom;
+    // x = 0 is a removable singularity (derivative is 0). Both numerator and
+    // denominator are 0 there, so numer / denom would be 0/0 = NaN, and
+    // NaN * 0 == NaN means a post-hoc mask cannot remove it. Substitute a safe
+    // nonzero denominator (1) at the singular positions before dividing.
+    Variable ones_var(tenzor::ones_like(input_var.tensor()), false);
+    auto denom_safe = tenzor::where(mask_var, denom, ones_var);
+    auto deriv = numer / denom_safe;
     return {grad_outputs[0] * deriv * mask_var};
 }
 

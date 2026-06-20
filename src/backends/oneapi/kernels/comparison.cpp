@@ -94,6 +94,10 @@ static auto compute_broadcast_info(
     std::span<const int64_t> b_shape,
     const std::vector<int64_t>& out_shape) -> BroadcastInfo {
 
+    if (out_shape.size() > MAX_BROADCAST_DIMS) {
+        throw std::runtime_error("OneAPI comparison: max 8 broadcast dimensions supported");
+    }
+
     BroadcastInfo info{};
     info.ndim = static_cast<int>(out_shape.size());
     info.out_numel = 1;

@@ -603,8 +603,22 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
         return dispatch_to_device(OpId::Arange, device.type, {}, attrs)[0];
     }
 
-    // Calculate number of elements
-    int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
+    // Calculate number of elements with sign-aware tolerant rounding (matching
+    // PyTorch). A naive ceil((end-start)/step) over-counts when the exact
+    // quotient lands a hair above an integer due to floating-point error: e.g.
+    // arange(0.1, 0.4, 0.1) yields a quotient of 3.0000000000000004 -> ceil 4,
+    // erroneously emitting the excluded half-open end value 0.4. Subtracting a
+    // relative epsilon from the quotient (with the same sign as step so the
+    // half-open range is respected for both ascending and descending ranges)
+    // collapses these spurious extra elements. Exact integer counts (e.g.
+    // arange(0, 5, 1) -> 5) are unaffected because the epsilon is far smaller
+    // than 1.
+    double range = end - start;
+    double raw = range / step;
+    // Tolerance scaled by the magnitude of the quotient so it tracks the FP
+    // error that accumulates in the division for large ranges.
+    double eps = 1e-9 * std::max(1.0, std::fabs(raw));
+    int64_t numel = static_cast<int64_t>(std::ceil(raw - eps));
     if (numel < 0) numel = 0;
 
     // Use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -1022,7 +1036,13 @@ auto randperm(int64_t n, Device device) -> Tensor {
     if (n <= 1) {
         return arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
     }
-    Tensor keys = rand({n}, DType::Float32, device);
+    // Use Float64 keys: Float32's 24-bit mantissa gives only ~2^24 distinct
+    // values in [0,1), so key collisions (broken by argsort's stable index
+    // tie-break, which biases toward the identity order) become common well
+    // before n reaches that range. Float64's 53-bit mantissa pushes the
+    // collision floor (~2^53 distinct values) past any practical n, keeping the
+    // permutation effectively uniform while staying fully on-device.
+    Tensor keys = rand({n}, DType::Float64, device);
     return argsort(keys, /*dim=*/0, /*descending=*/false).to(DType::Int64);
 }
 
@@ -1278,6 +1298,10 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device,
 
 auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
             DType dtype, Device device, Generator& generator) -> Tensor {
+    if (low >= high) {
+        throw std::invalid_argument("randint: low must be less than high");
+    }
+
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
         attrs.set(AttrKey::Shape, shape_to_string(shape));
@@ -1403,7 +1427,11 @@ auto randperm(int64_t n, Device device, Generator& generator) -> Tensor {
     if (n <= 1) {
         return tenzor::arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
     }
-    Tensor keys = rand({n}, DType::Float32, device, generator);
+    // Float64 keys (53-bit mantissa, ~2^53 distinct values) avoid the frequent
+    // collisions Float32's 24-bit mantissa would produce; collisions are broken
+    // by argsort's stable index tie-break and would otherwise bias the
+    // permutation toward the identity order. See the plain overload above.
+    Tensor keys = rand({n}, DType::Float64, device, generator);
     return argsort(keys, /*dim=*/0, /*descending=*/false).to(DType::Int64);
 }
 

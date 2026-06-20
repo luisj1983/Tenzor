@@ -14,6 +14,7 @@
 #include "tenzor/ops/reduction.hpp"  // Audit G13: tenzor::sum on Tensor (for mask count)
 #include <random>
 #include <cmath>
+#include <stdexcept>
 
 namespace tenzor {
 namespace models {
@@ -265,6 +266,29 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
     // Compute cross-entropy loss for masked positions
     auto reshaped_logits = tenzor::reshape(gen_logits, {batch_size * seq_len, vocab_size});
 
+    // Validate original_tokens before reinterpreting its buffer as int64.
+    // data<int64_t>() does a raw reinterpret_cast of the storage, so a caller
+    // passing a wrong-dtype or undersized tensor (the [batch, seq_len]/Int64
+    // contract is documented in electra.hpp but not enforced here) would cause
+    // a heap out-of-bounds read and silently corrupt labels. Enforce the
+    // contract explicitly.
+    if (!original_tokens.is_valid()) {
+        throw std::invalid_argument(
+            "ElectraForPreTraining::compute_loss: original_tokens is invalid/uninitialized");
+    }
+    if (original_tokens.dtype() != DType::Int64) {
+        throw std::invalid_argument(
+            "ElectraForPreTraining::compute_loss: original_tokens must have dtype Int64");
+    }
+    if (original_tokens.numel() < batch_size * seq_len) {
+        throw std::invalid_argument(
+            "ElectraForPreTraining::compute_loss: original_tokens.numel() (" +
+            std::to_string(original_tokens.numel()) +
+            ") is smaller than batch_size*seq_len (" +
+            std::to_string(batch_size * seq_len) +
+            ") derived from gen_logits");
+    }
+
     // Create labels tensor - move to CPU for data access, then transfer to device
     Tensor original_tokens_cpu = original_tokens;
     if (original_tokens.device() != Device::cpu()) {
@@ -336,7 +360,13 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
         auto masked_disc = disc_loss_per_tok * disc_mask_var;       // [batch, seq_len]
         Variable disc_sum = tenzor::sum(masked_disc);               // scalar
 
-        Tensor mask_count_cpu = tenzor::sum(disc_mask).to(Device::cpu()).to(DType::Float32);
+        // Sum the mask in Float32, not the model dtype. disc_mask is cast to
+        // disc_logits.dtype() (line above) so for BF16/F16 models the count
+        // would accumulate in half precision and saturate (BF16 cannot
+        // represent integers > 256 exactly, F16 > 2048), shrinking the divisor
+        // and inflating disc_loss. Widen to Float32 before the reduction.
+        Tensor mask_count_cpu =
+            tenzor::sum(disc_mask.to(DType::Float32)).to(Device::cpu()).to(DType::Float32);
         float valid_tokens = mask_count_cpu.item<float>();
         double disc_divisor = static_cast<double>(std::max(valid_tokens, 1.0f));
         disc_loss = disc_sum * (1.0 / disc_divisor);
@@ -376,7 +406,12 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
     Variable total_nll = tenzor::sum(masked_nll);                          // scalar
 
     // Count masked positions on CPU (one-time scalar reduction).
-    Tensor mask_sum_cpu = tenzor::sum(mask_flat).to(Device::cpu()).to(DType::Float32);
+    // mask_flat is cast to the model dtype (float_dtype) above; for BF16/F16
+    // models summing it in that dtype saturates the count (BF16 > 256, F16 >
+    // 2048), shrinking the divisor and inflating gen_loss. Widen to Float32
+    // before the reduction so the count is exact.
+    Tensor mask_sum_cpu =
+        tenzor::sum(mask_flat.to(DType::Float32)).to(Device::cpu()).to(DType::Float32);
     float num_masked = mask_sum_cpu.item<float>();
     double divisor = static_cast<double>(std::max(num_masked, 1.0f));
 

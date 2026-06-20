@@ -44,6 +44,33 @@ float readBias(uint element_idx) {
     return float(uintBitsToFloat(bits << 16));
 }
 
+// Write a single BF16 element to packed output using bounded CAS masked-RMW.
+//
+// Two invocations writing to adjacent BF16 lanes in the same uint32 word
+// race when a non-atomic full-word store is used. For odd N the column pair
+// (col0, col1) owned by one invocation may straddle word boundaries shared
+// with another invocation's columns (e.g. col0 on an odd flat index lands in
+// the high lane of one word while col1 lands in the low lane of the next
+// word, which another invocation also writes). Compute the word/lane for each
+// element from its own flat index and CAS only that lane. Matches the pattern
+// in bmm_strided_bf16.comp / bmm_bf16.comp::writeBF16C.
+void writeBF16Out(uint out_idx, float value) {
+    uint out_word = out_idx / 2;
+    uint out_off = out_idx % 2;
+    uint shift = out_off * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+
+    uint old_val = output_data[out_word];
+    for (uint iter = 0u; iter < 65536u; ++iter) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(output_data[out_word], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // cap-exhaust unreachable in practice; see bmm_bf16.comp note.
+}
+
 void main() {
     uint row = gl_GlobalInvocationID.y;
     uint col_pair = gl_GlobalInvocationID.x;
@@ -106,12 +133,14 @@ void main() {
             }
         }
 
-        uint out_idx = row * params.N + col0;
-        uint word_idx = out_idx / 2;
-
-        uint bits0 = ((floatBitsToUint(sum0) + 0x7FFFu + ((floatBitsToUint(sum0) >> 16) & 1u)) >> 16);
-        uint bits1 = (col1 < params.N) ? (((floatBitsToUint(sum1) + 0x7FFFu + ((floatBitsToUint(sum1) >> 16) & 1u)) >> 16)) : 0u;
-
-        output_data[word_idx] = bits0 | (bits1 << 16);
+        // Write each BF16 element to its own lane via bounded CAS. col0 and
+        // col1 may land in different words (or share words with columns owned
+        // by adjacent invocations) when N is odd, so each must be stored with
+        // a masked atomic RMW rather than a single full-word store.
+        uint out_idx0 = row * params.N + col0;
+        writeBF16Out(out_idx0, sum0);
+        if (col1 < params.N) {
+            writeBF16Out(out_idx0 + 1u, sum1);
+        }
     }
 }

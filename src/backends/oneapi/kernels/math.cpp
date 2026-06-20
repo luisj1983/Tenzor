@@ -1774,74 +1774,85 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         std::unique_ptr<sycl::half, decltype(half_deleter)> d_c_h(
             static_cast<sycl::half*>(sycl::malloc_device(m * n * sizeof(sycl::half), queue)), half_deleter);
 
-        queue.memcpy(d_a_h.get(), a_ptr, m * k * sizeof(sycl::half));
-        queue.memcpy(d_b_h.get(), b_ptr, k * n * sizeof(sycl::half));
-        queue.wait_and_throw();
-
-        // Upcast FP16 → FP32 on device
-        const int64_t a_count = m * k;
-        const int64_t b_count = k * n;
-        auto* d_a_h_raw = d_a_h.get();
-        auto* d_a_raw = d_a.get();
-        queue.parallel_for(sycl::range<1>(a_count), [=](sycl::id<1> i) {
-            d_a_raw[i] = static_cast<float>(d_a_h_raw[i]);
-        }).wait();
-        auto* d_b_h_raw = d_b_h.get();
-        auto* d_b_raw = d_b.get();
-        queue.parallel_for(sycl::range<1>(b_count), [=](sycl::id<1> i) {
-            d_b_raw[i] = static_cast<float>(d_b_h_raw[i]);
-        }).wait();
-        queue.wait_and_throw();
-
         const float alpha = 1.0f;
         const float beta = 0.0f;
 
-        try {
-            ::oneapi::mkl::blas::column_major::gemm(
-                queue,
-                ::oneapi::mkl::transpose::nontrans,
-                ::oneapi::mkl::transpose::nontrans,
-                n, m, k,
-                alpha,
-                d_b.get(), n,
-                d_a.get(), k,
-                beta,
-                d_c.get(), n
-            );
-            queue.wait_and_throw();
-        } catch (const ::oneapi::mkl::exception& e) {
-            throw std::runtime_error(std::string("oneMKL GEMM (F16) failed: ") + e.what());
-        } catch (const sycl::exception& e) {
-            throw std::runtime_error(std::string("SYCL error in GEMM (F16): ") + e.what());
-        }
-
-        // Downcast FP32 → FP16 on device, then copy back
+        const int64_t a_count = m * k;
+        const int64_t b_count = k * n;
         const int64_t c_count = m * n;
-        auto* d_c_raw = d_c.get();
-        auto* d_c_h_raw = d_c_h.get();
-        queue.parallel_for(sycl::range<1>(c_count), [=](sycl::id<1> i) {
-            d_c_h_raw[i] = sycl::half(d_c_raw[i]);
-        }).wait();
-        queue.wait_and_throw();
 
-        queue.memcpy(out_ptr, d_c_h.get(), m * n * sizeof(sycl::half));
-        queue.wait_and_throw();
+        // Per-batch loop (audit-surfaced bug fix — same as F32/F64 paths above).
+        // Each 2D slice is upcast FP16→FP32, GEMM'd, downcast FP32→FP16 and
+        // copied back at its own batch offset; without this loop any rank>2
+        // matmul left every output slice past the first uninitialized.
+        for (int64_t bi = 0; bi < batch_count; ++bi) {
+            queue.memcpy(d_a_h.get(), a_ptr + bi * a_batch_stride, m * k * sizeof(sycl::half));
+            queue.memcpy(d_b_h.get(), b_ptr + bi * b_batch_stride, k * n * sizeof(sycl::half));
+            queue.wait_and_throw();
+
+            // Upcast FP16 → FP32 on device
+            auto* d_a_h_raw = d_a_h.get();
+            auto* d_a_raw = d_a.get();
+            queue.parallel_for(sycl::range<1>(a_count), [=](sycl::id<1> i) {
+                d_a_raw[i] = static_cast<float>(d_a_h_raw[i]);
+            }).wait();
+            auto* d_b_h_raw = d_b_h.get();
+            auto* d_b_raw = d_b.get();
+            queue.parallel_for(sycl::range<1>(b_count), [=](sycl::id<1> i) {
+                d_b_raw[i] = static_cast<float>(d_b_h_raw[i]);
+            }).wait();
+            queue.wait_and_throw();
+
+            try {
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    n, m, k,
+                    alpha,
+                    d_b.get(), n,
+                    d_a.get(), k,
+                    beta,
+                    d_c.get(), n
+                );
+                queue.wait_and_throw();
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F16) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F16): ") + e.what());
+            }
+
+            // Downcast FP32 → FP16 on device, then copy back
+            auto* d_c_raw = d_c.get();
+            auto* d_c_h_raw = d_c_h.get();
+            queue.parallel_for(sycl::range<1>(c_count), [=](sycl::id<1> i) {
+                d_c_h_raw[i] = sycl::half(d_c_raw[i]);
+            }).wait();
+            queue.wait_and_throw();
+
+            queue.memcpy(out_ptr + bi * c_batch_stride, d_c_h.get(), m * n * sizeof(sycl::half));
+            queue.wait_and_throw();
+        }
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
         const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
 
-        // Use int64 accumulation to avoid overflow
-        queue.parallel_for<MatMulKernelInt32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        // Use int64 accumulation to avoid overflow. Batch dim iterated as the
+        // leading range axis so every rank>2 output slice is computed (M9
+        // 4D-parity fix — integer paths previously dropped the batch loop).
+        const int64_t as = a_batch_stride, bs = b_batch_stride, cs = c_batch_stride;
+        queue.parallel_for<MatMulKernelInt32>(sycl::range<3>(batch_count, m, n), [=](sycl::id<3> idx) {
+            const int64_t bi = idx[0];
+            const int64_t i = idx[1];
+            const int64_t j = idx[2];
 
             int64_t sum = 0;
             for (int64_t p = 0; p < k; ++p) {
-                sum += static_cast<int64_t>(a_ptr[i * k + p]) * static_cast<int64_t>(b_ptr[p * n + j]);
+                sum += static_cast<int64_t>(a_ptr[bi * as + i * k + p]) * static_cast<int64_t>(b_ptr[bi * bs + p * n + j]);
             }
-            out_ptr[i * n + j] = static_cast<int32_t>(sum);
+            out_ptr[bi * cs + i * n + j] = static_cast<int32_t>(sum);
         }).wait();
     }
     else if (a_cont.dtype() == DType::Int8 || a_cont.dtype() == DType::Int16 ||
@@ -1849,18 +1860,20 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
              a_cont.dtype() == DType::UInt16 || a_cont.dtype() == DType::UInt32 ||
              a_cont.dtype() == DType::UInt64) {
         const int64_t mm = m, nn = n, kk = k;
+        const int64_t bc = batch_count;
+        const int64_t as = a_batch_stride, bs = b_batch_stride, cs = c_batch_stride;
         auto run_t = [&]<typename T>() {
             const T* a_ptr = get_data_ptr<const T>(a_cont);
             const T* b_ptr = get_data_ptr<const T>(b_cont);
             T* out_ptr = get_data_ptr<T>(output);
             using ACC = std::conditional_t<std::is_signed_v<T>, long long, unsigned long long>;
-            queue.parallel_for(sycl::range<2>(mm, nn), [=](sycl::id<2> idx) {
-                const int64_t i = idx[0], j = idx[1];
+            queue.parallel_for(sycl::range<3>(bc, mm, nn), [=](sycl::id<3> idx) {
+                const int64_t bi = idx[0], i = idx[1], j = idx[2];
                 ACC sum = 0;
                 for (int64_t p = 0; p < kk; ++p) {
-                    sum += static_cast<ACC>(a_ptr[i * kk + p]) * static_cast<ACC>(b_ptr[p * nn + j]);
+                    sum += static_cast<ACC>(a_ptr[bi * as + i * kk + p]) * static_cast<ACC>(b_ptr[bi * bs + p * nn + j]);
                 }
-                out_ptr[i * nn + j] = static_cast<T>(sum);
+                out_ptr[bi * cs + i * nn + j] = static_cast<T>(sum);
             }).wait();
         };
         switch (a_cont.dtype()) {
@@ -1879,15 +1892,17 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
-        queue.parallel_for<MatMulKernelBFloat16>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        const int64_t as = a_batch_stride, bs = b_batch_stride, cs = c_batch_stride;
+        queue.parallel_for<MatMulKernelBFloat16>(sycl::range<3>(batch_count, m, n), [=](sycl::id<3> idx) {
+            const int64_t bi = idx[0];
+            const int64_t i = idx[1];
+            const int64_t j = idx[2];
 
             float sum = 0.0f;
             for (int64_t p = 0; p < k; ++p) {
-                sum += bf16_to_f32(a_ptr[i * k + p]) * bf16_to_f32(b_ptr[p * n + j]);
+                sum += bf16_to_f32(a_ptr[bi * as + i * k + p]) * bf16_to_f32(b_ptr[bi * bs + p * n + j]);
             }
-            out_ptr[i * n + j] = f32_to_bf16(sum);
+            out_ptr[bi * cs + i * n + j] = f32_to_bf16(sum);
         }).wait();
     }
     else if (a_cont.dtype() == DType::Complex64) {
@@ -1974,22 +1989,28 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         throw std::runtime_error("Unsupported dtype for matmul with oneMKL");
     }
 #else
-    // Fallback naive implementation for Float32
+    // Fallback naive implementation (no oneMKL). Every dtype iterates the
+    // batch dimension as the leading range axis with per-batch offsets so
+    // rank>2 matmul computes all output slices (M9 4D-parity fix — the
+    // fallback previously used sycl::range<2>(m,n) and left batch slices past
+    // the first uninitialized).
+    const int64_t as = a_batch_stride, bs = b_batch_stride, cs = c_batch_stride;
     if (a_cont.dtype() == DType::Float32) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
         const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         // Simple parallel matrix multiplication
-        queue.parallel_for<MatMulKernelFloat32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        queue.parallel_for<MatMulKernelFloat32>(sycl::range<3>(batch_count, m, n), [=](sycl::id<3> idx) {
+            const int64_t bi = idx[0];
+            const int64_t i = idx[1];
+            const int64_t j = idx[2];
 
             float sum = 0.0f;
             for (int64_t p = 0; p < k; ++p) {
-                sum += a_ptr[i * k + p] * b_ptr[p * n + j];
+                sum += a_ptr[bi * as + i * k + p] * b_ptr[bi * bs + p * n + j];
             }
-            out_ptr[i * n + j] = sum;
+            out_ptr[bi * cs + i * n + j] = sum;
         }).wait();
     }
     else if (a_cont.dtype() == DType::Float64) {
@@ -1997,15 +2018,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for<MatMulKernelFloat64>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        queue.parallel_for<MatMulKernelFloat64>(sycl::range<3>(batch_count, m, n), [=](sycl::id<3> idx) {
+            const int64_t bi = idx[0];
+            const int64_t i = idx[1];
+            const int64_t j = idx[2];
 
             double sum = 0.0;
             for (int64_t p = 0; p < k; ++p) {
-                sum += a_ptr[i * k + p] * b_ptr[p * n + j];
+                sum += a_ptr[bi * as + i * k + p] * b_ptr[bi * bs + p * n + j];
             }
-            out_ptr[i * n + j] = sum;
+            out_ptr[bi * cs + i * n + j] = sum;
         }).wait();
     }
     else if (a_cont.dtype() == DType::Float16) {
@@ -2014,15 +2036,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         // Use float accumulation for precision
-        queue.parallel_for<MatMulKernelFloat16>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        queue.parallel_for<MatMulKernelFloat16>(sycl::range<3>(batch_count, m, n), [=](sycl::id<3> idx) {
+            const int64_t bi = idx[0];
+            const int64_t i = idx[1];
+            const int64_t j = idx[2];
 
             float sum = 0.0f;
             for (int64_t p = 0; p < k; ++p) {
-                sum += static_cast<float>(a_ptr[i * k + p]) * static_cast<float>(b_ptr[p * n + j]);
+                sum += static_cast<float>(a_ptr[bi * as + i * k + p]) * static_cast<float>(b_ptr[bi * bs + p * n + j]);
             }
-            out_ptr[i * n + j] = sycl::half(sum);
+            out_ptr[bi * cs + i * n + j] = sycl::half(sum);
         }).wait();
     }
     else if (a_cont.dtype() == DType::Int32) {
@@ -2031,15 +2054,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
 
         // Use int64 accumulation to avoid overflow
-        queue.parallel_for<MatMulKernelInt32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        queue.parallel_for<MatMulKernelInt32>(sycl::range<3>(batch_count, m, n), [=](sycl::id<3> idx) {
+            const int64_t bi = idx[0];
+            const int64_t i = idx[1];
+            const int64_t j = idx[2];
 
             int64_t sum = 0;
             for (int64_t p = 0; p < k; ++p) {
-                sum += static_cast<int64_t>(a_ptr[i * k + p]) * static_cast<int64_t>(b_ptr[p * n + j]);
+                sum += static_cast<int64_t>(a_ptr[bi * as + i * k + p]) * static_cast<int64_t>(b_ptr[bi * bs + p * n + j]);
             }
-            out_ptr[i * n + j] = static_cast<int32_t>(sum);
+            out_ptr[bi * cs + i * n + j] = static_cast<int32_t>(sum);
         }).wait();
     }
     else if (a_cont.dtype() == DType::Int8 || a_cont.dtype() == DType::Int16 ||
@@ -2047,18 +2071,19 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
              a_cont.dtype() == DType::UInt16 || a_cont.dtype() == DType::UInt32 ||
              a_cont.dtype() == DType::UInt64) {
         const int64_t mm = m, nn = n, kk = k;
+        const int64_t bc = batch_count;
         auto run_t = [&]<typename T>() {
             const T* a_ptr = get_data_ptr<const T>(a_cont);
             const T* b_ptr = get_data_ptr<const T>(b_cont);
             T* out_ptr = get_data_ptr<T>(output);
             using ACC = std::conditional_t<std::is_signed_v<T>, long long, unsigned long long>;
-            queue.parallel_for(sycl::range<2>(mm, nn), [=](sycl::id<2> idx) {
-                const int64_t i = idx[0], j = idx[1];
+            queue.parallel_for(sycl::range<3>(bc, mm, nn), [=](sycl::id<3> idx) {
+                const int64_t bi = idx[0], i = idx[1], j = idx[2];
                 ACC sum = 0;
                 for (int64_t p = 0; p < kk; ++p) {
-                    sum += static_cast<ACC>(a_ptr[i * kk + p]) * static_cast<ACC>(b_ptr[p * nn + j]);
+                    sum += static_cast<ACC>(a_ptr[bi * as + i * kk + p]) * static_cast<ACC>(b_ptr[bi * bs + p * nn + j]);
                 }
-                out_ptr[i * nn + j] = static_cast<T>(sum);
+                out_ptr[bi * cs + i * nn + j] = static_cast<T>(sum);
             }).wait();
         };
         switch (a_cont.dtype()) {
@@ -2077,15 +2102,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
-        queue.parallel_for<MatMulKernelBFloat16>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        queue.parallel_for<MatMulKernelBFloat16>(sycl::range<3>(batch_count, m, n), [=](sycl::id<3> idx) {
+            const int64_t bi = idx[0];
+            const int64_t i = idx[1];
+            const int64_t j = idx[2];
 
             float sum = 0.0f;
             for (int64_t p = 0; p < k; ++p) {
-                sum += bf16_to_f32(a_ptr[i * k + p]) * bf16_to_f32(b_ptr[p * n + j]);
+                sum += bf16_to_f32(a_ptr[bi * as + i * k + p]) * bf16_to_f32(b_ptr[bi * bs + p * n + j]);
             }
-            out_ptr[i * n + j] = f32_to_bf16(sum);
+            out_ptr[bi * cs + i * n + j] = f32_to_bf16(sum);
         }).wait();
     }
     else {
@@ -5421,25 +5447,29 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         auto out_shape = broadcast_shapes(a_shape, b_shape);
         auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
         Tensor output(out_shape, a_cont.dtype(), a_cont.device());
+        // Use `(x < y) ? x : y` (not sycl::fmin) to match the CPU reference
+        // NaN semantics: CPU computes `less(x,y)?x:y`, so minimum(1, NaN)
+        // returns NaN (since 1<NaN is false → y). sycl::fmin would suppress
+        // the NaN and return the finite operand, breaking cross-backend parity.
         if (a_cont.dtype() == DType::Float32) {
             sycl_broadcast_binary<float, BroadcastMinimumFloat32>(
                 a_cont, b_cont, output, info, queue,
-                [](float x, float y) { return sycl::fmin(x, y); });
+                [](float x, float y) { return (x < y) ? x : y; });
         } else if (a_cont.dtype() == DType::Float64) {
             sycl_broadcast_binary<double, BroadcastMinimumFloat64>(
                 a_cont, b_cont, output, info, queue,
-                [](double x, double y) { return sycl::fmin(x, y); });
+                [](double x, double y) { return (x < y) ? x : y; });
         } else if (a_cont.dtype() == DType::Float16) {
             sycl_broadcast_binary<sycl::half, BroadcastMinimumFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](sycl::half x, sycl::half y) {
-                    return sycl::half(sycl::fmin(static_cast<float>(x), static_cast<float>(y)));
+                    return (static_cast<float>(x) < static_cast<float>(y)) ? x : y;
                 });
         } else if (a_cont.dtype() == DType::BFloat16) {
             sycl_broadcast_binary<uint16_t, BroadcastMinimumBFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](uint16_t x, uint16_t y) {
-                    return f32_to_bf16(sycl::fmin(bf16_to_f32(x), bf16_to_f32(y)));
+                    return (bf16_to_f32(x) < bf16_to_f32(y)) ? x : y;
                 });
         } else {
             throw std::runtime_error("minimum: unsupported dtype");
@@ -5451,33 +5481,39 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
                   a_cont.dtype(), a_cont.device());
     const int64_t numel = a_cont.numel();
 
+    // `(a < b) ? a : b` matches CPU NaN semantics (NaN propagates); see the
+    // broadcast path above. sycl::fmin would suppress NaN and break parity.
     if (a_cont.dtype() == DType::Float32) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
         const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<MinimumKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::fmin(a_ptr[idx], b_ptr[idx]);
+            const float av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (av < bv) ? av : bv;
         }).wait();
     } else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
         const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<MinimumKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::fmin(a_ptr[idx], b_ptr[idx]);
+            const double av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (av < bv) ? av : bv;
         }).wait();
     } else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
         const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<MinimumKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::half(sycl::fmin(static_cast<float>(a_ptr[idx]), static_cast<float>(b_ptr[idx])));
+            const sycl::half av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (static_cast<float>(av) < static_cast<float>(bv)) ? av : bv;
         }).wait();
     } else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<MinimumKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = f32_to_bf16(sycl::fmin(bf16_to_f32(a_ptr[idx]), bf16_to_f32(b_ptr[idx])));
+            const uint16_t av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (bf16_to_f32(av) < bf16_to_f32(bv)) ? av : bv;
         }).wait();
     } else {
         throw std::runtime_error("minimum: unsupported dtype");
@@ -5501,25 +5537,29 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         auto out_shape = broadcast_shapes(a_shape, b_shape);
         auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
         Tensor output(out_shape, a_cont.dtype(), a_cont.device());
+        // Use `(x > y) ? x : y` (not sycl::fmax) to match the CPU reference
+        // NaN semantics: CPU computes `greater(x,y)?x:y`, so maximum(1, NaN)
+        // returns NaN (since 1>NaN is false → y). sycl::fmax would suppress
+        // the NaN and return the finite operand, breaking cross-backend parity.
         if (a_cont.dtype() == DType::Float32) {
             sycl_broadcast_binary<float, BroadcastMaximumFloat32>(
                 a_cont, b_cont, output, info, queue,
-                [](float x, float y) { return sycl::fmax(x, y); });
+                [](float x, float y) { return (x > y) ? x : y; });
         } else if (a_cont.dtype() == DType::Float64) {
             sycl_broadcast_binary<double, BroadcastMaximumFloat64>(
                 a_cont, b_cont, output, info, queue,
-                [](double x, double y) { return sycl::fmax(x, y); });
+                [](double x, double y) { return (x > y) ? x : y; });
         } else if (a_cont.dtype() == DType::Float16) {
             sycl_broadcast_binary<sycl::half, BroadcastMaximumFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](sycl::half x, sycl::half y) {
-                    return sycl::half(sycl::fmax(static_cast<float>(x), static_cast<float>(y)));
+                    return (static_cast<float>(x) > static_cast<float>(y)) ? x : y;
                 });
         } else if (a_cont.dtype() == DType::BFloat16) {
             sycl_broadcast_binary<uint16_t, BroadcastMaximumBFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](uint16_t x, uint16_t y) {
-                    return f32_to_bf16(sycl::fmax(bf16_to_f32(x), bf16_to_f32(y)));
+                    return (bf16_to_f32(x) > bf16_to_f32(y)) ? x : y;
                 });
         } else {
             throw std::runtime_error("maximum: unsupported dtype");
@@ -5531,33 +5571,39 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
                   a_cont.dtype(), a_cont.device());
     const int64_t numel = a_cont.numel();
 
+    // `(a > b) ? a : b` matches CPU NaN semantics (NaN propagates); see the
+    // broadcast path above. sycl::fmax would suppress NaN and break parity.
     if (a_cont.dtype() == DType::Float32) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
         const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<MaximumKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::fmax(a_ptr[idx], b_ptr[idx]);
+            const float av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (av > bv) ? av : bv;
         }).wait();
     } else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
         const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<MaximumKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::fmax(a_ptr[idx], b_ptr[idx]);
+            const double av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (av > bv) ? av : bv;
         }).wait();
     } else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
         const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<MaximumKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::half(sycl::fmax(static_cast<float>(a_ptr[idx]), static_cast<float>(b_ptr[idx])));
+            const sycl::half av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (static_cast<float>(av) > static_cast<float>(bv)) ? av : bv;
         }).wait();
     } else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<MaximumKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = f32_to_bf16(sycl::fmax(bf16_to_f32(a_ptr[idx]), bf16_to_f32(b_ptr[idx])));
+            const uint16_t av = a_ptr[idx], bv = b_ptr[idx];
+            out_ptr[idx] = (bf16_to_f32(av) > bf16_to_f32(bv)) ? av : bv;
         }).wait();
     } else {
         throw std::runtime_error("maximum: unsupported dtype");

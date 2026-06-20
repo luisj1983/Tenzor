@@ -85,7 +85,25 @@ Tensor compute_max_dim_mask(const Tensor& input, const Tensor& output,
     auto two_eps = full(input_shape_vec, 2.0 * eps_val2, input.dtype(), input.device());
     auto numerator = sub(add(input, eps_tensor), max_without);
     auto ratio = div(numerator, two_eps);
-    return clamp(ratio, 0.0f, 1.0f);
+    auto mask = clamp(ratio, 0.0f, 1.0f);
+
+    // Split the gradient equally among tied maxima so the per-dim mass sums to
+    // 1, matching the global-max path (which divides by tie_count). At an exact
+    // K-way tie every tied position would otherwise clamp to 1, returning mass
+    // K instead of 1 and disagreeing with the central-difference derivative
+    // (1/K each). Normalize by the per-dim tie count. Build the count in
+    // Float32 so the sum does not saturate past 2048 ties in half precision,
+    // then narrow back. Guard against a zero denominator (cannot happen for a
+    // real max, but keeps the division well-defined).
+    const bool is_half =
+        (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    auto mask_f32 = is_half ? mask.to(DType::Float32) : mask;
+    auto tie_count = sum(mask_f32, dim, /*keepdim=*/true);
+    auto tie_count_expanded = expand(tie_count, input_shape_vec);
+    auto one_f32 = ones(input_shape_vec, DType::Float32, input.device());
+    auto safe_tie_count = maximum(tie_count_expanded, one_f32);
+    auto normalized = div(mask_f32, safe_tie_count);
+    return is_half ? normalized.to(input.dtype()) : normalized;
 }
 }  // namespace
 
@@ -330,15 +348,21 @@ auto MedianBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
             case DType::BFloat16: eps_val2 = 1e-3; break;
             default:              eps_val2 = 1e-7; break;
         }
-        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto scaled_diff = div(abs_diff, epsilon);
+        // Build the tie mask + per-dim tie_count in Float32 so the sum does not
+        // saturate past 2048 ties in half precision (matching the global path),
+        // then narrow back to the input dtype.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
+        auto epsilon = full(input_shape_vec, eps_val2, DType::Float32, input.device());
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto scaled_diff = div(abs_diff_f32, epsilon);
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
         auto mask = sub(ones_tensor, clamped);
 
         // Normalize mask by tie count along dim
         auto tie_count = sum(mask, dim, /*keepdim=*/true);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         return {mul(grad_expanded, mask)};
     }
@@ -421,14 +445,19 @@ auto MedianBackward::backward_with_variables(std::vector<Variable> grad_outputs)
             case DType::BFloat16: eps_val2 = 1e-3; break;
             default:              eps_val2 = 1e-7; break;
         }
-        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto scaled_diff = div(abs_diff, epsilon);
+        // Float32 tie mask + per-dim sum (half precision saturates past 2048
+        // ties); narrow back to input dtype, matching the global path.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
+        auto epsilon = full(input_shape_vec, eps_val2, DType::Float32, input.device());
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto scaled_diff = div(abs_diff_f32, epsilon);
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
         auto mask = sub(ones_tensor, clamped);
 
         auto tie_count = sum(mask, dim, /*keepdim=*/true);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         auto mask_var = Variable(mask, false);
         return {grad_expanded * mask_var};
@@ -524,15 +553,20 @@ auto ModeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
             case DType::BFloat16: eps_val2 = 1e-3; break;
             default:              eps_val2 = 1e-7; break;
         }
-        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto scaled_diff = div(abs_diff, epsilon);
+        // Float32 tie mask + per-dim sum (half precision saturates past 2048
+        // ties); narrow back to input dtype, matching the global path.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
+        auto epsilon = full(input_shape_vec, eps_val2, DType::Float32, input.device());
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto scaled_diff = div(abs_diff_f32, epsilon);
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
         auto mask = sub(ones_tensor, clamped);
 
         // Normalize mask by tie count along dim
         auto tie_count = sum(mask, dim, /*keepdim=*/true);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         return {mul(grad_expanded, mask)};
     }
@@ -613,14 +647,19 @@ auto ModeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
             case DType::BFloat16: eps_val2 = 1e-3; break;
             default:              eps_val2 = 1e-7; break;
         }
-        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto scaled_diff = div(abs_diff, epsilon);
+        // Float32 tie mask + per-dim sum (half precision saturates past 2048
+        // ties); narrow back to input dtype, matching the global path.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
+        auto epsilon = full(input_shape_vec, eps_val2, DType::Float32, input.device());
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto scaled_diff = div(abs_diff_f32, epsilon);
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
         auto mask = sub(ones_tensor, clamped);
 
         auto tie_count = sum(mask, dim, /*keepdim=*/true);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         auto mask_var = Variable(mask, false);
         return {grad_expanded * mask_var};

@@ -122,7 +122,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     // On-device Philox 4x32-10 counter-based RNG with Box-Muller for normal distribution.
     // Each work-item uses its index as counter and the global seed as key.
 
-    auto seed_val = static_cast<uint32_t>(tenzor::get_global_seed());
+    uint64_t seed64 = static_cast<uint64_t>(tenzor::get_global_seed());
 
     // Generate Float32 on device, then convert if needed
     // We generate pairs via Box-Muller, so allocate (numel + 1) / 2 * 2 floats
@@ -134,19 +134,23 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     int64_t num_pairs = padded / 2;
 
     queue.parallel_for(sycl::range<1>(num_pairs), [=](sycl::id<1> idx) {
-        uint32_t counter = static_cast<uint32_t>(idx[0]);
-        uint32_t key = seed_val;
-
-        // Philox 4x32-10: use counter as c0, ~counter as c1, key as k0, ~key as k1
-        uint32_t c0 = counter;
-        uint32_t c1 = ~counter;
-        uint32_t k0 = key;
+        // Split the full 64-bit per-element counter across both Philox lanes so
+        // the stream period is not exhausted below 2^64 elements, and seed the
+        // key schedule with both halves of the 64-bit global seed so that two
+        // manual_seed() values differing only above bit 31 produce distinct
+        // streams.
+        uint64_t ctr = static_cast<uint64_t>(idx[0]);
+        uint32_t c0 = static_cast<uint32_t>(ctr & 0xFFFFFFFFu);
+        uint32_t c1 = static_cast<uint32_t>(ctr >> 32);
+        uint32_t k0 = static_cast<uint32_t>(seed64 & 0xFFFFFFFFu);
+        uint32_t k1 = static_cast<uint32_t>(seed64 >> 32);
 
         // Philox-2x32-10 (Salmon et al., "Parallel Random Numbers", 2011).
         // Each round multiplies the counter lane c0, then mixes the high word
-        // with c1 and the key; the key advances by the Weyl constant. The
-        // previous loop mixed 4x32 multipliers into a 2-lane state with
-        // redundant self-assignments, producing a biased non-Philox stream.
+        // with c1 and the key; the key advances by the Weyl constant. Both
+        // 64-bit-seed halves participate: k0 mixes into the state directly while
+        // k1 (added to the Weyl increment) perturbs the key schedule, ensuring
+        // the high seed word affects the output stream.
         constexpr uint32_t PHILOX_M = 0xD256D193u;  // 2x32 multiplier
         constexpr uint32_t PHILOX_W = 0x9E3779B9u;  // Weyl key increment
         for (int round = 0; round < 10; ++round) {
@@ -155,7 +159,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             uint32_t new_c0 = hi ^ c1 ^ k0;
             c1 = lo;
             c0 = new_c0;
-            k0 += PHILOX_W;
+            k0 += PHILOX_W + k1;
         }
 
         // Convert two uint32 outputs to uniform [0,1) floats
@@ -299,25 +303,27 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     }
 #else
     // On-device Philox 4x32-10 counter-based RNG for uniform distribution [0, 1)
-    auto seed_val = static_cast<uint32_t>(tenzor::get_global_seed());
+    uint64_t seed64 = static_cast<uint64_t>(tenzor::get_global_seed());
 
     // Generate Float32 on device directly
     Tensor f32_buf({numel}, DType::Float32, device);
     float* f32_ptr = get_data_ptr<float>(f32_buf);
 
     queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-        uint32_t counter = static_cast<uint32_t>(idx[0]);
-        uint32_t key = seed_val;
+        // Split the full 64-bit per-element counter across both Philox lanes so
+        // the stream period is not exhausted below 2^64 elements, and seed the
+        // key schedule with both halves of the 64-bit global seed so distinct
+        // 64-bit seeds produce distinct streams. Mirrors the randn fallback.
+        uint64_t ctr = static_cast<uint64_t>(idx[0]);
+        uint32_t c0 = static_cast<uint32_t>(ctr & 0xFFFFFFFFu);
+        uint32_t c1 = static_cast<uint32_t>(ctr >> 32);
+        uint32_t k0 = static_cast<uint32_t>(seed64 & 0xFFFFFFFFu);
+        uint32_t k1 = static_cast<uint32_t>(seed64 >> 32);
 
-        // Philox-2x32-10 (Salmon et al., "Parallel Random Numbers", 2011),
-        // mirroring the randn fallback. Each round multiplies counter lane c0,
-        // mixes the high word with c1 and the key, and advances the key by the
-        // Weyl constant. The previous 4x32 variant had a redundant self-
-        // assignment (c0 = c0) and discarded a lane, producing a biased stream.
-        uint32_t c0 = counter;
-        uint32_t c1 = ~counter;
-        uint32_t k0 = key;
-
+        // Philox-2x32-10 (Salmon et al., "Parallel Random Numbers", 2011).
+        // Each round multiplies counter lane c0, mixes the high word with c1 and
+        // the key, and advances the key by the Weyl constant perturbed by the
+        // high seed word k1 so both seed halves affect the output stream.
         constexpr uint32_t PHILOX_M = 0xD256D193u;  // 2x32 multiplier
         constexpr uint32_t PHILOX_W = 0x9E3779B9u;  // Weyl key increment
         for (int round = 0; round < 10; ++round) {
@@ -326,7 +332,7 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             uint32_t new_c0 = hi ^ c1 ^ k0;
             c1 = lo;
             c0 = new_c0;
-            k0 += PHILOX_W;
+            k0 += PHILOX_W + k1;
         }
 
         // Convert to uniform [0, 1)
@@ -721,6 +727,10 @@ struct RandintKernelInt64 {};
 
 auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape,
                     DType dtype, Device device, sycl::queue& queue) -> Tensor {
+    if (high <= low) {
+        throw std::invalid_argument("randint: high must be greater than low");
+    }
+
     Tensor output(shape, dtype, device);
     const int64_t numel = output.numel();
     if (numel == 0) return output;

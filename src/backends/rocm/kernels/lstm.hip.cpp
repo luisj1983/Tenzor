@@ -36,8 +36,20 @@ namespace rocm {
 
 constexpr int BLOCK_SIZE = 256;
 
-inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    return (n + block_size - 1) / block_size;
+// Maximum grid dimension on x for current HIP/ROCm devices. Grid-stride loops
+// (HIP_GRID_STRIDE_LOOP) cover the full element range even when the requested
+// block count is clamped, so clamping here cannot drop work.
+constexpr int64_t MAX_GRID_DIM_X = 2147483647;  // 2^31 - 1
+
+inline unsigned int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
+    int64_t num_blocks = (n + block_size - 1) / block_size;
+    if (num_blocks < 1) {
+        num_blocks = 1;
+    }
+    if (num_blocks > MAX_GRID_DIM_X) {
+        num_blocks = MAX_GRID_DIM_X;
+    }
+    return static_cast<unsigned int>(num_blocks);
 }
 
 // RAII wrapper for rocBLAS handle to prevent leaks on exceptions
@@ -837,13 +849,22 @@ auto lstm_forward_kernel(
     Tensor h_t({batch, hidden}, input.dtype(), input.device());
     Tensor c_t({batch, hidden}, input.dtype(), input.device());
 
-    // Copy h0 and c0 to h_t and c_t
-    HIP_CHECK(hipMemcpyAsync(h_t.data_ptr(), h0.data_ptr(),
-                   batch * hidden * dtype_size(input.dtype()),
-                   hipMemcpyDeviceToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(c_t.data_ptr(), c0.data_ptr(),
-                   batch * hidden * dtype_size(input.dtype()),
-                   hipMemcpyDeviceToDevice, stream));
+    // Copy h0 and c0 to h_t and c_t. h0/c0 may be empty (caller passed
+    // Tensor{} for no initial state); data_ptr() is nullptr in that case, so
+    // zero-initialize instead of memcpy'ing from a null source.
+    const size_t state_bytes = batch * hidden * dtype_size(input.dtype());
+    if (h0.numel() > 0) {
+        HIP_CHECK(hipMemcpyAsync(h_t.data_ptr(), h0.data_ptr(), state_bytes,
+                       hipMemcpyDeviceToDevice, stream));
+    } else {
+        HIP_CHECK(hipMemsetAsync(h_t.data_ptr(), 0, state_bytes, stream));
+    }
+    if (c0.numel() > 0) {
+        HIP_CHECK(hipMemcpyAsync(c_t.data_ptr(), c0.data_ptr(), state_bytes,
+                       hipMemcpyDeviceToDevice, stream));
+    } else {
+        HIP_CHECK(hipMemsetAsync(c_t.data_ptr(), 0, state_bytes, stream));
+    }
 
     if (input.dtype() == DType::Float32) {
         // Get rocBLAS handle (RAII ensures cleanup on exceptions)
@@ -1007,6 +1028,16 @@ auto lstm_forward_kernel(
     }
 
     HIP_CHECK(hipGetLastError());
+
+    // All GEMMs, fused-cell kernels, bias adds and per-timestep copies were
+    // enqueued asynchronously on `stream`. The function-local RocBLASHandleGuard
+    // and the device-backed temporaries (gates, h_t, c_t) are about to go out of
+    // scope; their destructors free the rocBLAS handle and return the device
+    // buffers to the (non-stream-ordered) ROCm caching allocator, which can hand
+    // them to the next allocation immediately. Synchronize here so all queued
+    // work has finished reading those buffers and using the handle before they
+    // are destroyed, preventing a use-after-free.
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     return {output, h_n, c_n};
 }

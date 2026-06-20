@@ -70,19 +70,45 @@ float readF16COut(uint idx) {
 }
 
 void writeF16GradGates(uint idx, float val) {
+    // Adjacent elements share a 32-bit word (two packed F16 lanes); a plain
+    // read-modify-write races with the neighbouring lane's writer and loses
+    // updates. Use a bounded atomicCompSwap masked write so each lane is
+    // updated without clobbering its partner.
     uint word_idx = idx >> 1u;
-    uint packed = grad_gates[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    grad_gates[word_idx] = packHalf2x16(pair);
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+
+    uint old_val = grad_gates[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_gates[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: do NOT add a non-atomic fallback store, it would clobber
+    // the neighbouring packed half-word.
 }
 
 void writeF16GradCPrev(uint idx, float val) {
+    // See writeF16GradGates: adjacent global indices idx and idx+1 share a
+    // word, so the store must be a collision-safe masked atomicCompSwap.
     uint word_idx = idx >> 1u;
-    uint packed = grad_c_prev[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    grad_c_prev[word_idx] = packHalf2x16(pair);
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+
+    uint old_val = grad_c_prev[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_c_prev[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: do NOT add a non-atomic fallback store, it would clobber
+    // the neighbouring packed half-word.
 }
 
 float sigmoid(float x) {

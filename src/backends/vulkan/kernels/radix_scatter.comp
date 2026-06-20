@@ -13,23 +13,34 @@ layout(push_constant) uniform PushConstants {
     uint n;
     uint digit;
     uint n_wgs;
+    uint descending; // 0 = ascending, 1 = descending
 };
 
 shared uint local_offsets[256];
 
+// Must derive exactly the same digit as the histogram pass, so apply the same
+// descending key inversion here: an ascending LSD radix over the inverted key
+// yields descending values with stable (ascending-index) tie order.
 uint float_to_sortable(float val) {
     uint bits = floatBitsToUint(val);
     uint mask = -int(bits >> 31) | 0x80000000u;
-    return bits ^ mask;
+    uint sortable = bits ^ mask;
+    if (descending != 0u) sortable = ~sortable;
+    return sortable;
 }
 
 void main() {
     uint lid = gl_LocalInvocationID.x;
     uint wg_id = gl_WorkGroupID.x;
 
-    // Load this workgroup's prefix sums into shared memory
-    if (lid < 256) {
-        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    // Load this workgroup's prefix sums into shared memory. The offset table
+    // always has exactly 256 bins, but the workgroup size is a runtime spec
+    // constant (local_size_x_id=0) that can be <256 or >256, so load all 256
+    // bins via a strided loop rather than one-bin-per-thread (which would leave
+    // local_offsets[wgSize..255] uninitialized for wgSize<256 and read/write
+    // past local_offsets[256] for wgSize>256).
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        local_offsets[b] = histos[b * n_wgs + wg_id];
     }
     barrier();
 
@@ -38,7 +49,11 @@ void main() {
     uint tile_start = wg_id * tile_size;
     uint tile_end = min(tile_start + tile_size, n);
 
-    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+    // Stride the scatter loop by the actual workgroup size (not a hardcoded
+    // 256) so every element is scattered exactly once: wgSize<256 would
+    // otherwise drop elements, and wgSize>256 would make lanes lid and lid+256
+    // collide on the same element index (double-scatter / data race).
+    for (uint i = tile_start + lid; i < tile_end; i += gl_WorkGroupSize.x) {
         uint sortable = float_to_sortable(keys_in[i]);
         uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
         uint dest = atomicAdd(local_offsets[digit_val], 1);

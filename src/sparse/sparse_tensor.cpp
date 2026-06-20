@@ -1162,6 +1162,15 @@ auto SparseTensor::to_csc() const -> SparseTensor {
         throw std::runtime_error("to_csc: only 2D sparse tensors supported");
     }
 
+    // CSR and BSR: convert to COO first, then COO→CSC below. The vendor
+    // (cuSPARSE/rocSPARSE) paths below expect a COO tensor with a populated
+    // indices_ buffer; CSR/BSR tensors only populate crow/col indices and
+    // would otherwise feed an empty indices buffer to the COO->CSC kernels
+    // (OOB read / wrong result). Mirror the symmetric guard in to_csr().
+    if (layout_ == SparseLayout::CSR || layout_ == SparseLayout::BSR) {
+        return to_coo().to_csc();
+    }
+
     // GPU-native path: sort by (col, row) and build ccol_indices entirely
     // on device using thrust, avoiding GPU->CPU->GPU round-trips.
 #ifdef TENZOR_HAS_CUSPARSE

@@ -404,6 +404,13 @@ auto cudnn_batchnorm2d_forward_training(
             reinterpret_cast<__half*>(running_var.data_ptr()),
             stat_n);
         CUDA_CHECK(cudaGetLastError());
+        // The conversion kernels read from running_mean_f32/running_var_f32, which are
+        // local temporaries destroyed at function return. The caching allocator is NOT
+        // stream-ordered (free() immediately returns the block to the pool), so the
+        // memory could be reused by a later allocation while these async kernels are
+        // still reading it. Synchronize the stream so the reads complete before the
+        // temporaries' device memory is released.
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     } else if (input.dtype() == DType::BFloat16) {
         // For BF16 input, cuDNN requires FP32 for all BN parameters
         const float alpha = 1.0f;
@@ -450,6 +457,13 @@ auto cudnn_batchnorm2d_forward_training(
             reinterpret_cast<__nv_bfloat16*>(running_var.data_ptr()),
             stat_n);
         CUDA_CHECK(cudaGetLastError());
+        // The conversion kernels read from running_mean_f32/running_var_f32, which are
+        // local temporaries destroyed at function return. The caching allocator is NOT
+        // stream-ordered (free() immediately returns the block to the pool), so the
+        // memory could be reused by a later allocation while these async kernels are
+        // still reading it. Synchronize the stream so the reads complete before the
+        // temporaries' device memory is released.
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     }
 
     // bn_desc destroyed by bn_desc_guard (RAII)

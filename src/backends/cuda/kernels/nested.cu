@@ -514,8 +514,17 @@ auto nested_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V,
 
     auto output = tenzor::zeros({total_q_len, head_dim}, Q.dtype(), Q.device());
 
-    // Use enough threads to cover query rows (one thread per query row)
-    int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
+    // Empty nested batch: a 0-block grid (B==0) or 0-thread block (total_q_len==0)
+    // is an invalid CUDA launch config that cudaGetLastError() would turn into a
+    // thrown exception. The output is already an allocated empty/zero tensor, so
+    // just return it without launching.
+    if (B <= 0 || total_q_len <= 0) {
+        return output;
+    }
+
+    // Use enough threads to cover query rows (one thread per query row).
+    // Clamp to >=1 so the block dimension is always a valid launch config.
+    int threads = static_cast<int>(std::max(int64_t(1), std::min(int64_t(256), total_q_len)));
 
     if (Q.dtype() == DType::Float32) {
         nested_attention_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
@@ -690,7 +699,14 @@ auto nested_attention_backward_cuda(const Tensor& grad_out, const Tensor& Q,
     auto grad_K = tenzor::zeros({total_kv_len, head_dim}, K.dtype(), K.device());
     auto grad_V = tenzor::zeros({total_kv_len, head_dim}, V.dtype(), V.device());
 
-    int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
+    // Empty nested batch: avoid a 0-block grid (B==0) or 0-thread block
+    // (total_q_len==0) launch, which would be an invalid CUDA launch config and
+    // throw. The gradients are already allocated as zeros, so return them as-is.
+    if (B <= 0 || total_q_len <= 0) {
+        return {grad_Q, grad_K, grad_V};
+    }
+
+    int threads = static_cast<int>(std::max(int64_t(1), std::min(int64_t(256), total_q_len)));
 
     if (Q.dtype() == DType::Float32) {
         nested_attention_backward_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
@@ -818,9 +834,19 @@ auto nested_from_padded_cuda(const Tensor& padded, const Tensor& offsets,
     // Inner size = product of all dims after dim 1, covering 4D+ padded inputs.
     int64_t D = (B > 0 && max_len > 0) ? padded.numel() / (B * max_len) : 1;
 
-    // Compute total_len from offsets
-    auto offsets_cpu = (offsets.device().type == Device::Type::CPU) ? offsets : offsets.to(Device::cpu());
-    int64_t total_len = offsets_cpu.data<int64_t>()[B];
+    // Compute total_len from offsets[B]. Avoid synchronously copying the whole
+    // offsets tensor to host (which serializes the stream); instead copy just the
+    // single trailing int64 element asynchronously on `stream`, then sync only
+    // that stream. For an already-host offsets tensor, read it directly.
+    int64_t total_len;
+    if (offsets.device().type == Device::Type::CPU) {
+        total_len = offsets.data<int64_t>()[B];
+    } else {
+        CUDA_CHECK_NESTED(cudaMemcpyAsync(&total_len, offsets.data<int64_t>() + B,
+                                          sizeof(int64_t), cudaMemcpyDeviceToHost,
+                                          stream));
+        CUDA_CHECK_NESTED(cudaStreamSynchronize(stream));
+    }
 
     auto values = tenzor::empty({total_len, D}, padded.dtype(), padded.device());
 

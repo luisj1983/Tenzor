@@ -33,7 +33,7 @@ auto RandomSampler::reset(int64_t epoch) -> void {
     indices_.resize(dataset_size_);
     std::iota(indices_.begin(), indices_.end(), size_t{0});
 
-    std::mt19937 rng(static_cast<unsigned>(seed_ + epoch));
+    std::mt19937_64 rng(static_cast<uint64_t>(seed_ + epoch));
     std::shuffle(indices_.begin(), indices_.end(), rng);
 }
 
@@ -48,6 +48,9 @@ WeightedRandomSampler::WeightedRandomSampler(
       replacement_(replacement),
       seed_(seed) {
 
+    if (num_samples_ < 0) {
+        throw std::invalid_argument("num_samples must be non-negative");
+    }
     if (weights_.empty()) {
         throw std::invalid_argument("weights must not be empty");
     }
@@ -83,7 +86,7 @@ auto WeightedRandomSampler::reset(int64_t epoch) -> void {
     indices_.clear();
     indices_.reserve(static_cast<size_t>(num_samples_));
 
-    std::mt19937 rng(static_cast<unsigned>(seed_ + epoch));
+    std::mt19937_64 rng(static_cast<uint64_t>(seed_ + epoch));
     std::discrete_distribution<size_t> dist(weights_.begin(), weights_.end());
 
     if (replacement_) {
@@ -116,7 +119,7 @@ SubsetRandomSampler::SubsetRandomSampler(std::vector<size_t> indices, int64_t se
 auto SubsetRandomSampler::reset(int64_t epoch) -> void {
     indices_ = subset_indices_;
 
-    std::mt19937 rng(static_cast<unsigned>(seed_ + epoch));
+    std::mt19937_64 rng(static_cast<uint64_t>(seed_ + epoch));
     std::shuffle(indices_.begin(), indices_.end(), rng);
 }
 
@@ -151,7 +154,7 @@ auto DistributedSampler::reset(int64_t epoch) -> void {
 
     // Optionally shuffle with deterministic seed based on epoch
     if (shuffle_) {
-        std::mt19937 rng(static_cast<unsigned>(seed_ + epoch));
+        std::mt19937_64 rng(static_cast<uint64_t>(seed_ + epoch));
         std::shuffle(all_indices.begin(), all_indices.end(), rng);
     }
 

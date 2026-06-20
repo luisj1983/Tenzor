@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <type_traits>
 
 namespace tenzor {
 namespace cuda {
@@ -870,12 +871,19 @@ __global__ void slice_kernel_impl(
 }
 
 auto slice_kernel(
-    const Tensor& input,
+    const Tensor& input_orig,
     const std::vector<int64_t>& starts,
     const std::vector<int64_t>& ends,
     const std::vector<int64_t>& steps,
     cudaStream_t stream
 ) -> Tensor {
+    // slice synthesizes input strides from shape below, which is only valid for
+    // contiguous input; materialize a contiguous copy so a non-contiguous view
+    // is sliced correctly.
+    Tensor input_contig;
+    const Tensor& input = input_orig.is_contiguous()
+        ? input_orig
+        : (input_contig = input_orig.contiguous());
     auto input_shape = input.shape();
     int64_t ndim = input_shape.size();
 
@@ -1040,7 +1048,11 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, cudaStre
         return results;
     }
 
-    // General path: use slice_kernel for each split
+    // General path: use slice_kernel for each split. Materialize a single
+    // contiguous copy up front so a non-contiguous input is not re-contiguated
+    // inside slice_kernel on every iteration (O(num_splits*numel) extra D2D
+    // traffic); slice_kernel then takes the already-contiguous tensor directly.
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
     for (int64_t i = 0; i < num_splits; ++i) {
         int64_t start = i * split_size;
         int64_t end = std::min(start + split_size, dim_size);
@@ -1051,7 +1063,7 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, cudaStre
         starts[dim] = start;
         ends[dim] = end;
 
-        results.push_back(slice_kernel(input, starts, ends, steps, stream));
+        results.push_back(slice_kernel(cont, starts, ends, steps, stream));
     }
 
     return results;
@@ -1666,10 +1678,17 @@ template<> struct TraceAccumType<__nv_bfloat16> { using type = float; };
 
 // Trace kernel: sum diagonal elements from a 2D matrix (rows x cols)
 // input layout is row-major: diagonal element i is at input[i * cols + i]
+//
+// When multiple blocks participate, each block's partial sum is written in the
+// accumulator type (Acc) — not narrowed back to T — so that the final pass
+// re-accumulates in full precision. For half/bf16 (Acc=float) this avoids
+// reintroducing per-block rounding error that the float accumulator exists to
+// prevent. For all other dtypes Acc == T, so the partial buffer layout is
+// unchanged.
 template<typename T>
 __global__ void trace_diag_sum_kernel(
     const T* __restrict__ input,
-    T* output,
+    typename TraceAccumType<T>::type* output,
     int64_t diag_size,
     int64_t cols
 ) {
@@ -1697,14 +1716,16 @@ __global__ void trace_diag_sum_kernel(
     }
 
     if (tid == 0) {
-        output[blockIdx.x] = T(shared[0]);
+        // Keep the partial in the accumulator type for full-precision re-sum.
+        output[blockIdx.x] = shared[0];
     }
 }
 
-// Simple contiguous sum for final pass of multi-block trace reduction
+// Final pass of multi-block trace reduction. Reads the per-block partials in
+// the accumulator type (Acc) and narrows to T only on the single scalar write.
 template<typename T>
 __global__ void trace_final_sum_kernel(
-    const T* __restrict__ input,
+    const typename TraceAccumType<T>::type* __restrict__ input,
     T* output,
     int64_t n
 ) {
@@ -1718,7 +1739,7 @@ __global__ void trace_final_sum_kernel(
 
     Acc thread_sum = Acc(0);
     for (int64_t i = idx; i < n; i += grid_size) {
-        thread_sum = thread_sum + Acc(input[i]);
+        thread_sum = thread_sum + input[i];
     }
 
     shared[tid] = thread_sum;
@@ -1759,16 +1780,24 @@ auto trace_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     const int block_size = 256;
     int num_blocks = std::min<int>((diag_size + block_size - 1) / block_size, 1024);
 
-    // Helper macro to reduce boilerplate for trace dispatch
+    // Helper macro to reduce boilerplate for trace dispatch.
+    //
+    // diag_sum now emits per-block partials in the accumulator type (Acc), so
+    // inter-block partials are never narrowed back to T. For Acc == T (fp32,
+    // fp64, int) the single-block case can still write straight to the output.
+    // For Acc != T (half/bf16, Acc=float) we always run the two-pass form with
+    // an Acc-typed temp and narrow to T only in the final scalar write, keeping
+    // the reduction in full precision end to end.
     #define TRACE_DISPATCH(T, in_ptr, out_ptr, accum_size) \
         do { \
+            using Acc = typename TraceAccumType<T>::type; \
             size_t smem = block_size * (accum_size); \
-            if (num_blocks == 1) { \
+            if (num_blocks == 1 && std::is_same<Acc, T>::value) { \
                 trace_diag_sum_kernel<T><<<1, block_size, smem, stream>>>( \
-                    in_ptr, out_ptr, diag_size, cols); \
+                    in_ptr, reinterpret_cast<Acc*>(out_ptr), diag_size, cols); \
             } else { \
-                backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T)); \
-                auto* d_temp = static_cast<T*>(d_temp_guard.get()); \
+                backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(Acc)); \
+                auto* d_temp = static_cast<Acc*>(d_temp_guard.get()); \
                 trace_diag_sum_kernel<T><<<num_blocks, block_size, smem, stream>>>( \
                     in_ptr, d_temp, diag_size, cols); \
                 CUDA_CHECK(cudaGetLastError()); \
@@ -2280,6 +2309,15 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     int64_t ndim = shape.size();
     int64_t in_dim_size = shape[dim];
 
+    // Empty input along `dim`: the output is empty too. Returning here avoids the
+    // zero-byte device allocations + a finalize kernel that would read
+    // prefix[N-1]/repeats[N-1] (i.e. index -1) out of bounds when N == 0.
+    if (in_dim_size == 0) {
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[dim] = 0;
+        return Tensor::empty_uninitialized(out_shape, input.dtype(), input.device());
+    }
+
     // Convert repeats to int64 on device (no CPU roundtrip)
     int64_t* d_repeats_i64 = nullptr;
     CUDA_CHECK(cudaMallocAsync(&d_repeats_i64, in_dim_size * sizeof(int64_t), stream));
@@ -2312,13 +2350,16 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     CUDA_CHECK(cudaMallocAsync(&d_prefix, (in_dim_size + 1) * sizeof(int64_t), stream));
 
     // CUB ExclusiveSum: d_prefix[0]=0, d_prefix[i]=sum(d_repeats[0..i-1])
+    // Pass the item count as int64_t (the NumItemsT template parameter) so a
+    // dimension larger than INT_MAX is not silently truncated, which would scan
+    // the wrong element count and corrupt the prefix array.
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
     cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
-                                  static_cast<int>(in_dim_size), stream);
+                                  in_dim_size, stream);
     CUDA_CHECK(cudaMallocAsync(&d_temp, temp_bytes, stream));
     cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
-                                  static_cast<int>(in_dim_size), stream);
+                                  in_dim_size, stream);
     CUDA_CHECK(cudaFreeAsync(d_temp, stream));
 
     // Compute total = d_prefix[N-1] + d_repeats[N-1] entirely on device,

@@ -118,6 +118,21 @@ struct DeviceInfo {
     DeviceInfo& operator=(const DeviceInfo&) = delete;
 };
 
+/// RAII wrapper for a raw caching-allocator scratch buffer so it is released on
+/// any return/exception path (mirrors DeviceInfo). The buffer is freed back to
+/// the RocmCachingAllocator in the destructor.
+struct ScratchBuffer {
+    void* ptr = nullptr;
+    explicit ScratchBuffer(size_t bytes) {
+        ptr = backend::rocm::RocmCachingAllocator::get().allocate(bytes);
+    }
+    ~ScratchBuffer() {
+        if (ptr) backend::rocm::RocmCachingAllocator::get().free(ptr);
+    }
+    ScratchBuffer(const ScratchBuffer&) = delete;
+    ScratchBuffer& operator=(const ScratchBuffer&) = delete;
+};
+
 /// Validate dtype for linalg ops. ROCm linalg supports Float32 and Float64 only.
 /// Float16 and BFloat16 are upcast to Float32 by the caller; anything else is an error.
 void validate_linalg_dtype(const Tensor& t, const std::string& op_name) {
@@ -789,7 +804,8 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
 
     // Allocate E (superdiagonal) on device — required by rocSOLVER gesvd
     size_t e_bytes = (k > 1 ? k - 1 : 1) * (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
-    void* d_e = backend::rocm::RocmCachingAllocator::get().allocate(e_bytes);
+    ScratchBuffer e_guard(e_bytes);  // RAII: freed on any exception/return path
+    void* d_e = e_guard.ptr;
 
     // rocSOLVER gesvd leading-dimension rules (col-major), with m',n' = rocSOLVER
     // arguments (= our swapped n_cols, m):
@@ -862,7 +878,7 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    backend::rocm::RocmCachingAllocator::get().free(d_e);
+    // d_e released by e_guard (ScratchBuffer RAII)
     return {U, S, Vt};
 }
 
@@ -1010,9 +1026,13 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     rocblas_evect evect = rocblas_evect_original;
     rocblas_fill uplo = rocblas_fill_upper;
 
-    // Allocate E (off-diagonal) on device — required by rocSOLVER syevd
+    // Allocate E (off-diagonal) on device — required by rocSOLVER syevd.
+    // RAII via ScratchBuffer so it is released on any exception/return path
+    // (e.g. the check_rocsolver_info throws in the per-batch loop below),
+    // matching the SVD path's e_guard.
     size_t e_bytes = (n > 1 ? n - 1 : 1) * (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
-    void* d_e = backend::rocm::RocmCachingAllocator::get().allocate(e_bytes);
+    ScratchBuffer e_guard(e_bytes);
+    void* d_e = e_guard.ptr;
 
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
@@ -1041,7 +1061,7 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    backend::rocm::RocmCachingAllocator::get().free(d_e);
+    // d_e freed by e_guard (ScratchBuffer) on scope exit.
     // rocSOLVER syevd writes eigenvectors as COLUMNS of a COLUMN-MAJOR matrix.
     // Reinterpreted as row-major this gives V^T; transpose so the caller
     // sees row-major V with eigenvectors as columns (matches CPU/LAPACKE).
@@ -2021,6 +2041,16 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
 
 auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    validate_linalg_dtype(A, "geqrf");
+    if (A.dtype() == DType::Float16) {
+        auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), stream);
+        return {R.to(DType::Float16), tau.to(DType::Float16)};
+    }
+    if (A.dtype() == DType::BFloat16) {
+        auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), stream);
+        return {R.to(DType::BFloat16), tau.to(DType::BFloat16)};
+    }
+
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
@@ -4298,10 +4328,10 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     validate_linalg_dtype(A, "inv");
     if (A.dtype() == DType::Float16) {
-        return linalg_inv_kernel(A.to(DType::Float32), stream);
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::Float16);
     }
     if (A.dtype() == DType::BFloat16) {
-        return linalg_inv_kernel(A.to(DType::Float32), stream);
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::BFloat16);
     }
 
     auto work = A.contiguous().clone();
@@ -4349,7 +4379,26 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+
+    // Inspect the per-batch info written by lu_kernel. A value > 0 is the
+    // 1-based index of the first zero pivot (singular matrix); negative values
+    // encode the determinant sign and must NOT be treated as an error. Without
+    // this check lu_inv_kernel divides by a zero diagonal and silently returns
+    // Inf/NaN, diverging from rocSOLVER (check_rocsolver_info) and the CPU
+    // backend which both raise. Mirrors the fallback cholesky info check.
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    hipError_t copy_err = hipMemcpy(h_info.data(), d_info,
+                                    nbatch * sizeof(int), hipMemcpyDeviceToHost);
     // d_pivots/d_info freed by their HipBuffer guards on scope exit.
+    HIP_CHECK_LINALG(copy_err);
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg::inv: computation failed (info=" +
+                std::to_string(h_info[b]) + ") — matrix is singular");
+        }
+    }
+
     return result;
 }
 
@@ -4360,10 +4409,12 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -> Tensor {
     validate_linalg_dtype(A, "solve");
     if (A.dtype() == DType::Float16) {
-        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream);
+        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream)
+            .to(DType::Float16);
     }
     if (A.dtype() == DType::BFloat16) {
-        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream);
+        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream)
+            .to(DType::BFloat16);
     }
 
     auto work_a = A.contiguous().clone();
@@ -4414,7 +4465,26 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+
+    // Inspect the per-batch info written by lu_kernel. A value > 0 is the
+    // 1-based index of the first zero pivot (singular matrix); negative values
+    // encode the determinant sign and must NOT be treated as an error. Without
+    // this check lu_solve_kernel divides by a zero diagonal and silently returns
+    // Inf/NaN, diverging from rocSOLVER (check_rocsolver_info) and the CPU
+    // backend which both raise. Mirrors the fallback cholesky info check.
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    hipError_t copy_err = hipMemcpy(h_info.data(), d_info,
+                                    nbatch * sizeof(int), hipMemcpyDeviceToHost);
     // d_pivots/d_info freed by their HipBuffer guards on scope exit.
+    HIP_CHECK_LINALG(copy_err);
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg::solve: computation failed (info=" +
+                std::to_string(h_info[b]) + ") — matrix is singular");
+        }
+    }
+
     return work_b;
 }
 
@@ -4658,10 +4728,10 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
 auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> Tensor {
     validate_linalg_dtype(A, "cholesky");
     if (A.dtype() == DType::Float16) {
-        return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream);
+        return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream).to(DType::Float16);
     }
     if (A.dtype() == DType::BFloat16) {
-        return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream);
+        return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream).to(DType::BFloat16);
     }
 
     auto work = A.contiguous().clone();
@@ -5099,11 +5169,11 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
     validate_linalg_dtype(A, "geqrf");
     if (A.dtype() == DType::Float16) {
         auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), stream);
-        return {R, tau};
+        return {R.to(DType::Float16), tau.to(DType::Float16)};
     }
     if (A.dtype() == DType::BFloat16) {
         auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), stream);
-        return {R, tau};
+        return {R.to(DType::BFloat16), tau.to(DType::BFloat16)};
     }
 
     auto work = A.contiguous().clone();

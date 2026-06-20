@@ -1,5 +1,7 @@
 #include "vulkan_ops_common.hpp"
 
+#include <cstddef>  // offsetof — for partial push-constant ranges
+
 namespace tenzor {
 
 // Normalization operations implementation
@@ -36,6 +38,14 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     const Tensor mean_c = dispatchContiguous(mean);
     const Tensor var_c = dispatchContiguous(var);
     const Tensor gamma_c = gamma ? dispatchContiguous(*gamma) : Tensor();
+
+    // Float16 / BFloat16 use native packed-half backward shaders implementing the
+    // correct training-mode two-pass algorithm (grad_gamma/grad_beta via global
+    // atomicAdd in pass 1, then grad_input from the completed per-channel sums in
+    // pass 2). The F16 shader (batchnorm2d_backward_f16) is a single pipeline that
+    // selects the pass via the `pass` push-constant; the BF16 path uses two
+    // separate pipelines (batchnorm2d_backward_bf16 then
+    // batchnorm2d_backward_grad_input_bf16). Both are wired below.
 
     // Select shader based on dtype
     std::string shader_name = "batchnorm2d_backward";
@@ -146,7 +156,11 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Push constants
+    // Push constants. The trailing `pass` field is only consumed by the F16
+    // shader (batchnorm2d_backward_f16), which is a single pipeline that runs
+    // both passes selected by `pass`. The F32 / BF16 / F64 shaders reflect a
+    // 6-field (24-byte) push range, so for those we push only the first 24 bytes;
+    // for F16 we push the full 28-byte struct.
     struct PushConstants {
         uint32_t n_elements;
         uint32_t batch;
@@ -154,6 +168,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         uint32_t spatial_size;
         float eps;
         uint32_t has_gamma;
+        uint32_t pass;
     } push_constants;
 
     push_constants.n_elements = static_cast<uint32_t>(n_elements);
@@ -162,6 +177,14 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     push_constants.spatial_size = static_cast<uint32_t>(spatial_size);
     push_constants.eps = epsilon;
     push_constants.has_gamma = (gamma != nullptr) ? 1 : 0;
+    push_constants.pass = 0;  // pass 0 = grad_gamma/grad_beta reduction (F16)
+
+    // Only the F16 shader declares the 7th `pass` field; everyone else has a
+    // 24-byte (6-field) push range.
+    const bool bn_uses_pass = (input.dtype() == DType::Float16);
+    const uint32_t bn_push_size = bn_uses_pass
+        ? static_cast<uint32_t>(sizeof(PushConstants))
+        : static_cast<uint32_t>(offsetof(PushConstants, pass));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -169,16 +192,17 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+                      0, bn_push_size, &push_constants);
 
     if (is_f64_bn) {
         // f64: one workgroup per (batch, channel) pair
         uint32_t workgroups_bn = static_cast<uint32_t>(batch * channels);
         vkCmdDispatch(cmdBuffer, workgroups_bn, 1, 1);
     } else {
-        // For Float16, each thread processes a word (2 elements), so dispatch half as many threads
+        // For packed half (F16/BF16), each thread processes a word (2 elements),
+        // so dispatch half as many threads (word count).
         uint64_t dispatch_count = n_elements;
-        if (input.dtype() == DType::Float16) {
+        if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
             dispatch_count = (n_elements + 1) / 2;  // number of words
         }
         uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
@@ -189,11 +213,56 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    // Float16: pass 2 — re-run the SAME f16 pipeline with pass=1 to compute
+    // grad_input from the completed per-channel grad_gamma/grad_beta atomics.
+    if (input.dtype() == DType::Float16) {
+        PushConstants pc_pass1 = push_constants;
+        pc_pass1.pass = 1;
+
+        VkDescriptorSet f16_gi_ds = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer f16_gi_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(f16_gi_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(f16_gi_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->layout(), 0, 1, &f16_gi_ds, 0, nullptr);
+        vkCmdPushConstants(f16_gi_cmd, pipeline->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, static_cast<uint32_t>(sizeof(PushConstants)), &pc_pass1);
+        uint32_t f16_words = div_wg((n_elements + 1) / 2, devices_[device_id].workgroupSize);
+        vkCmdDispatch(f16_gi_cmd, f16_words, 1, 1);
+        insertComputeOnlyBarrier(f16_gi_cmd);
+        endSingleTimeCommands(f16_gi_cmd, device_id);
+    }
+
+    // BFloat16: pass 2 — dedicated grad_input pipeline consuming the per-channel
+    // grad_gamma/grad_beta accumulated by the bf16 pass-1 shader. Each thread
+    // handles one packed word (2 BF16 elements), so dispatch by word count.
+    if (input.dtype() == DType::BFloat16) {
+        auto* bn_input_pipeline_bf16 =
+            getPipeline("batchnorm2d_backward_grad_input_bf16", device_id);
+        VkDescriptorSet bf16_gi_ds = allocateAndWriteDescriptorSet(
+            device_id, bn_input_pipeline_bf16, bindings, sizes);
+
+        VkCommandBuffer bf16_gi_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(bf16_gi_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          bn_input_pipeline_bf16->pipeline());
+        vkCmdBindDescriptorSets(bf16_gi_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                bn_input_pipeline_bf16->layout(), 0, 1, &bf16_gi_ds, 0, nullptr);
+        // bf16 grad_input shader reflects a 6-field (24-byte) push range.
+        vkCmdPushConstants(bf16_gi_cmd, bn_input_pipeline_bf16->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, static_cast<uint32_t>(offsetof(PushConstants, pass)), &push_constants);
+        uint32_t bf16_words = div_wg((n_elements + 1) / 2, devices_[device_id].workgroupSize);
+        vkCmdDispatch(bf16_gi_cmd, bf16_words, 1, 1);
+        insertComputeOnlyBarrier(bf16_gi_cmd);
+        endSingleTimeCommands(bf16_gi_cmd, device_id);
+    }
+
     // Float32 backward is now two passes: pass 1 accumulated grad_gamma/
     // grad_beta; pass 2 uses those per-channel sums to compute grad_input
     // with the correct batchnorm training-mode formula.
-    // (Float16 / Float64 paths still handle grad_input inside their own
-    // specialized shaders — they retain the single-pass layout.)
+    // (Float64 path handles grad_input in its own dedicated pass-3 shader.)
     if (input.dtype() == DType::Float32) {
         auto* bn_input_pipeline = getPipeline("batchnorm2d_backward_grad_input", device_id);
         VkDescriptorSet bn_input_ds = allocateAndWriteDescriptorSet(
@@ -206,7 +275,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
                                 bn_input_pipeline->layout(), 0, 1, &bn_input_ds, 0, nullptr);
         vkCmdPushConstants(bn_input_cmd, bn_input_pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(PushConstants), &push_constants);
+                           0, static_cast<uint32_t>(offsetof(PushConstants, pass)), &push_constants);
         uint32_t bn_input_wg = div_wg(n_elements, devices_[device_id].workgroupSize);
         vkCmdDispatch(bn_input_cmd, bn_input_wg, 1, 1);
         insertComputeOnlyBarrier(bn_input_cmd);
@@ -248,6 +317,53 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         vkCmdDispatch(reduce_cmd, static_cast<uint32_t>(channels), 1, 1);
         insertComputeOnlyBarrier(reduce_cmd);
         endSingleTimeCommands(reduce_cmd, device_id);
+
+        // Float64: pass 3 — compute grad_input from the final per-channel
+        // grad_gamma/grad_beta sums using the training-mode formula. Pass 1 only
+        // wrote the partial grad_gamma/grad_beta; grad_input was deliberately
+        // left unwritten because it needs the full per-channel reductions.
+        // Bindings 0-5 mirror the main pass; bindings 6/7 must point at the FINAL
+        // (reduced) channel-sized grad_gamma/grad_beta, NOT the partial buffers.
+        auto* bn_input_pipeline_f64 =
+            getPipeline("batchnorm2d_backward_grad_input_f64", device_id);
+
+        std::vector<std::pair<uint32_t, const void*>> gi_bindings = {
+            {0, buffer_grad_out},
+            {1, buffer_input},
+            {2, buffer_mean},
+            {3, buffer_var},
+            {4, gamma_effective ? gamma_effective->data_ptr() : buffer_mean},
+            {5, buffer_grad_input},
+            {6, grad_gamma.data_ptr()},
+            {7, grad_beta.data_ptr()},
+        };
+        std::vector<size_t> gi_sizes = {
+            buffer_size_input,
+            buffer_size_input,
+            buffer_size_channel,
+            buffer_size_channel,
+            gamma_effective ? gamma_effective->numel() * gamma_effective->dtype_size()
+                            : buffer_size_channel,
+            buffer_size_input,
+            buffer_size_channel,
+            buffer_size_channel,
+        };
+
+        VkDescriptorSet gi_ds = allocateAndWriteDescriptorSet(
+            device_id, bn_input_pipeline_f64, gi_bindings, gi_sizes);
+
+        VkCommandBuffer gi_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(gi_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          bn_input_pipeline_f64->pipeline());
+        vkCmdBindDescriptorSets(gi_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                bn_input_pipeline_f64->layout(), 0, 1, &gi_ds, 0, nullptr);
+        vkCmdPushConstants(gi_cmd, bn_input_pipeline_f64->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, static_cast<uint32_t>(offsetof(PushConstants, pass)), &push_constants);
+        uint32_t gi_wg = div_wg(n_elements, devices_[device_id].workgroupSize);
+        vkCmdDispatch(gi_cmd, gi_wg, 1, 1);
+        insertComputeOnlyBarrier(gi_cmd);
+        endSingleTimeCommands(gi_cmd, device_id);
     }
 
     // For Float16 input, the shader accumulates grad_gamma/grad_beta in Float32
@@ -443,13 +559,10 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
     // Select shader based on dtype
     std::string shader_name = "batchnorm2d_mean_var";
     if (input.dtype() == DType::Float64) {
-        // FF.8: batchnorm2d_mean_var_f64.comp issues `atomicAdd(double)` on
-        // SSBO storage, which requires VK_EXT_shader_atomic_float +
-        // shaderBufferFloat64AtomicAdd.  Gate so unsupported devices fail
-        // fast with a readable diagnostic instead of an opaque SPIR-V
-        // validation error at pipeline creation.
-        vulkan::ensure_atomic_float64_storage_supported(
-            device_id, "BatchNorm2dMeanVar");
+        // batchnorm2d_mean_var_f64.comp is now a deterministic
+        // one-workgroup-per-channel tree reduction (mirroring the F32 path),
+        // using a plain shared double array instead of float64 buffer
+        // atomicAdd. No shaderBufferFloat64AtomicAdd gate is required.
         shader_name = "batchnorm2d_mean_var_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "batchnorm2d_mean_var_f16";
@@ -523,10 +636,11 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        // The F32 shader is a deterministic one-workgroup-per-channel tree
-        // reduction (see batchnorm2d_mean_var.comp); the f16/f64 variants
-        // still use one-thread-per-element atomics.
-        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var")
+        // The F32 and F64 shaders are deterministic one-workgroup-per-channel
+        // tree reductions (see batchnorm2d_mean_var.comp / *_f64.comp); the f16
+        // variant still uses one-thread-per-element atomics.
+        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var" ||
+                               shader_name == "batchnorm2d_mean_var_f64")
             ? static_cast<uint32_t>(channels)
             : static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -585,7 +699,8 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           0, sizeof(PushConstants), &push_constants);
 
         // Same deterministic per-channel dispatch as the mean pass.
-        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var")
+        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var" ||
+                               shader_name == "batchnorm2d_mean_var_f64")
             ? static_cast<uint32_t>(channels)
             : static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -753,9 +868,10 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
         throw std::invalid_argument("group_norm requires at least 2D input");
     }
 
-    // For BFloat16 or other unsupported types, convert to Float32
+    // Unsupported types convert to Float32. BFloat16 has a native packed shader
+    // (group_norm_bf16) selected below, so it is intentionally excluded here.
     if (input.dtype() != DType::Float32 && input.dtype() != DType::Float16 &&
-        input.dtype() != DType::Float64) {
+        input.dtype() != DType::Float64 && input.dtype() != DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         Tensor gamma_f32, beta_f32;
@@ -779,6 +895,8 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
         shader_name = "group_norm_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "group_norm_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "group_norm_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -818,10 +936,12 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     const void* buf_mean = mean_out.data_ptr();
     const void* buf_inv_std = inv_std_out.data_ptr();
 
-    bool is_float16 = (input.dtype() == DType::Float16);
-    // For F16: packed uint32 words, 4-byte aligned
-    size_t input_buf_size = is_float16 ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
-    size_t output_buf_size = is_float16 ? ((output.numel() + 1) / 2) * 4 : output.numel() * elem_size;
+    // F16 and BF16 both pack 2 elements per uint32 word (4-byte aligned) and use
+    // Float32 channel statistics / affine params.
+    bool is_packed_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    // For packed half: packed uint32 words, 4-byte aligned
+    size_t input_buf_size = is_packed_half ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
+    size_t output_buf_size = is_packed_half ? ((output.numel() + 1) / 2) * 4 : output.numel() * elem_size;
     size_t stats_buf_size = N * num_groups * stats_elem_size;
 
     // Bindings: input(0), output(1), gamma(2), beta(3), mean(4), inv_std(5)
@@ -836,8 +956,9 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
         const void* buf_beta = beta_c.data_ptr();
         bindings.push_back({2, buf_gamma});
         bindings.push_back({3, buf_beta});
-        // Gamma/beta are always Float32 for F16 shader, elem_size for F32/F64
-        size_t affine_elem_size = is_float16 ? sizeof(float) : elem_size;
+        // Gamma/beta are always Float32 for the packed-half (F16/BF16) shaders,
+        // elem_size for F32/F64
+        size_t affine_elem_size = is_packed_half ? sizeof(float) : elem_size;
         sizes.push_back(C * affine_elem_size);
         sizes.push_back(C * affine_elem_size);
     } else {
@@ -1392,8 +1513,13 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
         return grad_weight;
     }
 
+    // Fallback path (reached when the device lacks atomic-int64 support, so the
+    // CAS-based "embedding_backward_f64_atomic" shader cannot be used because it
+    // hard-requires GL_EXT_shader_atomic_int64). For Float64 use the dedicated
+    // non-atomic shader "embedding_backward_f64", which writes a real float64_t
+    // grad_weight buffer (matching the Float64 grad_weight allocated below).
     std::string shader_name = (grad_output.dtype() == DType::Float64)
-        ? "embedding_backward_f64_atomic" : "embedding_backward";
+        ? "embedding_backward_f64" : "embedding_backward";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Output: grad_weight of shape [num_embeddings, embedding_dim], initialized to zero
@@ -1569,6 +1695,15 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
     size_t elem_size = input.dtype_size();
     size_t rrms_elem_size = rrms.dtype_size();
 
+    // For Float64: rms_norm_backward_f64.comp is a two-pass (no-atomics) shader
+    // mirroring layer_norm_backward_f64. Binding 5 is a PARTIAL grad_weight of
+    // size [batch_size * normalized_shape] (one row per batch element), reduced
+    // into the final [normalized_shape] grad_weight by reduce_partial_sums_f64.
+    Tensor partial_grad_weight_rms;
+    if (is_float64) {
+        partial_grad_weight_rms = Tensor({batch_size * normalized_shape}, DType::Float64, input.device());
+    }
+
     // Materialize read operands to packed offset-0 buffers before binding.
     const Tensor grad_output_c = dispatchContiguous(grad_output);
     const Tensor input_c = dispatchContiguous(input);
@@ -1586,17 +1721,26 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
     size_t rrms_buf_size = batch_size * rrms_elem_size;
     size_t norm_buf_size = normalized_shape * elem_size;
 
-    // Bindings: grad_output(0), input(1), rrms(2), weight(3), grad_input(4), grad_weight(5)
+    // Bindings: grad_output(0), input(1), rrms(2), weight(3), grad_input(4),
+    // grad_weight(5). For F64, binding 5 is the partial grad_weight buffer.
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_grad_out},
         {1, buf_input},
         {2, buf_rrms},
         {3, buf_weight},
         {4, buf_grad_input},
-        {5, buf_grad_weight},
     };
     std::vector<size_t> sizes = {input_buf_size, input_buf_size, rrms_buf_size, norm_buf_size,
-                                  input_buf_size, norm_buf_size};
+                                  input_buf_size};
+
+    if (is_float64) {
+        size_t partial_buf_size = batch_size * normalized_shape * sizeof(double);
+        bindings.push_back({5, partial_grad_weight_rms.data_ptr()});
+        sizes.push_back(partial_buf_size);
+    } else {
+        bindings.push_back({5, buf_grad_weight});
+        sizes.push_back(norm_buf_size);
+    }
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
@@ -1627,6 +1771,53 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
 
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    // Float64: pass 2 — reduce the per-batch-element partial grad_weight rows
+    // into the final [normalized_shape] grad_weight. reduce_partial_sums_f64
+    // reduces two partial inputs (bindings 0,1) into two outputs (bindings 2,3);
+    // RMS has a single grad to reduce, so we bind the partial to BOTH inputs and
+    // a throwaway scratch to the second output. The "channels" axis here is the
+    // normalized_shape (one column per normalized element), num_partials is the
+    // batch_size (rows summed together).
+    if (is_float64) {
+        auto* reduce_pipeline = getPipeline("reduce_partial_sums_f64", device_id);
+
+        struct ReducePC {
+            uint32_t num_partials;
+            uint32_t channels;
+        } reduce_pc;
+        reduce_pc.num_partials = static_cast<uint32_t>(batch_size);
+        reduce_pc.channels = static_cast<uint32_t>(normalized_shape);
+
+        // Scratch output for the unused second reduction result. Must not alias
+        // the partial input (it is written), so allocate a dedicated buffer.
+        Tensor grad_weight_dummy = dispatchZeros({normalized_shape}, DType::Float64, input.device());
+
+        size_t partial_buf_size = batch_size * normalized_shape * sizeof(double);
+        std::vector<std::pair<uint32_t, const void*>> reduce_bindings = {
+            {0, partial_grad_weight_rms.data_ptr()},
+            {1, partial_grad_weight_rms.data_ptr()},
+            {2, grad_weight.data_ptr()},
+            {3, grad_weight_dummy.data_ptr()}
+        };
+        std::vector<size_t> reduce_sizes = {
+            partial_buf_size, partial_buf_size, norm_buf_size, norm_buf_size
+        };
+
+        VkDescriptorSet reduce_ds = allocateAndWriteDescriptorSet(
+            device_id, reduce_pipeline, reduce_bindings, reduce_sizes);
+
+        VkCommandBuffer reduce_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(reduce_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, reduce_pipeline->pipeline());
+        vkCmdBindDescriptorSets(reduce_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               reduce_pipeline->layout(), 0, 1, &reduce_ds, 0, nullptr);
+        vkCmdPushConstants(reduce_cmd, reduce_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(ReducePC), &reduce_pc);
+        vkCmdDispatch(reduce_cmd, static_cast<uint32_t>(normalized_shape), 1, 1);
+        insertComputeOnlyBarrier(reduce_cmd);
+        endSingleTimeCommands(reduce_cmd, device_id);
+    }
 
     return {grad_input, grad_weight};
 }

@@ -9,6 +9,12 @@
 #include <mutex>
 #include <random>
 #include <atomic>
+#include <stdexcept>
+#include <cmath>
+#include <vector>
+#include <memory>
+#include <utility>
+#include <cstdint>
 
 namespace tenzor::serving {
 
@@ -26,7 +32,12 @@ struct ExperimentMetrics {
 class TrafficRouter {
 public:
     /// Create or update an A/B experiment
+    /// @throws std::invalid_argument if rule.fraction_b is NaN or outside [0.0, 1.0]
     auto set_experiment(const std::string& experiment_name, TrafficRule rule) -> void {
+        if (std::isnan(rule.fraction_b) || rule.fraction_b < 0.0 || rule.fraction_b > 1.0) {
+            throw std::invalid_argument(
+                "TrafficRouter::set_experiment: fraction_b must be in [0.0, 1.0]");
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         experiments_[experiment_name] = std::move(rule);
         if (metrics_.find(experiment_name) == metrics_.end()) {

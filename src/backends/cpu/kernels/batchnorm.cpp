@@ -347,6 +347,17 @@ auto batchnorm2d_mean_var_kernel(const Tensor& input_orig) -> std::vector<Tensor
     int64_t H = shape[2];
     int64_t W = shape[3];
 
+    // Guard the empty-tensor case here so every dtype/SIMD path behaves
+    // identically. The scalar batchnorm_mean_var_impl<T> paths throw on
+    // total_elements == 0, but the AVX2 (batchnorm_mean_var_simd_f32) and
+    // AVX512 (avx512::batchnorm_mean_var_f32) Float32 paths have no such guard
+    // and would silently return all-zero mean/variance, a backend-config
+    // dependent behavioral divergence. Hoisting the check makes the kernel
+    // dtype/SIMD-agnostic.
+    if (N * H * W == 0) {
+        throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor (total_elements = 0)");
+    }
+
     // Allocate output tensors
     Tensor mean({C}, input.dtype(), input.device());
     Tensor variance({C}, input.dtype(), input.device());
@@ -899,10 +910,21 @@ void batchnorm_update_running_stats_impl(T* running_mean,
                                          T momentum,
                                          int64_t C) {
     // Running stats update is very lightweight - no parallelization needed
-    // Parallelizing would add more overhead than benefit
+    // Parallelizing would add more overhead than benefit.
+    // Compute the EMA blend in a float accumulator for half types
+    // (Float16/BFloat16): performing the multiplies/adds in half precision
+    // rounds every step (BFloat16 has only 8 mantissa bits), drifts from the
+    // float reference, and can saturate large running_var toward Float16 inf.
+    // For float/double, Acc == T (behavior unchanged).
+    using Acc = std::conditional_t<
+        std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, T>;
+    const Acc m = static_cast<Acc>(momentum);
+    const Acc one_minus_m = Acc(1) - m;
     for (int64_t c = 0; c < C; c++) {
-        running_mean[c] = (T(1.0f) - momentum) * running_mean[c] + momentum * batch_mean[c];
-        running_var[c] = (T(1.0f) - momentum) * running_var[c] + momentum * batch_var[c];
+        running_mean[c] = static_cast<T>(
+            one_minus_m * static_cast<Acc>(running_mean[c]) + m * static_cast<Acc>(batch_mean[c]));
+        running_var[c] = static_cast<T>(
+            one_minus_m * static_cast<Acc>(running_var[c]) + m * static_cast<Acc>(batch_var[c]));
     }
 }
 

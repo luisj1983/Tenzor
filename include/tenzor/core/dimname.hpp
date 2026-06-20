@@ -97,9 +97,12 @@ inline void validate_dimnames(const DimnameList& names) {
  * @throws std::invalid_argument if not found
  */
 inline auto find_dim_by_name(const DimnameList& names, std::string_view name) -> int64_t {
-    Dimname target(name);
+    // Compare by name string_view rather than constructing a Dimname, which
+    // would intern `name` into the global, process-lifetime pool even when the
+    // name is absent and this function throws.
     for (size_t i = 0; i < names.size(); ++i) {
-        if (names[i] == target) return static_cast<int64_t>(i);
+        if (names[i].is_wildcard()) continue;
+        if (names[i].name() == name) return static_cast<int64_t>(i);
     }
     throw std::invalid_argument(
         "Dimension name '" + std::string(name) + "' not found");

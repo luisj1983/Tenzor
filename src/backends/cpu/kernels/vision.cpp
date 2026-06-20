@@ -10,6 +10,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
 #include "tenzor/ops/creation.hpp"   // zeros()
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -798,25 +799,35 @@ void interpolate_trilinear_backward_impl(
             const T* go = grad_out + (((n * C + c) * out_d) * out_h * out_w);
             T* gi = grad_in + (((n * C + c) * in_d) * in_h * in_w);
             for (int64_t od = 0; od < out_d; ++od) {
-                const Compute src_d = align_corners
+                Compute src_d = align_corners
                     ? static_cast<Compute>(od) * scale_d
                     : (static_cast<Compute>(od) + Compute(0.5)) * scale_d - Compute(0.5);
-                const int64_t d0 = static_cast<int64_t>(std::floor(src_d));
-                const int64_t d1 = d0 + 1;
+                // Mirror the forward (interpolate_trilinear_impl clamps z/y/x to
+                // [0, in-1] before taking the integer base): clamp the source
+                // coord first so the backward is the exact transpose at the
+                // borders. Without this, a lower-border output whose src goes
+                // negative would floor d0/h0/w0 to -1, the (1-f) tap would be
+                // dropped by the bounds check in add(), and the (1-f) mass the
+                // forward assigned to index 0 would be silently lost.
+                src_d = std::clamp(src_d, Compute(0), static_cast<Compute>(in_d - 1));
+                const int64_t d0 = static_cast<int64_t>(src_d);
+                const int64_t d1 = std::min(d0 + 1, in_d - 1);
                 const Compute fd = src_d - static_cast<Compute>(d0);
                 for (int64_t oh = 0; oh < out_h; ++oh) {
-                    const Compute src_h = align_corners
+                    Compute src_h = align_corners
                         ? static_cast<Compute>(oh) * scale_h
                         : (static_cast<Compute>(oh) + Compute(0.5)) * scale_h - Compute(0.5);
-                    const int64_t h0 = static_cast<int64_t>(std::floor(src_h));
-                    const int64_t h1 = h0 + 1;
+                    src_h = std::clamp(src_h, Compute(0), static_cast<Compute>(in_h - 1));
+                    const int64_t h0 = static_cast<int64_t>(src_h);
+                    const int64_t h1 = std::min(h0 + 1, in_h - 1);
                     const Compute fh = src_h - static_cast<Compute>(h0);
                     for (int64_t ow = 0; ow < out_w; ++ow) {
-                        const Compute src_w = align_corners
+                        Compute src_w = align_corners
                             ? static_cast<Compute>(ow) * scale_w
                             : (static_cast<Compute>(ow) + Compute(0.5)) * scale_w - Compute(0.5);
-                        const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
-                        const int64_t w1 = w0 + 1;
+                        src_w = std::clamp(src_w, Compute(0), static_cast<Compute>(in_w - 1));
+                        const int64_t w0 = static_cast<int64_t>(src_w);
+                        const int64_t w1 = std::min(w0 + 1, in_w - 1);
                         const Compute fw = src_w - static_cast<Compute>(w0);
                         const Compute g_val = static_cast<Compute>(
                             go[(od * out_h + oh) * out_w + ow]);
@@ -859,6 +870,11 @@ void nearest_backward_axis_scatter(
     for (int64_t s : out_spatial) out_total *= s;
     for (int64_t s : in_spatial) in_total *= s;
 
+    // spatial_dims is at most 3 (caller caps rank to 3-5, i.e. 1-3 spatial
+    // dims). Use a fixed stack array reused across iterations instead of
+    // heap-allocating a std::vector per output element in the hot loop.
+    std::array<int64_t, 3> src_indices{};
+
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             const T* go = grad_out + ((n * C + c) * out_total);
@@ -868,7 +884,6 @@ void nearest_backward_axis_scatter(
                 int64_t in_idx = 0;
                 int64_t in_stride = 1;
                 int64_t tmp = out_idx;
-                std::vector<int64_t> src_indices(spatial_dims);
                 // Compute src for each dim, unwind right-to-left.
                 for (int64_t d = spatial_dims - 1; d >= 0; --d) {
                     const int64_t dim_idx = tmp % out_spatial[d];

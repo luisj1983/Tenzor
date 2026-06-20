@@ -74,6 +74,13 @@ void main() {
                    uint(scatter_idx) * params.inner_size +
                    inner_idx;
 
+    // Guard the computed output offset against the destination size. The non-scatter
+    // dims of the values/index tensor can exceed the output's, yielding out_idx >=
+    // output_size; without this guard that is an out-of-bounds device write.
+    if (out_idx >= params.output_size) {
+        return;
+    }
+
     // Get value to scatter
     float value;
     if (params.use_values > 0) {

@@ -65,19 +65,33 @@ void main() {
     shared_indices[tid] = best_index;
     barrier();
 
-    // Parallel reduction in shared memory
+    // Parallel reduction in shared memory.
+    // On value ties, keep the LOWEST source index to match the CPU/PyTorch
+    // first-occurrence semantics. Strided partitioning means a lower-tid
+    // thread can hold a higher source index than a higher-tid thread, so the
+    // tie-break must compare indices explicitly rather than relying on tid.
     for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
+            int other_val = shared_vals[tid + s];
+            int64_t other_idx = shared_indices[tid + s];
+            int64_t cur_idx = shared_indices[tid];
+            // Treat a slot that never observed an element (index == -1) as
+            // always losing, so it can never win a value tie.
+            bool other_valid = other_idx >= 0;
+            bool cur_valid = cur_idx >= 0;
+            bool take;
             if (params.op == 0) { // argmax
-                if (shared_vals[tid + s] > shared_vals[tid]) {
-                    shared_vals[tid] = shared_vals[tid + s];
-                    shared_indices[tid] = shared_indices[tid + s];
-                }
+                take = other_valid && (!cur_valid ||
+                       other_val > shared_vals[tid] ||
+                       (other_val == shared_vals[tid] && other_idx < cur_idx));
             } else { // argmin
-                if (shared_vals[tid + s] < shared_vals[tid]) {
-                    shared_vals[tid] = shared_vals[tid + s];
-                    shared_indices[tid] = shared_indices[tid + s];
-                }
+                take = other_valid && (!cur_valid ||
+                       other_val < shared_vals[tid] ||
+                       (other_val == shared_vals[tid] && other_idx < cur_idx));
+            }
+            if (take) {
+                shared_vals[tid] = other_val;
+                shared_indices[tid] = other_idx;
             }
         }
         barrier();

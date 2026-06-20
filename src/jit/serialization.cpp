@@ -288,6 +288,15 @@ auto GraphReader::read_metadata(Graph& graph) -> void {
 
 auto GraphReader::read_values(Graph& graph) -> void {
     uint64_t num_values = read_uint64();
+    // Each value entry begins with at least a string-length header (read_string
+    // reads a uint64 first). Bound the declared count against the remaining file
+    // length before the loop, mirroring read_io_lists / read_constants /
+    // read_int64_vector. Without this a crafted count can't be used to spin past
+    // the file's reach (and guards the count consistently with sibling readers).
+    if (num_values > remaining_bytes() / sizeof(uint64_t)) {
+        throw std::runtime_error(
+            "GraphReader::read_values: num_values exceeds remaining file");
+    }
 
     for (uint64_t i = 0; i < num_values; ++i) {
         std::string id = read_string();
@@ -306,6 +315,16 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
     // loop. The old loop could not coexist with any trailing section
     // (v2 adds I/O lists and constants) — it would either stop short
     // or swallow unrelated bytes as "bad node" exceptions.
+    //
+    // meta_num_nodes_ is an untrusted count read from file metadata. Each node
+    // begins with at least a uint32 op_type plus a string-length header, so
+    // bound the declared count against the remaining file length before looping,
+    // mirroring read_io_lists / read_constants / read_int64_vector. This keeps
+    // the count-hardening consistent with the sibling readers.
+    if (meta_num_nodes_ > remaining_bytes() / sizeof(uint64_t)) {
+        throw std::runtime_error(
+            "GraphReader::read_nodes: num_nodes exceeds remaining file");
+    }
     for (uint64_t n = 0; n < meta_num_nodes_; ++n) {
         OpType op_type = static_cast<OpType>(read_uint32());
         std::string name = read_string();

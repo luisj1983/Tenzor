@@ -97,9 +97,11 @@ void main() {
     }
     barrier();
 
+    // Write U (shape m × k) — note the correct batch stride uses m*k, not m*n_cols.
+    uint u_offset = batch_idx * m * k;
     for (uint row = 0; row < m; row++) {
         if (tid < k) {
-            data_u[mat_offset_mn + row * k + tid] = U[row][tid];
+            data_u[u_offset + row * k + tid] = U[row][tid];
         }
     }
 

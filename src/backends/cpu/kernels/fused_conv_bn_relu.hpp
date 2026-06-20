@@ -407,12 +407,21 @@ inline void conv_bn_relu_training(
                 var_sum += diff * diff;
             }
         }
-        float var = static_cast<float>(var_sum / static_cast<double>(samples_per_channel));
+        double var_biased_d = var_sum / static_cast<double>(samples_per_channel);
+        float var = static_cast<float>(var_biased_d);  // biased: used for normalization
         batch_var[oc] = var;
+
+        // Running variance uses the unbiased (Bessel-corrected) estimate to
+        // match PyTorch and this codebase's BatchNorm; the biased var above is
+        // still used for the in-batch normalization.
+        double n_d = static_cast<double>(samples_per_channel);
+        float var_unbiased = (samples_per_channel > 1)
+            ? static_cast<float>(var_biased_d * n_d / (n_d - 1.0))
+            : var;
 
         // Update running statistics
         running_mean[oc] = (1.0f - momentum) * running_mean[oc] + momentum * mean;
-        running_var[oc] = (1.0f - momentum) * running_var[oc] + momentum * var;
+        running_var[oc] = (1.0f - momentum) * running_var[oc] + momentum * var_unbiased;
     }
 
     // Normalize + scale + ReLU

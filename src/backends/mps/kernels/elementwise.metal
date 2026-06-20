@@ -897,6 +897,54 @@ kernel void min_reduce_kernel(
 }
 
 // Float16 reduction variants
+//
+// max/min track the running best in float for safety (a Float16 comparison
+// chain is fine numerically, but accumulating in float mirrors the
+// sum/mean_f16 convention and avoids subnormal/rounding surprises). Storage
+// is read as half and the winning value is packed back to half on store, so
+// the buffer length matches the 2-byte half allocation (no over-read).
+kernel void max_reduce_kernel_f16(
+    device const half* input    [[buffer(0)]],
+    device half* out_values     [[buffer(1)]],
+    device int* out_indices     [[buffer(2)]],
+    constant uint& reduce_size  [[buffer(3)]],
+    uint row                    [[thread_position_in_grid]])
+{
+    uint base = row * reduce_size;
+    float best = float(input[base]);
+    int best_idx = 0;
+    for (uint j = 1; j < reduce_size; ++j) {
+        float val = float(input[base + j]);
+        if (val > best) {
+            best = val;
+            best_idx = int(j);
+        }
+    }
+    out_values[row] = half(best);
+    out_indices[row] = best_idx;
+}
+
+kernel void min_reduce_kernel_f16(
+    device const half* input    [[buffer(0)]],
+    device half* out_values     [[buffer(1)]],
+    device int* out_indices     [[buffer(2)]],
+    constant uint& reduce_size  [[buffer(3)]],
+    uint row                    [[thread_position_in_grid]])
+{
+    uint base = row * reduce_size;
+    float best = float(input[base]);
+    int best_idx = 0;
+    for (uint j = 1; j < reduce_size; ++j) {
+        float val = float(input[base + j]);
+        if (val < best) {
+            best = val;
+            best_idx = int(j);
+        }
+    }
+    out_values[row] = half(best);
+    out_indices[row] = best_idx;
+}
+
 kernel void sum_reduce_kernel_f16(
     device const half* input   [[buffer(0)]],
     device half* output        [[buffer(1)]],
@@ -1709,6 +1757,7 @@ kernel void embedding_backward_kernel(
     device atomic_float* grad_weight [[buffer(2)]],
     constant uint& num_indices [[buffer(3)]],
     constant uint& embed_dim [[buffer(4)]],
+    constant uint& num_embeddings [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     // Each thread handles one element of one gradient row
@@ -1716,7 +1765,11 @@ kernel void embedding_backward_kernel(
     uint dim = tid % embed_dim;
     if (idx_pos >= num_indices) return;
     int token_id = indices[idx_pos];
-    atomic_fetch_add_explicit(&grad_weight[token_id * embed_dim + dim],
+    // Bounds-check the token id against the vocabulary size before scattering the
+    // gradient. A negative or out-of-range index would otherwise atomically write
+    // out-of-bounds device memory, corrupting GPU buffers. Skip invalid ids.
+    if (token_id < 0 || (uint)token_id >= num_embeddings) return;
+    atomic_fetch_add_explicit(&grad_weight[(uint)token_id * embed_dim + dim],
                               grad_output[tid],
                               memory_order_relaxed);
 }
@@ -1874,31 +1927,6 @@ kernel void trunc_kernel(
     output[id] = trunc(input[id]);
 }
 
-kernel void reciprocal_kernel(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    uint id [[thread_position_in_grid]])
-{
-    output[id] = 1.0f / input[id];
-}
-
-kernel void rsqrt_kernel(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    uint id [[thread_position_in_grid]])
-{
-    output[id] = rsqrt(input[id]);
-}
-
-kernel void square_kernel(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    uint id [[thread_position_in_grid]])
-{
-    float x = input[id];
-    output[id] = x * x;
-}
-
 // F16 variants for additional element-wise ops
 
 kernel void clamp_min_kernel_f16(
@@ -1958,31 +1986,6 @@ kernel void trunc_kernel_f16(
     uint id [[thread_position_in_grid]])
 {
     output[id] = half(trunc(float(input[id])));
-}
-
-kernel void reciprocal_kernel_f16(
-    device const half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
-    uint id [[thread_position_in_grid]])
-{
-    output[id] = half(1.0f / float(input[id]));
-}
-
-kernel void rsqrt_kernel_f16(
-    device const half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
-    uint id [[thread_position_in_grid]])
-{
-    output[id] = half(rsqrt(float(input[id])));
-}
-
-kernel void square_kernel_f16(
-    device const half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
-    uint id [[thread_position_in_grid]])
-{
-    float x = float(input[id]);
-    output[id] = half(x * x);
 }
 
 // ============================================================================
@@ -2151,13 +2154,21 @@ kernel void embedding_kernel(
     device const int* indices      [[buffer(1)]],
     device float* output           [[buffer(2)]],
     constant uint& embedding_dim   [[buffer(3)]],
+    constant uint& num_embeddings  [[buffer(4)]],
     uint id                        [[thread_position_in_grid]])
 {
     // Each thread copies one element: output[id] = weight[indices[id/dim]*dim + id%dim]
     uint idx = id / embedding_dim;
     uint dim = id % embedding_dim;
     int token_id = indices[idx];
-    output[id] = weight[token_id * embedding_dim + dim];
+    // Bounds-check the token id against the vocabulary size. An out-of-range or
+    // negative index would otherwise read out-of-bounds device memory. Emit a
+    // zero row for invalid ids (matching the safe "no contribution" behaviour).
+    if (token_id < 0 || (uint)token_id >= num_embeddings) {
+        output[id] = 0.0f;
+        return;
+    }
+    output[id] = weight[(uint)token_id * embedding_dim + dim];
 }
 
 // ============================================================================

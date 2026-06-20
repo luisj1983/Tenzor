@@ -33,6 +33,57 @@ namespace elastic {
 namespace {
 constexpr auto kPollInterval = std::chrono::milliseconds(25);
 constexpr auto kGraceWindow  = std::chrono::milliseconds(250);
+
+// Shared key holding the round number that *all* workers — survivors and
+// freshly-spawned replacements alike — should currently attempt. Stored once
+// in the run's namespace (not per-round) so it survives across rounds.
+auto current_round_key(const std::string& run_id) -> std::string {
+    return run_id + "/current_round";
+}
+
+// Per-round single-fire guard used to advance current_round exactly once even
+// when many workers concurrently discover the same round has closed.
+auto advance_guard_key(const std::string& run_id, int64_t round) -> std::string {
+    return run_id + "/round_" + std::to_string(round) + "/advance_guard";
+}
+
+// Read the shared current round from the store (missing/unparseable => 0).
+auto read_current_round(RendezvousStore& store, const std::string& run_id)
+    -> int64_t {
+    std::string v;
+    try {
+        v = store.get(current_round_key(run_id));
+    } catch (...) {
+        v.clear();
+    }
+    if (v.empty()) return 0;
+    try {
+        const int64_t r = std::stoll(v);
+        return r < 0 ? 0 : r;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Atomically advance the shared current round past `closed_round`, exactly once
+// across all workers that observed the same closed round. The per-round guard's
+// atomic add serialises the winner; losers (guard != 1) leave current_round
+// untouched. Returns the round the caller should next attempt.
+auto advance_current_round(RendezvousStore& store, const std::string& run_id,
+                           int64_t closed_round) -> int64_t {
+    const int64_t next = closed_round + 1;
+    // First caller to bump the guard from 0 -> 1 publishes the next round.
+    if (store.add(advance_guard_key(run_id, closed_round), 1) == 1) {
+        // Only ever move forward; never clobber a higher round already
+        // published by a later, concurrently-closing round.
+        if (read_current_round(store, run_id) < next) {
+            store.set(current_round_key(run_id), std::to_string(next));
+        }
+    }
+    // Whether we won or lost the guard, the published current round is now at
+    // least `next`; report what is actually in the store so all workers agree.
+    return std::max<int64_t>(next, read_current_round(store, run_id));
+}
 }  // namespace
 
 C10dRendezvous::C10dRendezvous(RendezvousConfig config)
@@ -66,16 +117,38 @@ auto C10dRendezvous::join() -> RendezvousResult {
             "C10dRendezvous::join: invalid config (need 1 <= min_workers <= max_workers)");
     }
 
-    ++round_;
-    const std::string prefix = config_.run_id + "/round_" + std::to_string(round_);
-    const std::string counter_key = prefix + "/slot_counter";
-    const std::string world_size_key = prefix + "/world_size";
-
     RendezvousStore& store = ensure_store();
 
+    // Discover the active round from the shared store rather than a per-process
+    // counter. Survivors (which leave()+join() after a membership change) and
+    // freshly-spawned replacement workers must agree on the same round number,
+    // otherwise they write/read disjoint key prefixes and can never assemble
+    // into the same rendezvous. The coordinator advances current_round once a
+    // round closes (see below), so everyone converges on the live round.
+    round_ = read_current_round(store, config_.run_id);
+    std::string prefix =
+        config_.run_id + "/round_" + std::to_string(round_);
+    std::string counter_key = prefix + "/slot_counter";
+    std::string world_size_key = prefix + "/world_size";
+
     // Claim a unique slot for this round (0-based). Slot 0 is the coordinator.
-    const int64_t slot = store.add(counter_key, 1) - 1;
-    store.set(prefix + "/member/" + std::to_string(slot), worker_id());
+    int64_t slot = store.add(counter_key, 1) - 1;
+    std::string member_key = prefix + "/member/" + std::to_string(slot);
+    store.set(member_key, worker_id());
+
+    // Fast path for survivors rejoining a round that has already closed: if the
+    // coordinator has already frozen world_size for this round, a slot claimed
+    // now necessarily lands past it. Don't sit through the barrier/grace window
+    // — drop the just-claimed (orphan) member key, advance the shared round, and
+    // signal the caller to retry into the next round.
+    if (store.check_key(world_size_key)) {
+        try { store.delete_key(member_key); } catch (...) { /* best-effort */ }
+        round_ = advance_current_round(store, config_.run_id, round_);
+        throw std::runtime_error(
+            "C10dRendezvous::join: round " + std::to_string(round_ - 1) +
+            " already closed before slot " + std::to_string(slot) +
+            " could join; retry to enter round " + std::to_string(round_));
+    }
 
     // Barrier: gather participants until min_workers (then a grace window for
     // stragglers, capped at max_workers), or throw on timeout.
@@ -94,12 +167,20 @@ auto C10dRendezvous::join() -> RendezvousResult {
         }
         if (now >= deadline) {
             if (count >= config_.min_workers) break;
+            // Round failed to assemble. Advance the shared round and drop this
+            // worker's member key so a caller-driven retry enters a clean round
+            // rather than re-claiming slots in the stuck one (which would
+            // accumulate phantom counter increments and stale member keys).
+            try { store.delete_key(member_key); } catch (...) { /* best-effort */ }
+            const int64_t stuck_round = round_;
+            round_ = advance_current_round(store, config_.run_id, stuck_round);
             throw std::runtime_error(
                 "C10dRendezvous::join: timed out after " +
                 std::to_string(config_.timeout.count()) + "s with only " +
                 std::to_string(count) + " of min_workers=" +
                 std::to_string(config_.min_workers) + " joined (run_id='" +
-                config_.run_id + "', round " + std::to_string(round_) + ")");
+                config_.run_id + "', round " + std::to_string(stuck_round) +
+                "); retry to enter round " + std::to_string(round_));
         }
         std::this_thread::sleep_for(kPollInterval);
     }
@@ -134,12 +215,19 @@ auto C10dRendezvous::join() -> RendezvousResult {
     }
 
     // A worker whose slot landed at or beyond the frozen world_size joined after
-    // the round closed; tell it to retry (the caller starts the next round).
+    // the round closed; tell it to retry. Advance the shared round so the next
+    // join() (from this caller and any concurrent late joiner) converges on the
+    // same fresh round, and best-effort drop the orphaned member key so rejected
+    // entries don't accumulate in the store across retries.
     if (slot >= world_size) {
+        try { store.delete_key(member_key); } catch (...) { /* best-effort */ }
+        const int64_t closed_round = round_;
+        round_ = advance_current_round(store, config_.run_id, closed_round);
         throw std::runtime_error(
-            "C10dRendezvous::join: joined round " + std::to_string(round_) +
+            "C10dRendezvous::join: joined round " + std::to_string(closed_round) +
             " after it closed (slot " + std::to_string(slot) + " >= world_size " +
-            std::to_string(world_size) + "); retry to enter the next round");
+            std::to_string(world_size) + "); retry to enter round " +
+            std::to_string(round_));
     }
 
     rank_ = static_cast<int32_t>(slot);

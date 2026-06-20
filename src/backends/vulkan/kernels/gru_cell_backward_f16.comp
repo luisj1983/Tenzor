@@ -57,32 +57,74 @@ float readF16HPrev(uint idx) {
     return (idx & 1u) == 0u ? pair.x : pair.y;
 }
 
+// Packed-F16 writes use an atomicCompSwap CAS loop on the enclosing uint32
+// word. Adjacent element indices (h and h+1) map to the two halves of the
+// SAME 32-bit word, and the dispatch runs one invocation per (b, h), so a
+// plain load-modify-store would race: two concurrent invocations would each
+// read the word, modify their own half, and store back, clobbering the
+// neighbour's half-word write and dropping ~half the gradient elements.
+// Do NOT add a non-atomic fallback store: it would reintroduce that hazard.
 void writeF16GradGX(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = grad_gates_x[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    grad_gates_x[word_idx] = packHalf2x16(pair);
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_gates_x[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_gates_x[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
 }
 
 void writeF16GradGH(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = grad_gates_h[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    grad_gates_h[word_idx] = packHalf2x16(pair);
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_gates_h[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_gates_h[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
 }
 
 void writeF16GradHPrev(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = grad_h_prev[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    grad_h_prev[word_idx] = packHalf2x16(pair);
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_h_prev[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_h_prev[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
 }
 
-float sigmoid(float x) {
-    return 1.0 / (1.0 + exp(-x));
+// Use exp()-based stable activations matching gru_cell_f16.comp forward exactly, so the
+// recomputed activations match the values forward produced (the driver `tanh`
+// intrinsic drifts >1e-3 from std::tanh and breaks gradient parity on NVIDIA/Vulkan).
+precise float sigmoid_stable(float x) {
+    if (x >= 0.0) {
+        float e = exp(-x);
+        return 1.0 / (1.0 + e);
+    } else {
+        float e = exp(x);
+        return e / (1.0 + e);
+    }
+}
+
+// Stable tanh via sigmoid: tanh(x) = 2 * sigmoid(2x) - 1.
+precise float tanh_stable(float x) {
+    return 2.0 * sigmoid_stable(2.0 * x) - 1.0;
 }
 
 void main() {
@@ -103,11 +145,11 @@ void main() {
     uint n_idx = gate_base + 2 * H + h;
 
     // ---- Recompute forward activations ----
-    float r = sigmoid(readF16GatesX(r_idx) + readF16GatesH(r_idx));
-    float z = sigmoid(readF16GatesX(z_idx) + readF16GatesH(z_idx));
+    float r = sigmoid_stable(readF16GatesX(r_idx) + readF16GatesH(r_idx));
+    float z = sigmoid_stable(readF16GatesX(z_idx) + readF16GatesH(z_idx));
     float gh_n = readF16GatesH(n_idx);
     float n_combined = readF16GatesX(n_idx) + r * gh_n;
-    float n = tanh(n_combined);
+    float n = tanh_stable(n_combined);
 
     // ---- Backward through h_out = (1 - z) * n + z * h_prev ----
     float dh = readF16GradH(idx);

@@ -293,8 +293,25 @@ auto quantize_static(
     // Set model to eval mode for calibration
     model->eval();
 
-    // Attach observers by preparing the model with FakeQuantize modules
+    // Attach observers by preparing the model with FakeQuantize modules.
+    // prepare_for_qat() only knows how to insert activation observers into a
+    // Sequential container; for any other top-level module it returns the model
+    // UNCHANGED (same pointer). In that case no FakeQuantize observer is ever
+    // inserted, calibration_fn would run but collect nothing, and we would
+    // silently emit a quantized model with no activation qparams (degrading to a
+    // dynamic-equivalent result while advertising full static calibration). Fail
+    // loudly instead of producing that silently-degraded model.
     auto prepared_model = prepare_module_for_qat_recursive(model, qconfig);
+
+    if (prepared_model == model ||
+        std::dynamic_pointer_cast<nn::Sequential>(prepared_model) == nullptr) {
+        throw std::runtime_error(
+            "quantize_static: the top-level model is not an nn::Sequential, so no "
+            "activation observers could be inserted and calibration would collect "
+            "no statistics. Wrap the quantizable layers in an nn::Sequential (the "
+            "supported static-calibration container), or use quantize_dynamic for "
+            "models built from custom containers.");
+    }
 
     qlog() << "[Quantization] Observers attached to quantizable layers" << std::endl;
 
@@ -335,19 +352,23 @@ auto prepare_qat(
     // Set model to training mode for QAT
     model->train();
 
-    // Use QATHelper to prepare model with fake quantization
-    auto qat_helper = std::make_unique<nn::quantization::QATHelper>();
-    qat_helper->prepare_qat(
-        *model,
-        qconfig.weight_dtype(),
-        qconfig.activation_scheme(),
-        false  // not learnable by default
-    );
-
-    // Insert FakeQuantize modules into the model structure
+    // NOTE (activation-only fake quantization): this prepares the model by
+    // inserting an ACTIVATION FakeQuantize observer after each quantizable layer
+    // (see ModuleConverter::prepare_for_qat). Weights are NOT fake-quantized
+    // during the QAT forward pass here; they are quantized later, at conversion
+    // time, directly from the trained float parameters inside
+    // QuantizedLinear/QuantizedConv2d::from_float() (called by convert_qat()).
+    //
+    // The previous implementation also constructed an nn::quantization::QATHelper
+    // and called helper->prepare_qat(...), but QATHelper only populates its own
+    // internal vector of FakeQuantize modules and inserts NOTHING into the model
+    // (its API leaves application to the caller). Its result was never wired into
+    // the returned graph, so the allocation was dead work. It has been removed;
+    // the returned graph comes solely from prepare_module_for_qat_recursive.
     auto qat_module = prepare_module_for_qat_recursive(model, qconfig);
 
-    qlog() << "[QAT] Model prepared. Train normally to learn quantization-robust weights." << std::endl;
+    qlog() << "[QAT] Model prepared (activation-only fake quantization). "
+              "Train normally to learn quantization-robust weights." << std::endl;
     qlog() << "[QAT] After training, use convert_qat() to get quantized model." << std::endl;
 
     return qat_module;
@@ -475,17 +496,32 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
     // that is itself a Sequential container.
     auto seq = std::dynamic_pointer_cast<nn::Sequential>(model);
     if (!seq) {
-        // Recursive walk: fuse within any Sequential submodules
-        bool any_fused = false;
-        for (auto& [name, submodule] : model->get_submodules()) {
+        // Recursive walk: fuse within any Sequential (or nested-container)
+        // submodule and WRITE THE RESULT BACK. fuse_modules() is non-mutating
+        // for Sequential inputs (it returns a freshly built Sequential), so the
+        // fused subtree MUST be re-registered under the same name or the work is
+        // lost and the caller silently sees the un-fused graph.
+        //
+        // get_submodules() returns a reference to the live map; collect the
+        // (name -> fused) replacements first, then apply them, to avoid mutating
+        // the map while iterating it.
+        std::vector<std::pair<std::string, std::shared_ptr<nn::Module>>> replacements;
+        for (const auto& [name, submodule] : model->get_submodules()) {
             auto fused_sub = fuse_modules(submodule);
             if (fused_sub != submodule) {
-                // Replace submodule with fused version (via re-registration)
-                any_fused = true;
+                replacements.emplace_back(name, std::move(fused_sub));
             }
         }
-        if (!any_fused) {
-            qlog() << "[Fusion] No Sequential submodules found for fusion" << std::endl;
+        for (auto& [name, fused_sub] : replacements) {
+            // replace_module() assigns into submodules_[name], overwriting the
+            // existing entry and replacing the submodule in place (public API).
+            model->replace_module(name, std::move(fused_sub));
+        }
+        if (replacements.empty()) {
+            qlog() << "[Fusion] No fusable Sequential submodules found for fusion" << std::endl;
+        } else {
+            qlog() << "[Fusion] Fused " << replacements.size()
+                   << " submodule(s) in place" << std::endl;
         }
         return model;
     }
@@ -723,6 +759,29 @@ auto benchmark_quantization(
 // must STITCH the converted children into rebuilt parents rather than discard
 // them. Sequential children are named by positional index (PyTorch convention),
 // which is what users put in layer_overrides / skip_layers.
+// True if `module`, or any module reachable through its registered submodules
+// (or Sequential children), is a quantizable leaf (Linear/Conv2d). Used to turn
+// the silent no-op of convert_path_aware on an unsupported custom container into
+// a visible error: a container we cannot rebuild but that DOES hold quantizable
+// layers would otherwise be returned untouched.
+static bool has_quantizable_descendant(const std::shared_ptr<nn::Module>& module) {
+    if (!module) return false;
+    if (std::dynamic_pointer_cast<nn::Linear>(module) != nullptr ||
+        std::dynamic_pointer_cast<nn::Conv2d>(module) != nullptr) {
+        return true;
+    }
+    if (auto seq = std::dynamic_pointer_cast<nn::Sequential>(module)) {
+        for (const auto& child : seq->modules()) {
+            if (has_quantizable_descendant(child)) return true;
+        }
+    }
+    for (const auto& [name, sub] : module->get_submodules()) {
+        (void)name;
+        if (has_quantizable_descendant(sub)) return true;
+    }
+    return false;
+}
+
 static std::shared_ptr<nn::Module> convert_path_aware(
     std::shared_ptr<nn::Module> module,
     const QuantizationConfig& config,
@@ -758,6 +817,24 @@ static std::shared_ptr<nn::Module> convert_path_aware(
     }
 
     // Non-quantizable / non-container (ReLU, custom modules): return unchanged.
+    //
+    // A custom (non-Sequential) container that still holds quantizable children
+    // cannot be rebuilt here: convert_path_aware only knows how to reconstruct
+    // an nn::Sequential, and ModuleConverter is non-mutating, so converting the
+    // children in place would require a public submodule-replacement API on
+    // Module. Rather than silently returning the un-quantized container (the old
+    // behavior — a no-op that also ignored any layer_overrides / skip_layers),
+    // fail loudly so the missed quantization is visible.
+    if (has_quantizable_descendant(module)) {
+        throw std::runtime_error(
+            "quantize_dynamic(QuantizationConfig): encountered a non-Sequential "
+            "container at path '" +
+            (current_path.empty() ? std::string("<root>") : current_path) +
+            "' that holds quantizable (Linear/Conv2d) layers. Path-aware dynamic "
+            "quantization can only rebuild nn::Sequential containers; wrap these "
+            "layers in an nn::Sequential so per-path overrides and skip_layers can "
+            "be applied.");
+    }
     return module;
 }
 

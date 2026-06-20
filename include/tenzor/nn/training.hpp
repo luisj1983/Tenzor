@@ -13,6 +13,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 #include "module.hpp"
 #include "optim/optimizer.hpp"
 #include "callbacks.hpp"
@@ -47,7 +48,11 @@ public:
      * @param batch_size Number of samples per batch
      */
     DataLoader(std::vector<std::pair<Tensor, Tensor>> data, size_t batch_size)
-        : data_(std::move(data)), batch_size_(batch_size) {}
+        : data_(std::move(data)), batch_size_(batch_size) {
+        if (batch_size_ == 0) {
+            throw std::invalid_argument("DataLoader: batch_size must be > 0");
+        }
+    }
 
     /**
      * @brief Iterator for batch traversal
@@ -74,11 +79,12 @@ public:
             const size_t start = index_ * loader_->batch_size_;
             const size_t total = loader_->data_.size();
             if (start >= total) {
-                // Out-of-range iteration; return the first sample as a degenerate
-                // single-element batch rather than reading OOB.
-                std::vector<Tensor> in0{loader_->data_[0].first};
-                std::vector<Tensor> tg0{loader_->data_[0].second};
-                return {tenzor::stack(in0, 0), tenzor::stack(tg0, 0)};
+                // Dereferencing an at/past-end iterator. For an empty loader
+                // (total == 0) there is no sample to fabricate a batch from, so
+                // indexing data_[0] would read out of bounds. Signal the misuse
+                // explicitly rather than returning sample-0 silently.
+                throw std::out_of_range(
+                    "DataLoader: dereferencing iterator past the end of the data");
             }
 
             // Build a real batch by stacking every sample in

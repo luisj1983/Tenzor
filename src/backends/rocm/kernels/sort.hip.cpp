@@ -57,6 +57,31 @@ struct MultOp {
     __device__ __forceinline__ T operator()(const T& a, const T& b) const { return a * b; }
 };
 
+// RAII wrapper for a typed HIP device allocation. Frees on scope exit so that an
+// exception thrown by HIP_CHECK (kernel launch errors, thrust failures, etc.)
+// while a buffer is live unwinds without leaking device memory. The destructor
+// is noexcept and swallows the hipFree status — there is nothing actionable to
+// do during stack unwinding, and the process state is already being torn down.
+template<typename T>
+struct ScopedDevicePtr {
+    T* ptr = nullptr;
+
+    explicit ScopedDevicePtr(int64_t count) {
+        HIP_CHECK(hipMalloc(&ptr, static_cast<size_t>(count) * sizeof(T)));
+    }
+
+    ~ScopedDevicePtr() noexcept {
+        if (ptr) (void)hipFree(ptr);
+    }
+
+    ScopedDevicePtr(const ScopedDevicePtr&) = delete;
+    ScopedDevicePtr& operator=(const ScopedDevicePtr&) = delete;
+    ScopedDevicePtr(ScopedDevicePtr&&) = delete;
+    ScopedDevicePtr& operator=(ScopedDevicePtr&&) = delete;
+
+    T* get() const { return ptr; }
+};
+
 // Safe comparison helpers for half types
 template<typename T>
 __device__ __forceinline__ bool hip_gt(const T& a, const T& b) { return a > b; }
@@ -345,10 +370,10 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
     auto launch = [&]<typename T>() {
-        T* d_slice = nullptr;
-        int64_t* d_idx = nullptr;
-        HIP_CHECK(hipMalloc(&d_slice, dim_size * sizeof(T)));
-        HIP_CHECK(hipMalloc(&d_idx, dim_size * sizeof(int64_t)));
+        // RAII-owned device scratch: freed on scope exit even if a HIP_CHECK or
+        // thrust call inside the loop throws, so no device buffer is leaked.
+        ScopedDevicePtr<T> d_slice(dim_size);
+        ScopedDevicePtr<int64_t> d_idx(dim_size);
 
         int block = 256;
         int grid = std::min(int((dim_size + block - 1) / block), 1024);
@@ -357,21 +382,18 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
             for (int64_t inner = 0; inner < inner_size; ++inner) {
                 hipLaunchKernelGGL(extract_slice_kernel<T>,
                     dim3(grid), dim3(block), 0, stream,
-                    input_cont.data<T>(), d_slice, dim_size, inner_size, outer, inner);
+                    input_cont.data<T>(), d_slice.get(), dim_size, inner_size, outer, inner);
                 HIP_CHECK(hipGetLastError());
 
-                sort_1d_thrust<T>(d_slice, d_slice, d_idx, dim_size, descending, stream);
+                sort_1d_thrust<T>(d_slice.get(), d_slice.get(), d_idx.get(), dim_size, descending, stream);
 
                 hipLaunchKernelGGL(scatter_slice_kernel<T>,
                     dim3(grid), dim3(block), 0, stream,
-                    d_slice, d_idx, values.data<T>(), indices.data<int64_t>(),
+                    d_slice.get(), d_idx.get(), values.data<T>(), indices.data<int64_t>(),
                     dim_size, inner_size, outer, inner);
                 HIP_CHECK(hipGetLastError());
             }
         }
-
-        HIP_CHECK(hipFree(d_slice));
-        HIP_CHECK(hipFree(d_idx));
     };
 
     switch (dtype) {
@@ -502,10 +524,10 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending,
     // (strided) slice into a contiguous buffer, argsort it to get per-slice
     // local indices, then scatter those indices back to the strided positions.
     auto run = [&]<typename T>(const T* base_ptr) {
-        T* d_slice = nullptr;
-        int64_t* d_idx = nullptr;
-        HIP_CHECK(hipMalloc(&d_slice, dim_size * sizeof(T)));
-        HIP_CHECK(hipMalloc(&d_idx, dim_size * sizeof(int64_t)));
+        // RAII-owned device scratch: freed on scope exit even if a HIP_CHECK or
+        // argsort call inside the loop throws, so no device buffer is leaked.
+        ScopedDevicePtr<T> d_slice(dim_size);
+        ScopedDevicePtr<int64_t> d_idx(dim_size);
 
         int block = 256;
         int grid = std::min(int((dim_size + block - 1) / block), 1024);
@@ -514,21 +536,18 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending,
             for (int64_t inner = 0; inner < inner_size; ++inner) {
                 hipLaunchKernelGGL(extract_slice_kernel<T>,
                     dim3(grid), dim3(block), 0, stream,
-                    base_ptr, d_slice, dim_size, inner_size, outer, inner);
+                    base_ptr, d_slice.get(), dim_size, inner_size, outer, inner);
                 HIP_CHECK(hipGetLastError());
 
-                launch_argsort(d_slice, d_idx, dim_size, descending, stream);
+                launch_argsort(d_slice.get(), d_idx.get(), dim_size, descending, stream);
 
                 hipLaunchKernelGGL(scatter_argsort_slice_kernel,
                     dim3(grid), dim3(block), 0, stream,
-                    d_idx, output.data<int64_t>(),
+                    d_idx.get(), output.data<int64_t>(),
                     dim_size, inner_size, outer, inner);
                 HIP_CHECK(hipGetLastError());
             }
         }
-
-        HIP_CHECK(hipFree(d_slice));
-        HIP_CHECK(hipFree(d_idx));
     };
 
     switch (dtype) {

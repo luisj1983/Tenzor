@@ -353,6 +353,31 @@ void gemm_cpu<double>(
     int64_t M, int64_t N, int64_t K,
     bool transpose_B
 ) {
+    // The LP64 MKL interface takes int dimensions/leading-dims. If any of
+    // M/N/K (which double as the leading dimensions here) exceeds INT_MAX the
+    // static_cast<int> would silently truncate, producing a wrong-shaped GEMM
+    // with out-of-bounds access. Fall back to an int64-indexed scalar GEMM in
+    // that (extreme, multi-GB) case so the result stays correct.
+    constexpr int64_t kIntMax = static_cast<int64_t>(std::numeric_limits<int>::max());
+    if (M > kIntMax || N > kIntMax || K > kIntMax) {
+        #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
+        for (int64_t i = 0; i < M; ++i) {
+            for (int64_t j = 0; j < N; ++j) {
+                double sum = 0.0;
+                if (transpose_B) {
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += A[i * K + k] * B[j * K + k];
+                    }
+                } else {
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += A[i * K + k] * B[k * N + j];
+                    }
+                }
+                C[i * N + j] = sum;
+            }
+        }
+        return;
+    }
     if (transpose_B) {
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
@@ -446,6 +471,24 @@ void gemm_transA_cpu<double>(
     const double* A, const double* B, double* C,
     int64_t M, int64_t N, int64_t K
 ) {
+    // See gemm_cpu<double>: guard against int64->int truncation in the LP64
+    // MKL interface for extreme dimensions, falling back to an int64-indexed
+    // scalar GEMM that matches the generic gemm_transA_cpu template.
+    constexpr int64_t kIntMax = static_cast<int64_t>(std::numeric_limits<int>::max());
+    if (M > kIntMax || N > kIntMax || K > kIntMax) {
+        #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
+        for (int64_t i = 0; i < M; ++i) {
+            for (int64_t j = 0; j < N; ++j) {
+                double sum = 0.0;
+                // A is (K, M) row-major, access as A[k][i]
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += A[k * M + i] * B[k * N + j];
+                }
+                C[i * N + j] = sum;
+            }
+        }
+        return;
+    }
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                 1.0, A, static_cast<int>(M), B, static_cast<int>(N),
@@ -713,8 +756,15 @@ static bool conv2d_forward_onednn(
             g_conv2d_cache.put(cache_key, cached);
         }
 
-        // Refresh weight data only if the data pointer changed (optimizer updated weights)
-        if (weight.data_ptr() != cached->cached_weight_ptr) {
+        // Refresh weight data on EVERY cache hit. Weights can be mutated
+        // in-place by the optimizer (SubInplace/AddcdivInplace/...) WITHOUT
+        // changing the data pointer, so gating the reorder on pointer identity
+        // reused stale reordered weights. The cache stores the primitive and
+        // descriptors (which are shape/dtype-dependent only), not the weight
+        // values, so re-reading the current weights here is required for
+        // correctness; the reorder/copy is weights-only and cheap relative to
+        // the convolution itself.
+        {
             auto weights_mem_user = dnnl::memory(cached->weights_md_user, engine, const_cast<float*>(weight.data<float>()));
             if (cached->need_weights_reorder) {
                 dnnl::reorder(weights_mem_user, cached->weights_mem).execute(stream, weights_mem_user, cached->weights_mem);
@@ -2011,39 +2061,48 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
 
 namespace {
 
-/// Bilinear interpolation at fractional position (h, w) in a single channel plane.
-/// Returns 0 for out-of-bounds positions.
+/// Accumulator type for deformable-conv interpolation: double for the Float64
+/// path so finite-difference gradcheck precision is preserved, float otherwise.
+/// Mirrors the AccumT used by the forward/weight-gradient impls.
 template <typename T>
-inline T bilinear_interpolate(const T* data, int64_t H, int64_t W,
-                               float h, float w) {
-    if (h <= -1 || h >= H || w <= -1 || w >= W) return T(0);
+using DeformAccT = std::conditional_t<std::is_same_v<T, double>, double, float>;
+
+/// Bilinear interpolation at fractional position (h, w) in a single channel plane.
+/// Returns 0 for out-of-bounds positions. Interpolation arithmetic is performed
+/// in AccT (double for the Float64 path) to avoid narrowing the result to float.
+template <typename T>
+inline DeformAccT<T> bilinear_interpolate(const T* data, int64_t H, int64_t W,
+                                          float h, float w) {
+    using AccT = DeformAccT<T>;
+    if (h <= -1 || h >= H || w <= -1 || w >= W) return AccT(0);
 
     int64_t h_low = static_cast<int64_t>(std::floor(h));
     int64_t w_low = static_cast<int64_t>(std::floor(w));
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - h_low;
-    float lw = w - w_low;
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    AccT lh = static_cast<AccT>(h) - static_cast<AccT>(h_low);
+    AccT lw = static_cast<AccT>(w) - static_cast<AccT>(w_low);
+    AccT hh = AccT(1) - lh;
+    AccT hw = AccT(1) - lw;
 
-    auto val = [&](int64_t r, int64_t c) -> float {
-        if (r < 0 || r >= H || c < 0 || c >= W) return 0.0f;
-        return static_cast<float>(data[r * W + c]);
+    auto val = [&](int64_t r, int64_t c) -> AccT {
+        if (r < 0 || r >= H || c < 0 || c >= W) return AccT(0);
+        return static_cast<AccT>(data[r * W + c]);
     };
 
-    float v = hh * hw * val(h_low, w_low) +
-              hh * lw * val(h_low, w_high) +
-              lh * hw * val(h_high, w_low) +
-              lh * lw * val(h_high, w_high);
-    return static_cast<T>(v);
+    AccT v = hh * hw * val(h_low, w_low) +
+             hh * lw * val(h_low, w_high) +
+             lh * hw * val(h_high, w_low) +
+             lh * lw * val(h_high, w_high);
+    return v;
 }
 
 /// Scatter gradient back through bilinear interpolation (used in backward).
 template <typename T>
 inline void bilinear_interpolate_gradient(T* grad_data, int64_t H, int64_t W,
-                                           float h, float w, float top_grad) {
+                                           float h, float w, DeformAccT<T> top_grad) {
+    using AccT = DeformAccT<T>;
     if (h <= -1 || h >= H || w <= -1 || w >= W) return;
 
     int64_t h_low = static_cast<int64_t>(std::floor(h));
@@ -2051,12 +2110,12 @@ inline void bilinear_interpolate_gradient(T* grad_data, int64_t H, int64_t W,
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - h_low;
-    float lw = w - w_low;
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    AccT lh = static_cast<AccT>(h) - static_cast<AccT>(h_low);
+    AccT lw = static_cast<AccT>(w) - static_cast<AccT>(w_low);
+    AccT hh = AccT(1) - lh;
+    AccT hw = AccT(1) - lw;
 
-    auto add = [&](int64_t r, int64_t c, float weight) {
+    auto add = [&](int64_t r, int64_t c, AccT weight) {
         if (r >= 0 && r < H && c >= 0 && c < W) {
             // Use atomic for thread safety under OpenMP
             #pragma omp atomic
@@ -2074,9 +2133,10 @@ inline void bilinear_interpolate_gradient(T* grad_data, int64_t H, int64_t W,
 template <typename T>
 inline void bilinear_interpolate_offset_gradient(
     const T* data, int64_t H, int64_t W, float h, float w,
-    float& grad_h, float& grad_w) {
-    grad_h = 0.0f;
-    grad_w = 0.0f;
+    DeformAccT<T>& grad_h, DeformAccT<T>& grad_w) {
+    using AccT = DeformAccT<T>;
+    grad_h = AccT(0);
+    grad_w = AccT(0);
     if (h <= -1 || h >= H || w <= -1 || w >= W) return;
 
     int64_t h_low = static_cast<int64_t>(std::floor(h));
@@ -2084,20 +2144,20 @@ inline void bilinear_interpolate_offset_gradient(
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - h_low;
-    float lw = w - w_low;
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    AccT lh = static_cast<AccT>(h) - static_cast<AccT>(h_low);
+    AccT lw = static_cast<AccT>(w) - static_cast<AccT>(w_low);
+    AccT hh = AccT(1) - lh;
+    AccT hw = AccT(1) - lw;
 
-    auto val = [&](int64_t r, int64_t c) -> float {
-        if (r < 0 || r >= H || c < 0 || c >= W) return 0.0f;
-        return static_cast<float>(data[r * W + c]);
+    auto val = [&](int64_t r, int64_t c) -> AccT {
+        if (r < 0 || r >= H || c < 0 || c >= W) return AccT(0);
+        return static_cast<AccT>(data[r * W + c]);
     };
 
-    float v00 = val(h_low, w_low);
-    float v01 = val(h_low, w_high);
-    float v10 = val(h_high, w_low);
-    float v11 = val(h_high, w_high);
+    AccT v00 = val(h_low, w_low);
+    AccT v01 = val(h_low, w_high);
+    AccT v10 = val(h_high, w_low);
+    AccT v11 = val(h_high, w_high);
 
     // d(bilinear)/dh = (-hw * v00) + (-lw * v01) + (hw * v10) + (lw * v11)
     grad_h = -hw * v00 - lw * v01 + hw * v10 + lw * v11;
@@ -2217,7 +2277,11 @@ static void deformable_conv2d_backward_input_impl(
 
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 for (int64_t ow = 0; ow < W_out; ++ow) {
-                    float grad_out_val = static_cast<float>(
+                    // Accumulate gradients in double for the Float64 path so a
+                    // tight finite-difference gradcheck on offset/mask passes;
+                    // float otherwise. Matches the forward/weight-grad impls.
+                    using AccumT = std::conditional_t<std::is_same_v<T, double>, double, float>;
+                    AccumT grad_out_val = static_cast<AccumT>(
                         grad_output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow]);
 
                     for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
@@ -2249,27 +2313,27 @@ static void deformable_conv2d_backward_input_impl(
                                 float h_loc = h_base + h_off;
                                 float w_loc = w_base + w_off;
 
-                                float w_val = static_cast<float>(weight_plane[k_linear]);
-                                float m_val = 1.0f;
+                                AccumT w_val = static_cast<AccumT>(weight_plane[k_linear]);
+                                AccumT m_val = AccumT(1);
                                 if (use_mask) {
                                     const T* mask_plane = mask + (n * offset_groups * kH * kW + (mask_idx + k_linear)) * H_out * W_out;
-                                    m_val = static_cast<float>(mask_plane[oh * W_out + ow]);
+                                    m_val = static_cast<AccumT>(mask_plane[oh * W_out + ow]);
                                 }
 
-                                float top_grad = grad_out_val * w_val * m_val;
+                                AccumT top_grad = grad_out_val * w_val * m_val;
 
                                 // grad_input
                                 bilinear_interpolate_gradient(grad_input_plane, H, W, h_loc, w_loc, top_grad);
 
                                 // grad_offset (d/dh, d/dw of bilinear)
-                                float grad_h, grad_w;
+                                AccumT grad_h, grad_w;
                                 bilinear_interpolate_offset_gradient(input_plane, H, W, h_loc, w_loc, grad_h, grad_w);
 
                                 T* grad_off_h = grad_offset + (n * offset_groups * 2 * kH * kW + off_h_idx) * H_out * W_out;
                                 T* grad_off_w = grad_offset + (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
 
-                                float off_grad_h = grad_out_val * w_val * m_val * grad_h;
-                                float off_grad_w = grad_out_val * w_val * m_val * grad_w;
+                                AccumT off_grad_h = grad_out_val * w_val * m_val * grad_h;
+                                AccumT off_grad_w = grad_out_val * w_val * m_val * grad_w;
 
                                 #pragma omp atomic
                                 grad_off_h[oh * W_out + ow] += static_cast<T>(off_grad_h);
@@ -2278,10 +2342,10 @@ static void deformable_conv2d_backward_input_impl(
 
                                 // grad_mask
                                 if (use_mask && grad_mask) {
-                                    float interp_val = static_cast<float>(
+                                    AccumT interp_val = static_cast<AccumT>(
                                         bilinear_interpolate(input_plane, H, W, h_loc, w_loc));
                                     T* grad_mask_plane = grad_mask + (n * offset_groups * kH * kW + (mask_idx + k_linear)) * H_out * W_out;
-                                    float mask_grad = grad_out_val * w_val * interp_val;
+                                    AccumT mask_grad = grad_out_val * w_val * interp_val;
                                     #pragma omp atomic
                                     grad_mask_plane[oh * W_out + ow] += static_cast<T>(mask_grad);
                                 }

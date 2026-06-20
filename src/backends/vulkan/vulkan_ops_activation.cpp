@@ -105,7 +105,11 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input_orig, int64_t dim) -> Te
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    // Dispatch one workgroup per batch element
+    // Dispatch one workgroup per batch element. Guard against exceeding the
+    // device's maxComputeWorkGroupCount[0] (Vulkan guaranteed minimum 65535):
+    // an over-limit dispatch is invalid and drivers truncate (leaving trailing
+    // batch rows uncomputed) or trigger device-lost.
+    checkSparseRowDispatch(device_id, "Softmax", static_cast<int64_t>(batch_size));
     vkCmdDispatch(cmdBuffer, batch_size, 1, 1);
 
     // Add memory barrier
@@ -195,7 +199,10 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input_orig, int64_t dim) ->
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    // Dispatch one workgroup per batch element
+    // Dispatch one workgroup per batch element. Guard against exceeding the
+    // device's maxComputeWorkGroupCount[0] (Vulkan guaranteed minimum 65535);
+    // an over-limit dispatch is invalid and silently truncates trailing rows.
+    checkSparseRowDispatch(device_id, "LogSoftmax", static_cast<int64_t>(batch_size));
     vkCmdDispatch(cmdBuffer, batch_size, 1, 1);
 
     // Add memory barrier
@@ -247,7 +254,11 @@ auto VulkanBackend::dispatchNestedLogSoftmax(const Tensor& values, const Tensor&
     vkCmdPushConstants(cmd, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-    // One workgroup per batch element
+    // One workgroup per batch element. Guard against exceeding the device's
+    // maxComputeWorkGroupCount[0] (Vulkan guaranteed minimum 65535): a nested
+    // tensor with more segments than the limit issues an invalid/truncated
+    // dispatch, silently leaving trailing segments uncomputed.
+    checkSparseRowDispatch(device_id, "NestedLogSoftmax", static_cast<int64_t>(B));
     vkCmdDispatch(cmd, B, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -290,6 +301,8 @@ auto VulkanBackend::dispatchNestedSoftmax(const Tensor& values, const Tensor& of
     vkCmdPushConstants(cmd, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
+    // One workgroup per segment; guard against maxComputeWorkGroupCount[0].
+    checkSparseRowDispatch(device_id, "NestedSoftmax", static_cast<int64_t>(B));
     vkCmdDispatch(cmd, B, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -332,6 +345,8 @@ auto VulkanBackend::dispatchNestedSum(const Tensor& values, const Tensor& offset
     vkCmdPushConstants(cmd, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
+    // One workgroup per segment; guard against maxComputeWorkGroupCount[0].
+    checkSparseRowDispatch(device_id, "NestedSum", static_cast<int64_t>(B));
     vkCmdDispatch(cmd, B, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -373,6 +388,8 @@ auto VulkanBackend::dispatchNestedMean(const Tensor& values, const Tensor& offse
     vkCmdPushConstants(cmd, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
+    // One workgroup per segment; guard against maxComputeWorkGroupCount[0].
+    checkSparseRowDispatch(device_id, "NestedMean", static_cast<int64_t>(B));
     vkCmdDispatch(cmd, B, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -417,6 +434,8 @@ auto VulkanBackend::dispatchNestedToPadded(const Tensor& values, const Tensor& o
     vkCmdPushConstants(cmd, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
+    // One workgroup per segment; guard against maxComputeWorkGroupCount[0].
+    checkSparseRowDispatch(device_id, "NestedToPadded", static_cast<int64_t>(B));
     vkCmdDispatch(cmd, B, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -464,6 +483,8 @@ auto VulkanBackend::dispatchNestedFromPadded(const Tensor& padded, const Tensor&
     vkCmdPushConstants(cmd, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
+    // One workgroup per segment; guard against maxComputeWorkGroupCount[0].
+    checkSparseRowDispatch(device_id, "NestedFromPadded", static_cast<int64_t>(B));
     vkCmdDispatch(cmd, B, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -583,7 +604,11 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    // Saturate Float16 output to the F16 range, matching the convention used by
+    // dispatchSoftmax/dispatchLogSoftmax and InstanceNorm: an overflowing loss
+    // would otherwise yield inf and diverge from the clamped-to-65504 behaviour
+    // other activation ops follow (no-op for non-F16 dtypes).
+    return fp16_saturate_if_needed(*this, output);
 }
 
 } // namespace tenzor

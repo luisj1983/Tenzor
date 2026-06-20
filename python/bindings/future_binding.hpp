@@ -26,8 +26,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <atomic>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -39,9 +42,11 @@ namespace tenzor::python {
 /**
  * @brief Python wrapper around `tenzor::Future<Tensor>`.
  *
- * The underlying `tenzor::Future<T>::wait()` is destructive (moves the
- * value out of the shared state). We mirror that: `.result()` is one-shot
- * and subsequent calls will throw via the shared-state's own bookkeeping.
+ * The underlying `tenzor::Future<T>::wait()` is non-destructive: its shared
+ * state's `get()` returns a *copy* of the stored value (see
+ * `SharedState::get()` in future.hpp) and never invalidates `ready_`. As a
+ * result `.result()` and `.wait()` are repeatable, and `.done()` stays True
+ * once the operation has completed.
  */
 struct TensorFuture {
     // shared_ptr because pybind11 needs to copy/hold the handle while
@@ -61,12 +66,10 @@ struct TensorFuture {
         if (!fut) {
             throw std::runtime_error("TensorFuture: invalid (no shared state)");
         }
-        // Discard the value; we just block. The underlying shared state
-        // caches the value/exception so a subsequent .result() still works
-        // if implementation supports it — but `Future::wait()` consumes.
-        // To keep wait() side-effect-free wrt the stored value, we poll
-        // via is_ready() / busy-wait-free wait: just call wait() and drop
-        // the returned tensor. Python sees None.
+        // Block until ready, then discard the value (Python sees None).
+        // `Future::wait()` is non-destructive — it returns a copy of the
+        // stored value and leaves the shared state intact — so a later
+        // .result() / .wait() still works and .done() stays True.
         (void)fut->wait();
     }
 
@@ -81,35 +84,110 @@ struct TensorFuture {
 /**
  * @brief Python wrapper around `std::future<std::vector<Tensor>>`
  *        (used by `tenzor::distributed::rpc::rpc_async`).
+ *
+ * `std::future::get()` is one-shot and destructive: it consumes the shared
+ * state, after which `valid()` is false. That would make `.done()` flip back
+ * to False after a `.result()` and a second `.result()` throw, diverging from
+ * TensorFuture (whose `tenzor::Future<T>::wait()` is repeatable). To honour
+ * the documented "same contract as TensorFuture", we resolve the std::future
+ * exactly once and cache the value (or the captured exception). All subsequent
+ * `.done()` / `.wait()` / `.result()` calls are served from the cache, so:
+ *   - `.done()` stays True once the RPC has completed,
+ *   - `.result()` is repeatable and returns a copy each time,
+ *   - any exception raised by the RPC is re-raised on every `.result()`.
+ *
+ * A mutex serialises access to the underlying std::future and the cache.
+ * `std::future` provides no thread-safety for concurrent member access on a
+ * single object, and `.result()`/`.wait()` run with the GIL released, so the
+ * mutex is required to make concurrent `.done()` / `.result()` / `.wait()`
+ * from multiple Python threads well-defined.
  */
 struct TensorListFuture {
-    // std::future is move-only; wrap in shared_ptr for the same reason as
-    // above. Also tracks a "done" flag we can poll without consuming the
-    // value.
-    std::shared_ptr<std::future<std::vector<tenzor::Tensor>>> fut;
+    struct State {
+        std::mutex mutex;
+        std::future<std::vector<tenzor::Tensor>> fut;
+        std::optional<std::vector<tenzor::Tensor>> value;
+        std::exception_ptr exception;
+        std::atomic<bool> resolved{false};
+
+        explicit State(std::future<std::vector<tenzor::Tensor>> f)
+            : fut(std::move(f)) {}
+
+        // Resolve the std::future exactly once, caching the value or the
+        // captured exception. Must be called with `mutex` held. Returns once
+        // `resolved` is true.
+        void resolve_locked() {
+            if (resolved.load(std::memory_order_acquire)) {
+                return;
+            }
+            if (!fut.valid()) {
+                // Should not happen: we only ever consume the future here, and
+                // only when not yet resolved.
+                exception = std::make_exception_ptr(std::runtime_error(
+                    "TensorListFuture: invalid (no shared state)"));
+                resolved.store(true, std::memory_order_release);
+                return;
+            }
+            try {
+                value = fut.get();
+            } catch (...) {
+                exception = std::current_exception();
+            }
+            resolved.store(true, std::memory_order_release);
+        }
+    };
+
+    std::shared_ptr<State> state;
 
     explicit TensorListFuture(std::future<std::vector<tenzor::Tensor>> f)
-        : fut(std::make_shared<std::future<std::vector<tenzor::Tensor>>>(std::move(f))) {}
+        : state(std::make_shared<State>(std::move(f))) {}
 
     bool done() const {
-        if (!fut || !fut->valid()) {
+        if (!state) {
             return false;
         }
-        return fut->wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+        // Fast path: already resolved (and cached) -> always True.
+        if (state->resolved.load(std::memory_order_acquire)) {
+            return true;
+        }
+        // Non-blocking poll of the still-pending std::future. Guard with the
+        // mutex because a concurrent .result()/.wait() may be calling get()
+        // on the same object with the GIL released.
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->resolved.load(std::memory_order_relaxed)) {
+            return true;
+        }
+        if (!state->fut.valid()) {
+            return false;
+        }
+        return state->fut.wait_for(std::chrono::seconds(0)) ==
+               std::future_status::ready;
     }
 
     void wait_only() const {
-        if (!fut || !fut->valid()) {
+        if (!state) {
             throw std::runtime_error("TensorListFuture: invalid (no shared state)");
         }
-        fut->wait();
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->resolve_locked();
+        // Mirror .result() error semantics: re-raise any captured exception
+        // so wait() surfaces RPC failures rather than silently returning.
+        if (state->exception) {
+            std::rethrow_exception(state->exception);
+        }
     }
 
     std::vector<tenzor::Tensor> result() {
-        if (!fut || !fut->valid()) {
+        if (!state) {
             throw std::runtime_error("TensorListFuture: invalid (no shared state)");
         }
-        return fut->get();
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->resolve_locked();
+        if (state->exception) {
+            std::rethrow_exception(state->exception);
+        }
+        // Return a copy so .result() stays repeatable, matching TensorFuture.
+        return *state->value;
     }
 };
 

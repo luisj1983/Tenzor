@@ -94,6 +94,10 @@ auto Lion::initialize_buffers() -> void {
         if (param) {
             // R.16: half-precision params get Float32 state buffers.
             momentum_.push_back(make_optim_state(param->tensor()));
+        } else {
+            // Keep momentum_ index-aligned with parameters_ for null params,
+            // mirroring on_parameters_appended_ (see Audit K.1).
+            momentum_.push_back(Tensor{});
         }
     }
 }

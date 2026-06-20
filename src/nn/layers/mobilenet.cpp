@@ -13,8 +13,31 @@
 #include "tenzor/ops/math.hpp"
 #include <stdexcept>
 #include <memory>
+#include <algorithm>
 
 namespace tenzor::nn {
+
+namespace {
+
+// Choose a Squeeze-and-Excitation reduction ratio that (a) targets the standard
+// ~hidden_dim/4 reduced-channel count and (b) exactly divides hidden_dim, which
+// SqueezeExcitation's constructor requires. When hidden_dim is divisible by 4
+// this returns hidden_dim/4 (identical to the historical behaviour, yielding 4
+// reduced channels); otherwise it returns the largest divisor of hidden_dim not
+// exceeding the desired ratio, guaranteeing channels % reduction == 0 for any
+// (in_channels, expand_ratio) combination.
+int64_t se_reduction_for(int64_t hidden_dim) {
+    int64_t desired = std::max(int64_t(1), hidden_dim / 4);
+    // Find the largest divisor of hidden_dim that is <= desired.
+    for (int64_t r = desired; r >= 1; --r) {
+        if (hidden_dim % r == 0) {
+            return r;
+        }
+    }
+    return 1;  // 1 always divides hidden_dim (unreachable given r=1 above).
+}
+
+} // namespace
 
 // ============================================================================
 // SqueezeExcitation Implementation
@@ -149,8 +172,9 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
 
     // 3. Squeeze-and-Excitation (optional)
     if (use_se) {
-        // SE reduction ratio of 4 (standard for MobileNetV3/EfficientNet)
-        int64_t se_reduction = std::max(int64_t(1), hidden_dim / 4);
+        // SE reduction ratio of 4 (standard for MobileNetV3/EfficientNet),
+        // adjusted to a divisor of hidden_dim so the SE ctor never throws.
+        int64_t se_reduction = se_reduction_for(hidden_dim);
         se_ = std::make_shared<SqueezeExcitation>(hidden_dim, se_reduction, activation);
         register_module("se", se_);
     }
@@ -225,7 +249,9 @@ FusedMBConv::FusedMBConv(int64_t in_channels,
 
         // 2. Squeeze-and-Excitation (optional)
         if (use_se) {
-            int64_t se_reduction = std::max(int64_t(1), hidden_dim / 4);
+            // SE reduction ratio of 4, adjusted to a divisor of hidden_dim so
+            // the SE ctor never throws on non-multiple-of-4 hidden_dim.
+            int64_t se_reduction = se_reduction_for(hidden_dim);
             se_ = std::make_shared<SqueezeExcitation>(hidden_dim, se_reduction, activation);
             register_module("se", se_);
         }

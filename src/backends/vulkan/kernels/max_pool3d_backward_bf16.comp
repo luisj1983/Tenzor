@@ -14,28 +14,10 @@ layout(push_constant) uniform PushConstants {
     uint grad_input_size;
 } params;
 
-float half_to_float(uint h) {
-    uint sign = (h & 0x8000u) << 16;
-    uint exp = (h >> 10) & 0x1Fu;
-    uint mant = h & 0x3FFu;
-
-    if (exp == 0u) {
-        if (mant == 0u) {
-            return uintBitsToFloat(sign);
-        }
-        while ((mant & 0x400u) == 0u) {
-            mant <<= 1;
-            exp--;
-        }
-        exp++;
-        mant &= ~0x400u;
-        exp += 127u - 15u;
-        return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
-    } else if (exp == 31u) {
-        return uintBitsToFloat(sign | 0x7F800000u | (mant << 13));
-    }
-    exp += 127u - 15u;
-    return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
+// BF16 -> FP32: the 16 BF16 bits are the high 16 bits of an FP32 value.
+// Matches the forward kernel (max_pool3d_bf16.comp readBF16Element).
+float bf16_to_float(uint b) {
+    return uintBitsToFloat((b & 0xFFFFu) << 16);
 }
 
 void main() {
@@ -46,7 +28,7 @@ void main() {
     uint grad_half_idx = idx % 2;
     uint grad_packed = grad_output[grad_word_idx];
     uint grad_half = (grad_half_idx == 0) ? (grad_packed & 0xFFFFu) : (grad_packed >> 16);
-    float grad = half_to_float(grad_half);
+    float grad = bf16_to_float(grad_half);
 
     int target_idx = indices_data[idx];
 

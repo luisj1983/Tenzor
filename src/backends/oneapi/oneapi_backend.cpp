@@ -657,13 +657,12 @@ public:
             throw std::invalid_argument("OneAPI record_event requires a non-null stream (SYCL queue)");
         }
         auto* queue = static_cast<sycl::queue*>(stream);
-        // Submit a marker event on the queue
+        // Submit a device-side barrier so the recorded event's profiling
+        // timestamps reflect GPU work ordering on the queue rather than
+        // host-task scheduling.
         auto* ev = static_cast<sycl::event*>(event);
         try {
-            *ev = queue->submit([](sycl::handler& h) {
-                // Empty kernel acts as a synchronization marker
-                h.host_task([]() {});
-            });
+            *ev = queue->ext_oneapi_submit_barrier();
         } catch (const sycl::exception& e) {
             throw std::runtime_error(std::string("SYCL record_event failed: ") + e.what());
         }
@@ -672,9 +671,14 @@ public:
     auto wait_event(EventHandle event, StreamHandle stream = nullptr) -> void override {
         if (!event) return;
         auto* ev = static_cast<sycl::event*>(event);
-        // Block until the event completes
+        // A null stream maps to the backend's default queue, mirroring CUDA's
+        // cudaStreamWaitEvent(stream=0) semantics.
+        sycl::queue* queue = stream ? static_cast<sycl::queue*>(stream)
+                                    : &get_queue(0);
+        // Enqueue a device-side dependency: subsequent submissions on `queue`
+        // wait for `event` without blocking the host thread.
         try {
-            ev->wait_and_throw();
+            queue->ext_oneapi_submit_barrier({*ev});
         } catch (const sycl::exception& e) {
             throw std::runtime_error(std::string("SYCL wait_event failed: ") + e.what());
         }
@@ -742,11 +746,33 @@ private:
 
     void check_async_errors() {
         std::lock_guard<std::mutex> lock(async_errors_mutex_);
-        if (!async_errors_.empty()) {
-            auto e = async_errors_.front();
-            async_errors_.clear();
-            std::rethrow_exception(e);
+        if (async_errors_.empty()) {
+            return;
         }
+        // Drain all pending async exceptions. If exactly one is queued, rethrow
+        // it unchanged to preserve its concrete type. If several accumulated
+        // (e.g. a multi-kernel error storm), aggregate every message into a
+        // single std::runtime_error so none are dropped from the structured
+        // rethrow path — previously only async_errors_.front() survived and the
+        // remainder were silently discarded by clear().
+        std::vector<std::exception_ptr> pending;
+        pending.swap(async_errors_);
+        if (pending.size() == 1) {
+            std::rethrow_exception(pending.front());
+        }
+        std::string message = "Multiple SYCL async errors (" +
+                              std::to_string(pending.size()) + "):";
+        for (size_t i = 0; i < pending.size(); ++i) {
+            message += "\n  [" + std::to_string(i) + "] ";
+            try {
+                std::rethrow_exception(pending[i]);
+            } catch (const std::exception& e) {
+                message += e.what();
+            } catch (...) {
+                message += "unknown non-std exception";
+            }
+        }
+        throw std::runtime_error(message);
     }
 
     auto get_queue(int32_t device_id) -> sycl::queue& {

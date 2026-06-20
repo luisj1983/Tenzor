@@ -68,8 +68,14 @@ auto RPNHead::forward(const Variable& features)
     objectness = reshape(objectness, {N, -1});  // (N, H*W*num_anchors)
 
     // bbox_reg: (N, num_anchors*4, H, W) -> (N, H*W*num_anchors, 4)
+    // Must use the SAME flat ordering as objectness and AnchorGenerator,
+    // namely location-major / anchor-minor: flat row = (h*W+w)*num_anchors + a.
+    // Start from (N, num_anchors, 4, H*W), then move H*W ahead of num_anchors
+    // (dims [0, 3, 1, 2] -> (N, H*W, num_anchors, 4)) before the final reshape,
+    // so the per-row (anchor, location) pairing matches the objectness scores
+    // and the anchors produced by AnchorGenerator.
     bbox_reg = reshape(bbox_reg, {N, num_anchors, 4, H * W});
-    bbox_reg = transpose(bbox_reg, 2, 3);  // (N, num_anchors, H*W, 4)
+    bbox_reg = permute(bbox_reg, {0, 3, 1, 2});  // (N, H*W, num_anchors, 4)
     bbox_reg = reshape(bbox_reg, {N, -1, 4});  // (N, H*W*num_anchors, 4)
 
     return {objectness, bbox_reg};

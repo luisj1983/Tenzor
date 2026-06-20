@@ -81,7 +81,17 @@ auto VulkanBackend::dispatchGridSample(const Tensor& input, const Tensor& grid,
     Tensor output_f32(std::vector<int64_t>{N, C, H_out, W_out},
                       DType::Float32, input.device());
 
-    int32_t total = N * C * H_out * W_out;
+    // Compute in int64 to avoid 32-bit overflow. The grid_sample.comp shader
+    // addresses elements with a signed 32-bit `int idx`/`int total` (shaderInt64
+    // is not enabled), so reject outputs whose element count exceeds INT32_MAX
+    // rather than wrap the push-constant and dispatch a wrong workgroup count.
+    int64_t total64 = static_cast<int64_t>(N) * C * H_out * W_out;
+    if (total64 > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error(
+            "Vulkan grid_sample: output too large for 32-bit indexing (" +
+            std::to_string(total64) + " elements); exceeds INT32_MAX");
+    }
+    int32_t total = static_cast<int32_t>(total64);
     if (total == 0) return (orig_dtype == DType::Float32) ? output_f32 : dispatchCast(output_f32, orig_dtype);
 
     int32_t pad_mode = 0;
@@ -164,7 +174,16 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
     Tensor gg_f32(std::vector<int64_t>{N, H_out, W_out, 2},
                   DType::Float32, grid.device());
 
-    int32_t total = N * H_out * W_out;
+    // int64 product to avoid 32-bit overflow; grid_sample_backward.comp indexes
+    // with signed 32-bit `int idx`/`int total`, so reject grids whose thread
+    // count exceeds INT32_MAX rather than wrap the push-constant/dispatch.
+    int64_t total64 = static_cast<int64_t>(N) * H_out * W_out;
+    if (total64 > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error(
+            "Vulkan grid_sample_backward: grid too large for 32-bit indexing (" +
+            std::to_string(total64) + " threads); exceeds INT32_MAX");
+    }
+    int32_t total = static_cast<int32_t>(total64);
     int32_t device_id = input.device().index;
 
     // Zero grad_input — scatter is via atomicAdd on this buffer.
@@ -265,7 +284,16 @@ auto VulkanBackend::dispatchAffineGridBackward(const Tensor& grad_grid,
     int32_t N = static_cast<int32_t>(size[0]);
     int32_t H = static_cast<int32_t>(size[2]);
     int32_t W = static_cast<int32_t>(size[3]);
-    int32_t total = N * H * W;
+    // int64 product to avoid 32-bit overflow; affine_grid_backward.comp indexes
+    // with signed 32-bit `int idx`/`int total`, so reject sizes whose thread
+    // count exceeds INT32_MAX rather than wrap the push-constant/dispatch.
+    int64_t total64 = static_cast<int64_t>(N) * H * W;
+    if (total64 > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error(
+            "Vulkan affine_grid_backward: grid too large for 32-bit indexing (" +
+            std::to_string(total64) + " threads); exceeds INT32_MAX");
+    }
+    int32_t total = static_cast<int32_t>(total64);
 
     DType gr_dt = grad_grid.dtype();
     // Materialize read operand to a packed offset-0 buffer before binding.
@@ -349,7 +377,16 @@ auto VulkanBackend::dispatchAffineGrid(const Tensor& theta, const std::vector<in
     int32_t N = static_cast<int32_t>(size[0]);
     int32_t H = static_cast<int32_t>(size[2]);
     int32_t W = static_cast<int32_t>(size[3]);
-    int32_t total = N * H * W;
+    // int64 product to avoid 32-bit overflow; affine_grid.comp indexes with
+    // signed 32-bit `int idx`/`int total`, so reject sizes whose thread count
+    // exceeds INT32_MAX rather than wrap the push-constant/dispatch.
+    int64_t total64 = static_cast<int64_t>(N) * H * W;
+    if (total64 > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error(
+            "Vulkan affine_grid: grid too large for 32-bit indexing (" +
+            std::to_string(total64) + " threads); exceeds INT32_MAX");
+    }
+    int32_t total = static_cast<int32_t>(total64);
 
     DType orig_dtype = theta.dtype();
     // Materialize read operand to a packed offset-0 buffer before binding.

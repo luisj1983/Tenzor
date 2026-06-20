@@ -380,9 +380,15 @@ public:
             cudaMemLocation location{};
             location.type = cudaMemLocationTypeDevice;
             location.id = device_id;
-            cudaMemAdvise(ptr, bytes, cudaMemAdviseSetPreferredLocation, location);
+            // These are best-effort hints; on failure clear the sticky runtime
+            // error (mirroring the pattern elsewhere) rather than ignoring it.
+            if (cudaMemAdvise(ptr, bytes, cudaMemAdviseSetPreferredLocation, location) != cudaSuccess) {
+                cudaGetLastError();
+            }
             // Prefetch to device for immediate use
-            cudaMemPrefetchAsync(ptr, bytes, location, 0);
+            if (cudaMemPrefetchAsync(ptr, bytes, location, 0) != cudaSuccess) {
+                cudaGetLastError();
+            }
 
             {
                 std::lock_guard<std::mutex> lock(ptr_device_mutex_);
@@ -402,7 +408,9 @@ public:
         }
 
         void* ptr = nullptr;
-        cudaSetDevice(device_id);
+        // Scoped: restores the caller's prior device and keeps the thread-local
+        // current-device consistent (a bare cudaSetDevice leaked the switch).
+        DeviceGuard guard(Device::cuda(device_id));
         cudaError_t err = cudaMalloc(&ptr, bytes);
         if (err != cudaSuccess) {
             throw std::runtime_error(
@@ -492,7 +500,11 @@ public:
                 // Use cudaMemcpyPeerAsync when devices differ and P2P is enabled
                 if (src_device >= 0 && dst_device >= 0 && src_device != dst_device &&
                     has_peer_access(src_device, dst_device)) {
-                    err = cudaMemcpyPeerAsync(dst, dst_device, src, src_device, bytes, cudaStreamPerThread);
+                    // Issue on the legacy default stream (0), matching the
+                    // sibling D2D/H2D path below, so the peer copy is ordered
+                    // with subsequent stream-0 kernel launches (cudaStreamPerThread
+                    // is unordered w.r.t. stream 0 and raced those kernels).
+                    err = cudaMemcpyPeerAsync(dst, dst_device, src, src_device, bytes, 0);
                     if (err != cudaSuccess) {
                         throw std::runtime_error(
                             std::string("CUDA peer copy failed: ") + cudaGetErrorString(err));
@@ -528,7 +540,10 @@ public:
     }
 
     auto synchronize(int32_t device_id) -> void override {
-        cudaSetDevice(device_id);
+        // Scoped: restores the caller's prior device on return. A bare
+        // cudaSetDevice would silently leak the device switch into the
+        // calling thread (see allocate()/copy()).
+        DeviceGuard guard(Device::cuda(device_id));
         cudaDeviceSynchronize();
         // Surface any deferred index-out-of-range error now that all device
         // work (incl. the embedding OOB flag copy) has completed.
@@ -554,7 +569,10 @@ public:
     }
 
     auto create_event(int32_t device_id, bool enable_timing = true) -> EventHandle override {
-        cudaSetDevice(device_id);
+        // Scoped: restores the caller's prior device on return. A bare
+        // cudaSetDevice would silently leak the device switch into the
+        // calling thread (see allocate()/copy()).
+        DeviceGuard guard(Device::cuda(device_id));
         cudaEvent_t event;
         unsigned flags = enable_timing ? cudaEventDefault : cudaEventDisableTiming;
         cudaError_t err = cudaEventCreateWithFlags(&event, flags);
@@ -612,7 +630,10 @@ public:
     }
 
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override {
-        cudaSetDevice(device_id);
+        // Scoped: restores the caller's prior device on return. A bare
+        // cudaSetDevice would silently leak the device switch into the
+        // calling thread (see allocate()/copy()).
+        DeviceGuard guard(Device::cuda(device_id));
         cudaError_t err = cudaMemset(ptr, value, bytes);
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("cudaMemset failed: ") + cudaGetErrorString(err));

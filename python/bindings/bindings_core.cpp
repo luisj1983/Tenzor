@@ -89,6 +89,52 @@ inline void require_backend_for_device(const tenzor::Device& dev) {
     }
 }
 
+// In-place write of `src` (assumed already matching self's dtype, device and
+// shape, and contiguous) into self's EXISTING storage, so other aliases of
+// self (e.g. a Parameter's stored tensor) observe the new values. Mirrors the
+// storage-write half of Tensor.copy_. Does NOT touch the Python GIL; callers
+// release it if desired.
+inline void inplace_fill_storage(tenzor::Tensor& self, const tenzor::Tensor& src) {
+    size_t nbytes = static_cast<size_t>(self.numel()) * self.dtype_size();
+    if (nbytes == 0) return;
+    if (self.is_contiguous()) {
+        if (self.device().type == tenzor::Device::Type::CPU) {
+            std::memcpy(self.data_ptr(), src.data_ptr(), nbytes);
+        } else {
+            auto* backend = tenzor::backend_registry().get_backend(self.device().type);
+            if (!backend) {
+                throw std::runtime_error("in-place fill: no backend registered for device");
+            }
+            backend->copy(self.data_ptr(), src.data_ptr(), nbytes,
+                          tenzor::CopyKind::DeviceToDevice);
+        }
+    } else {
+        if (self.device().type != tenzor::Device::Type::CPU) {
+            throw std::runtime_error(
+                "in-place fill: non-contiguous destination only supported on CPU; "
+                "call .contiguous() first");
+        }
+        auto ss = self.shape();
+        auto iter_shape = std::vector<int64_t>(ss.begin(), ss.end());
+        int64_t n = self.numel();
+        int64_t ndim = static_cast<int64_t>(iter_shape.size());
+        auto strides_self = self.strides();
+        const uint8_t* src_bytes = static_cast<const uint8_t*>(src.data_ptr());
+        uint8_t* dst_bytes = static_cast<uint8_t*>(self.data_ptr());
+        size_t elt = self.dtype_size();
+        for (int64_t lin = 0; lin < n; ++lin) {
+            int64_t rem = lin;
+            int64_t dst_off = 0;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                int64_t idx = rem % iter_shape[d];
+                rem /= iter_shape[d];
+                dst_off += idx * strides_self[d];
+            }
+            std::memcpy(dst_bytes + dst_off * elt, src_bytes + lin * elt, elt);
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Audit Q.14: Variable.__mod__ / __floordiv__ stop-gradient Function nodes.
 //
@@ -237,7 +283,7 @@ bool variable_setitem_autograd(tenzor::Variable& self,
     tenzor::Variable result;
     if (py::isinstance<py::int_>(value) || py::isinstance<py::float_>(value)) {
         // Scalar RHS: value is a non-differentiable constant.
-        result = tenzor::masked_fill(base, mask, value.cast<float>());
+        result = tenzor::masked_fill(base, mask, value.cast<double>());
     } else {
         tenzor::Variable value_var =
             py::isinstance<tenzor::Variable>(value)
@@ -918,10 +964,22 @@ Returns:
                 if (d < 0)
                     throw py::value_error(
                         "from_blob: negative dimension in shape");
-                numel *= d;
+                // Detect overflow: a shape whose product wraps int64 to a small
+                // or zero positive value would otherwise defeat the
+                // required_bytes > available_bytes guard below and yield a
+                // zero-copy view over a too-small buffer (OOB on later access).
+                if (__builtin_mul_overflow(numel, d, &numel))
+                    throw py::value_error(
+                        "from_blob: shape element count overflows int64");
             }
-            const size_t required_bytes =
-                static_cast<size_t>(numel) * tenzor::dtype_size(dtype);
+            // Also guard required_bytes = numel * dtype_size against size_t
+            // overflow before using it in the buffer-size comparison.
+            size_t required_bytes = 0;
+            if (__builtin_mul_overflow(static_cast<size_t>(numel),
+                                       tenzor::dtype_size(dtype),
+                                       &required_bytes))
+                throw py::value_error(
+                    "from_blob: required byte count overflows size_t");
             const size_t available_bytes =
                 static_cast<size_t>(info.size) *
                 static_cast<size_t>(info.itemsize);
@@ -1406,7 +1464,12 @@ Returns:
                     auto shift = tenzor::full({1}, mean, self.dtype(), self.device());
                     sampled = sampled * scale + shift;
                 }
-                self = sampled; return self;
+                // Write into self's existing storage so Parameter aliases
+                // (param.tensor().normal_(...)) observe the new values; a plain
+                // `self = sampled` would only swap the receiver's impl pointer.
+                if (!sampled.is_contiguous()) sampled = sampled.contiguous();
+                inplace_fill_storage(self, sampled);
+                return self;
             }, py::arg("mean") = 0.0, py::arg("std") = 1.0,
             "Fill self with samples from N(mean, std^2) in-place. Returns self.",
             py::call_guard<py::gil_scoped_release>())
@@ -1418,7 +1481,10 @@ Returns:
                     auto shift = tenzor::full({1}, low, self.dtype(), self.device());
                     sampled = sampled * scale + shift;
                 }
-                self = sampled; return self;
+                // Write into self's existing storage (see normal_).
+                if (!sampled.is_contiguous()) sampled = sampled.contiguous();
+                inplace_fill_storage(self, sampled);
+                return self;
             }, py::arg("low") = 0.0, py::arg("high") = 1.0,
             "Fill self with samples from U[low, high) in-place. Returns self.",
             py::call_guard<py::gil_scoped_release>())
@@ -1970,8 +2036,8 @@ Returns:
                 switch (dtype) {
                     case tenzor::DType::Float32:  dval = t.item<float>(); is_float = true; break;
                     case tenzor::DType::Float64:  dval = t.item<double>(); is_float = true; break;
-                    case tenzor::DType::Float16:  dval = static_cast<float>(t.data<tenzor::Float16>()[0]); is_float = true; break;
-                    case tenzor::DType::BFloat16: dval = static_cast<float>(t.data<tenzor::BFloat16>()[0]); is_float = true; break;
+                    case tenzor::DType::Float16:  dval = static_cast<float>(t.item<tenzor::Float16>()); is_float = true; break;
+                    case tenzor::DType::BFloat16: dval = static_cast<float>(t.item<tenzor::BFloat16>()); is_float = true; break;
                     case tenzor::DType::Int8:     ival = t.item<int8_t>(); is_int = true; break;
                     case tenzor::DType::Int16:    ival = t.item<int16_t>(); is_int = true; break;
                     case tenzor::DType::Int32:    ival = t.item<int32_t>(); is_int = true; break;
@@ -3430,7 +3496,32 @@ Returns:
                     std::vector<std::optional<tenzor::Tensor>> idx_opt;
                     idx_opt.reserve(fancy_indices.size());
                     for (auto& t : fancy_indices) idx_opt.emplace_back(t);
-                    tenzor::index_put(self, idx_opt, val);
+
+                    // Broadcast/expand the RHS to the indexed-write element
+                    // layout BEFORE dispatch. The AdvancedIndexPut kernels
+                    // (CPU/CUDA/Vulkan) read values[gid] for every output
+                    // element gid in [0, total_out) with no internal broadcast
+                    // or size guard, so a scalar RHS (passed as a shape-{1}
+                    // tensor via make_scalar_tensor) — or any under-sized
+                    // values tensor — would otherwise drive an out-of-bounds
+                    // read past the end of the values buffer. The other write
+                    // paths (Int/Slice/Tuple via copy_with_broadcast, BoolMask
+                    // via masked_fill) already expand the scalar; do the same
+                    // here. The output element layout equals the gather output
+                    // shape of index(self, idx_opt), so derive it from there
+                    // to stay in lockstep with the kernels' meta computation.
+                    tenzor::Tensor put_val = val;
+                    auto gathered = tenzor::index(self, idx_opt);
+                    if (put_val.numel() != gathered.numel()) {
+                        auto out_shape = gathered.shape();
+                        auto out_shape_vec =
+                            std::vector<int64_t>(out_shape.begin(), out_shape.end());
+                        auto src_cast = (put_val.dtype() == self.dtype())
+                                            ? put_val
+                                            : put_val.to(self.dtype());
+                        put_val = tenzor::expand(src_cast, out_shape_vec).contiguous();
+                    }
+                    tenzor::index_put(self, idx_opt, put_val);
                     return;
                 }
                 case SetIndexKind::Tuple: {
@@ -3686,6 +3777,104 @@ Returns:
         std::vector<int64_t> shape;
         get_shape(data, shape, 0);
 
+        auto actual_dtype = dtype.value_or(tenzor::DType::Float32);
+
+        // Helper to reject ragged nested sequences. get_shape only recurses
+        // into the first element of each level, so an inconsistent (ragged)
+        // input produces a shape whose product disagrees with the number of
+        // leaves collected by flatten(). Constructing a tensor anyway would
+        // leave elements uninitialized (numel > leaves) or write past the
+        // buffer (numel < leaves). PyTorch/NumPy raise here too.
+        auto check_ragged = [&](size_t leaf_count) {
+            int64_t numel = 1;
+            for (int64_t d : shape) numel *= d;
+            if (!shape.empty() &&
+                leaf_count != static_cast<size_t>(numel)) {
+                throw py::value_error(
+                    "tensor(): ragged nested sequence — expected " +
+                    std::to_string(numel) + " elements for the inferred "
+                    "shape but found " + std::to_string(leaf_count) +
+                    ". All sub-sequences at a given depth must have equal "
+                    "length.");
+            }
+        };
+
+        // 64-bit integer dtypes: route through an exact integer buffer rather
+        // than double. Python ints are arbitrary-precision; casting via double
+        // (py::cast<double>) silently loses precision above 2^53, so e.g.
+        // tensor([9007199254740993], dtype=int64) would store ...992. Use
+        // PyLong_AsLongLong / PyLong_AsUnsignedLongLong (exact, with overflow
+        // detection) to fill 64-bit integer tensors losslessly.
+        if (actual_dtype == tenzor::DType::Int64 ||
+            actual_dtype == tenzor::DType::UInt64) {
+            const bool is_unsigned = (actual_dtype == tenzor::DType::UInt64);
+            std::vector<int64_t> ivalues;   // signed payload
+            std::vector<uint64_t> uvalues;  // unsigned payload
+            std::function<void(py::handle)> flatten_int;
+            flatten_int = [&](py::handle obj) {
+                if (py::isinstance<py::list>(obj) || py::isinstance<py::tuple>(obj)) {
+                    for (auto item : py::cast<py::sequence>(obj))
+                        flatten_int(item);
+                    return;
+                }
+                if (is_unsigned) {
+                    if (!PyLong_Check(obj.ptr())) {
+                        // bool is a subclass of int; everything else (float) is
+                        // not a valid exact integer source.
+                        throw py::type_error(
+                            "tensor(): non-integer value supplied for a 64-bit "
+                            "integer dtype");
+                    }
+                    unsigned long long v = PyLong_AsUnsignedLongLong(obj.ptr());
+                    if (v == static_cast<unsigned long long>(-1) && PyErr_Occurred())
+                        throw py::error_already_set();
+                    uvalues.push_back(static_cast<uint64_t>(v));
+                } else {
+                    if (!PyLong_Check(obj.ptr())) {
+                        throw py::type_error(
+                            "tensor(): non-integer value supplied for a 64-bit "
+                            "integer dtype");
+                    }
+                    long long v = PyLong_AsLongLong(obj.ptr());
+                    if (v == -1 && PyErr_Occurred())
+                        throw py::error_already_set();
+                    ivalues.push_back(static_cast<int64_t>(v));
+                }
+            };
+
+            if (py::isinstance<py::list>(data) || py::isinstance<py::tuple>(data)) {
+                flatten_int(data);
+            } else {
+                flatten_int(data);  // scalar
+            }
+
+            size_t leaf_count = is_unsigned ? uvalues.size() : ivalues.size();
+            check_ragged(leaf_count);
+
+            if (shape.empty()) {
+                auto t = tenzor::empty({}, actual_dtype, tenzor::Device::cpu());
+                if (is_unsigned)
+                    *t.data<uint64_t>() = uvalues[0];
+                else
+                    *t.data<int64_t>() = ivalues[0];
+                if (device.type != tenzor::Device::Type::CPU)
+                    t = t.to(device);
+                return t;
+            }
+
+            auto t = tenzor::empty(shape, actual_dtype, tenzor::Device::cpu());
+            if (is_unsigned) {
+                auto* ptr = t.data<uint64_t>();
+                for (size_t i = 0; i < uvalues.size(); ++i) ptr[i] = uvalues[i];
+            } else {
+                auto* ptr = t.data<int64_t>();
+                for (size_t i = 0; i < ivalues.size(); ++i) ptr[i] = ivalues[i];
+            }
+            if (device.type != tenzor::Device::Type::CPU)
+                t = t.to(device);
+            return t;
+        }
+
         // Flatten all values
         std::vector<double> values;
         std::function<void(py::handle)> flatten;
@@ -3705,27 +3894,7 @@ Returns:
             values.push_back(py::cast<double>(data));
         }
 
-        // Reject ragged nested sequences. get_shape only recurses into the
-        // first element of each level, so an inconsistent (ragged) input
-        // produces a shape whose product disagrees with the number of leaves
-        // collected by flatten(). Constructing a tensor anyway would leave
-        // elements uninitialized (numel > leaves) or write past the buffer
-        // (numel < leaves). PyTorch/NumPy raise here too.
-        {
-            int64_t numel = 1;
-            for (int64_t d : shape) numel *= d;
-            if (!shape.empty() &&
-                values.size() != static_cast<size_t>(numel)) {
-                throw py::value_error(
-                    "tensor(): ragged nested sequence — expected " +
-                    std::to_string(numel) + " elements for the inferred "
-                    "shape but found " + std::to_string(values.size()) +
-                    ". All sub-sequences at a given depth must have equal "
-                    "length.");
-            }
-        }
-
-        auto actual_dtype = dtype.value_or(tenzor::DType::Float32);
+        check_ragged(values.size());
 
         if (shape.empty()) {
             // Scalar tensor
@@ -4755,7 +4924,7 @@ Returns:
          py::arg("input"), py::arg("mask"),
          py::call_guard<py::gil_scoped_release>());
     m.def("masked_fill",
-         static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, const tenzor::Tensor&, float)>(
+         static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, const tenzor::Tensor&, double)>(
              &tenzor::masked_fill),
          "Fill elements with value where mask is true",
          py::arg("input"), py::arg("mask"), py::arg("value"),
@@ -4988,8 +5157,8 @@ Returns:
                 switch (dtype) {
                     case tenzor::DType::Float32:  dval = t.item<float>(); is_float = true; break;
                     case tenzor::DType::Float64:  dval = t.item<double>(); is_float = true; break;
-                    case tenzor::DType::Float16:  dval = static_cast<float>(t.data<tenzor::Float16>()[0]); is_float = true; break;
-                    case tenzor::DType::BFloat16: dval = static_cast<float>(t.data<tenzor::BFloat16>()[0]); is_float = true; break;
+                    case tenzor::DType::Float16:  dval = static_cast<float>(t.item<tenzor::Float16>()); is_float = true; break;
+                    case tenzor::DType::BFloat16: dval = static_cast<float>(t.item<tenzor::BFloat16>()); is_float = true; break;
                     case tenzor::DType::Int8:     ival = t.item<int8_t>(); is_int = true; break;
                     case tenzor::DType::Int16:    ival = t.item<int16_t>(); is_int = true; break;
                     case tenzor::DType::Int32:    ival = t.item<int32_t>(); is_int = true; break;
@@ -5177,42 +5346,123 @@ Returns:
         .def("__ge__", [](const tenzor::Variable& a, double b) {
             return tenzor::ge(a.tensor(), tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
         }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
-        // In-place operators
+        // In-place operators.
+        //
+        // The underlying tenzor::add_/sub_/mul_/div_ are plain non-autograd
+        // Tensor ops: they mutate the buffer with NO backward node and NO
+        // grad_fn update. Calling them directly on a tracked Variable silently
+        // breaks the chain rule (a later backward() sees post-mutation data
+        // with the in-place op invisible). To preserve correctness we mirror
+        // the __setitem__ contract:
+        //   * a leaf Variable that requires grad cannot be mutated in place
+        //     (breaks the leaf invariant) -> raise, matching PyTorch;
+        //   * when a live autograd graph is involved (grad enabled and self or
+        //     the operand requires grad), REBIND `a` through the autograd-aware
+        //     operator (a = a + b) so the op contributes to backward();
+        //   * otherwise (no graph to preserve) do the cheap in-place mutation.
         .def("__iadd__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
-            tenzor::add_(a.tensor(), b.tensor());
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__iadd__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && (a.requires_grad() || b.requires_grad()))
+                a = a + b;
+            else
+                tenzor::add_(a.tensor(), b.tensor());
             return a;
         }, py::is_operator())
         .def("__isub__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
-            tenzor::sub_(a.tensor(), b.tensor());
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__isub__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && (a.requires_grad() || b.requires_grad()))
+                a = a - b;
+            else
+                tenzor::sub_(a.tensor(), b.tensor());
             return a;
         }, py::is_operator())
         .def("__imul__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
-            tenzor::mul_(a.tensor(), b.tensor());
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__imul__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && (a.requires_grad() || b.requires_grad()))
+                a = a * b;
+            else
+                tenzor::mul_(a.tensor(), b.tensor());
             return a;
         }, py::is_operator())
         .def("__itruediv__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
-            tenzor::div_(a.tensor(), b.tensor());
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__itruediv__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && (a.requires_grad() || b.requires_grad()))
+                a = a / b;
+            else
+                tenzor::div_(a.tensor(), b.tensor());
             return a;
         }, py::is_operator())
         // Scalar in-place
-        .def("__iadd__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
-            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
-            tenzor::add_(a.tensor(), scalar_t);
+        .def("__iadd__", [](tenzor::Variable& a, double b) -> tenzor::Variable& {
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__iadd__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && a.requires_grad()) {
+                a = a + b;
+            } else {
+                auto scalar_t = tenzor::full({1}, b, a.dtype(), a.device());
+                tenzor::add_(a.tensor(), scalar_t);
+            }
             return a;
         }, py::is_operator())
-        .def("__isub__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
-            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
-            tenzor::sub_(a.tensor(), scalar_t);
+        .def("__isub__", [](tenzor::Variable& a, double b) -> tenzor::Variable& {
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__isub__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && a.requires_grad()) {
+                a = a - b;
+            } else {
+                auto scalar_t = tenzor::full({1}, b, a.dtype(), a.device());
+                tenzor::sub_(a.tensor(), scalar_t);
+            }
             return a;
         }, py::is_operator())
-        .def("__imul__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
-            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
-            tenzor::mul_(a.tensor(), scalar_t);
+        .def("__imul__", [](tenzor::Variable& a, double b) -> tenzor::Variable& {
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__imul__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && a.requires_grad()) {
+                a = a * b;
+            } else {
+                auto scalar_t = tenzor::full({1}, b, a.dtype(), a.device());
+                tenzor::mul_(a.tensor(), scalar_t);
+            }
             return a;
         }, py::is_operator())
-        .def("__itruediv__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
-            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
-            tenzor::div_(a.tensor(), scalar_t);
+        .def("__itruediv__", [](tenzor::Variable& a, double b) -> tenzor::Variable& {
+            if (a.requires_grad() && a.is_leaf())
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__itruediv__). Detach the "
+                    "Variable first or wrap the op in a no_grad() block.");
+            if (tenzor::is_grad_enabled() && a.requires_grad()) {
+                a = a / b;
+            } else {
+                auto scalar_t = tenzor::full({1}, b, a.dtype(), a.device());
+                tenzor::div_(a.tensor(), scalar_t);
+            }
             return a;
         }, py::is_operator())
         // Numeric protocol
@@ -5262,8 +5512,29 @@ Returns:
         })
         .def("dim", [](const tenzor::Variable& v) { return v.tensor().ndim(); },
              "Number of dimensions")
-        .def("__index__", [](const tenzor::Variable& v) {
-            return v.tensor().item<int64_t>();
+        .def("__index__", [](const tenzor::Variable& v) -> int64_t {
+            const auto& t = v.tensor();
+            if (t.numel() != 1) {
+                throw py::value_error("only single-element tensors can be converted to Python scalars");
+            }
+            // Python's __index__ contract is integer-only: float (and complex)
+            // scalars are NOT valid indices and must raise TypeError, not be
+            // reinterpreted from raw storage bytes. Mirror Tensor.__index__.
+            switch (t.dtype()) {
+                case tenzor::DType::Int64: return t.item<int64_t>();
+                case tenzor::DType::Int32: return static_cast<int64_t>(t.item<int32_t>());
+                case tenzor::DType::Int16: return static_cast<int64_t>(t.item<int16_t>());
+                case tenzor::DType::Int8:  return static_cast<int64_t>(t.item<int8_t>());
+                case tenzor::DType::UInt8:  return static_cast<int64_t>(t.item<uint8_t>());
+                case tenzor::DType::UInt16: return static_cast<int64_t>(t.item<uint16_t>());
+                case tenzor::DType::UInt32: return static_cast<int64_t>(t.item<uint32_t>());
+                case tenzor::DType::UInt64: return static_cast<int64_t>(t.item<uint64_t>());
+                case tenzor::DType::Bool:  return static_cast<int64_t>(t.item<bool>());
+                default:
+                    throw py::type_error(
+                        "only integer tensors can be used as indices (__index__); "
+                        "got dtype " + std::string(tenzor::dtype_name(t.dtype())));
+            }
         })
         .def("__len__", [](const tenzor::Variable& v) -> int64_t {
             if (v.tensor().ndim() == 0) throw py::type_error("len() of a 0-d Variable");

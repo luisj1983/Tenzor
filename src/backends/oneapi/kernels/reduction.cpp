@@ -289,13 +289,22 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
             ).wait();
 
-            // Second pass: reduce partial sums
+            // Second pass: reduce partial sums.
+            // Grid-stride fold so every partial in [0, num_wgs) is consumed even
+            // when num_wgs > WG_SIZE (total_size > WG_SIZE*WG_SIZE = 65536). The
+            // single phase-2 work-group is only WG_SIZE wide; without the fold the
+            // partials at indices [WG_SIZE, num_wgs) would be silently dropped and
+            // the reported sum would be too small. Mirrors sycl_arg_reduce_full's
+            // phase-2 grid-stride fix.
             auto event2 = queue.parallel_for(
                 sycl::nd_range<1>(WG_SIZE, WG_SIZE),
                 [=](sycl::nd_item<1> item) {
                     int64_t lid = item.get_local_id(0);
-                    int64_t val = (lid < num_wgs) ? partial_buf[lid] : int64_t(0);
-                    int64_t sum = sycl::reduce_over_group(item.get_group(), val, sycl::plus<int64_t>());
+                    int64_t acc = int64_t(0);
+                    for (int64_t p = lid; p < num_wgs; p += WG_SIZE) {
+                        acc += partial_buf[p];
+                    }
+                    int64_t sum = sycl::reduce_over_group(item.get_group(), acc, sycl::plus<int64_t>());
                     if (lid == 0) out_ptr[0] = sum;
                 }
             );
@@ -324,12 +333,17 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
             ).wait();
 
+            // Second pass: grid-stride fold so all num_wgs partials are summed
+            // even when num_wgs > WG_SIZE (total_size > 65536); see the Int64 path.
             auto event2 = queue.parallel_for(
                 sycl::nd_range<1>(WG_SIZE, WG_SIZE),
                 [=](sycl::nd_item<1> item) {
                     int64_t lid = item.get_local_id(0);
-                    uint64_t val = (lid < num_wgs) ? partial_buf[lid] : uint64_t(0);
-                    uint64_t sum = sycl::reduce_over_group(item.get_group(), val, sycl::plus<uint64_t>());
+                    uint64_t acc = uint64_t(0);
+                    for (int64_t p = lid; p < num_wgs; p += WG_SIZE) {
+                        acc += partial_buf[p];
+                    }
+                    uint64_t sum = sycl::reduce_over_group(item.get_group(), acc, sycl::plus<uint64_t>());
                     if (lid == 0) out_ptr[0] = sum;
                 }
             );
@@ -1367,6 +1381,44 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue&
  *   IsMax     - true for argmax, false for argmin
  *   ReadT     - the actual device pointer type (may differ from T for Float16)
  */
+// NaN-aware argmax/argmin reducer helpers, matching the CPU reference
+// (src/backends/cpu/kernels/reduction.cpp). PyTorch returns the index of the
+// FIRST NaN (NaN sorts as the extreme): once `best` is NaN it is never replaced,
+// and any NaN candidate beats a non-NaN `best`. For integer T these collapse to
+// a plain strict comparison (integers have no NaN). Strict `>`/`<` on value
+// ties keeps the earlier index when the two candidates are visited in index
+// order; the explicit index tie-break below handles unordered visitation.
+template<typename T>
+inline bool arg_is_nan(T v) {
+    if constexpr (std::is_floating_point_v<T>) return sycl::isnan(v);
+    else return false;
+}
+template<typename T>
+inline bool arg_takes_max(T cand, T best) {
+    return !arg_is_nan(best) && (arg_is_nan(cand) || cand > best);
+}
+template<typename T>
+inline bool arg_takes_min(T cand, T best) {
+    return !arg_is_nan(best) && (arg_is_nan(cand) || cand < best);
+}
+// "Should candidate b (value bv, flat index bidx) replace current best a (av,
+// aidx)?" used when merging two already-reduced (value,index) pairs whose visit
+// order is not monotone (tree reduction over local memory). NaN-aware with
+// first-occurrence (smaller index) tie-break, matching the CPU reference.
+template<bool IsMax, typename T>
+inline bool arg_pair_replace(T bv, int64_t bidx, T av, int64_t aidx) {
+    const bool a_nan = arg_is_nan(av);
+    const bool b_nan = arg_is_nan(bv);
+    if (a_nan && b_nan) return bidx < aidx;
+    if (a_nan) return false;
+    if (b_nan) return true;
+    if constexpr (IsMax) {
+        return bv > av || (bv == av && bidx < aidx);
+    } else {
+        return bv < av || (bv == av && bidx < aidx);
+    }
+}
+
 template<typename T, typename Phase1Name, typename Phase2Name, bool IsMax, typename ReadT = T>
 static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
                                  int64_t total_size, sycl::queue& queue) {
@@ -1409,10 +1461,11 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
                         // Float16 path: read sycl::half, promote to float
                         val = static_cast<T>(in_ptr[i]);
                     }
+                    // NaN-aware (PyTorch first-NaN semantics, matches CPU).
                     if constexpr (IsMax) {
-                        if (val > best_val) { best_val = val; best_idx = i; }
+                        if (arg_takes_max(val, best_val)) { best_val = val; best_idx = i; }
                     } else {
-                        if (val < best_val) { best_val = val; best_idx = i; }
+                        if (arg_takes_min(val, best_val)) { best_val = val; best_idx = i; }
                     }
                 }
 
@@ -1427,18 +1480,9 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
                     if (lid < stride) {
                         const T ov = local_vals[lid + stride];
                         const int64_t oidx = local_idxs[lid + stride];
-                        if constexpr (IsMax) {
-                            if (ov > local_vals[lid] ||
-                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
-                                local_vals[lid] = ov;
-                                local_idxs[lid] = oidx;
-                            }
-                        } else {
-                            if (ov < local_vals[lid] ||
-                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
-                                local_vals[lid] = ov;
-                                local_idxs[lid] = oidx;
-                            }
+                        if (arg_pair_replace<IsMax>(ov, oidx, local_vals[lid], local_idxs[lid])) {
+                            local_vals[lid] = ov;
+                            local_idxs[lid] = oidx;
                         }
                     }
                     sycl::group_barrier(item.get_group());
@@ -1491,14 +1535,8 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
                 for (int64_t p = lid; p < n_partials; p += phase2_wg) {
                     const T v = partial_vals[p];
                     const int64_t pidx = partial_idxs[p];
-                    if constexpr (IsMax) {
-                        if (v > best_val || (v == best_val && pidx < best_idx)) {
-                            best_val = v; best_idx = pidx;
-                        }
-                    } else {
-                        if (v < best_val || (v == best_val && pidx < best_idx)) {
-                            best_val = v; best_idx = pidx;
-                        }
+                    if (arg_pair_replace<IsMax>(v, pidx, best_val, best_idx)) {
+                        best_val = v; best_idx = pidx;
                     }
                 }
 
@@ -1510,18 +1548,9 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
                     if (lid < stride) {
                         const T ov = local_vals[lid + stride];
                         const int64_t oidx = local_idxs[lid + stride];
-                        if constexpr (IsMax) {
-                            if (ov > local_vals[lid] ||
-                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
-                                local_vals[lid] = ov;
-                                local_idxs[lid] = oidx;
-                            }
-                        } else {
-                            if (ov < local_vals[lid] ||
-                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
-                                local_vals[lid] = ov;
-                                local_idxs[lid] = oidx;
-                            }
+                        if (arg_pair_replace<IsMax>(ov, oidx, local_vals[lid], local_idxs[lid])) {
+                            local_vals[lid] = ov;
+                            local_idxs[lid] = oidx;
                         }
                     }
                     sycl::group_barrier(item.get_group());
@@ -1644,11 +1673,13 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
 
+            // NaN-aware (PyTorch first-NaN semantics, matches CPU). Init best to
+            // -inf so the first NaN (if any) wins on the first arg_takes_max test.
             float max_val = -std::numeric_limits<float>::infinity();
             int64_t max_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 float val = in_ptr[base_offset + d * inner_size];
-                if (val > max_val) {
+                if (arg_takes_max(val, max_val)) {
                     max_val = val;
                     max_idx = d;
                 }
@@ -1669,7 +1700,7 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             int64_t max_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 double val = in_ptr[base_offset + d * inner_size];
-                if (val > max_val) {
+                if (arg_takes_max(val, max_val)) {
                     max_val = val;
                     max_idx = d;
                 }
@@ -1690,7 +1721,7 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             int64_t max_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
-                if (val > max_val) {
+                if (arg_takes_max(val, max_val)) {
                     max_val = val;
                     max_idx = d;
                 }
@@ -1830,11 +1861,13 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
 
+            // NaN-aware (PyTorch first-NaN semantics, matches CPU). Init best to
+            // +inf so the first NaN (if any) wins on the first arg_takes_min test.
             float min_val = std::numeric_limits<float>::infinity();
             int64_t min_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 float val = in_ptr[base_offset + d * inner_size];
-                if (val < min_val) {
+                if (arg_takes_min(val, min_val)) {
                     min_val = val;
                     min_idx = d;
                 }
@@ -1855,7 +1888,7 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             int64_t min_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 double val = in_ptr[base_offset + d * inner_size];
-                if (val < min_val) {
+                if (arg_takes_min(val, min_val)) {
                     min_val = val;
                     min_idx = d;
                 }
@@ -1876,7 +1909,7 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             int64_t min_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
-                if (val < min_val) {
+                if (arg_takes_min(val, min_val)) {
                     min_val = val;
                     min_idx = d;
                 }
@@ -2188,8 +2221,11 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
             Tensor out_vals({n_unique}, input.dtype(), input.device());
             queue.memcpy(out_vals.data_ptr(), d_sorted, n_unique * sizeof(T)).wait();
 
-            // Compute inverse mapping if needed
-            Tensor out_inverse({numel}, DType::Int64, input.device());
+            // Compute inverse mapping if needed. When not requested, return an
+            // empty {0} tensor (matching the CPU reference at src/ops/advanced.cpp)
+            // rather than an uninitialized {numel} USM buffer that would escape to
+            // the binding layer holding garbage.
+            Tensor out_inverse({return_inverse ? numel : 0}, DType::Int64, input.device());
             if (return_inverse) {
                 int64_t* inv_ptr = get_data_ptr<int64_t>(out_inverse);
                 const T* unique_ptr = get_data_ptr<const T>(out_vals);
@@ -2328,8 +2364,10 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
             }).wait();
 
             // Step 6: Build inverse indices — for each original element, binary search
-            // in the unique values to find its group index
-            Tensor out_inverse({numel}, DType::Int64, input.device());
+            // in the unique values to find its group index. When not requested,
+            // return an empty {0} tensor (matching the CPU reference) instead of an
+            // uninitialized {numel} buffer.
+            Tensor out_inverse({return_inverse ? numel : 0}, DType::Int64, input.device());
             if (return_inverse) {
                 int64_t* inv_ptr = get_data_ptr<int64_t>(out_inverse);
                 const T* unique_ptr = get_data_ptr<const T>(out_vals);

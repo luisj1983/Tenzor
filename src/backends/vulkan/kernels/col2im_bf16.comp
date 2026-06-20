@@ -3,10 +3,13 @@
 // Col2im (Fold) operation for BFloat16
 // Transforms (N, C*K_h*K_w, L) -> (N,C,H,W) with accumulation
 // BF16 packed buffers (2 BFloat16 per uint32), arithmetic in float32
-// Note: Cannot use atomicAdd on packed BF16 — use read-modify-write
-// (col2im threads may race on the same output element, so this shader
-//  is only safe when dispatched with non-overlapping output mapping,
-//  or when used as part of a serial accumulation strategy.)
+// Dispatched INPUT-CENTRIC (one thread per column entry); overlapping fold
+// windows make multiple threads target the same output element, so the
+// accumulation MUST be atomic. Core Vulkan has no native atomicAdd for
+// packed BF16, so we use an atomicCompSwap CAS loop on the enclosing uint32
+// word (same pattern as avg_pool2d_backward_bf16 / put_bf16). This makes the
+// fold deterministic and matches the F32 atomicAdd path. Arithmetic is in
+// float32 with round-to-nearest-even narrowing back to BF16.
 // HH.6: per-axis kernel/stride/padding/dilation.
 layout(local_size_x_id = 0) in;
 
@@ -40,21 +43,33 @@ float readBF16Input(uint element_idx) {
     return uintBitsToFloat(bits << 16);
 }
 
-float readBF16Output(uint element_idx) {
+// Atomically add a value (in float32) into a packed BF16 output element.
+// Since there's no native BF16 atomicAdd, use a bounded CAS loop on the
+// enclosing uint32 word, touching only the target half. Narrowing uses
+// round-to-nearest-even. (Pattern shared with avg_pool2d_backward_bf16.)
+void atomicAddBF16Output(uint element_idx, float add_val) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint packed = output_data[word_idx];
-    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
-    return uintBitsToFloat(bits << 16);
-}
+    uint half_idx = element_idx % 2;
+    uint mask = 0xFFFFu << (half_idx * 16);
 
-void writeBF16Output(uint element_idx, float val) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
-    uint existing = output_data[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    output_data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        uint bits = (expected >> (half_idx * 16)) & 0xFFFFu;
+        float current = uintBitsToFloat(bits << 16);
+        float updated = current + add_val;
+        uint new_bits = ((floatBitsToUint(updated) + 0x7FFFu + ((floatBitsToUint(updated) >> 16) & 1u)) >> 16);
+
+        // Build the new word with only the target half changed
+        new_val = (expected & ~mask) | (new_bits << (half_idx * 16));
+
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word.
 }
 
 void main() {
@@ -94,9 +109,8 @@ void main() {
                          c * (params.height * params.width) +
                          uint(ih) * params.width + uint(iw);
 
-        // Read input value, read existing output, accumulate, write back
+        // Read input value, atomically accumulate into the output element.
         float in_val = readBF16Input(input_idx);
-        float out_val = readBF16Output(output_idx);
-        writeBF16Output(output_idx, out_val + in_val);
+        atomicAddBF16Output(output_idx, in_val);
     }
 }

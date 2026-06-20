@@ -30,6 +30,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <limits>
 
 namespace tenzor {
 namespace cuda {
@@ -150,6 +151,22 @@ double get_norm_factor_nd(const std::vector<int64_t>& n_vec, const std::string& 
         factor *= get_norm_factor(n, norm, is_forward);
     }
     return factor;
+}
+
+/// Safely narrow a 64-bit cuFFT plan parameter to the `int` that cuFFT's API
+/// requires. cuFFT genuinely uses `int` for transform extents, batch counts,
+/// strides and distances, so the narrowing is unavoidable — but an unchecked
+/// static_cast<int> silently wraps for values > INT_MAX, after which cuFFT
+/// either errors opaquely or plans over the wrong region. Validate first and
+/// throw a clear diagnostic instead.
+int cufft_checked_int(int64_t value, const char* what) {
+    if (value < 0 || value > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            std::string("cuFFT: ") + what + " (" + std::to_string(value) +
+            ") exceeds the int range supported by the cuFFT API (max " +
+            std::to_string(std::numeric_limits<int>::max()) + ").");
+    }
+    return static_cast<int>(value);
 }
 
 /// Apply scaling to a complex tensor (in-place).
@@ -292,7 +309,7 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     plan.set_stream(stream);
     size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
-    int n_int = static_cast<int>(N_out);
+    int n_int = cufft_checked_int(N_out, "transform size");
     int inembed[] = {n_int};
     int onembed[] = {n_int};
 
@@ -311,7 +328,7 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int ostride = 1;
         int idist = n_int;
         int odist = n_int;
-        int plan_batch = static_cast<int>(outer_size);
+        int plan_batch = cufft_checked_int(outer_size, "batch count");
         CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
@@ -330,11 +347,11 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 CUFFT_FORWARD));
         }
     } else {
-        int istride = static_cast<int>(inner_size);
-        int ostride = static_cast<int>(inner_size);
+        int istride = cufft_checked_int(inner_size, "inner stride");
+        int ostride = istride;
         int idist = 1;
         int odist = 1;
-        int plan_batch = static_cast<int>(inner_size);  // batches per outer block
+        int plan_batch = istride;  // batches per outer block (== inner_size)
         CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
@@ -428,7 +445,7 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     plan.set_stream(stream);
     size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
-    int n_int = static_cast<int>(N_out);
+    int n_int = cufft_checked_int(N_out, "transform size");
     int inembed[] = {n_int};
     int onembed[] = {n_int};
     bool last_dim = (dim == ndim - 1);
@@ -439,7 +456,7 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int ostride = 1;
         int idist = n_int;
         int odist = n_int;
-        int plan_batch = static_cast<int>(outer_size);
+        int plan_batch = cufft_checked_int(outer_size, "batch count");
         CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
@@ -459,11 +476,11 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         }
     } else {
         // audit-2026-05-03 — same outer-block loop fix as cuda_fft_kernel.
-        int istride = static_cast<int>(inner_size);
-        int ostride = static_cast<int>(inner_size);
+        int istride = cufft_checked_int(inner_size, "inner stride");
+        int ostride = istride;
         int idist = 1;
         int odist = 1;
-        int plan_batch = static_cast<int>(inner_size);
+        int plan_batch = istride;  // batches per outer block (== inner_size)
         CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
@@ -569,10 +586,11 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     plan.set_stream(stream);
     size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
-    int n_int = static_cast<int>(n);
+    int n_int = cufft_checked_int(n, "transform size");
     cufftType fft_type = is_float32 ? CUFFT_R2C : CUFFT_D2Z;
 
-    CUFFT_CHECK(cufftMakePlan1d(plan.handle, n_int, fft_type, static_cast<int>(batch), &cufft_ws));
+    CUFFT_CHECK(cufftMakePlan1d(plan.handle, n_int, fft_type,
+                                cufft_checked_int(batch, "batch count"), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -598,10 +616,13 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
                        const std::string& norm, cudaStream_t stream) -> Tensor {
-    // Accept real inputs (Float32 / Float64) by widening to the matching
-    // complex dtype first — mirrors the CPU path (cpu/kernels/fft.cpp).
+    // Accept real inputs by widening to the matching complex dtype first —
+    // mirrors the CPU path (cpu/kernels/fft.cpp): Float16/BFloat16 -> Complex64,
+    // Float32 -> Complex64, Float64 -> Complex128.
     Tensor input = input_raw;
-    if (input.dtype() == DType::Float32) input = input.to(DType::Complex64);
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+        input = input.to(DType::Complex64);
+    else if (input.dtype() == DType::Float32) input = input.to(DType::Complex64);
     else if (input.dtype() == DType::Float64) input = input.to(DType::Complex128);
 
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
@@ -663,10 +684,11 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
     plan.set_stream(stream);
     size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
-    int n_int = static_cast<int>(n);
+    int n_int = cufft_checked_int(n, "transform size");
     cufftType fft_type = is_float32 ? CUFFT_C2R : CUFFT_Z2D;
 
-    CUFFT_CHECK(cufftMakePlan1d(plan.handle, n_int, fft_type, static_cast<int>(batch), &cufft_ws));
+    CUFFT_CHECK(cufftMakePlan1d(plan.handle, n_int, fft_type,
+                                cufft_checked_int(batch, "batch count"), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -752,13 +774,16 @@ auto cuda_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     plan.set_stream(stream);
     size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
-    int n_arr[2] = {static_cast<int>(N0), static_cast<int>(N1)};
+    int n_arr[2] = {cufft_checked_int(N0, "transform size (dim 0)"),
+                    cufft_checked_int(N1, "transform size (dim 1)")};
+    int dist2d = cufft_checked_int(N0 * N1, "transform distance (N0*N1)");
+    int plan_batch = cufft_checked_int(batch, "batch count");
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
 
     CUFFT_CHECK(cufftMakePlanMany(plan.handle, 2, n_arr,
-                              nullptr, 1, static_cast<int>(N0 * N1),
-                              nullptr, 1, static_cast<int>(N0 * N1),
-                              fft_type, static_cast<int>(batch), &cufft_ws));
+                              nullptr, 1, dist2d,
+                              nullptr, 1, dist2d,
+                              fft_type, plan_batch, &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -838,13 +863,16 @@ auto cuda_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     plan.set_stream(stream);
     size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
-    int n_arr[2] = {static_cast<int>(N0), static_cast<int>(N1)};
+    int n_arr[2] = {cufft_checked_int(N0, "transform size (dim 0)"),
+                    cufft_checked_int(N1, "transform size (dim 1)")};
+    int dist2d = cufft_checked_int(N0 * N1, "transform distance (N0*N1)");
+    int plan_batch = cufft_checked_int(batch, "batch count");
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
 
     CUFFT_CHECK(cufftMakePlanMany(plan.handle, 2, n_arr,
-                              nullptr, 1, static_cast<int>(N0 * N1),
-                              nullptr, 1, static_cast<int>(N0 * N1),
-                              fft_type, static_cast<int>(batch), &cufft_ws));
+                              nullptr, 1, dist2d,
+                              nullptr, 1, dist2d,
+                              fft_type, plan_batch, &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -952,14 +980,16 @@ auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 
     std::vector<int> n_arr(rank);
     for (int64_t i = 0; i < rank; ++i) {
-        n_arr[i] = static_cast<int>(n_vec[i]);
+        n_arr[i] = cufft_checked_int(n_vec[i], "transform size");
     }
+    int nd_dist = cufft_checked_int(out_fft_size, "transform distance");
+    int plan_batch = cufft_checked_int(batch, "batch count");
 
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
     CUFFT_CHECK(cufftMakePlanMany(plan.handle, static_cast<int>(rank), n_arr.data(),
-                              nullptr, 1, static_cast<int>(out_fft_size),
-                              nullptr, 1, static_cast<int>(out_fft_size),
-                              fft_type, static_cast<int>(batch), &cufft_ws));
+                              nullptr, 1, nd_dist,
+                              nullptr, 1, nd_dist,
+                              fft_type, plan_batch, &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -1056,14 +1086,16 @@ auto cuda_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 
     std::vector<int> n_arr(rank);
     for (int64_t i = 0; i < rank; ++i) {
-        n_arr[i] = static_cast<int>(n_vec[i]);
+        n_arr[i] = cufft_checked_int(n_vec[i], "transform size");
     }
+    int nd_dist = cufft_checked_int(out_fft_size, "transform distance");
+    int plan_batch = cufft_checked_int(batch, "batch count");
 
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
     CUFFT_CHECK(cufftMakePlanMany(plan.handle, static_cast<int>(rank), n_arr.data(),
-                              nullptr, 1, static_cast<int>(out_fft_size),
-                              nullptr, 1, static_cast<int>(out_fft_size),
-                              fft_type, static_cast<int>(batch), &cufft_ws));
+                              nullptr, 1, nd_dist,
+                              nullptr, 1, nd_dist,
+                              fft_type, plan_batch, &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -1186,8 +1218,11 @@ double get_norm_factor_nd(const std::vector<int64_t>& n_vec, const std::string& 
 
 template<typename T>
 __global__ void native_scale_kernel(T* data, int64_t numel, T scale) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx < numel) {
+    // Grid-stride loop so a clamped/truncated grid count still covers all
+    // elements when numel exceeds the launchable thread count.
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < numel; idx += stride) {
         data[idx] *= scale;
     }
 }
@@ -1196,7 +1231,11 @@ template<typename T>
 void launch_scale(T* data, int64_t numel, T scale, cudaStream_t stream) {
     if (numel == 0) return;
     constexpr int block = 256;
-    int grid = static_cast<int>((numel + block - 1) / block);
+    // Clamp the grid to a safe maximum; the kernel grid-strides to cover any
+    // remainder when numel exceeds the launchable thread count (which would
+    // otherwise overflow the int grid or exceed gridDim.x and drop the tail).
+    int64_t grid64 = (numel + block - 1) / block;
+    int grid = static_cast<int>(std::min<int64_t>(grid64, 65535));
     native_scale_kernel<T><<<grid, block, 0, stream>>>(data, numel, scale);
     TENZOR_CUDA_CHECK(cudaGetLastError());
 }
@@ -2183,8 +2222,17 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // 1D IRFFT: Complex-to-Real inverse (native CUDA fallback)
 // ============================================================================
 
-auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
                        const std::string& norm, cudaStream_t stream) -> Tensor {
+    // Accept real inputs by widening to the matching complex dtype first —
+    // mirrors the cuFFT path above and the CPU reference (cpu/kernels/fft.cpp:
+    // Float16/BFloat16 -> Complex64, Float32 -> Complex64, Float64 -> Complex128).
+    Tensor input = input_raw;
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+        input = input.to(DType::Complex64);
+    else if (input.dtype() == DType::Float32) input = input.to(DType::Complex64);
+    else if (input.dtype() == DType::Float64) input = input.to(DType::Complex128);
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;

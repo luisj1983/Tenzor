@@ -114,8 +114,8 @@ auto remote(int32_t dst, const std::string& func_name,
     // non-self dst, so cross-rank remote() never resolved.)
     Tensor value = results.empty()
         ? Tensor({}, DType::Float32, Device::cpu())
-        : results[0];
-    int64_t rref_id = RRefStore::instance().store(value);
+        : std::move(results[0]);
+    int64_t rref_id = RRefStore::instance().store(std::move(value));
     return RRef(agent->self().id, rref_id, agent);
 }
 

@@ -16,6 +16,9 @@
 namespace tenzor {
 namespace oneapi {
 
+// Kernel name tag for the bidirectional output interleave (dtype-agnostic byte copy).
+struct BiLSTMInterleaveKernel {};
+
 // Forward declarations of cell-level kernels (from lstm.cpp / gru.cpp)
 auto lstm_cell_forward_kernel(
     const Tensor& gates, const Tensor& c_prev,
@@ -514,23 +517,42 @@ auto bilstm_forward_kernel(
         copy_to_time(bwd_output, x_t, t, queue);
     }
 
-    // Concatenate forward and backward outputs along feature dim
+    // Concatenate forward and backward outputs along feature dim.
+    // fwd_output / bwd_output are contiguous (seq, batch, H); combined_output is
+    // contiguous (seq, batch, 2H). The interleave is a pure byte copy (no
+    // arithmetic), so we dispatch a single dtype-agnostic parallel_for over all
+    // (seq*batch*H) elements instead of issuing O(2*seq*batch) tiny memcpys.
     Tensor combined_output({seq_len, batch_size, 2 * hidden_size}, input.dtype(), input.device());
     int64_t elem_size = input.dtype_size();
-    for (int64_t t = 0; t < seq_len; ++t) {
-        Tensor fwd_t = slice_at(fwd_output, t, queue);
-        Tensor bwd_t = slice_at(bwd_output, t, queue);
-        // Copy fwd to first H columns, bwd to second H columns
-        for (int64_t b = 0; b < batch_size; ++b) {
-            auto* dst = static_cast<uint8_t*>(const_cast<void*>(combined_output.data_ptr())) +
-                        (t * batch_size * 2 * hidden_size + b * 2 * hidden_size) * elem_size;
-            const auto* fwd_src = static_cast<const uint8_t*>(fwd_t.data_ptr()) +
-                                  b * hidden_size * elem_size;
-            const auto* bwd_src = static_cast<const uint8_t*>(bwd_t.data_ptr()) +
-                                  b * hidden_size * elem_size;
-            queue.memcpy(dst, fwd_src, hidden_size * elem_size);
-            queue.memcpy(dst + hidden_size * elem_size, bwd_src, hidden_size * elem_size);
-        }
+    int64_t total_elems = seq_len * batch_size * hidden_size;
+    if (total_elems > 0) {
+        auto* dst_base = static_cast<uint8_t*>(const_cast<void*>(combined_output.data_ptr()));
+        const auto* fwd_base = static_cast<const uint8_t*>(fwd_output.data_ptr());
+        const auto* bwd_base = static_cast<const uint8_t*>(bwd_output.data_ptr());
+        int64_t H = hidden_size;
+        queue.parallel_for<BiLSTMInterleaveKernel>(
+            sycl::range<1>(static_cast<size_t>(total_elems)),
+            [=](sycl::id<1> idx) {
+                int64_t i = static_cast<int64_t>(idx[0]);
+                // Decompose flat element index into (t, b, h) over (seq, batch, H).
+                int64_t h = i % H;
+                int64_t tb = i / H;                 // flattened (t * batch + b)
+                int64_t b = tb % batch_size;
+                int64_t t = tb / batch_size;
+
+                // Source element offset in fwd/bwd (seq, batch, H), in bytes.
+                int64_t src_off = ((t * batch_size + b) * H + h) * elem_size;
+                // Destination element offsets in (seq, batch, 2H), in bytes:
+                // fwd -> first H columns, bwd -> second H columns.
+                int64_t row_base = (t * batch_size + b) * 2 * H;
+                int64_t dst_fwd_off = (row_base + h) * elem_size;
+                int64_t dst_bwd_off = (row_base + H + h) * elem_size;
+
+                for (int64_t k = 0; k < elem_size; ++k) {
+                    dst_base[dst_fwd_off + k] = fwd_base[src_off + k];
+                    dst_base[dst_bwd_off + k] = bwd_base[src_off + k];
+                }
+            });
     }
 
     // Stack h_n and c_n: (2, batch, hidden_size)

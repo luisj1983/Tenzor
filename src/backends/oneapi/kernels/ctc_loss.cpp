@@ -159,7 +159,7 @@ auto ctc_loss_forward_kernel(
                 return (s % 2 == 0) ? static_cast<int32_t>(blank_c) : tgt_n[s / 2];
             };
 
-            if (T_n <= 0 || S_n <= 0 || L_n > L_max_c) {
+            if (T_n <= 0 || S_n <= 0 || T_n > T_max_c || L_n > L_max_c) {
                 if (tid == 0) loss_data[n] = 0.0f;
                 for (int64_t idx = tid; idx < T_max_c * C_c; idx += nthreads) {
                     int64_t t = idx / C_c;

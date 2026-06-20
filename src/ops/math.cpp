@@ -568,9 +568,15 @@ auto beta(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto betainc(const Tensor& a, const Tensor& b, const Tensor& x) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    auto [ap2, xp] = promote_inputs(ap, x);
-    Tensor ac = ap2.is_contiguous() ? ap2 : ap2.contiguous();
+    // Compute a single common dtype across all three operands. The kernel keys
+    // its dtype branch off a.dtype() and reads b/x with that same element type,
+    // so every operand must share the promoted dtype; otherwise a narrower
+    // operand's buffer is reinterpreted as a wider type (out-of-bounds read).
+    DType common = promote_types(promote_types(a.dtype(), b.dtype()), x.dtype());
+    Tensor ap = (a.dtype() != common) ? a.to(common) : a;
+    Tensor bp = (b.dtype() != common) ? b.to(common) : b;
+    Tensor xp = (x.dtype() != common) ? x.to(common) : x;
+    Tensor ac = ap.is_contiguous() ? ap : ap.contiguous();
     Tensor bc = bp.is_contiguous() ? bp : bp.contiguous();
     Tensor xc = xp.is_contiguous() ? xp : xp.contiguous();
     std::vector<Tensor> inputs = {ac, bc, xc};
@@ -668,7 +674,14 @@ auto searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool righ
         throw std::runtime_error("searchsorted: sorted_sequence must be 1-D");
     }
 
-    std::array<Tensor, 2> inputs = {sorted_sequence, values};
+    // The kernel keys its dtype branch off sorted_sequence.dtype() and reads
+    // the values buffer with that same element type. A mismatched values dtype
+    // would be reinterpreted as the wrong type (and, when values is wider,
+    // read out of bounds). Cast values to the sequence dtype before dispatch.
+    Tensor values_cast = (values.dtype() != sorted_sequence.dtype())
+                             ? values.to(sorted_sequence.dtype())
+                             : values;
+    std::array<Tensor, 2> inputs = {sorted_sequence, values_cast};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Right, right);
     return dispatch<OpId::SearchSorted>(inputs, attrs)[0];
@@ -811,18 +824,15 @@ auto diff(const Tensor& input, int64_t n, int64_t dim) -> Tensor {
 }
 
 auto logaddexp(const Tensor& a, const Tensor& b) -> Tensor {
-    std::array<Tensor, 2> inputs = {a, b};
-    return dispatch<OpId::LogAddExp>(inputs)[0];
+    return detail::binary_op_promoted<OpId::LogAddExp>("logaddexp", a, b);
 }
 
 auto logaddexp2(const Tensor& a, const Tensor& b) -> Tensor {
-    std::array<Tensor, 2> inputs = {a, b};
-    return dispatch<OpId::LogAddExp2>(inputs)[0];
+    return detail::binary_op_promoted<OpId::LogAddExp2>("logaddexp2", a, b);
 }
 
 auto xlogy(const Tensor& x, const Tensor& y) -> Tensor {
-    std::array<Tensor, 2> inputs = {x, y};
-    return dispatch<OpId::XLogY>(inputs)[0];
+    return detail::binary_op_promoted<OpId::XLogY>("xlogy", x, y);
 }
 
 auto i0e(const Tensor& x) -> Tensor {
@@ -874,17 +884,23 @@ auto renorm(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tenso
 }
 
 auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tensor {
-    // For integral (or bool) inputs the rtol/atol scalars would be truncated to
-    // 0 in the input dtype, degenerating isclose into exact equality. Promote to
-    // a floating compute dtype (matching PyTorch) so tolerances are honoured.
+    // For integral/bool inputs the rtol/atol scalars would be truncated to 0 in
+    // the input dtype, degenerating isclose into exact equality. For low-
+    // precision floats (Float16/BFloat16) atol=1e-8 underflows below the
+    // smallest representable subnormal (collapsing to 0) and the diff/tol math
+    // loses precision. In both cases promote to a higher floating compute dtype
+    // (matching PyTorch's promote-to-compute-type) so tolerances are honoured.
+    auto needs_promote = [](DType d) {
+        return d != DType::Float32 && d != DType::Float64;
+    };
     Tensor ca = a;
     Tensor cb = b;
-    if (!is_floating_type(a.dtype())) {
+    if (needs_promote(a.dtype()) || needs_promote(b.dtype())) {
         DType compute = (a.dtype() == DType::Float64 || b.dtype() == DType::Float64)
                             ? DType::Float64
                             : DType::Float32;
-        ca = a.to(compute);
-        cb = b.to(compute);
+        ca = (a.dtype() != compute) ? a.to(compute) : a;
+        cb = (b.dtype() != compute) ? b.to(compute) : b;
     }
     auto diff = tenzor::abs(tenzor::sub(ca, cb));
     auto tol = tenzor::add(

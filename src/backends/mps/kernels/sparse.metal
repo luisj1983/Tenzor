@@ -18,10 +18,10 @@ using namespace metal;
 // ============================================================================
 
 kernel void sparse_spmv_kernel_f32(
-    constant int64_t* crow_indices [[buffer(0)]],
-    constant int64_t* col_indices  [[buffer(1)]],
-    constant float*   values       [[buffer(2)]],
-    constant float*   x            [[buffer(3)]],
+    device const int64_t* crow_indices [[buffer(0)]],
+    device const int64_t* col_indices  [[buffer(1)]],
+    device const float*   values       [[buffer(2)]],
+    device const float*   x            [[buffer(3)]],
     device   float*   y            [[buffer(4)]],
     constant uint&    m            [[buffer(5)]],
     uint              row          [[thread_position_in_grid]])
@@ -37,10 +37,10 @@ kernel void sparse_spmv_kernel_f32(
 }
 
 kernel void sparse_spmv_kernel_f64(
-    constant int64_t* crow_indices [[buffer(0)]],
-    constant int64_t* col_indices  [[buffer(1)]],
-    constant float*   values       [[buffer(2)]],   // F64 unsupported on Metal — falls through F32 in caller
-    constant float*   x            [[buffer(3)]],
+    device const int64_t* crow_indices [[buffer(0)]],
+    device const int64_t* col_indices  [[buffer(1)]],
+    device const float*   values       [[buffer(2)]],   // F64 unsupported on Metal — falls through F32 in caller
+    device const float*   x            [[buffer(3)]],
     device   float*   y            [[buffer(4)]],
     constant uint&    m            [[buffer(5)]],
     uint              row          [[thread_position_in_grid]])
@@ -56,10 +56,10 @@ kernel void sparse_spmv_kernel_f64(
 }
 
 kernel void sparse_spmv_kernel_f16(
-    constant int64_t* crow_indices [[buffer(0)]],
-    constant int64_t* col_indices  [[buffer(1)]],
-    constant half*    values       [[buffer(2)]],
-    constant half*    x            [[buffer(3)]],
+    device const int64_t* crow_indices [[buffer(0)]],
+    device const int64_t* col_indices  [[buffer(1)]],
+    device const half*    values       [[buffer(2)]],
+    device const half*    x            [[buffer(3)]],
     device   half*    y            [[buffer(4)]],
     constant uint&    m            [[buffer(5)]],
     uint              row          [[thread_position_in_grid]])
@@ -81,10 +81,10 @@ kernel void sparse_spmv_kernel_f16(
 // ============================================================================
 
 kernel void sparse_spmm_kernel_f32(
-    constant int64_t* crow_indices [[buffer(0)]],
-    constant int64_t* col_indices  [[buffer(1)]],
-    constant float*   values       [[buffer(2)]],
-    constant float*   B            [[buffer(3)]],   // (k, n) row-major
+    device const int64_t* crow_indices [[buffer(0)]],
+    device const int64_t* col_indices  [[buffer(1)]],
+    device const float*   values       [[buffer(2)]],
+    device const float*   B            [[buffer(3)]],   // (k, n) row-major
     device   float*   C            [[buffer(4)]],   // (m, n) row-major
     constant uint&    m            [[buffer(5)]],
     constant uint&    n            [[buffer(6)]],
@@ -103,10 +103,10 @@ kernel void sparse_spmm_kernel_f32(
 }
 
 kernel void sparse_spmm_kernel_f16(
-    constant int64_t* crow_indices [[buffer(0)]],
-    constant int64_t* col_indices  [[buffer(1)]],
-    constant half*    values       [[buffer(2)]],
-    constant half*    B            [[buffer(3)]],
+    device const int64_t* crow_indices [[buffer(0)]],
+    device const int64_t* col_indices  [[buffer(1)]],
+    device const half*    values       [[buffer(2)]],
+    device const half*    B            [[buffer(3)]],
     device   half*    C            [[buffer(4)]],
     constant uint&    m            [[buffer(5)]],
     constant uint&    n            [[buffer(6)]],

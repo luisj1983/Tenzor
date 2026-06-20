@@ -144,12 +144,20 @@ public:
      */
     TensorDataset(Tensor inputs, Tensor targets)
         : inputs_(std::move(inputs)), targets_(std::move(targets)) {
+        if (inputs_.ndim() == 0 || targets_.ndim() == 0) {
+            throw std::invalid_argument(
+                "TensorDataset requires tensors with a batch dimension");
+        }
         if (inputs_.shape()[0] != targets_.shape()[0]) {
             throw std::invalid_argument("Input and target batch dimensions must match");
         }
     }
 
     auto size() const -> size_t override {
+        if (inputs_.ndim() == 0) {
+            throw std::runtime_error(
+                "TensorDataset requires tensors with a batch dimension");
+        }
         return inputs_.shape()[0];
     }
 

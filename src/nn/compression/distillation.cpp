@@ -443,11 +443,13 @@ auto kl_divergence(
     constexpr float EPSILON = 1e-10f;
     auto p_safe = ::tenzor::clamp(p, EPSILON, 1.0f);   // autograd-aware (p has no grad)
     auto log_p = ::tenzor::log(p_safe);                // autograd-aware
-    auto per_element = p * (log_p - log_q);            // autograd flows through log_q
-    // Clamp element-wise negatives (fp-precision noise) to 0. relu is
-    // autograd-aware and piecewise-linear; grad passes through positive
-    // elements and zero through the clamped ones.
-    auto kl = nn::relu(per_element);
+    // KL(P||Q) element-wise term = p * (log p - log q). Individual terms are
+    // legitimately negative wherever q_i > p_i; only the SUM over a full
+    // distribution is guaranteed non-negative. Do NOT clamp the per-element
+    // terms (e.g. with relu) — that would zero real negative contributions,
+    // inflate the reduced loss, and drop their gradient. The clamp of p to
+    // [eps, 1] above already keeps every term finite.
+    auto kl = p * (log_p - log_q);                     // autograd flows through log_q
 
     // Apply reduction
     if (reduction == "none") {

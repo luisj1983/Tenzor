@@ -384,9 +384,21 @@ public:
     }
 
     auto tag() const -> Tag { return tag_; }
-    auto as_int() const -> int64_t { return data_.i; }
-    auto as_float() const -> double { return data_.f; }
-    auto as_bool() const -> bool { return data_.i != 0; }
+    // Tag-aware numeric accessors: convert across numeric tags so that a value
+    // stored as Float64 and read as int (or vice versa) yields a proper numeric
+    // conversion rather than a raw reinterpretation of the union bit pattern.
+    auto as_int() const -> int64_t {
+        if (tag_ == Tag::Float64) return static_cast<int64_t>(data_.f);
+        return data_.i;  // Int64 and Bool both store in data_.i
+    }
+    auto as_float() const -> double {
+        if (tag_ == Tag::Int64 || tag_ == Tag::Bool) return static_cast<double>(data_.i);
+        return data_.f;
+    }
+    auto as_bool() const -> bool {
+        if (tag_ == Tag::Float64) return data_.f != 0.0;
+        return data_.i != 0;  // Int64 and Bool both store in data_.i
+    }
     auto as_string() const -> const std::string& { return str_; }
 
     /**

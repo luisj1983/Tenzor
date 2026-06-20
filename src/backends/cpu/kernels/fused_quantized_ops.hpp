@@ -28,6 +28,12 @@ namespace cpu {
  * @param K            Number of input features
  * @param act_scale    Activation quantization scale
  * @param weight_scale Weight quantization scale
+ * @param act_zp       Activation (input) zero-point. For asymmetric activation
+ *                     quantization this must be subtracted from every activation
+ *                     before the dot product; the algebraically-equivalent
+ *                     correction term -act_zp * sum_k(w[k,n]) is applied to the
+ *                     int32 accumulator. INT4 weights are symmetric so no weight
+ *                     zero-point term is needed. Defaults to 0 (symmetric).
  */
 inline void fused_qlinear_dequant(
     const int8_t* act,
@@ -35,7 +41,8 @@ inline void fused_qlinear_dequant(
     const float* bias,
     float* output,
     int64_t M, int64_t N, int64_t K,
-    float act_scale, float weight_scale) {
+    float act_scale, float weight_scale,
+    int32_t act_zp = 0) {
 
     const float combined_scale = act_scale * weight_scale;
     const int64_t KN = K * N;
@@ -67,6 +74,24 @@ inline void fused_qlinear_dequant(
 
     const int8_t* w_data = w_unpacked.data();
 
+    // Asymmetric-activation zero-point correction:
+    //   sum_k (act[k] - act_zp) * w[k,n]
+    //     = sum_k act[k]*w[k,n]  -  act_zp * sum_k w[k,n]
+    // so the int32 accumulator only needs the constant term act_zp*col_sum_w[n]
+    // subtracted. Precompute the per-output-column weight sums once. INT4 weights
+    // are symmetric (weight_zp == 0) so there is no symmetric weight-side term.
+    std::vector<int32_t> col_sum_w;
+    if (act_zp != 0) {
+        col_sum_w.assign(static_cast<size_t>(N), 0);
+        for (int64_t k = 0; k < K; ++k) {
+            const int8_t* w_row = w_data + k * N;
+            for (int64_t n = 0; n < N; ++n) {
+                col_sum_w[static_cast<size_t>(n)] += static_cast<int32_t>(w_row[n]);
+            }
+        }
+    }
+    const int32_t* col_sum_w_ptr = col_sum_w.empty() ? nullptr : col_sum_w.data();
+
     #pragma omp parallel for schedule(static) if(M * N * K > 4096)
     for (int64_t m = 0; m < M; ++m) {
         const int8_t* act_row = act + m * K;
@@ -75,6 +100,10 @@ inline void fused_qlinear_dequant(
             for (int64_t k = 0; k < K; ++k) {
                 acc += static_cast<int32_t>(act_row[k]) *
                        static_cast<int32_t>(w_data[k * N + n]);
+            }
+
+            if (col_sum_w_ptr) {
+                acc -= act_zp * col_sum_w_ptr[n];
             }
 
             float result = static_cast<float>(acc) * combined_scale;
@@ -95,9 +124,10 @@ inline void fused_qlinear_dequant_relu(
     const float* bias,
     float* output,
     int64_t M, int64_t N, int64_t K,
-    float act_scale, float weight_scale) {
+    float act_scale, float weight_scale,
+    int32_t act_zp = 0) {
 
-    fused_qlinear_dequant(act, weights, bias, output, M, N, K, act_scale, weight_scale);
+    fused_qlinear_dequant(act, weights, bias, output, M, N, K, act_scale, weight_scale, act_zp);
     for (int64_t i = 0; i < M * N; ++i) {
         if (output[i] < 0.0f) output[i] = 0.0f;
     }

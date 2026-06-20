@@ -24,6 +24,13 @@ HealthMonitor::~HealthMonitor() {
 }
 
 auto HealthMonitor::start(const std::vector<int32_t>& worker_ids) -> void {
+    // Ensure any previously running monitor thread is stopped and joined before
+    // launching a new one. std::thread::operator= onto a joinable thread calls
+    // std::terminate(), so a second start() without an intervening stop() would
+    // otherwise abort the process. stop() is idempotent: on the first start()
+    // monitor_thread_ is default-constructed (not joinable) and this is a no-op.
+    stop();
+
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         // Reset monitored set to exactly `worker_ids`. After a membership shrink

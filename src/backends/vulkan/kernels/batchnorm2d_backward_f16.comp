@@ -2,12 +2,29 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_atomic_float : enable
 
-// Batch Normalization 2D Backward Pass for Float16
-// Input/grad tensors are packed F16 (2 elements per 32-bit word)
-// Statistics and parameter gradients are Float32
+// Batch Normalization 2D Backward Pass for Float16 (two-pass, training-mode).
+// Input/grad tensors are packed F16 (2 elements per 32-bit word).
+// Statistics and parameter gradients are Float32.
 //
-// Each thread processes a pair of F16 elements (one 32-bit word) to avoid
-// race conditions when writing packed data.
+// The pass to execute is selected by params.pass:
+//   pass == 0  -> accumulate grad_gamma / grad_beta into the per-channel
+//                 Float32 buffers via global atomicAdd (no shared-memory cap;
+//                 every channel index is written, including c >= 256).
+//                   grad_gamma[c] = sum over (n,h,w) of grad_out * normalized
+//                   grad_beta[c]  = sum over (n,h,w) of grad_out
+//   pass == 1  -> compute grad_input using the completed per-channel sums with
+//                 the correct batch-norm *training-mode* formula:
+//                   grad_in = gamma * invstd *
+//                       (grad_out - sum_grad/N - normalized * sum_grad_norm/N)
+//                 with N = batch * spatial_size, sum_grad = grad_beta[c],
+//                 sum_grad_norm = grad_gamma[c].
+//
+// The previous single-pass shader returned grad_out * gamma * invstd, which is
+// the inference-mode backward — it dropped the two mean-correction terms that
+// are required during training. It also reduced grad_gamma/grad_beta through a
+// WORKGROUP_SIZE-element shared array indexed by channel with a hard-coded
+// c < 256 cap, silently dropping gradients for channels >= 256 (common in
+// ResNet stages with 512/1024/2048 channels). Both defects are fixed here.
 layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
@@ -27,14 +44,8 @@ layout(push_constant) uniform PushConstants {
     uint spatial_size;
     float eps;
     uint has_gamma;
+    uint pass;          // 0 = grad_gamma/grad_beta reduction, 1 = grad_input
 } params;
-
-// Unpack a 32-bit word containing two F16 values
-vec2 unpackF16Pair(uint packed) {
-    float lo = unpackHalf2x16(packed).x;
-    float hi = unpackHalf2x16(packed >> 16).x;
-    return vec2(lo, hi);
-}
 
 // Pack two float values into a 32-bit word as F16
 uint packF16Pair(float v0, float v1) {
@@ -43,107 +54,81 @@ uint packF16Pair(float v0, float v1) {
     return bits0 | (bits1 << 16);
 }
 
-shared float s_grad_gamma[WORKGROUP_SIZE];
-shared float s_grad_beta[WORKGROUP_SIZE];
+// Decode the channel index for a flat element index in an (N, C, H, W) tensor.
+uint channelOf(uint flat_idx) {
+    uint temp = flat_idx / params.spatial_size;
+    return temp % params.channels;
+}
 
-// Process a single element and return (grad_input, grad_gamma_contrib, grad_beta_contrib)
-vec3 processElement(uint flat_idx, uint word_idx, uint half_idx) {
-    // Decode to get channel
-    uint temp = flat_idx;
-    uint w = temp % params.spatial_size;
-    temp /= params.spatial_size;
-    uint c = temp % params.channels;
+// Pass 0: contribution of a single element to grad_gamma / grad_beta.
+// Accumulates directly into the per-channel global buffers (zero-initialized by
+// the host) with atomicAdd. No shared-memory hashing, no c < 256 cap, so every
+// channel — including indices >= 256 — is correctly summed.
+void accumulateStats(uint flat_idx, uint word_idx, uint half_idx) {
+    uint c = channelOf(flat_idx);
 
-    // Read input and grad_output
     uint packed_x = input_data[word_idx];
     uint packed_grad = grad_output[word_idx];
     float x = (half_idx == 0) ? unpackHalf2x16(packed_x).x : unpackHalf2x16(packed_x >> 16).x;
     float grad_out = (half_idx == 0) ? unpackHalf2x16(packed_grad).x : unpackHalf2x16(packed_grad >> 16).x;
 
-    float mean = mean_data[c];
+    float normalized = (x - mean_data[c]) * invstd_data[c];
+
+    atomicAdd(grad_gamma[c], grad_out * normalized);
+    atomicAdd(grad_beta[c], grad_out);
+}
+
+// Pass 1: training-mode grad_input for a single element.
+float computeGradInput(uint flat_idx, uint word_idx, uint half_idx) {
+    uint c = channelOf(flat_idx);
+
+    uint packed_x = input_data[word_idx];
+    uint packed_grad = grad_output[word_idx];
+    float x = (half_idx == 0) ? unpackHalf2x16(packed_x).x : unpackHalf2x16(packed_x >> 16).x;
+    float grad_out = (half_idx == 0) ? unpackHalf2x16(packed_grad).x : unpackHalf2x16(packed_grad >> 16).x;
+
     float inv_std = invstd_data[c];
+    float normalized = (x - mean_data[c]) * inv_std;
 
-    float x_normalized = (x - mean) * inv_std;
-    float grad_x_normalized = grad_out;
-    if (params.has_gamma != 0) {
-        grad_x_normalized = grad_out * gamma_data[c];
-    }
+    float N = float(params.batch * params.spatial_size);
+    float mean_grad = grad_beta[c] / N;          // sum_grad / N
+    float mean_grad_norm = grad_gamma[c] / N;    // sum_grad_norm / N
 
-    float grad_in = grad_x_normalized * inv_std;
-    float grad_gamma_contrib = grad_out * x_normalized;
-    float grad_beta_contrib = grad_out;
-
-    return vec3(grad_in, grad_gamma_contrib, grad_beta_contrib);
+    float gamma = (params.has_gamma != 0u) ? gamma_data[c] : 1.0;
+    float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+    return gamma * inv_std * grad_normalized;
 }
 
 void main() {
-    uint local_id = gl_LocalInvocationID.x;
-
-    // Initialize shared memory
-    if (local_id < params.channels && local_id < 256) {
-        s_grad_gamma[local_id] = 0.0;
-        s_grad_beta[local_id] = 0.0;
-    }
-    barrier();
-
-    // Each thread processes one 32-bit word (2 F16 elements)
+    // Each thread processes one 32-bit word (2 F16 elements).
     uint word_idx = gl_GlobalInvocationID.x;
     uint num_words = (params.n_elements + 1) / 2;
-
-    float result0 = 0.0;
-    float result1 = 0.0;
-
-    if (word_idx < num_words) {
-        uint elem0 = word_idx * 2;
-        uint elem1 = word_idx * 2 + 1;
-
-        // Process first element
-        if (elem0 < params.n_elements) {
-            vec3 res = processElement(elem0, word_idx, 0);
-            result0 = res.x;
-
-            // Get channel for atomic accumulation
-            uint temp = elem0;
-            uint w = temp % params.spatial_size;
-            temp /= params.spatial_size;
-            uint c = temp % params.channels;
-            if (c < 256) {
-                atomicAdd(s_grad_gamma[c], res.y);
-                atomicAdd(s_grad_beta[c], res.z);
-            }
-        }
-
-        // Process second element
-        if (elem1 < params.n_elements) {
-            vec3 res = processElement(elem1, word_idx, 1);
-            result1 = res.x;
-
-            // Get channel for atomic accumulation
-            uint temp = elem1;
-            uint w = temp % params.spatial_size;
-            temp /= params.spatial_size;
-            uint c = temp % params.channels;
-            if (c < 256) {
-                atomicAdd(s_grad_gamma[c], res.y);
-                atomicAdd(s_grad_beta[c], res.z);
-            }
-        }
-
-        // Write both elements as a single word - no race condition
-        grad_input[word_idx] = packF16Pair(result0, result1);
+    if (word_idx >= num_words) {
+        return;
     }
 
-    barrier();
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
 
-    // Accumulate shared memory to global memory
-    if (local_id == 0) {
-        for (uint i = 0; i < params.channels && i < 256; i++) {
-            if (s_grad_gamma[i] != 0.0) {
-                atomicAdd(grad_gamma[i], s_grad_gamma[i]);
-            }
-            if (s_grad_beta[i] != 0.0) {
-                atomicAdd(grad_beta[i], s_grad_beta[i]);
-            }
+    if (params.pass == 0u) {
+        // Reduction pass: accumulate grad_gamma / grad_beta.
+        if (elem0 < params.n_elements) {
+            accumulateStats(elem0, word_idx, 0);
         }
+        if (elem1 < params.n_elements) {
+            accumulateStats(elem1, word_idx, 1);
+        }
+    } else {
+        // grad_input pass: consumes the completed per-channel sums.
+        float result0 = 0.0;
+        float result1 = 0.0;
+        if (elem0 < params.n_elements) {
+            result0 = computeGradInput(elem0, word_idx, 0);
+        }
+        if (elem1 < params.n_elements) {
+            result1 = computeGradInput(elem1, word_idx, 1);
+        }
+        // Write both elements as a single word - no race condition.
+        grad_input[word_idx] = packF16Pair(result0, result1);
     }
 }

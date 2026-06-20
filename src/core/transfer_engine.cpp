@@ -537,6 +537,27 @@ TransferEngine::~TransferEngine() {
         worker_thread_.join();
     }
 
+    // Defensive drain: the worker fully empties the queue before exiting, but in
+    // case any request remains (e.g. enqueued concurrently during shutdown),
+    // mark each as errored and wake its waiter so no TransferHandle::wait()
+    // blocks forever on a request that will never be processed.
+    {
+        std::lock_guard lock(queue_mutex_);
+        while (!transfer_queue_.empty()) {
+            TransferRequest& request = transfer_queue_.front();
+            if (request.state) {
+                {
+                    std::lock_guard state_lock(request.state->mutex);
+                    request.state->has_error = true;
+                    request.state->error_message = "Transfer engine shut down before request was processed";
+                    request.state->completed.store(true, std::memory_order_release);
+                }
+                request.state->cv.notify_all();
+            }
+            transfer_queue_.pop();
+        }
+    }
+
     cleanup_cuda_resources();
     cleanup_rocm_resources();
 
@@ -735,6 +756,47 @@ auto TransferEngine::get_pinned_buffer(size_t size) -> void* {
     }
 
     if (!result) {
+        // Enforce an upper bound on total page-locked memory. Pinned memory is a
+        // scarce OS resource; without a cap, distinct/large transfer sizes each
+        // spawn a new permanent allocation that is never freed until engine
+        // destruction. Account for currently-reserved bytes and, when a new
+        // allocation would exceed config_.pinned_pool_size, first evict free
+        // (not in-use) buffers to reclaim room; if it still does not fit, return
+        // nullptr so the caller falls back to a non-pinned copy.
+        const size_t cap = config_.pinned_pool_size;
+
+        auto reserved_bytes = [this]() -> size_t {
+            size_t total = 0;
+            for (const auto& b : pinned_buffers_) {
+                total += b.size;
+            }
+            return total;
+        };
+
+        if (cap > 0 && reserved_bytes() + size > cap) {
+            // Try to free idle buffers (smallest-first) until the new allocation
+            // fits under the cap.
+            for (auto it = pinned_buffers_.begin();
+                 it != pinned_buffers_.end() && reserved_bytes() + size > cap; ) {
+                if (!it->in_use) {
+#ifdef TENZOR_USE_CUDA
+                    cudaFreeHost(it->ptr);
+#elif defined(TENZOR_USE_ROCM)
+                    hipHostFree(it->ptr);
+#endif
+                    it = pinned_buffers_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        if (cap > 0 && reserved_bytes() + size > cap) {
+            // Cannot honor this request within the pinned budget; let the caller
+            // fall back to a direct (non-pinned) memcpy.
+            return nullptr;
+        }
+
 #ifdef TENZOR_USE_CUDA
         cudaError_t err = cudaMallocHost(&result, size);
         if (err == cudaSuccess) {
@@ -901,10 +963,13 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
     // all-zero output. Using .to() fills it correctly regardless of that macro.
 #ifdef TENZOR_USE_ROCM
     if (gpu_device.type == Device::Type::ROCm) {
+        // Contiguify first: a strided source's data_ptr() base would make the
+        // flat byte memcpy below read the wrong elements (mirrors the CUDA path).
+        Tensor src = cpu_tensor.contiguous();
         HIP_CHECK(hipSetDevice(gpu_device.index));
         HIP_CHECK(hipMemcpy(
             gpu_tensor.data_ptr(),
-            cpu_tensor.data_ptr(),
+            src.data_ptr(),
             bytes,
             hipMemcpyHostToDevice
         ));
@@ -971,10 +1036,14 @@ auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
     // unfilled (zero) host tensor. Route through .to() so the value is preserved.
 #ifdef TENZOR_USE_ROCM
     if (gpu_tensor.device().type == Device::Type::ROCm) {
+        // Contiguify the (possibly strided) GPU source so the flat byte copy
+        // into the fresh contiguous host tensor reads logical element order
+        // (mirrors the CUDA path).
+        Tensor src = gpu_tensor.contiguous();
         HIP_CHECK(hipSetDevice(gpu_tensor.device().index));
         HIP_CHECK(hipMemcpy(
             cpu_tensor.data_ptr(),
-            gpu_tensor.data_ptr(),
+            src.data_ptr(),
             bytes,
             hipMemcpyDeviceToHost
         ));
@@ -1321,7 +1390,14 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
 // ============================================================================
 
 auto TransferEngine::transfer_worker() -> void {
-    while (!stop_worker_.load(std::memory_order_acquire)) {
+    // Loop until stop is requested AND the queue has been fully drained. Using
+    // `while (!stop_worker_)` would let the outer condition exit the loop after
+    // the current iteration while requests are still queued, leaving their
+    // TransferState with completed=false and no recorded event -- a thread
+    // holding the corresponding TransferHandle would then block forever in
+    // wait(). Processing every remaining request on shutdown guarantees each
+    // waiter is eventually woken (via completion or error).
+    while (true) {
         TransferRequest request;
 
         {
@@ -1331,11 +1407,11 @@ auto TransferEngine::transfer_worker() -> void {
                        stop_worker_.load(std::memory_order_acquire);
             });
 
-            if (stop_worker_.load(std::memory_order_acquire) && transfer_queue_.empty()) {
-                break;
-            }
-
             if (transfer_queue_.empty()) {
+                // Queue is drained; only exit once shutdown has been requested.
+                if (stop_worker_.load(std::memory_order_acquire)) {
+                    break;
+                }
                 continue;
             }
 

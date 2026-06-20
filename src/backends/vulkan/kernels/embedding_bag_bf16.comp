@@ -1,12 +1,18 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-// EmbeddingBag for BFloat16
+// EmbeddingBag for BFloat16.
+//
+// BFloat16 has no native GLSL type, so the embeddings (binding 0) and output
+// (binding 2) buffers are bound by the host as raw 2-byte/element BFloat16
+// storage. We reinterpret them as packed uint words (two BF16 lanes per word)
+// and decode/encode by hand, matching index_select_bf16.comp. Accumulation is
+// performed in 32-bit float for precision, then rounded to BF16 on store.
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) buffer Embeddings { float emb_data[]; };
+layout(binding = 0) buffer Embeddings { uint emb_data[]; };   // Packed BF16
 layout(binding = 1) buffer Offsets { int offset_data[]; };
-layout(binding = 2) buffer Output { float out_data[]; };
+layout(binding = 2) buffer Output { uint out_data[]; };       // Packed BF16
 layout(binding = 3) buffer MaxIndices { int64_t idx_data[]; };
 
 layout(push_constant) uniform PushConstants {
@@ -17,6 +23,31 @@ layout(push_constant) uniform PushConstants {
     uint include_last_offset;
     uint num_offsets;
 } params;
+
+float readBF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2u;
+    uint half_idx = flat_idx % 2u;
+    uint packed = emb_data[word_idx];
+    uint bits = (packed >> (half_idx * 16u)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void writeBF16(uint flat_idx, float val) {
+    uint word_idx = flat_idx / 2u;
+    uint half_offset = (flat_idx % 2u) * 16u;
+    // Round-to-nearest-even from float32 to bfloat16.
+    uint fbits = floatBitsToUint(val);
+    uint new_bits = ((fbits + 0x7FFFu + ((fbits >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = out_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(out_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
@@ -36,30 +67,30 @@ void main() {
 
     int bag_size = end_val - start;
     if (bag_size <= 0) {
-        out_data[gid] = float(0.0);
+        writeBF16(gid, 0.0);
         idx_data[gid] = int64_t(-1);
         return;
     }
 
     if (params.mode == 2) {
         // Max mode — accumulate in float for precision, store as bf16
-        float max_val = float(emb_data[uint(start) * params.embedding_dim + j]);
+        float max_val = readBF16(uint(start) * params.embedding_dim + j);
         int arg = start;
         for (int i = start + 1; i < end_val; ++i) {
-            float v = float(emb_data[uint(i) * params.embedding_dim + j]);
+            float v = readBF16(uint(i) * params.embedding_dim + j);
             if (v > max_val) { max_val = v; arg = i; }
         }
-        out_data[gid] = float(max_val);
+        writeBF16(gid, max_val);
         idx_data[gid] = int64_t(arg);
     } else {
         // Sum or Mean mode — accumulate in float for precision
         float acc = 0.0;
         for (int i = start; i < end_val; ++i) {
-            acc += float(emb_data[uint(i) * params.embedding_dim + j]);
+            acc += readBF16(uint(i) * params.embedding_dim + j);
         }
         if (params.mode == 1) {
             acc /= float(bag_size);
         }
-        out_data[gid] = float(acc);
+        writeBF16(gid, acc);
     }
 }

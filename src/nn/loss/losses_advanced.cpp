@@ -730,6 +730,31 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
     auto tgt_shape = tgt_cpu.shape();
     int64_t S_max = tgt_shape.size() > 1 ? tgt_shape[1] : tgt_shape[0];
 
+    // Validate per-sample lengths against the available buffer extents BEFORE
+    // any indexing. log_probs (lp_data) and all_grads are sized T_max*N*C, and
+    // each target row spans S_max entries (tgt_data + n*S_max). If a
+    // user-supplied input_lengths[n] > T_max or target_lengths[n] > S_max, the
+    // extraction/write-back loops below and ctc_loss_single would read/write
+    // out of bounds (heap overflow). PyTorch rejects these; do the same. This
+    // is done serially before the parallel region so we never throw across an
+    // OpenMP boundary.
+    for (int64_t n = 0; n < N; ++n) {
+        const int64_t T_n = il_data[n];
+        const int64_t S_n = tl_data[n];
+        if (T_n > T_max) {
+            throw std::invalid_argument(
+                "CTCLoss: input_lengths[" + std::to_string(n) + "] (" +
+                std::to_string(T_n) + ") exceeds log_probs time dimension T (" +
+                std::to_string(T_max) + ")");
+        }
+        if (S_n > S_max) {
+            throw std::invalid_argument(
+                "CTCLoss: target_lengths[" + std::to_string(n) + "] (" +
+                std::to_string(S_n) + ") exceeds targets length dimension S (" +
+                std::to_string(S_max) + ")");
+        }
+    }
+
     // Compute per-element losses and gradients
     std::vector<float> losses(N);
     std::vector<float> all_grads(T_max * N * C, 0.0f);
@@ -1369,6 +1394,16 @@ auto MultiLabelMarginLoss::forward(const Variable& input, const Tensor& target) 
     switch (reduction_) {
         case Reduction::Mean: reduced = mean(per_sample); break;
         case Reduction::Sum:  reduced = sum(per_sample); break;
+        case Reduction::BatchMean: {
+            // sum(per_sample) / batch_size. per_sample is shape (N,), so the
+            // batch size is N. Handled explicitly so BatchMean does not fall
+            // through to the unreduced per-sample output (silent wrong shape).
+            auto summed = sum(per_sample);
+            reduced = (N > 0)
+                        ? summed * scalar_var(1.0f / static_cast<float>(N), per_sample)
+                        : summed;
+            break;
+        }
         default:              reduced = per_sample; break;
     }
     if (needs_upcast) reduced = tenzor::nn::variable_cast(reduced, orig_dtype);

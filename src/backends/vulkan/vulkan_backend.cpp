@@ -362,15 +362,22 @@ void VulkanBackend::createLogicalDevices() {
 
         // Device features
         VkPhysicalDeviceFeatures deviceFeatures{};
-        deviceFeatures.shaderFloat64 = VK_TRUE;
-        // Enable 64-bit integer arithmetic (core Vulkan 1.0 feature) when the
-        // device supports it. Required by the quantized Int8 GEMM/conv shaders,
-        // which accumulate in int64 to avoid silent INT32 wraparound on wide
-        // layers (matching the CUDA quantized reference). Querying first avoids
-        // a validation error when requesting an unsupported feature.
+        // Enable 64-bit floating-point and integer arithmetic (core Vulkan 1.0
+        // features) only when the device advertises them. shaderFloat64 backs
+        // the FP64 op paths (gated at runtime by ensure_fp64_supported via
+        // supports_fp64); shaderInt64 is required by the quantized Int8
+        // GEMM/conv shaders, which accumulate in int64 to avoid silent INT32
+        // wraparound on wide layers (matching the CUDA quantized reference).
+        // Requesting an unsupported feature makes vkCreateDevice fail with
+        // VK_ERROR_FEATURE_NOT_PRESENT, which would abort backend construction
+        // even for pure Float32 workloads on FP64-less GPUs (common on many
+        // integrated/mobile parts), so we must query first.
         {
             VkPhysicalDeviceFeatures supportedFeatures{};
             vkGetPhysicalDeviceFeatures(ctx.physicalDevice, &supportedFeatures);
+            if (supportedFeatures.shaderFloat64 == VK_TRUE) {
+                deviceFeatures.shaderFloat64 = VK_TRUE;
+            }
             if (supportedFeatures.shaderInt64 == VK_TRUE) {
                 deviceFeatures.shaderInt64 = VK_TRUE;
             }
@@ -722,8 +729,8 @@ void VulkanBackend::createLogicalDevices() {
             // Still clamp descriptorCount to reasonable fraction of device storage buffer limits.
             uint32_t maxSets = 100000u;
             uint32_t maxStorageBuffers = descPoolProps.limits.maxDescriptorSetStorageBuffers;
-            if (maxStorageBuffers > 0 && maxSets * 8 > maxStorageBuffers) {
-                maxSets = maxStorageBuffers / 8;
+            if (maxStorageBuffers > 0 && maxSets * vulkan::kStorageBuffersPerSet > maxStorageBuffers) {
+                maxSets = maxStorageBuffers / vulkan::kStorageBuffersPerSet;
             }
             ctx.descriptorPool = std::make_unique<vulkan::DescriptorPool>(ctx.device, maxSets);
         }
@@ -1055,7 +1062,7 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
     // stays well under the Vulkan spec minimum maxPerStageDescriptorStorageBuffers
     // guarantee of 16.
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (uint32_t i = 0; i < 12; i++) {
+    for (uint32_t i = 0; i < vulkan::kStorageBuffersPerSet; i++) {
         VkDescriptorSetLayoutBinding binding{};
         binding.binding = i;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -1165,7 +1172,7 @@ vulkan::ComputePipeline* VulkanBackend::getPipelineSpecialized(
     // stays well under the Vulkan spec minimum maxPerStageDescriptorStorageBuffers
     // guarantee of 16.
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (uint32_t i = 0; i < 12; i++) {
+    for (uint32_t i = 0; i < vulkan::kStorageBuffersPerSet; i++) {
         VkDescriptorSetLayoutBinding binding{};
         binding.binding = i;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;

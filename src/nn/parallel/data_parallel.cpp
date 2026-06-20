@@ -178,8 +178,23 @@ auto DataParallel::forward_impl(const Variable& input) -> Variable {
         );
     }
 
-    // Replicate module if needed
-    if (!replicas_initialized_) {
+    // Replicate module if needed.
+    //
+    // Concurrency: forward() may be invoked from multiple host threads
+    // concurrently. replicas_initialized_ is a plain (non-atomic) bool, so the
+    // previous double-checked-locking pattern performed an unguarded read of it
+    // outside replicas_mutex_ while another thread wrote it inside the lock --
+    // a data race / UB under the C++ memory model, with no happens-before
+    // edge guaranteeing that the populated replicas_/parameter state is visible
+    // to a thread that observes the flag as true.
+    //
+    // We close the race by always taking the mutex before touching the flag.
+    // The lock both serializes the read/check/write and establishes the
+    // acquire/release ordering needed so that a thread which sees
+    // replicas_initialized_ == true is guaranteed to see the fully populated
+    // replica state written under the same lock. The mutex acquisition is
+    // negligible relative to a multi-device forward pass.
+    {
         std::lock_guard<std::mutex> lock(replicas_mutex_);
         if (!replicas_initialized_) {
             replicate();

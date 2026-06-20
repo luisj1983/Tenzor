@@ -1218,6 +1218,17 @@ inline int64_t next_pow2(int64_t n) {
     return p;
 }
 
+/// Compute a 1D kernel grid dimension (ceil(total/block)) and validate that it
+/// fits in `int` before truncation. Mirrors the guard in apply_normalization_real
+/// so an astronomically large FFT fails loudly instead of wrapping to a small or
+/// negative grid that silently leaves part of the tensor untransformed.
+inline int grid_dim_checked(int64_t total, int block) {
+    int64_t grid = (total + block - 1) / block;
+    if (grid > static_cast<int64_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("FFT kernel grid exceeds device limit");
+    return static_cast<int>(grid);
+}
+
 // ============================================================================
 // RAII wrapper for HIP device memory (typed)
 // ============================================================================
@@ -1372,7 +1383,7 @@ void cooley_tukey_fft_hip(T* data, int64_t N, int64_t batch_size, int64_t batch_
     // Step 1: Bit-reverse permutation
     {
         int64_t total = N * batch_size;
-        int grid = static_cast<int>((total + block - 1) / block);
+        int grid = grid_dim_checked(total, block);
         bit_reverse_permutation_kernel<T><<<grid, block, 0, stream>>>(
             data, N, batch_size, batch_stride, log2N);
         HIP_CHECK(hipGetLastError());
@@ -1381,7 +1392,7 @@ void cooley_tukey_fft_hip(T* data, int64_t N, int64_t batch_size, int64_t batch_
     // Step 2: Butterfly stages
     int64_t num_butterflies = N / 2;
     int64_t total_butterflies = num_butterflies * batch_size;
-    int grid = static_cast<int>((total_butterflies + block - 1) / block);
+    int grid = grid_dim_checked(total_butterflies, block);
 
     for (int s = 1; s <= log2N; ++s) {
         int64_t stride = static_cast<int64_t>(1) << s;
@@ -1565,7 +1576,7 @@ void bluestein_fft_hip(const T* d_in, T* d_out,
 
     // Step 1: Generate chirp: chirp[k] = exp(-j * pi * k^2 / N)
     {
-        int grid = static_cast<int>((N + block - 1) / block);
+        int grid = grid_dim_checked(N, block);
         generate_chirp_kernel<T><<<grid, block, 0, stream>>>(chirp, N, static_cast<T>(-1.0));
         HIP_CHECK(hipGetLastError());
     }
@@ -1573,12 +1584,12 @@ void bluestein_fft_hip(const T* d_in, T* d_out,
     // Step 2: Build convolution kernel b
     HIP_CHECK(hipMemsetAsync(b_buf, 0, 2 * M * sizeof(T), stream));
     {
-        int grid = static_cast<int>((N + block - 1) / block);
+        int grid = grid_dim_checked(N, block);
         build_b_kernel<T><<<grid, block, 0, stream>>>(b_buf, chirp, N);
         HIP_CHECK(hipGetLastError());
     }
     if (N > 1) {
-        int grid = static_cast<int>((N - 1 + block - 1) / block);
+        int grid = grid_dim_checked(N - 1, block);
         build_b_wrap_kernel<T><<<grid, block, 0, stream>>>(b_buf, chirp, N, M);
         HIP_CHECK(hipGetLastError());
     }
@@ -1593,7 +1604,7 @@ void bluestein_fft_hip(const T* d_in, T* d_out,
     HIP_CHECK(hipMemsetAsync(a_buf, 0, 2 * M * total_slices * sizeof(T), stream));
     {
         int64_t total = N * total_slices;
-        int grid = static_cast<int>((total + block - 1) / block);
+        int grid = grid_dim_checked(total, block);
         bluestein_build_a_real_kernel<T><<<grid, block, 0, stream>>>(
             a_buf, d_in, chirp, N, M, total_slices, inner_size);
         HIP_CHECK(hipGetLastError());
@@ -1606,7 +1617,7 @@ void bluestein_fft_hip(const T* d_in, T* d_out,
     // Step 6: Pointwise multiply A *= B
     {
         int64_t total = M * total_slices;
-        int grid = static_cast<int>((total + block - 1) / block);
+        int grid = grid_dim_checked(total, block);
         pointwise_complex_mul_kernel<T><<<grid, block, 0, stream>>>(a_buf, B_buf, M, total_slices);
         HIP_CHECK(hipGetLastError());
     }
@@ -1623,7 +1634,7 @@ void bluestein_fft_hip(const T* d_in, T* d_out,
     // Step 8: Extract result: out[b,k,inner] = a[s][k] * conj(chirp[k])
     {
         int64_t total = N * total_slices;
-        int grid = static_cast<int>((total + block - 1) / block);
+        int grid = grid_dim_checked(total, block);
         bluestein_extract_real_kernel<T><<<grid, block, 0, stream>>>(
             d_out, a_buf, chirp, N, M, total_slices, inner_size);
         HIP_CHECK(hipGetLastError());
@@ -1661,7 +1672,7 @@ void bluestein_fft_complex_hip(const T* d_in, T* d_out,
 
     // Step 1: chirp[k] = exp(sign * j * pi * k^2 / N)
     {
-        int grid = static_cast<int>((N + block - 1) / block);
+        int grid = grid_dim_checked(N, block);
         generate_chirp_kernel<T><<<grid, block, 0, stream>>>(chirp, N, sign);
         HIP_CHECK(hipGetLastError());
     }
@@ -1669,12 +1680,12 @@ void bluestein_fft_complex_hip(const T* d_in, T* d_out,
     // Step 2: b[k] = conj(chirp[k])
     HIP_CHECK(hipMemsetAsync(b_buf, 0, 2 * M * sizeof(T), stream));
     {
-        int grid = static_cast<int>((N + block - 1) / block);
+        int grid = grid_dim_checked(N, block);
         build_b_kernel<T><<<grid, block, 0, stream>>>(b_buf, chirp, N);
         HIP_CHECK(hipGetLastError());
     }
     if (N > 1) {
-        int grid = static_cast<int>((N - 1 + block - 1) / block);
+        int grid = grid_dim_checked(N - 1, block);
         build_b_wrap_kernel<T><<<grid, block, 0, stream>>>(b_buf, chirp, N, M);
         HIP_CHECK(hipGetLastError());
     }
@@ -1689,7 +1700,7 @@ void bluestein_fft_complex_hip(const T* d_in, T* d_out,
     HIP_CHECK(hipMemsetAsync(a_buf, 0, 2 * M * total_slices * sizeof(T), stream));
     {
         int64_t total = N * total_slices;
-        int grid = static_cast<int>((total + block - 1) / block);
+        int grid = grid_dim_checked(total, block);
         bluestein_build_a_complex_kernel<T><<<grid, block, 0, stream>>>(
             a_buf, d_in, chirp, N, M, total_slices, inner_size);
         HIP_CHECK(hipGetLastError());
@@ -1702,7 +1713,7 @@ void bluestein_fft_complex_hip(const T* d_in, T* d_out,
     // Step 6: Pointwise multiply A *= B
     {
         int64_t total = M * total_slices;
-        int grid = static_cast<int>((total + block - 1) / block);
+        int grid = grid_dim_checked(total, block);
         pointwise_complex_mul_kernel<T><<<grid, block, 0, stream>>>(a_buf, B_buf, M, total_slices);
         HIP_CHECK(hipGetLastError());
     }
@@ -1719,7 +1730,7 @@ void bluestein_fft_complex_hip(const T* d_in, T* d_out,
     // Step 8: Extract result
     {
         int64_t total = N * total_slices;
-        int grid = static_cast<int>((total + block - 1) / block);
+        int grid = grid_dim_checked(total, block);
         bluestein_extract_complex_kernel<T><<<grid, block, 0, stream>>>(
             d_out, a_buf, chirp, N, M, total_slices, inner_size);
         HIP_CHECK(hipGetLastError());
@@ -1857,6 +1868,21 @@ __global__ void extract_real_scaled_inner_kernel(T* d_out, const T* d_ifft,
 
 auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                      const std::string& norm, hipStream_t stream) -> Tensor {
+    // Float16/BFloat16: widen to Complex64, compute, downcast (taking the real
+    // part). The native fallback only operates on Complex64/Complex128 buffers,
+    // classified by `is_float32 = (dtype == Complex64)`; a half input would
+    // otherwise fall into the Complex128 branch and be reinterpret_cast as
+    // Complex128 (16 bytes/element vs its 2-byte/element allocation), reading
+    // far out of bounds. We widen to Complex64 (not Float32) so the recursion
+    // lands in the complex branch; mirrors the rocFFT build's half handling and
+    // the op-layer's real->complex promotion so direct/internal kernel calls
+    // stay memory-safe and produce consistent results.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        auto input_c64 = input.to(DType::Float32).to(DType::Complex64);
+        auto result_c64 = rocm_fft_kernel(input_c64, dim, n, norm, stream);
+        return result_c64.to(input.dtype());
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -1968,6 +1994,18 @@ auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor {
+    // Float16/BFloat16: widen to Complex64, compute, downcast (taking the real
+    // part). The native fallback only operates on Complex64/Complex128 buffers,
+    // classified by `is_float32 = (dtype == Complex64)`; a half input would
+    // otherwise fall into the Complex128 branch and be reinterpret_cast as
+    // Complex128 (16 bytes/element vs its 2-byte/element allocation), reading
+    // far out of bounds. Mirrors the rocFFT build's half handling.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        auto input_c64 = input.to(DType::Float32).to(DType::Complex64);
+        auto result_c64 = rocm_ifft_kernel(input_c64, dim, n, norm, stream);
+        return result_c64.to(input.dtype());
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -2073,6 +2111,17 @@ auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor {
+    // Float16/BFloat16: upcast to Float32, compute rfft; result is Complex64
+    // (no downcast needed — rfft always produces complex output). The native
+    // fallback classifies precision with `is_float32 = (dtype == Float32)`; a
+    // half input would otherwise fall into the Float64 branch and be
+    // reinterpret_cast as double (8 bytes/element vs its 2-byte/element
+    // allocation), reading out of bounds. Mirrors the rocFFT build.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        return rocm_rfft_kernel(input_f32, dim, n, norm, stream);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -2137,7 +2186,7 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             HipDevicePtr<float> d_buf(2 * n * batch);
             int64_t total = n * batch;
             {
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 pack_real_to_complex_kernel<float><<<grid, block_size, 0, stream>>>(
                     d_buf.get(), static_cast<const float*>(real_buf.data_ptr()), total);
                 HIP_CHECK(hipGetLastError());
@@ -2154,7 +2203,7 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             // Truncate to first N/2+1 bins
             {
                 int64_t trunc_total = batch * N_out_complex;
-                int grid = static_cast<int>((trunc_total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(trunc_total, block_size);
                 truncate_rfft_kernel<float><<<grid, block_size, 0, stream>>>(
                     reinterpret_cast<float*>(output.data_ptr()),
                     d_buf.get(), N_out_complex, n, batch);
@@ -2178,7 +2227,7 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             // Truncate to N/2+1
             {
                 int64_t trunc_total = batch * N_out_complex;
-                int grid = static_cast<int>((trunc_total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(trunc_total, block_size);
                 truncate_rfft_kernel<float><<<grid, block_size, 0, stream>>>(
                     reinterpret_cast<float*>(output.data_ptr()),
                     d_full.get(), N_out_complex, n, batch);
@@ -2191,7 +2240,7 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             HipDevicePtr<double> d_buf(2 * n * batch);
             int64_t total = n * batch;
             {
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 pack_real_to_complex_kernel<double><<<grid, block_size, 0, stream>>>(
                     d_buf.get(), static_cast<const double*>(real_buf.data_ptr()), total);
                 HIP_CHECK(hipGetLastError());
@@ -2206,7 +2255,7 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             {
                 int64_t trunc_total = batch * N_out_complex;
-                int grid = static_cast<int>((trunc_total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(trunc_total, block_size);
                 truncate_rfft_kernel<double><<<grid, block_size, 0, stream>>>(
                     reinterpret_cast<double*>(output.data_ptr()),
                     d_buf.get(), N_out_complex, n, batch);
@@ -2228,7 +2277,7 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             {
                 int64_t trunc_total = batch * N_out_complex;
-                int grid = static_cast<int>((trunc_total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(trunc_total, block_size);
                 truncate_rfft_kernel<double><<<grid, block_size, 0, stream>>>(
                     reinterpret_cast<double*>(output.data_ptr()),
                     d_full.get(), N_out_complex, n, batch);
@@ -2246,6 +2295,35 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                        const std::string& norm, hipStream_t stream) -> Tensor {
+    // Float16/BFloat16: upcast to Float32 (-> Complex64), compute irfft, then
+    // downcast the real result back to the half dtype. The native fallback only
+    // handles Complex64/Complex128 input (classified by `is_float32 = (dtype ==
+    // Complex64)`); a half input would otherwise fall into the Complex128 branch
+    // and be reinterpret_cast as Complex128, reading far out of bounds.
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_irfft_kernel(input_f32, dim, n, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+    if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_irfft_kernel(input_f32, dim, n, norm, stream);
+        return result_f32.to(DType::Float16);
+    }
+    // Real-to-complex promotion. The CPU and CUDA irfft kernels accept Float32
+    // or Float64 input by first casting to Complex64/Complex128 (imag = 0), so
+    // mirror that here (and the rocFFT build) — without this a real input is
+    // misclassified as the wrong precision and the buffer is read at the wrong
+    // element width.
+    if (input.dtype() == DType::Float32) {
+        auto input_c64 = input.to(DType::Complex64);
+        return rocm_irfft_kernel(input_c64, dim, n, norm, stream);
+    }
+    if (input.dtype() == DType::Float64) {
+        auto input_c128 = input.to(DType::Complex128);
+        return rocm_irfft_kernel(input_c128, dim, n, norm, stream);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -2312,7 +2390,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             HipDevicePtr<float> d_buf(2 * n * batch);
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 reconstruct_spectrum_kernel<float><<<grid, block_size, 0, stream>>>(
                     d_buf.get(), d_in, n, expected_complex, batch);
                 HIP_CHECK(hipGetLastError());
@@ -2322,7 +2400,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 extract_real_scaled_kernel<float><<<grid, block_size, 0, stream>>>(
                     output.data<float>(), d_buf.get(), n, batch, scale);
                 HIP_CHECK(hipGetLastError());
@@ -2333,7 +2411,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             HipDevicePtr<float> d_full(full_complex_numel);
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 reconstruct_spectrum_kernel<float><<<grid, block_size, 0, stream>>>(
                     d_full.get(), d_in, n, expected_complex, batch);
                 HIP_CHECK(hipGetLastError());
@@ -2347,7 +2425,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 extract_real_scaled_kernel<float><<<grid, block_size, 0, stream>>>(
                     output.data<float>(), d_ifft.get(), n, batch, scale);
                 HIP_CHECK(hipGetLastError());
@@ -2361,7 +2439,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             HipDevicePtr<double> d_buf(2 * n * batch);
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 reconstruct_spectrum_kernel<double><<<grid, block_size, 0, stream>>>(
                     d_buf.get(), d_in, n, expected_complex, batch);
                 HIP_CHECK(hipGetLastError());
@@ -2371,7 +2449,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 extract_real_scaled_kernel<double><<<grid, block_size, 0, stream>>>(
                     output.data<double>(), d_buf.get(), n, batch, scale);
                 HIP_CHECK(hipGetLastError());
@@ -2381,7 +2459,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             HipDevicePtr<double> d_full(full_complex_numel);
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 reconstruct_spectrum_kernel<double><<<grid, block_size, 0, stream>>>(
                     d_full.get(), d_in, n, expected_complex, batch);
                 HIP_CHECK(hipGetLastError());
@@ -2395,7 +2473,7 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             {
                 int64_t total = batch * n;
-                int grid = static_cast<int>((total + block_size - 1) / block_size);
+                int grid = grid_dim_checked(total, block_size);
                 extract_real_scaled_kernel<double><<<grid, block_size, 0, stream>>>(
                     output.data<double>(), d_ifft.get(), n, batch, scale);
                 HIP_CHECK(hipGetLastError());

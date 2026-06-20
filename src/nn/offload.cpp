@@ -4,9 +4,10 @@
  */
 
 #include "tenzor/nn/offload.hpp"
-#include "tenzor/ops/math.hpp"          // for clamp, abs, round (G3)
+#include "tenzor/ops/math.hpp"          // for clamp, abs, round, gt, div, mul (G3)
 #include "tenzor/ops/reduction.hpp"     // for tenzor::max (G3)
-#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/creation.hpp"      // for zeros_like, ones_like (G3)
+#include "tenzor/ops/indexing.hpp"      // for where (G3 device-side zero guard)
 #include "tenzor/utils/log.hpp"         // TENZOR_LOG_WARN (D.1)
 #include <algorithm>
 #include <chrono>
@@ -711,17 +712,30 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr,
         // well as the host-side residency. Audit G3: Int8 path quantizes here
         // and stores the scale in `info.quant_scale`.
         Tensor src;
+        Tensor pending_max_t;  // kept alive for the post-DMA scale readback
         if (use_int8_quant) {
             // scale = max(|t|) / 127. Pin to 1.0 if the entire tensor is zero so
             // we don't emit a NaN-laden int8 payload.
-            Tensor abs_t = abs(*tensor_ptr);
-            Tensor max_t = tenzor::max(abs_t);
-            float max_val = max_t.item<float>();
-            float scale = (max_val > 0.0f) ? (max_val / 127.0f) : 1.0f;
-            info.quant_scale = scale;
+            //
+            // The quantize is performed entirely with device tensor ops so that
+            // *no* blocking device->host scalar readback sits on the offload
+            // critical path ahead of the async DMA. The zero-guard (max == 0 ->
+            // emit zeros) is applied on-device via `where`, and the host-side
+            // `quant_scale` readback is deferred until *after* the async DMA is
+            // issued (see below), so it overlaps the in-flight transfer instead
+            // of serializing the offload.
+            Tensor max_t = tenzor::max(abs(*tensor_ptr));  // 0-d scalar on device
+            pending_max_t = max_t;
 
-            // q = clamp(round(t / scale), -128, 127) cast to Int8.
-            Tensor scaled = (*tensor_ptr) * (1.0 / scale);
+            // safe_max = (max > 0) ? max : 1, so the all-zero tensor produces a
+            // zero int8 payload (0 / 1 * 127 = 0) rather than NaN/Inf, and the
+            // deferred host scale falls back to 1.0 consistently.
+            Tensor pos_mask = tenzor::gt(max_t, tenzor::zeros_like(max_t));
+            Tensor safe_max = tenzor::where(pos_mask, max_t, tenzor::ones_like(max_t));
+
+            // q = clamp(round(t / safe_max * 127), -128, 127) cast to Int8.
+            // Equivalent to round(t / scale) since scale = safe_max / 127.
+            Tensor scaled = tenzor::mul(tenzor::div(*tensor_ptr, safe_max), 127.0);
             Tensor rounded = round(scaled);
             Tensor clamped = clamp(rounded, -128.0f, 127.0f);
             src = clamped.to(DType::Int8);
@@ -738,6 +752,16 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr,
         // typically called from the next forward_post_hook / backward_post_hook.
         info.pending_handle = transfer_engine_->gpu_to_cpu_async(src);
         info.pending_is_offload = true;
+
+        // Audit G3: read back the per-tensor quant scale *after* the async int8
+        // DMA has been issued so the (unavoidable) device->host scalar transfer
+        // overlaps the in-flight payload DMA rather than blocking ahead of it.
+        // `scale = max(|t|) / 127`, with the same 1.0 zero-guard the on-device
+        // quantize used (safe_max == 1 when max == 0).
+        if (use_int8_quant) {
+            float max_val = pending_max_t.item<float>();
+            info.quant_scale = (max_val > 0.0f) ? (max_val / 127.0f) : 1.0f;
+        }
 
         // Stats: count the offload at issue time (so callers see immediate feedback in
         // stats); transfer-time accounting happens in finalize_pending against actual wait.

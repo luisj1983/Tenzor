@@ -101,7 +101,8 @@ public:
      * @param pg Process group for communication
      * @param config FSDP configuration
      */
-    FSDPUnit(nn::Module& module, ProcessGroup& pg, const FSDPConfig& config);
+    FSDPUnit(nn::Module& module, ProcessGroup& pg, const FSDPConfig& config,
+             std::vector<std::shared_ptr<Variable>> explicit_params = {});
 
     ~FSDPUnit();
 
@@ -229,6 +230,13 @@ private:
 
     /** @brief Shared pointers to original parameters (for writing back) */
     std::vector<std::shared_ptr<Variable>> original_params_;
+
+    // When non-empty, the explicit parameter set this unit owns. The recursive
+    // auto-wrap policy uses this to partition the module tree so that every
+    // parameter is sharded by exactly one unit (including the root module's own
+    // parameters and the parameters of descendants of a wrapped submodule).
+    // When empty, flatten_params() falls back to module_.own_parameters().
+    std::vector<std::shared_ptr<Variable>> explicit_params_;
 
     /** @brief Total number of elements across all parameters */
     size_t total_numel_{0};
@@ -501,6 +509,20 @@ private:
      * @param module Module to wrap
      */
     auto wrap_module(nn::Module& module) -> void;
+
+    /**
+     * @brief Recursively partition a module subtree into FSDP units.
+     *
+     * Bottom-up: each child subtree whose (not-yet-wrapped) trainable parameter
+     * count meets the auto-wrap threshold becomes its own unit owning exactly the
+     * parameters not already claimed by a deeper unit; everything else bubbles up
+     * to the caller. Guarantees every parameter is sharded by exactly one unit.
+     *
+     * @param module Subtree root to partition.
+     * @return Parameters of this subtree not placed into a descendant unit.
+     */
+    auto collect_units(nn::Module& module)
+        -> std::vector<std::shared_ptr<Variable>>;
 
     /**
      * @brief Count parameters in a module (non-recursive: only own params).

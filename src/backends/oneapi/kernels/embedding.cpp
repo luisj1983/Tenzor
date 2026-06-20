@@ -354,6 +354,36 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 
     const int64_t* offsets_ptr = get_data_ptr<const int64_t>(offsets);
 
+    // Pre-validate offsets host-side before launching device kernels. The
+    // kernels index embeddings_ptr[i*embedding_dim+...] for i in
+    // [start_idx, end_idx) with no on-device bounds checking (throwing inside
+    // a SYCL kernel is not possible), so malformed offsets (negative,
+    // non-monotonic, or exceeding the embedding table length) would cause
+    // out-of-bounds device reads. Validate that offsets are monotonic
+    // non-decreasing and lie within [0, total_elements].
+    if (offsets_size > 0) {
+        std::vector<int64_t> host_offsets(static_cast<size_t>(offsets_size));
+        queue.memcpy(host_offsets.data(), offsets_ptr,
+                     static_cast<size_t>(offsets_size) * sizeof(int64_t)).wait();
+        int64_t prev = 0;
+        for (int64_t b = 0; b < offsets_size; ++b) {
+            int64_t off = host_offsets[b];
+            if (off < 0 || off > total_elements) {
+                throw std::out_of_range("EmbeddingBag offset " + std::to_string(off) +
+                    " out of range [0, " + std::to_string(total_elements) + "]");
+            }
+            if (off < prev) {
+                throw std::invalid_argument("EmbeddingBag offsets must be monotonic "
+                    "non-decreasing (offset " + std::to_string(off) +
+                    " < previous " + std::to_string(prev) + ")");
+            }
+            prev = off;
+        }
+        // For each bag the kernel reads up to end_idx, which is either the next
+        // offset (validated above) or total_elements for the final implicit
+        // bag; both are within bounds, so no further checks are required.
+    }
+
     int mode_enum = 1; // default mean
     if (mode == "sum") mode_enum = 0;
     else if (mode == "mean") mode_enum = 1;
@@ -624,8 +654,8 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indi
  * 1. Compute per-row L_p norm for each unique index
  * 2. Scale rows exceeding max_norm by max_norm / norm
  */
-struct EmbeddingRenormNormKernel {};
-struct EmbeddingRenormScaleKernel {};
+template <typename StorageT> struct EmbeddingRenormNormKernel {};
+template <typename StorageT> struct EmbeddingRenormScaleKernel {};
 struct EmbeddingRenormCastFlagsKernel {};
 struct EmbeddingRenormCompactKernel {};
 
@@ -685,54 +715,90 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
     sycl::free(d_seen, queue);
     sycl::free(d_flags_i32, queue);
 
-    // Allocate device buffer for norms
-    float* d_norms = sycl::malloc_device<float>(n_unique, queue);
+    // Compute/scale phases dispatch on the weight dtype so norms and the
+    // scaling are computed in the correct precision. Norms are always
+    // accumulated in double to match the per-dtype precision used elsewhere;
+    // half/bfloat16 widen-to-float-storage on load and narrow on store.
+    //
+    // Loader/storer convert between the in-memory storage representation
+    // (StorageT) and a double compute value.
+    auto run_renorm = [&](auto storage_tag, auto load, auto store) {
+        using StorageT = decltype(storage_tag);
+        StorageT* w_ptr = get_data_ptr<StorageT>(weights);
 
-    float* w_ptr = get_data_ptr<float>(weights);
-    float max_norm_f = static_cast<float>(max_norm);
-    float norm_type_f = static_cast<float>(norm_type);
+        // Allocate device buffer for norms (double precision accumulation).
+        double* d_norms = sycl::malloc_device<double>(n_unique, queue);
 
-    // Phase 1: Compute per-row norms
-    queue.parallel_for<EmbeddingRenormNormKernel>(
-        sycl::range<1>(n_unique), [=](sycl::id<1> gid) {
-            int64_t row = d_unique_idx[gid];
-            float norm = 0.0f;
-            for (int64_t j = 0; j < embedding_dim; ++j) {
-                float val = w_ptr[row * embedding_dim + j];
-                if (norm_type_f == 2.0f) {
-                    norm += val * val;
-                } else {
-                    norm += sycl::pow(sycl::fabs(val), norm_type_f);
+        const double max_norm_d = max_norm;
+        const double norm_type_d = norm_type;
+        const int64_t emb_dim = embedding_dim;
+        const int64_t* unique_idx = d_unique_idx;
+
+        // Phase 1: Compute per-row L_p norms.
+        queue.parallel_for<EmbeddingRenormNormKernel<StorageT>>(
+            sycl::range<1>(n_unique), [=](sycl::id<1> gid) {
+                int64_t row = unique_idx[gid];
+                double norm = 0.0;
+                for (int64_t j = 0; j < emb_dim; ++j) {
+                    double val = load(w_ptr[row * emb_dim + j]);
+                    if (norm_type_d == 2.0) {
+                        norm += val * val;
+                    } else {
+                        norm += sycl::pow(sycl::fabs(val), norm_type_d);
+                    }
                 }
-            }
-            if (norm_type_f == 2.0f) {
-                norm = sycl::sqrt(norm);
-            } else {
-                norm = sycl::pow(norm, 1.0f / norm_type_f);
-            }
-            d_norms[gid] = norm;
-        }).wait();
+                if (norm_type_d == 2.0) {
+                    norm = sycl::sqrt(norm);
+                } else {
+                    norm = sycl::pow(norm, 1.0 / norm_type_d);
+                }
+                d_norms[gid] = norm;
+            }).wait();
 
-    // Phase 2: Scale rows exceeding max_norm
-    queue.parallel_for<EmbeddingRenormScaleKernel>(
-        sycl::nd_range<1>(sycl::range<1>(n_unique * 256), sycl::range<1>(256)),
-        [=](sycl::nd_item<1> item) {
-            int64_t row_idx = item.get_group(0);
-            int64_t tid = item.get_local_id(0);
-            if (row_idx >= n_unique) return;
+        // Phase 2: Scale rows exceeding max_norm.
+        queue.parallel_for<EmbeddingRenormScaleKernel<StorageT>>(
+            sycl::nd_range<1>(sycl::range<1>(n_unique * 256), sycl::range<1>(256)),
+            [=](sycl::nd_item<1> item) {
+                int64_t row_idx = item.get_group(0);
+                int64_t tid = item.get_local_id(0);
+                if (row_idx >= n_unique) return;
 
-            float norm = d_norms[row_idx];
-            if (norm <= max_norm_f) return;
+                double norm = d_norms[row_idx];
+                if (norm <= max_norm_d) return;
 
-            float scale = max_norm_f / (norm + 1e-8f);
-            int64_t row = d_unique_idx[row_idx];
-            for (int64_t j = tid; j < embedding_dim; j += 256) {
-                w_ptr[row * embedding_dim + j] *= scale;
-            }
-        }).wait();
+                double scale = max_norm_d / (norm + 1e-7);
+                int64_t row = unique_idx[row_idx];
+                for (int64_t j = tid; j < emb_dim; j += 256) {
+                    double scaled = load(w_ptr[row * emb_dim + j]) * scale;
+                    w_ptr[row * emb_dim + j] = store(scaled);
+                }
+            }).wait();
+
+        sycl::free(d_norms, queue);
+    };
+
+    if (weights.dtype() == DType::Float32) {
+        run_renorm(float{},
+                   [](float v) { return static_cast<double>(v); },
+                   [](double v) { return static_cast<float>(v); });
+    } else if (weights.dtype() == DType::Float64) {
+        run_renorm(double{},
+                   [](double v) { return v; },
+                   [](double v) { return v; });
+    } else if (weights.dtype() == DType::Float16) {
+        run_renorm(sycl::half{},
+                   [](sycl::half v) { return static_cast<double>(static_cast<float>(v)); },
+                   [](double v) { return sycl::half(static_cast<float>(v)); });
+    } else if (weights.dtype() == DType::BFloat16) {
+        run_renorm(uint16_t{},
+                   [](uint16_t v) { return static_cast<double>(bf16_to_f32(v)); },
+                   [](double v) { return f32_to_bf16(static_cast<float>(v)); });
+    } else {
+        sycl::free(d_unique_idx, queue);
+        throw std::runtime_error("Unsupported dtype for embedding_renorm_kernel");
+    }
 
     sycl::free(d_unique_idx, queue);
-    sycl::free(d_norms, queue);
 }
 
 } // namespace oneapi

@@ -1,17 +1,25 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// RMS Normalization Backward Pass (Float64)
-// One workgroup per batch element
+// RMS Normalization Backward Pass (Float64) — two-pass, no atomics.
+//
+// Float64 atomicAdd is unavailable in Vulkan, so (unlike the Float32 variant
+// rms_norm_backward.comp which uses atomicAdd into a shared grad_weight slot)
+// this kernel writes a per-batch-element partial grad_weight into a
+// (batch_size, normalized_shape) buffer with no cross-workgroup contention.
+// A second pass (reduce_partial_sums_f64.comp) sums the partials across batch
+// elements into the final grad_weight. This mirrors layer_norm_backward_f64.comp.
+//
+// Pass 1 dispatch: one workgroup per batch element (gl_WorkGroupID.x = batch_idx).
 layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
-layout(binding = 0) buffer GradOutput { double grad_output_data[]; };
-layout(binding = 1) buffer Input { double input_data[]; };
-layout(binding = 2) buffer Rrms { double rrms_data[]; };
-layout(binding = 3) buffer Weight { double weight_data[]; };
-layout(binding = 4) buffer GradInput { double grad_input_data[]; };
-layout(binding = 5) buffer GradWeight { double grad_weight_data[]; };
+layout(binding = 0) buffer GradOutput { double grad_output_data[]; };  // (batch_size, normalized_shape)
+layout(binding = 1) buffer Input { double input_data[]; };            // (batch_size, normalized_shape)
+layout(binding = 2) buffer Rrms { double rrms_data[]; };              // (batch_size)
+layout(binding = 3) buffer Weight { double weight_data[]; };          // (normalized_shape)
+layout(binding = 4) buffer GradInput { double grad_input_data[]; };   // (batch_size, normalized_shape)
+layout(binding = 5) buffer PartialGradWeight { double partial_grad_weight[]; };  // (batch_size, normalized_shape)
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -55,7 +63,9 @@ void main() {
     double c = shared_sum[0] * rrms_sq / double(params.normalized_shape);
     barrier();
 
-    // Step 2: Compute grad_input and accumulate grad_weight
+    // Step 2: Compute grad_input and write per-batch-element partial grad_weight.
+    // Each batch element owns its own row in the partial buffer, so there is no
+    // cross-workgroup race. The partials are reduced in pass 2.
     for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         double go = grad_output_data[base_idx + i];
         double inp = input_data[base_idx + i];
@@ -64,10 +74,7 @@ void main() {
         // grad_input = rrms * (grad_output * weight - input * c)
         grad_input_data[base_idx + i] = rrms * (go * w - inp * c);
 
-        // grad_weight += grad_output * input * rrms (accumulated across batch)
-        // Non-atomic addition - acceptable for gradient accumulation since
-        // different batch elements run in separate workgroups and collisions
-        // on the weight dimension are serialized within each workgroup
-        grad_weight_data[i] += go * inp * rrms;
+        // partial grad_weight for this batch element = grad_output * input * rrms
+        partial_grad_weight[base_idx + i] = go * inp * rrms;
     }
 }

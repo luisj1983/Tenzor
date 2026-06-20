@@ -24,6 +24,7 @@
 #include <sys/types.h>
 #include <limits.h>
 #include <thread>
+#include <atomic>
 
 namespace tenzor {
 
@@ -133,7 +134,10 @@ struct SummaryWriter::Impl {
     int flush_secs;
     int event_count{0};
     std::chrono::steady_clock::time_point last_flush;
-    bool is_open{false};
+    // Atomic so the lock-free public is_open() accessor and the destructor's
+    // pre-close check can observe it without holding `mutex` while the writers
+    // (which hold `mutex`) toggle it. All mutations occur under `mutex`.
+    std::atomic<bool> is_open{false};
     double wall_time_offset{0.0};
 
     Impl(std::string_view dir, int queue, int flush)
@@ -166,6 +170,19 @@ struct SummaryWriter::Impl {
             }
         }
         return false;
+    }
+
+    // Flush the underlying ofstream. MUST be called with `mutex` already held;
+    // it touches `event_file` and `last_flush`, both of which are otherwise
+    // mutated only under the lock. The public SummaryWriter::flush() acquires
+    // the lock and delegates here, while the already-locked write paths
+    // (add_*/close) call this directly to avoid self-deadlock.
+    void flush_locked() {
+        if (!is_open) {
+            return;
+        }
+        event_file.flush();
+        last_flush = std::chrono::steady_clock::now();
     }
 };
 
@@ -229,7 +246,7 @@ auto SummaryWriter::add_scalar(std::string_view tag, float value, int64_t step) 
     // Auto-flush if needed
     impl_->event_count++;
     if (impl_->maybe_flush_due()) {
-        flush();
+        impl_->flush_locked();
         impl_->event_count = 0;
     }
 }
@@ -244,8 +261,8 @@ auto SummaryWriter::add_histogram(std::string_view tag,
 
     // Validate the caller-controlled bin count before any allocation/copy:
     // bins <= 0 leads to OOB writes / huge allocations in serialize_histogram.
-    if (bins < 1) {
-        throw TensorBoardException("Histogram bins must be >= 1");
+    if (bins < 1 || bins > 1'000'000) {
+        throw TensorBoardException("Histogram bins must be in [1, 1000000]");
     }
 
     // Ensure tensor is on CPU
@@ -267,7 +284,7 @@ auto SummaryWriter::add_histogram(std::string_view tag,
 
     impl_->event_count++;
     if (impl_->maybe_flush_due()) {
-        flush();
+        impl_->flush_locked();
         impl_->event_count = 0;
     }
 }
@@ -312,7 +329,7 @@ auto SummaryWriter::add_image(std::string_view tag,
 
     impl_->event_count++;
     if (impl_->maybe_flush_due()) {
-        flush();
+        impl_->flush_locked();
         impl_->event_count = 0;
     }
 }
@@ -458,12 +475,12 @@ auto SummaryWriter::add_graph(std::string_view model_name,
 }
 
 auto SummaryWriter::flush() -> void {
-    if (!impl_->is_open) {
-        return;
-    }
-
-    impl_->event_file.flush();
-    impl_->last_flush = std::chrono::steady_clock::now();
+    // Take the same mutex the write paths use so a public flush() can never race
+    // an in-progress event_file.write() from add_*/add_graph. The locked write
+    // paths must NOT call this (they would self-deadlock); they call
+    // impl_->flush_locked() directly.
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->flush_locked();
 }
 
 auto SummaryWriter::close() -> void {
@@ -473,7 +490,7 @@ auto SummaryWriter::close() -> void {
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
-    flush();
+    impl_->flush_locked();
     impl_->event_file.close();
     impl_->is_open = false;
 
@@ -599,8 +616,8 @@ auto SummaryWriter::serialize_histogram(const Tensor& tensor, int bins) -> std::
     // (the all-equal branch then writes counts[0] OOB, and the clamp
     // min(max(bin,0), bins-1) == -1 writes counts[-1]), while a negative bins
     // requests a huge std::vector<double> allocation.
-    if (bins < 1) {
-        throw TensorBoardException("Histogram bins must be >= 1");
+    if (bins < 1 || bins > 1'000'000) {
+        throw TensorBoardException("Histogram bins must be in [1, 1000000]");
     }
 
     // Calculate histogram statistics

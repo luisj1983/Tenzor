@@ -87,35 +87,48 @@ void register_autograd(py::module_& m) {
             saved_retains[i] = inputs[i].retains_grad();
         }
 
+        // Restore the caller's pre-call .grad and retain_grad flags. Must run
+        // on every exit path, including when backward() throws — otherwise the
+        // caller's grads are left zeroed/overwritten by the scratch backward.
+        auto restore = [&]() {
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                if (saved_grads[i].has_value()) {
+                    inputs[i].set_grad(saved_grads[i].value());
+                } else {
+                    inputs[i].zero_grad();
+                }
+                inputs[i].set_retain_grad(saved_retains[i]);
+            }
+        };
+
         py::tuple result(inputs.size());
-        {
-            py::gil_scoped_release release;
-            for (auto& inp : inputs) {
-                inp.zero_grad();
-                inp.retain_grad();
+        try {
+            {
+                py::gil_scoped_release release;
+                for (auto& inp : inputs) {
+                    inp.zero_grad();
+                    inp.retain_grad();
+                }
+
+                for (size_t i = 0; i < outputs.size(); ++i) {
+                    bool retain = retain_graph || create_graph || (i < outputs.size() - 1);
+                    outputs[i].backward(grad_outs_vec[i], retain, create_graph);
+                }
             }
 
-            for (size_t i = 0; i < outputs.size(); ++i) {
-                bool retain = retain_graph || create_graph || (i < outputs.size() - 1);
-                outputs[i].backward(grad_outs_vec[i], retain, create_graph);
+            // Collect scratch grads into the result tuple (before restoring).
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                if (inputs[i].has_grad()) {
+                    result[i] = py::cast(inputs[i].grad());
+                } else {
+                    result[i] = py::none();
+                }
             }
+        } catch (...) {
+            restore();
+            throw;
         }
-
-        // Collect scratch grads into the result tuple, then restore caller state.
-        for (size_t i = 0; i < inputs.size(); ++i) {
-            if (inputs[i].has_grad()) {
-                result[i] = py::cast(inputs[i].grad());
-            } else {
-                result[i] = py::none();
-            }
-            // Restore the user's pre-call .grad and retain_grad flag.
-            if (saved_grads[i].has_value()) {
-                inputs[i].set_grad(saved_grads[i].value());
-            } else {
-                inputs[i].zero_grad();
-            }
-            inputs[i].set_retain_grad(saved_retains[i]);
-        }
+        restore();
         return result;
     },
     "Compute gradients of outputs w.r.t. inputs",

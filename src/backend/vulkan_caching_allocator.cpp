@@ -604,6 +604,10 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
     // If slab allocation fails, fall back to exact size before giving up
     if (result != VK_SUCCESS && slab_size > size) {
         vkDestroyBuffer(device_alloc.device, buffer, nullptr);
+        // Vulkan does not guarantee the handle is set to VK_NULL_HANDLE on a
+        // failed vkCreateBuffer, so clear it ourselves to avoid passing a stale
+        // (already-destroyed) handle to bind/destroy below.
+        buffer = VK_NULL_HANDLE;
 
         // Recreate buffer with exact requested size
         slab_size = size;
@@ -629,6 +633,11 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
                     using_relaxed_props = true;
                 }
             }
+        } else {
+            // Buffer recreation failed (host-memory exhaustion). Ensure the
+            // handle is null so the error path below does not destroy a buffer
+            // that was never created.
+            buffer = VK_NULL_HANDLE;
         }
     }
 
@@ -640,14 +649,44 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
         // Retry allocation with exact size
         if (slab_size != size) {
             vkDestroyBuffer(device_alloc.device, buffer, nullptr);
+            // Clear before recreate: Vulkan does not guarantee VK_NULL_HANDLE on
+            // a failed vkCreateBuffer, so a stale (destroyed) handle must not
+            // survive into the bind/destroy paths below.
+            buffer = VK_NULL_HANDLE;
             slab_size = size;
             buffer_info.size = slab_size;
-            vkCreateBuffer(device_alloc.device, &buffer_info, nullptr, &buffer);
-            vkGetBufferMemoryRequirements(device_alloc.device, buffer, &mem_requirements);
-            alloc_info.allocationSize = mem_requirements.size;
-        }
+            result = vkCreateBuffer(device_alloc.device, &buffer_info, nullptr, &buffer);
+            if (result != VK_SUCCESS) {
+                // Buffer recreation failed (host-memory exhaustion); ensure the
+                // handle is null and fall through to the error reporting below.
+                buffer = VK_NULL_HANDLE;
+            } else {
+                vkGetBufferMemoryRequirements(device_alloc.device, buffer, &mem_requirements);
+                alloc_info.allocationSize = mem_requirements.size;
+                // Refresh memoryTypeIndex from the fresh requirements rather than
+                // reusing the stale index computed for the larger slab buffer.
+                alloc_info.memoryTypeIndex = find_memory_type(device_alloc.physical_device,
+                                                              mem_requirements.memoryTypeBits,
+                                                              properties);
+                result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
 
-        result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
+                if (result != VK_SUCCESS &&
+                    (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                    alloc_info.memoryTypeIndex = find_memory_type(device_alloc.physical_device,
+                                                                  mem_requirements.memoryTypeBits,
+                                                                  relaxed_props);
+                    result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
+                    if (result == VK_SUCCESS) {
+                        using_relaxed_props = true;
+                        properties = relaxed_props;
+                    } else {
+                        using_relaxed_props = true;
+                    }
+                }
+            }
+        } else {
+            result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
+        }
 
         // If OOM retry succeeded with relaxed props, update properties
         if (result == VK_SUCCESS && using_relaxed_props) {
@@ -914,13 +953,10 @@ void VulkanCachingAllocator::enforce_cache_limit(int device) {
     // Release blocks until we're under the limit
     while (device_alloc.stats.cached_bytes > max_cached_memory_ &&
            !device_alloc.free_blocks.empty()) {
-        // Release largest block first
-        auto it = device_alloc.free_blocks.rbegin();
-        VulkanBlock* block = *it;
-
-        // Convert reverse iterator to forward iterator for erase
-        auto forward_it = std::next(it).base();
-        device_alloc.free_blocks.erase(forward_it);
+        // Release largest block first. release_block() owns the erase from
+        // free_blocks, so we only read the block here without erasing it
+        // ourselves (a duplicate erase would be a redundant lookup).
+        VulkanBlock* block = *device_alloc.free_blocks.rbegin();
 
         release_block(block);
     }

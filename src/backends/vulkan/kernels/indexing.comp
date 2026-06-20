@@ -8,9 +8,11 @@ layout(binding = 1) buffer Indices { int indices_data[]; };
 layout(binding = 2) buffer Output { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;          // Number of output elements
-    uint op;         // 0=gather, 1=scatter
-    uint dim;        // Dimension to index along
+    uint n;            // Number of work items (output elems for gather, input elems for scatter)
+    uint op;           // 0=gather, 1=scatter
+    uint dim;          // Dimension to index along
+    uint input_size;   // Number of valid elements in input_data
+    uint output_size;  // Number of valid elements in output_data
 } params;
 
 void main() {
@@ -22,14 +24,16 @@ void main() {
 
     if (params.op == 0) {
         // Gather: output[i] = input[indices[i]]
+        // src_idx indexes input_data, so it must be bounded by input_size, not n.
         int src_idx = indices_data[idx];
-        if (src_idx >= 0 && src_idx < int(params.n)) {
+        if (src_idx >= 0 && src_idx < int(params.input_size)) {
             output_data[idx] = input_data[src_idx];
         }
     } else {
         // Scatter: output[indices[i]] = input[i]
+        // dst_idx indexes output_data, so it must be bounded by output_size, not n.
         int dst_idx = indices_data[idx];
-        if (dst_idx >= 0 && dst_idx < int(params.n)) {
+        if (dst_idx >= 0 && dst_idx < int(params.output_size)) {
             output_data[dst_idx] = input_data[idx];
         }
     }

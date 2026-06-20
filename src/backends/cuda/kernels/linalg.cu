@@ -833,7 +833,8 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         {
             int64_t total = nbatch * n * n;
             int threads = 256;
-            int blocks = (total + threads - 1) / threads;
+            int64_t blocks64 = (total + threads - 1) / threads;
+            unsigned blocks = static_cast<unsigned>(blocks64);
             set_identity_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
             CUDA_CHECK_LINALG(cudaGetLastError());
         }
@@ -862,7 +863,8 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         {
             int64_t total = nbatch * n * n;
             int threads = 256;
-            int blocks = (total + threads - 1) / threads;
+            int64_t blocks64 = (total + threads - 1) / threads;
+            unsigned blocks = static_cast<unsigned>(blocks64);
             set_identity_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
             CUDA_CHECK_LINALG(cudaGetLastError());
         }
@@ -889,7 +891,8 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         {
             int64_t total = nbatch * n * n;
             int threads = 256;
-            int blocks = (total + threads - 1) / threads;
+            int64_t blocks64 = (total + threads - 1) / threads;
+            unsigned blocks = static_cast<unsigned>(blocks64);
             set_identity_c64_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
             CUDA_CHECK_LINALG(cudaGetLastError());
         }
@@ -912,7 +915,8 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         {
             int64_t total = nbatch * n * n;
             int threads = 256;
-            int blocks = (total + threads - 1) / threads;
+            int64_t blocks64 = (total + threads - 1) / threads;
+            unsigned blocks = static_cast<unsigned>(blocks64);
             set_identity_c128_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
             CUDA_CHECK_LINALG(cudaGetLastError());
         }
@@ -1165,7 +1169,7 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
             // matrices routed via the recursive transpose it violates the
             // leading-dimension contract and cuSOLVER returns status 3.
             int ldu_arg = m;            // for Vt_g output buffer
-            int ldvt_arg = full_matrices ? n_cols : n_cols;  // for U_g output buffer
+            int ldvt_arg = n_cols;  // for U_g output buffer
 
             int lwork = 0;
             CUSOLVER_CHECK(cusolverDnSgesvd_bufferSize(handle, n_cols, m, &lwork));
@@ -3791,358 +3795,6 @@ __global__ void eig_hqr2_kernel(
     }
 }
 
-// Ported from the ROCm qr_eig_fallback_kernel.
-// One block per batch element.
-// ============================================================================
-
-template<typename T>
-__global__ void qr_eig_fallback_kernel(
-    const T* __restrict__ A_in,
-    T* __restrict__ wr_out,
-    T* __restrict__ wi_out,
-    T* __restrict__ V_out,
-    int n, int max_iterations)
-{
-    constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
-    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
-
-    uint32_t tid = threadIdx.x;
-    uint32_t num_threads = blockDim.x;
-    uint32_t batch_idx = blockIdx.x;
-
-    extern __shared__ char smem_raw[];
-    T* H = reinterpret_cast<T*>(smem_raw);
-    T* Q = H + n * n;
-    T* scratch = Q + n * n;  // scratch[0]=v0, scratch[1]=tau, scratch[2]=alpha, scratch[3]=flag
-
-    const T* A = A_in + batch_idx * n * n;
-    T* wr = wr_out + batch_idx * n;
-    T* wi = wi_out + batch_idx * n;
-    T* V = V_out + batch_idx * n * n;
-
-    // Load matrix and init Q = I
-    for (int idx = static_cast<int>(tid); idx < n * n; idx += static_cast<int>(num_threads)) {
-        H[idx] = A[idx];
-        int row = idx / n;
-        int col = idx % n;
-        Q[idx] = (row == col) ? T(1) : T(0);
-    }
-    __syncthreads();
-
-    // Step 1: Reduce to upper Hessenberg form via Householder reflections
-    for (int k = 0; k + 2 < n; k++) {
-        if (tid == 0) {
-            T sigma = T(0);
-            for (int i = k + 1; i < n; i++) {
-                sigma += H[i * n + k] * H[i * n + k];
-            }
-            T norm_x = ::sqrt(sigma);
-            if (norm_x < zero_tol) {
-                scratch[1] = T(0);
-            } else {
-                T a = -::copysign(norm_x, H[(k + 1) * n + k]);
-                T v0_val = H[(k + 1) * n + k] - a;
-                T v_norm_sq = v0_val * v0_val;
-                for (int i = k + 2; i < n; i++) {
-                    v_norm_sq += H[i * n + k] * H[i * n + k];
-                }
-                if (v_norm_sq < zero_tol) {
-                    scratch[1] = T(0);
-                } else {
-                    scratch[0] = v0_val;
-                    scratch[1] = T(2) / v_norm_sq;
-                    scratch[2] = a;
-                }
-            }
-        }
-        __syncthreads();
-
-        T tau = scratch[1];
-        if (tau == T(0)) { __syncthreads(); continue; }
-        T v0 = scratch[0];
-        T alpha = scratch[2];
-
-        // Left: H = (I - tau*v*v^T) * H
-        for (int j = k + static_cast<int>(tid); j < n; j += static_cast<int>(num_threads)) {
-            T dot = v0 * H[(k + 1) * n + j];
-            for (int i = k + 2; i < n; i++) {
-                dot += H[i * n + k] * H[i * n + j];
-            }
-            dot *= tau;
-            H[(k + 1) * n + j] -= v0 * dot;
-            for (int i = k + 2; i < n; i++) {
-                H[i * n + j] -= H[i * n + k] * dot;
-            }
-        }
-        __syncthreads();
-
-        // Right: H = H * (I - tau*v*v^T)
-        for (int i = static_cast<int>(tid); i < n; i += static_cast<int>(num_threads)) {
-            T dot = v0 * H[i * n + (k + 1)];
-            for (int j = k + 2; j < n; j++) {
-                dot += H[j * n + k] * H[i * n + j];
-            }
-            dot *= tau;
-            H[i * n + (k + 1)] -= v0 * dot;
-            for (int j = k + 2; j < n; j++) {
-                H[i * n + j] -= H[j * n + k] * dot;
-            }
-        }
-        __syncthreads();
-
-        // Accumulate Q
-        for (int i = static_cast<int>(tid); i < n; i += static_cast<int>(num_threads)) {
-            T dot = v0 * Q[i * n + (k + 1)];
-            for (int j = k + 2; j < n; j++) {
-                dot += H[j * n + k] * Q[i * n + j];
-            }
-            dot *= tau;
-            Q[i * n + (k + 1)] -= v0 * dot;
-            for (int j = k + 2; j < n; j++) {
-                Q[i * n + j] -= H[j * n + k] * dot;
-            }
-        }
-        __syncthreads();
-
-        if (tid == 0) {
-            H[(k + 1) * n + k] = alpha;
-            for (int i = k + 2; i < n; i++) {
-                H[i * n + k] = T(0);
-            }
-        }
-        __syncthreads();
-    }
-
-    // Step 2: QR iteration with implicit double shifts
-    if (tid == 0) {
-        scratch[3] = static_cast<T>(n);
-    }
-    __syncthreads();
-
-    for (int iter = 0; iter < max_iterations; iter++) {
-        int nn = static_cast<int>(scratch[3]);
-        if (nn <= 0) break;
-
-        // Deflation checks (thread 0)
-        if (tid == 0) {
-            bool deflated = false;
-
-            if (nn >= 2) {
-                T tst = ::fabs(H[(nn - 2) * n + (nn - 2)]) + ::fabs(H[(nn - 1) * n + (nn - 1)]);
-                if (tst == T(0)) tst = T(1);
-                if (::fabs(H[(nn - 1) * n + (nn - 2)]) < eps * tst) {
-                    wr[nn - 1] = H[(nn - 1) * n + (nn - 1)];
-                    wi[nn - 1] = T(0);
-                    H[(nn - 1) * n + (nn - 2)] = T(0);
-                    scratch[3] = static_cast<T>(nn - 1);
-                    deflated = true;
-                }
-            }
-
-            if (!deflated && nn >= 3) {
-                T tst = ::fabs(H[(nn - 3) * n + (nn - 3)]) + ::fabs(H[(nn - 2) * n + (nn - 2)]);
-                if (tst == T(0)) tst = T(1);
-                if (::fabs(H[(nn - 2) * n + (nn - 3)]) < eps * tst) {
-                    T a = H[(nn - 2) * n + (nn - 2)], b = H[(nn - 2) * n + (nn - 1)];
-                    T c = H[(nn - 1) * n + (nn - 2)], d = H[(nn - 1) * n + (nn - 1)];
-                    T trace = a + d;
-                    T det = a * d - b * c;
-                    T disc = trace * trace - T(4) * det;
-
-                    if (disc >= T(0)) {
-                        T sq = ::sqrt(disc);
-                        wr[nn - 2] = T(0.5) * (trace + sq);
-                        wi[nn - 2] = T(0);
-                        wr[nn - 1] = T(0.5) * (trace - sq);
-                        wi[nn - 1] = T(0);
-                    } else {
-                        T sq = ::sqrt(-disc);
-                        wr[nn - 2] = T(0.5) * trace;
-                        wi[nn - 2] = T(0.5) * sq;
-                        wr[nn - 1] = T(0.5) * trace;
-                        wi[nn - 1] = T(-0.5) * sq;
-                    }
-
-                    H[(nn - 2) * n + (nn - 3)] = T(0);
-                    scratch[3] = static_cast<T>(nn - 2);
-                    deflated = true;
-                }
-            }
-
-            if (!deflated && nn == 1) {
-                wr[0] = H[0];
-                wi[0] = T(0);
-                scratch[3] = T(0);
-                deflated = true;
-            }
-
-            scratch[2] = deflated ? T(1) : T(0);
-        }
-        __syncthreads();
-
-        if (scratch[2] != T(0)) continue;
-
-        nn = static_cast<int>(scratch[3]);
-
-        // Francis double-shift QR step
-        T x, y, z;
-        if (tid == 0) {
-            T s = H[(nn - 2) * n + (nn - 2)] + H[(nn - 1) * n + (nn - 1)];
-            T t = H[(nn - 2) * n + (nn - 2)] * H[(nn - 1) * n + (nn - 1)] -
-                  H[(nn - 2) * n + (nn - 1)] * H[(nn - 1) * n + (nn - 2)];
-
-            scratch[0] = H[0] * H[0] + H[1] * H[n] - s * H[0] + t;
-            scratch[1] = H[n] * (H[0] + H[n + 1] - s);
-            scratch[2] = (nn > 2) ? H[n] * H[2 * n + 1] : T(0);
-        }
-        __syncthreads();
-        x = scratch[0]; y = scratch[1]; z = scratch[2];
-
-        for (int k = 0; k + 2 < nn; k++) {
-            T norm_v = ::sqrt(x * x + y * y + z * z);
-            if (norm_v < zero_tol) {
-                if (tid == 0) {
-                    x = H[(k + 1) * n + k];
-                    y = (k + 2 < nn) ? H[(k + 2) * n + k] : T(0);
-                    z = (k + 3 < nn) ? H[(k + 3) * n + k] : T(0);
-                    scratch[0] = x; scratch[1] = y; scratch[2] = z;
-                }
-                __syncthreads();
-                x = scratch[0]; y = scratch[1]; z = scratch[2];
-                continue;
-            }
-
-            T alpha_h = -::copysign(norm_v, x);
-            T v0 = x - alpha_h;
-            T v1 = y;
-            T v2 = z;
-            T v_sq = v0 * v0 + v1 * v1 + v2 * v2;
-            if (v_sq < zero_tol) {
-                if (tid == 0) {
-                    x = H[(k + 1) * n + k];
-                    y = (k + 2 < nn) ? H[(k + 2) * n + k] : T(0);
-                    z = (k + 3 < nn) ? H[(k + 3) * n + k] : T(0);
-                    scratch[0] = x; scratch[1] = y; scratch[2] = z;
-                }
-                __syncthreads();
-                x = scratch[0]; y = scratch[1]; z = scratch[2];
-                continue;
-            }
-            T tau_h = T(2) / v_sq;
-            int m_lim = (k + 4 < nn) ? k + 4 : nn;
-
-            // Left reflection
-            for (int j = k + static_cast<int>(tid); j < nn; j += static_cast<int>(num_threads)) {
-                T dot = v0 * H[k * n + j] + v1 * H[(k + 1) * n + j];
-                if (k + 2 < nn) dot += v2 * H[(k + 2) * n + j];
-                dot *= tau_h;
-                H[k * n + j] -= v0 * dot;
-                H[(k + 1) * n + j] -= v1 * dot;
-                if (k + 2 < nn) H[(k + 2) * n + j] -= v2 * dot;
-            }
-            __syncthreads();
-
-            // Right reflection
-            for (int i = static_cast<int>(tid); i < m_lim; i += static_cast<int>(num_threads)) {
-                T dot = v0 * H[i * n + k] + v1 * H[i * n + (k + 1)];
-                if (k + 2 < nn) dot += v2 * H[i * n + (k + 2)];
-                dot *= tau_h;
-                H[i * n + k] -= v0 * dot;
-                H[i * n + (k + 1)] -= v1 * dot;
-                if (k + 2 < nn) H[i * n + (k + 2)] -= v2 * dot;
-            }
-            __syncthreads();
-
-            // Accumulate Q
-            for (int i = static_cast<int>(tid); i < n; i += static_cast<int>(num_threads)) {
-                T dot = v0 * Q[i * n + k] + v1 * Q[i * n + (k + 1)];
-                if (k + 2 < nn) dot += v2 * Q[i * n + (k + 2)];
-                dot *= tau_h;
-                Q[i * n + k] -= v0 * dot;
-                Q[i * n + (k + 1)] -= v1 * dot;
-                if (k + 2 < nn) Q[i * n + (k + 2)] -= v2 * dot;
-            }
-            __syncthreads();
-
-            if (tid == 0) {
-                if (k > 0) H[k * n + (k - 1)] = alpha_h;
-                if (k + 2 < nn) H[(k + 2) * n + k] = T(0);
-                if (k + 3 < nn) H[(k + 3) * n + k] = T(0);
-
-                x = H[(k + 1) * n + k];
-                y = (k + 2 < nn) ? H[(k + 2) * n + k] : T(0);
-                z = (k + 3 < nn) ? H[(k + 3) * n + k] : T(0);
-                scratch[0] = x; scratch[1] = y; scratch[2] = z;
-            }
-            __syncthreads();
-            x = scratch[0]; y = scratch[1]; z = scratch[2];
-        }
-
-        // Final 2x2 Givens rotation
-        if (nn >= 2) {
-            T norm_v = ::sqrt(x * x + y * y);
-            if (norm_v > zero_tol) {
-                int k = nn - 2;
-                T c_val = x / norm_v;
-                T s_val = -y / norm_v;
-
-                for (int j = k + static_cast<int>(tid); j < nn; j += static_cast<int>(num_threads)) {
-                    T tmp = c_val * H[k * n + j] - s_val * H[(k + 1) * n + j];
-                    H[(k + 1) * n + j] = s_val * H[k * n + j] + c_val * H[(k + 1) * n + j];
-                    H[k * n + j] = tmp;
-                }
-                __syncthreads();
-
-                for (int i = static_cast<int>(tid); i < nn; i += static_cast<int>(num_threads)) {
-                    T tmp = c_val * H[i * n + k] - s_val * H[i * n + (k + 1)];
-                    H[i * n + (k + 1)] = s_val * H[i * n + k] + c_val * H[i * n + (k + 1)];
-                    H[i * n + k] = tmp;
-                }
-                __syncthreads();
-
-                for (int i = static_cast<int>(tid); i < n; i += static_cast<int>(num_threads)) {
-                    T tmp = c_val * Q[i * n + k] - s_val * Q[i * n + (k + 1)];
-                    Q[i * n + (k + 1)] = s_val * Q[i * n + k] + c_val * Q[i * n + (k + 1)];
-                    Q[i * n + k] = tmp;
-                }
-                __syncthreads();
-            }
-        }
-    }
-
-    // Handle remaining blocks
-    if (tid == 0) {
-        int nn = static_cast<int>(scratch[3]);
-        if (nn == 1) {
-            wr[0] = H[0];
-            wi[0] = T(0);
-        } else if (nn == 2) {
-            T a = H[0], b = H[1], c = H[n], d = H[n + 1];
-            T trace = a + d;
-            T det = a * d - b * c;
-            T disc = trace * trace - T(4) * det;
-            if (disc >= T(0)) {
-                T sq = ::sqrt(disc);
-                wr[0] = T(0.5) * (trace + sq);
-                wi[0] = T(0);
-                wr[1] = T(0.5) * (trace - sq);
-                wi[1] = T(0);
-            } else {
-                T sq = ::sqrt(-disc);
-                wr[0] = T(0.5) * trace;
-                wi[0] = T(0.5) * sq;
-                wr[1] = T(0.5) * trace;
-                wi[1] = T(-0.5) * sq;
-            }
-        }
-    }
-    __syncthreads();
-
-    // Write eigenvector matrix Q to output
-    for (int idx = static_cast<int>(tid); idx < n * n; idx += static_cast<int>(num_threads)) {
-        V[idx] = Q[idx];
-    }
-}
 
 } // anonymous namespace
 
@@ -4938,99 +4590,6 @@ __global__ void householder_geqrf_kernel(
     // Write back to global memory
     for (int idx = tid; idx < m * n_cols; idx += num_threads) {
         A[idx] = R[idx];
-    }
-}
-
-// ============================================================================
-// Ormqr fallback — apply Q (from Householder reflectors) to matrix C
-// One block per batch element.
-// Shared memory: refl[r_m*r_n] + C[c_m*c_n] + scratch[c_max_dim]
-// ============================================================================
-
-template<typename T>
-__global__ void householder_ormqr_kernel(
-    const T* __restrict__ refl_in,
-    const T* __restrict__ tau_in,
-    T* __restrict__ C_io,
-    int r_m, int r_n, int c_m, int c_n, int k_refl,
-    bool left, bool transpose_q)
-{
-    int batch_idx = blockIdx.x;
-    int tid = threadIdx.x;
-    int num_threads = blockDim.x;
-
-    extern __shared__ char smem_raw[];
-    T* C = reinterpret_cast<T*>(smem_raw);
-    T* work = C + c_m * c_n;  // scratch vector of size max(c_m, c_n)
-
-    const T* refl = refl_in + batch_idx * r_m * r_n;
-    const T* tau = tau_in + batch_idx * k_refl;
-    T* C_out = C_io + batch_idx * c_m * c_n;
-
-    // Load C into shared memory
-    for (int idx = tid; idx < c_m * c_n; idx += num_threads) {
-        C[idx] = C_out[idx];
-    }
-    __syncthreads();
-
-    // Apply Householder reflectors
-    // Left: Q*C or Q^T*C — iterate over reflectors
-    // Right: C*Q or C*Q^T — iterate over reflectors
-    // Q = H_0 * H_1 * ... * H_{k-1}, where H_j = I - tau_j * v_j * v_j^T
-    // Q^T = H_{k-1} * ... * H_1 * H_0
-    // For left, no-trans (Q*C): apply H_0, H_1, ..., H_{k-1} from left
-    // For left, trans (Q^T*C): apply H_{k-1}, ..., H_0 from left
-    // For right, no-trans (C*Q): apply H_0, ..., H_{k-1} from right
-    // For right, trans (C*Q^T): apply H_{k-1}, ..., H_0 from right
-
-    int start, end_val, step;
-    if ((left && !transpose_q) || (!left && !transpose_q)) {
-        start = 0; end_val = k_refl; step = 1;
-    } else {
-        start = k_refl - 1; end_val = -1; step = -1;
-    }
-
-    for (int j = start; j != end_val; j += step) {
-        T tau_j = tau[j];
-        if (tau_j == T(0)) continue;
-
-        if (left) {
-            // Apply H_j from left: C = (I - tau_j * v_j * v_j^T) * C
-            // For each column c of C: c = c - tau_j * v_j * (v_j^T * c)
-            for (int col = tid; col < c_n; col += num_threads) {
-                // Compute v_j^T * C[:,col]
-                T dot = C[j * c_n + col];  // v[j] = 1 (implicit)
-                for (int i = j + 1; i < c_m; i++) {
-                    dot += refl[i * r_n + j] * C[i * c_n + col];
-                }
-                dot *= tau_j;
-                // Update C[:,col]
-                C[j * c_n + col] -= dot;
-                for (int i = j + 1; i < c_m; i++) {
-                    C[i * c_n + col] -= refl[i * r_n + j] * dot;
-                }
-            }
-        } else {
-            // Apply H_j from right: C = C * (I - tau_j * v_j * v_j^T)
-            // For each row r of C: r = r - tau_j * (r * v_j) * v_j^T
-            for (int row = tid; row < c_m; row += num_threads) {
-                T dot = C[row * c_n + j];  // v[j] = 1 (implicit)
-                for (int i = j + 1; i < c_n; i++) {
-                    dot += C[row * c_n + i] * refl[i * r_n + j];
-                }
-                dot *= tau_j;
-                C[row * c_n + j] -= dot;
-                for (int i = j + 1; i < c_n; i++) {
-                    C[row * c_n + i] -= dot * refl[i * r_n + j];
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    // Write C back
-    for (int idx = tid; idx < c_m * c_n; idx += num_threads) {
-        C_out[idx] = C[idx];
     }
 }
 

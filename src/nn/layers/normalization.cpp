@@ -647,31 +647,14 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
         float mu = mean_data[b];
         float inv_std = rstd_data[b];
 
-        double sum_d = 0.0;
-        for (int64_t i = 0; i < N; ++i) {
-            sum_d += static_cast<double>(input_data[b * N + i]);
-        }
-        const double mu_d = sum_d / static_cast<double>(N);
-        double sum_sq_dev_d = 0.0;
-        for (int64_t i = 0; i < N; ++i) {
-            const double d = static_cast<double>(input_data[b * N + i]) - mu_d;
-            sum_sq_dev_d += d * d;
-        }
-        const double var_d = sum_sq_dev_d / static_cast<double>(N);
-        bool zero_variance = (var_d < static_cast<double>(eps_));
-
-        if (zero_variance) {
-            for (int64_t i = 0; i < N; i++) {
-                grad_in_data[b * N + i] = 0.0f;
-            }
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float x_normalized = 0.0f;
-                grad_weight_data[i] += grad_out_data[idx] * x_normalized;
-                grad_bias_data[i] += grad_out_data[idx];
-            }
-            continue;
-        }
+        // NOTE: do NOT short-circuit on low variance. rstd is the saved
+        // 1/sqrt(var+eps) and is therefore always finite (eps guards the
+        // sqrt), so the analytic gradient
+        //   (grad_out*w - mean_grad_out - x_hat*mean_grad_out_normalized)*rstd
+        // is well-defined and generally non-zero even when var < eps (e.g.
+        // constant or heavily down-scaled rows). Zeroing grad_input on such
+        // rows produced a wrong gradient that diverged from both the GPU
+        // kernels and the higher-order (create_graph=true) CPU path.
 
         // S.15: promote reduction accumulators to double to match the
         // double-precision variance computation above. Mixing float reductions
@@ -2024,6 +2007,11 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     Tensor input_tensor_cpu = input.tensor();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16 || original_dtype == DType::Float64) {
         input_tensor_cpu = input_tensor_cpu.to(DType::Float32);
+    } else if (!input_tensor_cpu.is_contiguous()) {
+        // Float32 path: the manual NCHW offset indexing below assumes
+        // contiguous row-major storage (.to() already yields contiguous for
+        // the converted dtypes above).
+        input_tensor_cpu = input_tensor_cpu.contiguous();
     }
     Variable input_cpu = Variable(input_tensor_cpu, input.requires_grad());
     // Get weight/bias from parameters_ to respect offload hooks
@@ -2996,7 +2984,17 @@ RMSNorm::RMSNorm(int64_t normalized_shape, double eps)
     reset_parameters();
 }
 
-auto RMSNorm::forward_impl(const Variable& input) -> Variable {
+auto RMSNorm::forward_impl(const Variable& input_orig) -> Variable {
+    // The CPU pointer/SIMD paths and the fused GPU kernel below all assume
+    // contiguous row-major storage, indexing as input_data[b * N + i]. Mirror
+    // LayerNorm::forward_impl and materialize a contiguous copy for non-contig
+    // views (e.g. a transposed input), preserving the autograd graph. `input`
+    // shadows `input_orig` so the rest of the body is untouched.
+    Variable input = input_orig;
+    if (!input_orig.tensor().is_contiguous()) {
+        tenzor::utils::wrap_preserving_grad(input, input_orig.tensor().contiguous());
+    }
+
     auto shape = input.shape();
 
     // Verify that input's last dimension matches normalized_shape

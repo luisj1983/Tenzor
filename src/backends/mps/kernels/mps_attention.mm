@@ -10,6 +10,7 @@
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
 #include "../mps_backend.hpp"
+#include "../mps_buffer_util.h"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <cstdint>
@@ -77,11 +78,11 @@ id<MTLComputePipelineState> get_attn_pipeline(const std::string& name) {
 }
 
 id<MTLBuffer> get_attn_buffer(const Tensor& tensor) {
-    size_t bytes = tensor.numel() * dtype_size(tensor.dtype());
-    return [g_attn_device newBufferWithBytesNoCopy:const_cast<void*>(tensor.data_ptr())
-                                             length:bytes
-                                            options:MTLResourceStorageModeShared
-                                        deallocator:nil];
+    // Route through the shared resolver: reuse the allocator's pooled buffer for
+    // allocation-base tensors, and materialize a kept-alive contiguous copy for
+    // offset views instead of wrapping a (likely unaligned) view pointer with
+    // newBufferWithBytesNoCopy — which would return nil and crash on encode.
+    return mps_buffer_for(g_attn_device, tensor);
 }
 
 id<MTLBuffer> make_attn_buffer(size_t bytes) {

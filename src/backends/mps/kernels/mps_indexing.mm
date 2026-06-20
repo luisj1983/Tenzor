@@ -23,6 +23,30 @@ extern id<MTLCommandQueue> g_command_queue;
 void ensure_initialized();
 id<MTLComputePipelineState> get_pipeline(const std::string& name);
 id<MTLBuffer> get_buffer(const Tensor& tensor);
+
+// The index_select/gather/scatter/scatter_add shaders are declared
+// `device const float*` / `device float*` and have no _f16 (or integer)
+// variants in indexing.metal. Routing a non-Float32 tensor through them
+// reinterprets the storage as 4-byte floats — wrong values plus a ~2x heap
+// over-read/over-write for Float16. Reject loudly until typed variants exist,
+// mirroring shader_name_for_dtype's default branch in mps_elementwise.mm.
+// index_select/gather/scatter are pure data movement; indexing.metal provides
+// size-suffixed variants (b1/b2/b4/b8/b16) so every dtype is handled correctly
+// by copying its byte pattern. Map a dtype's element size to the shader suffix.
+inline std::string indexing_size_suffix(const char* op, DType dtype) {
+    switch (dtype_size(dtype)) {
+        case 1:  return "_b1";
+        case 2:  return "_b2";
+        case 4:  return "_b4";
+        case 8:  return "_b8";
+        case 16: return "_b16";
+        default:
+            throw std::runtime_error(
+                "MPS: indexing op '" + std::string(op) +
+                "' unsupported element size for dtype " +
+                std::string(dtype_name(dtype)));
+    }
+}
 } // anonymous
 
 // ============================================================================
@@ -203,7 +227,8 @@ Tensor mps_index_select_kernel(const Tensor& input, int64_t dim, const Tensor& i
     out_shape[dim] = idx_size;
     Tensor output(out_shape, input.dtype(), input.device());
 
-    auto pipeline = get_pipeline("index_select_kernel");
+    auto pipeline = get_pipeline("index_select_kernel" +
+                                 indexing_size_suffix("index_select", input.dtype()));
     id<MTLBuffer> buf_in = get_buffer(input);
     // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
     // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
@@ -258,7 +283,8 @@ Tensor mps_gather_kernel(const Tensor& input, int64_t dim, const Tensor& indices
     std::vector<int64_t> out_shape(idx_shape.begin(), idx_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
 
-    auto pipeline = get_pipeline("gather_kernel");
+    auto pipeline = get_pipeline("gather_kernel" +
+                                 indexing_size_suffix("gather", input.dtype()));
     id<MTLBuffer> buf_in = get_buffer(input);
     // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
     // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
@@ -301,6 +327,9 @@ Tensor mps_gather_kernel(const Tensor& input, int64_t dim, const Tensor& indices
 
 Tensor mps_scatter_kernel(const Tensor& input, int64_t dim, const Tensor& indices, const Tensor& src) {
     ensure_initialized();
+    if (src.dtype() != input.dtype()) {
+        throw std::runtime_error("MPS scatter: src and input must have the same dtype");
+    }
     // Copy input to output first
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
@@ -316,7 +345,8 @@ Tensor mps_scatter_kernel(const Tensor& input, int64_t dim, const Tensor& indice
     for (int64_t d = 0; d < dim; ++d) outer *= idx_shape[d];
     for (int64_t d = dim + 1; d < ndim; ++d) inner *= idx_shape[d];
 
-    auto pipeline = get_pipeline("scatter_kernel");
+    auto pipeline = get_pipeline("scatter_kernel" +
+                                 indexing_size_suffix("scatter", input.dtype()));
     id<MTLBuffer> buf_src = get_buffer(src);
     // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
     // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
@@ -356,6 +386,8 @@ Tensor mps_scatter_kernel(const Tensor& input, int64_t dim, const Tensor& indice
 Tensor mps_scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& indices, const Tensor& src) {
     // Same as scatter but with atomic add
     ensure_initialized();
+    require_float32_indexing("scatter_add", input.dtype());
+    require_float32_indexing("scatter_add", src.dtype());
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -663,6 +695,10 @@ Tensor mps_put_kernel(const Tensor& input, const Tensor& indices, const Tensor& 
     [encoder setBuffer:buf_src offset:0 atIndex:0];
     [encoder setBuffer:buf_idx offset:0 atIndex:1];
     [encoder setBuffer:buf_out offset:0 atIndex:2];
+    // The shader bounds-guards each user-supplied flat destination index against
+    // the size of the output buffer to avoid out-of-bounds GPU writes.
+    uint32_t u_out_size = static_cast<uint32_t>(output.numel());
+    [encoder setBytes:&u_out_size length:sizeof(u_out_size) atIndex:3];
 
     MTLSize grid = MTLSizeMake(n, 1, 1);
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
@@ -958,7 +994,12 @@ Tensor mps_nonzero_kernel(const Tensor& input_arg) {
 Tensor mps_searchsorted_kernel(const Tensor& sorted, const Tensor& values, bool right) {
     ensure_initialized();
     int64_t n = values.numel();
-    Tensor output({n}, DType::Int32, values.device());
+    // The Metal kernel writes 32-bit indices into a contiguous buffer indexed by
+    // flat thread id. Allocate an Int32 scratch output that preserves values'
+    // shape (same memory layout as flat), then convert to Int64 below to match the
+    // CPU/PyTorch contract (DType::Int64, values.shape()).
+    std::vector<int64_t> out_shape(values.shape().begin(), values.shape().end());
+    Tensor output(out_shape, DType::Int32, values.device());
 
     auto pipeline = get_pipeline("searchsorted_kernel");
     id<MTLBuffer> buf_sorted = get_buffer(sorted);
@@ -984,7 +1025,8 @@ Tensor mps_searchsorted_kernel(const Tensor& sorted, const Tensor& values, bool 
     [cmd commit];
     [cmd waitUntilCompleted];
     ::tenzor::mps::mps_cmd_check(cmd, __func__);
-    return output;
+    // Match CPU/PyTorch: searchsorted returns Int64 indices.
+    return output.to(DType::Int64);
 }
 
 Tensor mps_bucketize_kernel(const Tensor& boundaries, const Tensor& input, bool right) {
@@ -992,6 +1034,8 @@ Tensor mps_bucketize_kernel(const Tensor& boundaries, const Tensor& input, bool 
     int64_t n = input.numel();
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    // Metal kernel writes 32-bit indices; allocate Int32 scratch then convert to
+    // Int64 below to match the CPU/PyTorch contract.
     Tensor output(shape_vec, DType::Int32, input.device());
 
     auto pipeline = get_pipeline("bucketize_kernel");
@@ -1018,7 +1062,8 @@ Tensor mps_bucketize_kernel(const Tensor& boundaries, const Tensor& input, bool 
     [cmd commit];
     [cmd waitUntilCompleted];
     ::tenzor::mps::mps_cmd_check(cmd, __func__);
-    return output;
+    // Match CPU/PyTorch: bucketize returns Int64 indices.
+    return output.to(DType::Int64);
 }
 
 } // namespace tenzor::mps

@@ -29,6 +29,7 @@
 #include <thrust/scan.h>
 #include <cfloat>
 #include <cstdint>  // INT64_MAX
+#include <limits>  // std::numeric_limits for type-correct reduction identities (device-usable via --expt-relaxed-constexpr)
 #include <chrono>
 #include <stdexcept>
 #include <optional>
@@ -193,10 +194,12 @@ __global__ void topk_slice_kernel(
         __syncthreads();
     }
 
-    // Phase 2: Sort the k results using parallel odd-even transposition sort
+    // Phase 2: Sort the k results using parallel odd-even transposition sort.
+    // Each thread may own more than one comparison pair when k > 2*blockDim.x,
+    // so grid-stride over all pairs every phase to guarantee full coverage of
+    // ranks >= 2*blockDim.x (otherwise large-k results come back mis-ordered).
     for (int64_t phase = 0; phase < k; ++phase) {
-        int64_t i = 2 * tid + (phase & 1);
-        if (i + 1 < k) {
+        for (int64_t i = 2 * tid + (phase & 1); i + 1 < k; i += 2 * nthreads) {
             bool should_swap = largest ?
                 cuda_lt(s_topk_vals[i], s_topk_vals[i + 1]) :
                 cuda_gt(s_topk_vals[i], s_topk_vals[i + 1]);
@@ -3184,8 +3187,20 @@ auto cummax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std
                 input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
                 dim_size, inner_size, total_slices);
             break;
-        default:
-            throw std::runtime_error("cummax CUDA: unsupported dtype");
+        default: {
+            // Float16/BFloat16: widen to Float32, run, narrow values back.
+            // Indices are Int64 and dtype-independent. Mirrors CPU path
+            // (src/backends/cpu/kernels/advanced.cpp:769-775).
+            DType orig = dtype;
+            Tensor cont_f32 = input_cont.to(DType::Float32);
+            Tensor values_f32(std::vector<int64_t>(shape.begin(), shape.end()),
+                              DType::Float32, device);
+            cummax_kernel_impl<float><<<grid, block, 0, stream>>>(
+                cont_f32.data<float>(), values_f32.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            values = values_f32.to(orig);
+            break;
+        }
     }
     TENZOR_CUDA_POST_LAUNCH_CHECK();
     return {values, indices_out};
@@ -3265,8 +3280,20 @@ auto cummin_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std
                 input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
                 dim_size, inner_size, total_slices);
             break;
-        default:
-            throw std::runtime_error("cummin CUDA: unsupported dtype");
+        default: {
+            // Float16/BFloat16: widen to Float32, run, narrow values back.
+            // Indices are Int64 and dtype-independent. Mirrors CPU path
+            // (src/backends/cpu/kernels/advanced.cpp:769-775).
+            DType orig = dtype;
+            Tensor cont_f32 = input_cont.to(DType::Float32);
+            Tensor values_f32(std::vector<int64_t>(shape.begin(), shape.end()),
+                              DType::Float32, device);
+            cummin_kernel_impl<float><<<grid, block, 0, stream>>>(
+                cont_f32.data<float>(), values_f32.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            values = values_f32.to(orig);
+            break;
+        }
     }
     TENZOR_CUDA_POST_LAUNCH_CHECK();
     return {values, indices_out};
@@ -4220,12 +4247,15 @@ __global__ void segment_reduce_kernel_cuda(
         int64_t seg_end = offsets[seg + 1];
         int64_t seg_len = seg_end - seg_start;
 
-        // Identity value
+        // Identity value. Use type-correct extremes (cuda::std::numeric_limits)
+        // so integer max/min reductions start from INT*_MIN / INT*_MAX rather
+        // than an out-of-range float sentinel cast to T (UB for integer T and a
+        // divergence from the CPU reference which uses numeric_limits).
         T identity;
-        if (mode == 0 || mode == 1) identity = T(0);       // sum/mean
-        else if (mode == 4) identity = T(1);                 // prod
-        else if (mode == 2) identity = T(-1e38);             // max
-        else identity = T(1e38);                             // min
+        if (mode == 0 || mode == 1) identity = T(0);                              // sum/mean
+        else if (mode == 4) identity = T(1);                                      // prod
+        else if (mode == 2) identity = std::numeric_limits<T>::lowest();    // max
+        else identity = std::numeric_limits<T>::max();                      // min
 
         // Each lane processes elements with stride 32
         T acc = identity;
@@ -4304,6 +4334,29 @@ auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
     grid = std::min(grid, 65535);
 
     const int64_t* offsets_ptr = offs.data<int64_t>();
+
+    // Validate the (untrusted) device-resident offsets host-side before launch so
+    // the kernel cannot index data out of bounds: at least 1 element, in-range
+    // endpoints, and non-decreasing. Mirrors the CPU wrapper
+    // (src/backends/cpu/kernels/advanced.cpp:1558-1573).
+    if (num_segments < 0) {
+        throw std::invalid_argument("segment_reduce: offsets must have at least 1 element");
+    }
+    if (num_segments > 0) {
+        std::vector<int64_t> host_offsets(static_cast<size_t>(num_segments) + 1);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(host_offsets.data(), offsets_ptr,
+                          (static_cast<size_t>(num_segments) + 1) * sizeof(int64_t),
+                          cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_offsets[0] < 0 || host_offsets[num_segments] > axis_size) {
+            throw std::invalid_argument("segment_reduce: offsets out of range [0, axis_size]");
+        }
+        for (int64_t i = 0; i < num_segments; ++i) {
+            if (host_offsets[i] > host_offsets[i + 1]) {
+                throw std::invalid_argument("segment_reduce: offsets must be non-decreasing");
+            }
+        }
+    }
 
     switch (dtype) {
         case DType::Float32:

@@ -181,7 +181,19 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
 
         // has_inf_nan stays on device; OR the flags together on-device.
         Tensor flag = has_inf_nan(probe).to(DType::Float32);
-        found_inf = found_inf.has_value() ? (*found_inf + flag) : flag;
+        if (found_inf.has_value()) {
+            // For a model-parallel optimizer whose parameters live on more than
+            // one device, `flag` resides on this param's device while the
+            // accumulator lives on an earlier param's device. tenzor::add does
+            // NOT align devices, so move the flag onto the accumulator's device
+            // before OR-ing (mirrors clip_grad.cpp's cross-device handling).
+            if (flag.device() != found_inf->device()) {
+                flag = flag.to(found_inf->device());
+            }
+            found_inf = *found_inf + flag;
+        } else {
+            found_inf = flag;
+        }
     }
 
     if (!found_inf.has_value()) {
@@ -297,35 +309,131 @@ auto GradScaler::clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, d
         unscale_(optimizer);
     }
 
-    // Collect parameters and delegate to the utility function
-    // Use a mutable copy of the parameter vector since clip_grad_norm_ takes by value
-    auto params = optimizer.parameters();
-    double result = nn::utils::clip_grad_norm_(
-        std::vector<std::shared_ptr<Variable>>(params.begin(), params.end()),
-        max_norm, norm_type
-    );
-
-    // BB.13: Y.32 introduced the F32 unscaled-grad side-table that
-    // ``check_inf_nan_`` consults when the param's grad is F16/BF16. The
-    // clip utility just mutated ``param->grad()`` in place IN THE GRAD'S OWN
-    // (half) dtype, so reading it back into F32 would re-introduce the very
-    // half-precision saturation the side-table exists to avoid. Instead, apply
-    // the SAME clip transform that clip_grad_norm_ applied to the half grads
-    // directly to the F32 side-table entries: norm clipping multiplies every
-    // grad by clip_coef = max_norm/(total_norm+1e-6) iff that coefficient < 1.
-    // (See nn/utils/clip_grad.cpp.) total_norm is the returned ``result``.
+    // BB.13 / Y.32: the norm that drives the clip coefficient MUST be computed
+    // from the genuine post-unscale F32 representations, not from the
+    // half-precision grads stored on the Variable. For an F16/BF16 param,
+    // unscale_() set the Variable's grad to ``unscaled.to(grad_dt)`` (the
+    // saturated/rounded half tensor) while keeping the exact F32 value in the
+    // side-table. If we delegated to nn::utils::clip_grad_norm_ (which reads
+    // p->grad()) the norm would be computed from the saturated halves: an
+    // unscaled F32 grad whose magnitude exceeds the F16 max (65504) casts back
+    // to +/-inf, making the norm inf, the coefficient ~0, and zeroing the
+    // finite F32 side-table entries -- exactly the failure the side-table was
+    // added to prevent. So compute the norm here over the genuine probes
+    // (F32 side-table entry where present, otherwise the param's own F32/F64
+    // grad) and apply the resulting coefficient to BOTH the side-table and the
+    // Variable grad, keeping them consistent. This mirrors the algorithm in
+    // nn/utils/clip_grad.cpp (inf vs p-norm, F32/F64 accumulation dtype,
+    // cross-device alignment).
     auto opt_it = f32_unscaled_grads_.find(&optimizer);
-    if (opt_it != f32_unscaled_grads_.end()) {
-        const double clip_coef = max_norm / (result + 1e-6);
-        if (clip_coef < 1.0) {
-            auto& opt_unscaled = opt_it->second;
-            for (auto& [key, f32_grad] : opt_unscaled) {
-                f32_grad = tenzor::mul(f32_grad, clip_coef);
+    std::unordered_map<Variable*, Tensor>* opt_unscaled =
+        (opt_it != f32_unscaled_grads_.end()) ? &opt_it->second : nullptr;
+
+    auto params = optimizer.parameters();
+
+    // Gather the genuine probe tensor for every param with a grad, keeping a
+    // parallel handle to the owning Variable so we can write the clipped value
+    // back into both the side-table and the Variable grad.
+    struct ProbeEntry {
+        std::shared_ptr<Variable> param;
+        Tensor probe;        // genuine F32 (or F32/F64 native) grad
+        bool from_sidetable; // true if probe came from the F32 side-table
+    };
+    std::vector<ProbeEntry> entries;
+    for (auto& p : params) {
+        if (!p || !p->has_grad()) {
+            continue;
+        }
+        const auto& grad = p->grad();
+        if (!grad.has_value()) {
+            continue;
+        }
+        bool from_sidetable = false;
+        Tensor probe = grad.value();
+        if (opt_unscaled) {
+            auto it = opt_unscaled->find(p.get());
+            if (it != opt_unscaled->end()) {
+                probe = it->second;
+                from_sidetable = true;
+            }
+        }
+        entries.push_back({p, probe, from_sidetable});
+    }
+
+    if (entries.empty()) {
+        return 0.0;
+    }
+
+    // Accumulation dtype: Float64 if any probe is Float64, else Float32 (the
+    // side-table probes are always Float32). Matches clip_grad.cpp.
+    DType accum_dtype = DType::Float32;
+    for (const auto& e : entries) {
+        if (e.probe.dtype() == DType::Float64) {
+            accum_dtype = DType::Float64;
+            break;
+        }
+    }
+    auto promote = [accum_dtype](const Tensor& t) -> Tensor {
+        return (t.dtype() == accum_dtype) ? t : t.to(accum_dtype);
+    };
+
+    Tensor accum;  // scalar on the first probe's device, accum_dtype
+    if (std::isinf(norm_type)) {
+        for (const auto& e : entries) {
+            auto g_max = tenzor::norm(tenzor::abs(e.probe),
+                                      std::numeric_limits<float>::infinity());
+            Tensor m_acc = promote(g_max);
+            if (!accum.impl()) {
+                accum = m_acc;
+            } else {
+                if (m_acc.device() != accum.device()) m_acc = m_acc.to(accum.device());
+                accum = tenzor::maximum(accum, m_acc);
+            }
+        }
+    } else {
+        for (const auto& e : entries) {
+            auto g_norm = tenzor::norm(e.probe, static_cast<float>(norm_type));
+            Tensor n_acc = promote(g_norm);
+            Tensor contribution = tenzor::pow(n_acc, static_cast<float>(norm_type));
+            if (!accum.impl()) {
+                accum = contribution;
+            } else {
+                if (contribution.device() != accum.device()) {
+                    contribution = contribution.to(accum.device());
+                }
+                accum = tenzor::add(accum, contribution);
+            }
+        }
+        accum = tenzor::pow(accum, static_cast<float>(1.0 / norm_type));
+    }
+
+    // Single host readback of the final scalar.
+    Tensor accum_cpu = accum.to(Device::cpu()).to(accum_dtype);
+    double total_norm = (accum_dtype == DType::Float64)
+        ? accum_cpu.data<double>()[0]
+        : static_cast<double>(accum_cpu.data<float>()[0]);
+
+    const double clip_coef = max_norm / (total_norm + 1e-6);
+    if (clip_coef < 1.0) {
+        for (auto& e : entries) {
+            // Scale the genuine probe in its own (F32/F64) dtype so the
+            // coefficient is applied to the exact value, never the saturated
+            // half representation.
+            Tensor scaled = tenzor::mul(e.probe, clip_coef);
+            if (e.from_sidetable) {
+                // Keep the side-table in sync (check_inf_nan_/step will read
+                // these), and cast the clipped value back to the Variable's
+                // half dtype for the optimizer step.
+                const DType grad_dt = e.param->grad()->dtype();
+                (*opt_unscaled)[e.param.get()] = scaled;
+                e.param->set_grad(scaled.to(grad_dt));
+            } else {
+                e.param->set_grad(scaled);
             }
         }
     }
 
-    return result;
+    return total_norm;
 }
 
 auto GradScaler::clip_grad_value_(optim::Optimizer& optimizer, double clip_value) -> void {

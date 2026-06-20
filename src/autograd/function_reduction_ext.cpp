@@ -125,9 +125,14 @@ auto MinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
             case DType::BFloat16: eps_val2 = 1e-3; break;
             default:              eps_val2 = 1e-7; break;
         }
-        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto scaled_diff = div(abs_diff, epsilon);
+        // Build mask + tie_count in Float32: in Float16/BFloat16 the running
+        // sum saturates past 2048 ties (and 1/tie_count underflows), silently
+        // mis-normalising the gradient along long axes. Narrow the final grad back.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
+        auto epsilon = full(input_shape_vec, eps_val2, is_half ? DType::Float32 : input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, is_half ? DType::Float32 : input.dtype(), input.device());
+        auto scaled_diff = div(abs_diff_f32, epsilon);
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
         auto mask = sub(ones_tensor, clamped);
 
@@ -135,7 +140,11 @@ auto MinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         auto tie_count = sum(mask, dim, /*keepdim=*/true);
         mask = div(mask, tie_count);
 
-        return {mul(grad_expanded, mask)};
+        auto grad_f32 = is_half ? grad_expanded.to(DType::Float32) : grad_expanded;
+        auto grad_input = mul(grad_f32, mask);
+        if (is_half) grad_input = grad_input.to(input.dtype());
+
+        return {grad_input};
     }
 }
 
@@ -216,14 +225,19 @@ auto MinBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
             case DType::BFloat16: eps_val2 = 1e-3; break;
             default:              eps_val2 = 1e-7; break;
         }
-        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto scaled_diff = div(abs_diff, epsilon);
+        // Build mask + tie_count in Float32 so the sum doesn't saturate in
+        // half precision; narrow the normalized mask back to input dtype.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
+        auto epsilon = full(input_shape_vec, eps_val2, is_half ? DType::Float32 : input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, is_half ? DType::Float32 : input.dtype(), input.device());
+        auto scaled_diff = div(abs_diff_f32, epsilon);
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
         auto mask = sub(ones_tensor, clamped);
 
         auto tie_count = sum(mask, dim, /*keepdim=*/true);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         auto mask_var = Variable(mask, false);
         return {grad_expanded * mask_var};

@@ -532,24 +532,35 @@ auto RoIHead::forward_detections(
                                                             {num_fg, num_classes_, 4});
 
                 // Select deltas for ground truth class (autograd-aware).
-                std::vector<Variable> selected_deltas;
-                selected_deltas.reserve(num_fg);
+                // Read fg_labels to host ONCE (single DeviceToHost copy) and build a
+                // (num_fg, 1, 4) gather index whose row j is the clamped, 0-indexed
+                // class for that foreground sample, broadcast across the 4 box coords.
+                // A single autograd-aware gather along dim 1 then selects the per-row
+                // class deltas, eliminating the previous per-element item() device
+                // sync and the per-iteration index_select allocations.
+                auto fg_labels_cpu = fg_labels.to(Device::cpu()).to(DType::Int64);
+                const int64_t* fg_labels_ptr = fg_labels_cpu.data<int64_t>();
+
+                auto gather_index = ops::zeros({num_fg, 1, 4}, DType::Int64,
+                                               Device::cpu());
+                int64_t* gather_index_ptr = gather_index.data<int64_t>();
                 for (int64_t j = 0; j < num_fg; ++j) {
-                    auto label_scalar = ops::select(fg_labels, 0, j).item<int64_t>() - 1;  // 0-indexed
-                    label_scalar = std::max(int64_t(0), std::min(label_scalar, num_classes_ - 1));
-                    // Pick class `label_scalar` along dim 1, then row `j` along
-                    // dim 0, both via autograd index_select; result shape (1, 4).
-                    auto cls_idx = ops::full({1}, static_cast<double>(label_scalar),
-                                             DType::Int64, fg_indices.device());
-                    auto row_idx = ops::full({1}, static_cast<double>(j),
-                                             DType::Int64, fg_indices.device());
-                    auto delta_cls = tenzor::index_select(fg_box_deltas_reshaped, 1, cls_idx); // (num_fg,1,4)
-                    auto delta_row = tenzor::index_select(delta_cls, 0, row_idx);              // (1,1,4)
-                    selected_deltas.push_back(
-                        tenzor::reshape(delta_row, {1, 4})
-                    );
+                    int64_t label_scalar = fg_labels_ptr[j] - 1;  // 0-indexed
+                    label_scalar = std::max(int64_t(0),
+                                            std::min(label_scalar, num_classes_ - 1));
+                    gather_index_ptr[j * 4 + 0] = label_scalar;
+                    gather_index_ptr[j * 4 + 1] = label_scalar;
+                    gather_index_ptr[j * 4 + 2] = label_scalar;
+                    gather_index_ptr[j * 4 + 3] = label_scalar;
                 }
-                auto fg_selected_deltas = tenzor::cat(selected_deltas, 0);
+                // Move the index to the deltas' device for the gather.
+                auto gather_index_dev = gather_index.to(fg_box_deltas_reshaped.device());
+
+                // gather along dim 1 -> (num_fg, 1, 4), then reshape to (num_fg, 4).
+                auto fg_selected_deltas = tenzor::reshape(
+                    tenzor::gather(fg_box_deltas_reshaped, 1, gather_index_dev),
+                    {num_fg, 4}
+                );
 
                 SmoothL1Loss smooth_l1;
                 auto reg_loss = smooth_l1(

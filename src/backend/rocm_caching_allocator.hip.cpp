@@ -128,9 +128,12 @@ void* RocmCachingAllocator::allocate(size_t size, int device, hipStream_t stream
 
     // Update statistics
     device_alloc.stats.allocated_bytes += block->size;
-    if (device_alloc.stats.cached_bytes >= block->size) {
-        device_alloc.stats.cached_bytes -= block->size;
-    }
+
+    // cached_bytes was already decremented in try_allocate_from_cache when the
+    // block was removed from the free pool (and split_block re-added any
+    // remainder), so nothing to subtract here. Subtracting the post-split
+    // block->size here as well would over-count by the split remainder on every
+    // split (mirrors the CUDA reference allocator, caching_allocator.cpp:85-88).
 
     // Track peak memory usage
     if (device_alloc.stats.allocated_bytes > device_alloc.stats.peak_allocated) {
@@ -251,7 +254,11 @@ void RocmCachingAllocator::empty_cache(int device) {
 
 void RocmCachingAllocator::garbage_collect(int device, bool aggressive) {
     std::lock_guard<std::mutex> lock(mutex_);
+    garbage_collect_locked(device, aggressive);
+}
 
+void RocmCachingAllocator::garbage_collect_locked(int device, bool aggressive) {
+    // Caller must hold mutex_.
     auto process_device = [this, aggressive](DeviceAllocator& device_alloc) {
         if (device_alloc.free_blocks.empty()) {
             return;
@@ -479,6 +486,18 @@ Block* RocmCachingAllocator::try_allocate_from_cache(size_t size, int device, hi
         // Remove from free blocks
         device_alloc.free_blocks.erase(it);
 
+        // The block leaves the free pool: drop its full (pre-split) size from
+        // cached_bytes here. If it is then split, split_block re-adds the
+        // remainder. This preserves the invariant cached_bytes == sum of
+        // free_blocks sizes (subtracting the post-split size in allocate()
+        // over-counted by the remainder on every split). Mirrors the CUDA
+        // reference allocator (caching_allocator.cpp:348-357).
+        if (device_alloc.stats.cached_bytes >= block->size) {
+            device_alloc.stats.cached_bytes -= block->size;
+        } else {
+            device_alloc.stats.cached_bytes = 0;
+        }
+
         // Try to split if block is too large
         if (block->size >= size + min_split_size_) {
             split_block(block, size);
@@ -590,8 +609,13 @@ bool RocmCachingAllocator::try_merge_blocks(Block* block) {
             // When merging, next_block's size is already counted in cached_bytes
             // (added by free()). Only subtract it here; do NOT re-add the grown
             // block->size, or this block's pre-merge bytes get double-counted.
-            // Mirrors the CUDA reference allocator (caching_allocator.cpp:449).
-            device_alloc.stats.cached_bytes -= next_block->size;
+            // Guard the subtraction against size_t underflow (cached_bytes can
+            // legitimately be < next_block->size after upstream clamping), and
+            // mirror the backward merge below + the CUDA reference allocator
+            // (caching_allocator.cpp:468-469).
+            if (device_alloc.stats.cached_bytes >= next_block->size) {
+                device_alloc.stats.cached_bytes -= next_block->size;
+            }
 
             // Expand current block
             block->size += next_block->size;
@@ -809,8 +833,10 @@ void RocmCachingAllocator::log_message(const std::string& message) {
 bool RocmCachingAllocator::handle_allocation_failure(size_t size, int device) {
     log_message("Allocation failure, attempting garbage collection");
 
-    // First try normal garbage collection
-    garbage_collect(device, false);
+    // First try normal garbage collection.
+    // NOTE: called from allocate() with mutex_ already held, so we must use the
+    // lock-free variant to avoid self-deadlock on the non-recursive mutex_.
+    garbage_collect_locked(device, false);
 
     // Check if we freed enough memory
     auto& device_alloc = device_allocators_[device];
@@ -819,7 +845,7 @@ bool RocmCachingAllocator::handle_allocation_failure(size_t size, int device) {
     }
 
     // Try aggressive garbage collection
-    garbage_collect(device, true);
+    garbage_collect_locked(device, true);
 
     return device_alloc.stats.cached_bytes > 0;
 }

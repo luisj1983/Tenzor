@@ -160,12 +160,20 @@ public:
      *
      * @param aspp_features High-level ASPP features (N, 256, H/16, W/16)
      * @param low_level_features Low-level features (N, C_low, H/4, W/4)
+     * @param output_h Target output height. When > 0 the final logits are
+     *        upsampled to exactly this height so the segmentation map aligns
+     *        per-pixel with the input; when <= 0 the size falls back to
+     *        low_level_features height * 4.
+     * @param output_w Target output width (see output_h).
      * @return Segmentation logits of shape (N, num_classes, H, W)
      *
-     * @note Output resolution matches low_level_features * 4
+     * @note When output_h/output_w are <= 0, output resolution matches
+     *       low_level_features * 4.
      */
     auto forward(const Variable& aspp_features,
-                const Variable& low_level_features) -> Variable;
+                const Variable& low_level_features,
+                int64_t output_h = 0,
+                int64_t output_w = 0) -> Variable;
 
     // Module interface implementation (not used - decoder requires 2 inputs)
     auto forward_impl(const Variable& input) -> Variable override {
@@ -188,11 +196,34 @@ public:
         // through). The refine_ + low_level_reduce_ branches are skipped
         // because they require low-level features that this overload
         // does not receive.
+        //
+        // IMPORTANT: classifier_ is constructed as Conv2d(256, num_classes, 1)
+        // in the dual-input path, where it consumes the 256-channel output of
+        // refine_(aspp_channels + 48 -> 256). Here we feed it the raw ASPP
+        // features directly, which carry `aspp_channels` channels. That only
+        // matches the classifier's expected 256 input channels when the
+        // decoder was constructed with aspp_channels == 256 (the default and
+        // the only configuration used by the full DeepLabV3Plus model). For a
+        // standalone decoder built with a different aspp_channels, the
+        // high-level-only fallback is not representable with the existing
+        // weights, so we fail fast with a clear diagnostic instead of letting
+        // Conv2d raise a confusing low-level channel-mismatch error.
         const auto& shape = input.tensor().shape();
         if (shape.size() != 4) {
             throw std::runtime_error(
                 "DeepLabV3PlusDecoder::forward_impl: input must be 4D "
                 "(N, C, H, W)");
+        }
+        constexpr int64_t kClassifierInChannels = 256;
+        if (shape[1] != kClassifierInChannels) {
+            throw std::runtime_error(
+                "DeepLabV3PlusDecoder::forward_impl: single-input "
+                "(high-level-only) fallback requires the decoder to have "
+                "been constructed with aspp_channels == 256 so the raw ASPP "
+                "features match the 256-channel classifier head. Got input "
+                "with " + std::to_string(shape[1]) + " channels. Use the "
+                "dual-input forward(aspp_features, low_level_features) "
+                "overload for other aspp_channels configurations.");
         }
         int64_t mid_h = shape[2] * 4;
         int64_t mid_w = shape[3] * 4;

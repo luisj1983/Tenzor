@@ -18,11 +18,29 @@ namespace tenzor::nn {
 
 namespace {
 
+// Default alpha/beta for the LeCun "scaled tanh" preset:
+//   1.7159 * tanh((2/3) * x)   (LeCun 1998), chosen so the output has ~unit
+// variance for normalized inputs. These are used as the standalone-cell
+// defaults when the caller does not provide ScaledTanh alpha/beta. The ONNX
+// importer plumbs the per-node activation_alpha/activation_beta attributes
+// through so imported graphs reproduce the exporter's parameterization
+// (ScaledTanh in ONNX is alpha*tanh(beta*x); see
+// https://onnx.ai/onnx/operators/onnx__RNN.html).
+constexpr double kScaledTanhDefaultAlpha = 1.7159;
+constexpr double kScaledTanhDefaultBeta  = 2.0 / 3.0;
+
 // Apply the named activation to a Variable. Recognises the full ONNX RNN
 // activation alphabet (https://onnx.ai/onnx/operators/onnx__RNN.html) so the
 // importer can pass `sigmoid`, `leaky_relu`, `elu`, etc. through without
 // rewriting the recurrence per-cell.
-auto apply_rnn_activation(const std::string& name, const Variable& x) -> Variable {
+//
+// `alpha`/`beta` parameterize the activations that ONNX defines with
+// activation_alpha/activation_beta. Currently only ScaledTanh consumes them
+// (alpha*tanh(beta*x)); other activations ignore them but the parameters are
+// accepted uniformly so the call sites stay simple.
+auto apply_rnn_activation(const std::string& name, const Variable& x,
+                          double alpha = kScaledTanhDefaultAlpha,
+                          double beta = kScaledTanhDefaultBeta) -> Variable {
     if (name == "tanh")          return nn::tanh(x);
     if (name == "relu")          return nn::relu(x);
     if (name == "sigmoid")       return nn::sigmoid(x);
@@ -33,11 +51,11 @@ auto apply_rnn_activation(const std::string& name, const Variable& x) -> Variabl
     if (name == "softsign")      return nn::softsign(x);
     if (name == "affine" || name == "identity" || name == "linear") return x;
     if (name == "scaledtanh" || name == "scaled_tanh")
-        // LeCun scaled tanh: 1.7159 * tanh((2/3) * x), the canonical "scaled
-        // tanh" (LeCun 1998) chosen so the output has ~unit variance for
-        // normalized inputs. Previously this silently returned plain tanh(x),
-        // dropping the characteristic scaling entirely.
-        return nn::tanh(x * (2.0f / 3.0f)) * 1.7159f;
+        // ONNX ScaledTanh: alpha * tanh(beta * x). Defaults to the LeCun preset
+        // when alpha/beta are not supplied. The importer passes the node's
+        // activation_alpha/activation_beta so imported models match the source
+        // framework numerically instead of being forced onto LeCun constants.
+        return nn::tanh(x * static_cast<float>(beta)) * static_cast<float>(alpha);
     throw std::invalid_argument(
         "RNNCell: unsupported activation '" + name + "'. Supported: tanh, relu, "
         "sigmoid, leaky_relu, elu, hardsigmoid, hardtanh, softsign, affine, "
@@ -55,10 +73,13 @@ bool is_known_rnn_activation(const std::string& name) {
 }  // namespace
 
 RNNCell::RNNCell(int64_t input_size, int64_t hidden_size,
-                 const std::string& nonlinearity, bool bias)
+                 const std::string& nonlinearity, bool bias,
+                 double activation_alpha, double activation_beta)
     : input_size_(input_size),
       hidden_size_(hidden_size),
-      nonlinearity_(nonlinearity) {
+      nonlinearity_(nonlinearity),
+      activation_alpha_(activation_alpha),
+      activation_beta_(activation_beta) {
 
     if (!is_known_rnn_activation(nonlinearity)) {
         throw std::invalid_argument(
@@ -123,7 +144,8 @@ auto RNNCell::forward(const Variable& input, const Variable& hx) -> Variable {
     auto combined = i_out + h_out;
 
     // Apply activation (supports the full ONNX RNN activation set).
-    auto h_new = apply_rnn_activation(nonlinearity_, combined);
+    auto h_new = apply_rnn_activation(nonlinearity_, combined,
+                                      activation_alpha_, activation_beta_);
     return needs_upcast ? variable_cast(h_new, orig_dtype) : h_new;
 }
 
@@ -153,7 +175,8 @@ auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Va
     Variable precomputed_ih_var(precomputed_ih, false);
     auto combined = precomputed_ih_var + h_out;
 
-    return apply_rnn_activation(nonlinearity_, combined);
+    return apply_rnn_activation(nonlinearity_, combined,
+                               activation_alpha_, activation_beta_);
 }
 
 // ============================================================================
@@ -163,7 +186,9 @@ auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Va
 RNN::RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers,
          const std::string& nonlinearity, bool bias, bool batch_first,
          double dropout, bool bidirectional,
-         const std::string& nonlinearity_bwd)
+         const std::string& nonlinearity_bwd,
+         double activation_alpha, double activation_beta,
+         double activation_alpha_bwd, double activation_beta_bwd)
     : input_size_(input_size),
       hidden_size_(hidden_size),
       num_layers_(num_layers),
@@ -181,14 +206,20 @@ RNN::RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers,
 
     // Backward activation defaults to the forward activation. ONNX RNN
     // exports can specify different activations per direction; this lets
-    // the importer pass both without a wrapper module.
+    // the importer pass both without a wrapper module. When the backward
+    // activation is left to default, its ScaledTanh alpha/beta also default to
+    // the forward values so a single-spec import stays self-consistent.
+    const bool backward_defaulted = nonlinearity_bwd.empty();
     const std::string& backward_nonlin =
-        nonlinearity_bwd.empty() ? nonlinearity : nonlinearity_bwd;
+        backward_defaulted ? nonlinearity : nonlinearity_bwd;
+    const double bwd_alpha = backward_defaulted ? activation_alpha : activation_alpha_bwd;
+    const double bwd_beta  = backward_defaulted ? activation_beta  : activation_beta_bwd;
 
     // Create forward cells for each layer
     for (int64_t i = 0; i < num_layers; ++i) {
         int64_t layer_input_size = (i == 0) ? input_size : hidden_size * (bidirectional_ ? 2 : 1);
-        auto cell = std::make_shared<RNNCell>(layer_input_size, hidden_size, nonlinearity, bias);
+        auto cell = std::make_shared<RNNCell>(layer_input_size, hidden_size, nonlinearity, bias,
+                                              activation_alpha, activation_beta);
         forward_cells_.push_back(cell);
         register_module("forward_cell_" + std::to_string(i), cell);
     }
@@ -198,7 +229,8 @@ RNN::RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers,
         for (int64_t i = 0; i < num_layers; ++i) {
             int64_t layer_input_size = (i == 0) ? input_size : hidden_size * 2;
             auto cell = std::make_shared<RNNCell>(layer_input_size, hidden_size,
-                                                  backward_nonlin, bias);
+                                                  backward_nonlin, bias,
+                                                  bwd_alpha, bwd_beta);
             backward_cells_.push_back(cell);
             register_module("backward_cell_" + std::to_string(i), cell);
         }

@@ -129,6 +129,17 @@ auto philox_dropout_mask(const std::vector<int64_t>& shape,
     // Generate as Float32 first; narrow to the target dtype below.
     Tensor mask_f32(std::vector<int64_t>(shape.begin(), shape.end()),
                      DType::Float32, Device::cpu());
+    // The Philox key is a 32-bit quantity by cross-backend convention: the
+    // CUDA/ROCm FlashAttention kernels, the OneAPI device kernel
+    // (`oneapi::philox_dropout_mask_kernel`, philox_dropout.cpp:160) and the
+    // Vulkan `philox_dropout.comp` shader (lines 11-21,63) all build the key
+    // as `{seed_low, seed_low ^ 0x1BD11BDA}` from the *low 32 bits* of the
+    // seed via plain truncation. Masks produced here must be bit-exactly
+    // identical to those device kernels so the dropout backward can replay
+    // them; therefore the same low-32-bit truncation is used here. Effective
+    // seed entropy is 32 bits — `new_philox_stream()` generates exactly 32
+    // bits so the uint64 seed parameter never overstates the entropy that the
+    // shared 32-bit key actually consumes.
     fill_mask_f32(mask_f32.data<float>(), total, bh, sq, sk,
                    static_cast<float>(p),
                    static_cast<uint32_t>(seed & 0xFFFFFFFFu),
@@ -142,7 +153,18 @@ auto new_philox_stream() -> PhiloxStream {
     static thread_local std::random_device rd;
     static thread_local std::mt19937_64 gen{rd()};
 
-    uint64_t seed_v = gen();
+    // The Philox key consumed by `philox_dropout_mask` (and the matching
+    // OneAPI / Vulkan / CUDA / ROCm device kernels) is 32 bits wide by the
+    // shared cross-backend convention `{seed_low, seed_low ^ 0x1BD11BDA}`,
+    // built from the low 32 bits of the seed. Generating a full 64-bit seed
+    // here would silently discard the high 32 bits at every consumer, making
+    // two distinct 64-bit seeds that share their low half collide and
+    // overstating the realised entropy. Draw exactly 32 bits so the seed
+    // tensor faithfully reflects the entropy the key actually uses; the value
+    // is still stored in the Int64 tensor for type compatibility with the
+    // saved-state / replay plumbing.
+    uint64_t seed_v = static_cast<uint64_t>(
+        static_cast<uint32_t>(gen() & 0xFFFFFFFFu));
     uint64_t offset_v = 0;  // The per-element counters in `philox_dropout_mask`
                             // already disambiguate elements; offset=0 is the
                             // canonical "first call" sentinel.

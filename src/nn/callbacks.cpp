@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <sstream>
 #include <cmath>
+#include <cctype>
 #include <algorithm>
 
 namespace tenzor {
@@ -182,12 +183,26 @@ auto ModelCheckpointCallback::format_filepath(int epoch) const -> std::string {
             // Extract format spec (e.g., "03d" from "{epoch:03d}")
             std::string format_spec = result.substr(pos + 7, end_pos - pos - 7);
 
-            // Parse width from format spec (e.g., "03d" -> width=3)
+            // Parse width from format spec robustly. Supports Python-style
+            // integer specs such as "03d", "3d", "03", "3":
+            //   [0]<width><type?>  where a leading '0' selects zero-fill and
+            //   the trailing type char (e.g. 'd') is optional.
             int width = 0;
-            char fill = '0';
-            if (!format_spec.empty() && format_spec[0] == '0') {
+            char fill = ' ';
+            size_t i = 0;
+            // Optional leading '0' fill flag -> zero-padding.
+            if (i < format_spec.length() && format_spec[i] == '0') {
                 fill = '0';
-                width = std::stoi(format_spec.substr(0, format_spec.length() - 1));
+                ++i;
+            }
+            // Consume the run of width digits.
+            size_t width_start = i;
+            while (i < format_spec.length() &&
+                   std::isdigit(static_cast<unsigned char>(format_spec[i]))) {
+                ++i;
+            }
+            if (i > width_start) {
+                width = std::stoi(format_spec.substr(width_start, i - width_start));
             }
 
             // Format epoch number

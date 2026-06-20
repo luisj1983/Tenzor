@@ -15,6 +15,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <mutex>
+#include <iomanip>
+#include <limits>
+#include <cstring>
+#include <cstdint>
 #include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
 #include <iostream>
 #include <functional>
@@ -70,9 +74,13 @@ auto FusionGroup::compute_signature() -> std::string {
         ss << "_" << static_cast<int>(step.op)
            << "i" << step.input_idx
            << "j" << step.second_input_idx;
-        if (step.op >= ElemOp::AddScalar) {
-            ss << "s" << step.scalar;
-        }
+        // Key on the scalar's exact bit pattern for every step: this both
+        // disambiguates scalar-consuming ops that sort below AddScalar
+        // (LeakyRelu/Elu/Softplus) and prevents distinct doubles from
+        // colliding via printed-precision rounding.
+        uint64_t bits;
+        std::memcpy(&bits, &step.scalar, sizeof(bits));
+        ss << "s" << bits;
     }
     signature = ss.str();
     return signature;
@@ -120,7 +128,22 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
     const std::string F = f64 ? "" : "f";          // float-literal suffix
     const std::string ZERO = "0.0" + F;
     const std::string ONE = "1.0" + F;
-    std::string s = std::to_string(step.scalar);   // scalar operand literal
+    // Emit scalar literals with full round-trip (double) precision; the older
+    // std::to_string rounds to ~6 digits and silently defeats the f64 path.
+    auto fmt_double = [](double v) -> std::string {
+        std::ostringstream o;
+        o << std::setprecision(std::numeric_limits<double>::max_digits10) << v;
+        std::string str = o.str();
+        // Ensure the result is a valid floating literal body: a whole number
+        // prints as e.g. "2", and appending the 'f' suffix would yield the
+        // invalid literal "2f". Give it a decimal point unless it already has
+        // a '.', an exponent, or is inf/nan.
+        if (str.find_first_of(".eEni") == std::string::npos) {
+            str += ".0";
+        }
+        return str;
+    };
+    std::string s = fmt_double(step.scalar);        // scalar operand literal
 
     // Activation scalars default to their PyTorch nn.functional values when the
     // step records 0.0 (no explicit slope/alpha). Mirror execute_fused_cpu
@@ -128,7 +151,7 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
     // collapse to 0 (LeakyRelu) or use a 0 coefficient (Elu), diverging from
     // the CPU fallback for the same fused group.
     auto activation_scalar = [&](double dflt) -> std::string {
-        return std::to_string(step.scalar != 0.0 ? step.scalar : dflt);
+        return fmt_double(step.scalar != 0.0 ? step.scalar : dflt);
     };
 
     switch (step.op) {
@@ -160,7 +183,12 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
             return vp + "val = " + a + " > 0 ? " + lam + " * " + a + " : " + lam + " * " + alp + " * (exp(" + a + ") - " + ONE + ");";
         }
         case ElemOp::Gelu:
-            return vp + "val = 0.5" + F + " * " + a + " * (" + ONE + " + tanh(0.7978845608028654" + F + " * (" + a + " + 0.044715" + F + " * " + a + " * " + a + " * " + a + ")));";
+            // Exact erf GELU 0.5*x*(1 + erf(x / sqrt(2))) to match the CPU/eager
+            // kernel (cpu::gelu_kernel, approximate='none'); 1/sqrt(2) =
+            // 0.7071067811865476. erf is available in NVRTC/HIPRTC device math.
+            // The older tanh approximation diverged from CPU by ~1e-3, breaking
+            // cross-backend parity / gradcheck for any fused group with GELU.
+            return vp + "val = 0.5" + F + " * " + a + " * (" + ONE + " + erf(" + a + " * 0.7071067811865476" + F + "));";
         case ElemOp::Mish:
             return vp + "val = " + a + " * tanh(log(" + ONE + " + exp(" + a + ")));";
         case ElemOp::Softplus:   return vp + "val = log(" + ONE + " + exp(" + a + "));";
@@ -541,6 +569,20 @@ auto execute_fused(const FusionGroup& group,
     }
 
 #if CODEGEN_AVAILABLE
+    // The generated kernel only implements Float32/Float64 math. Reject any
+    // other dtype up front — before any device transfer, kernel compilation, or
+    // output allocation — instead of reinterpreting its bytes as float (which
+    // silently produced garbage / OOB for Int32/Int64 whose element size
+    // differs). Validating here (rather than after get_or_compile/allocation)
+    // also avoids compiling and caching a dead NVRTC/HIPRTC kernel and wasting
+    // CPU->GPU transfers for a dtype that always throws.
+    if (group.dtype != DType::Float32 && group.dtype != DType::Float64) {
+        throw std::runtime_error(
+            "KernelCodegen::execute_fused: fused GPU codegen only supports "
+            "Float32/Float64; got " + std::string(dtype_name(group.dtype)) +
+            " — route this dtype through the eager fallback");
+    }
+
     // Move inputs to GPU if needed (codegen runs on GPU). CODEGEN_AVAILABLE is
     // set for both CUDA and ROCm builds, so derive the concrete GPU device from
     // the active backend — directing tensors to a CUDA device on a ROCm build
@@ -568,16 +610,6 @@ auto execute_fused(const FusionGroup& group,
     // Allocate output on GPU
     std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());
     Tensor output(shape, group.dtype, gpu_device);
-
-    // The generated kernel only implements Float32/Float64 math. Reject any
-    // other dtype instead of reinterpreting its bytes as float (which silently
-    // produced garbage / OOB for Int32/Int64 whose element size differs).
-    if (group.dtype != DType::Float32 && group.dtype != DType::Float64) {
-        throw std::runtime_error(
-            "KernelCodegen::execute_fused: fused GPU codegen only supports "
-            "Float32/Float64; got " + std::string(dtype_name(group.dtype)) +
-            " — route this dtype through the eager fallback");
-    }
 
     // Collect input data pointers (now on GPU). contiguous() may allocate a
     // fresh tensor whose storage is NOT shared with gpu_inputs[i]; storing a

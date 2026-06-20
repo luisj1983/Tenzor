@@ -345,24 +345,40 @@ auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Ten
 // ============================================================================
 
 auto VulkanBackend::dispatchComplexTensor(const Tensor& real, const Tensor& imag) -> Tensor {
+    // Determine the output precision from BOTH operands, mirroring the CPU
+    // complex() reference (src/ops/creation.cpp): if either real or imag is
+    // Float64 the result is Complex128, otherwise Complex64. Keying off
+    // real.dtype() alone would (a) read imag with the wrong element width when
+    // the two dtypes differ (OOB read for Float64 real + Float32 imag, garbage
+    // imaginary parts for the reverse) and (b) drop precision relative to the
+    // CPU path when imag is the Float64 operand. The op-level complex()
+    // validates shape/device but NOT dtype, so a mismatched-dtype call is
+    // reachable on this backend.
+    const bool use_double =
+        (real.dtype() == DType::Float64) || (imag.dtype() == DType::Float64);
+
     if (real.numel() == 0) {
         std::vector<int64_t> out_shape(real.shape().begin(), real.shape().end());
-        DType out_dtype = (real.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        DType out_dtype = use_double ? DType::Complex128 : DType::Complex64;
         return Tensor(out_shape, out_dtype, real.device());
     }
 
-    // Float16/BFloat16: up-cast to Float32 and produce a genuine interleaved
-    // Complex64 (8 B/elem). The old packed F16 fast path wrote one uint32 (two
-    // packed F16) per element while labelling the tensor Complex64, leaving
-    // half the allocation uninitialised and feeding packed-F16 bits to
-    // consumers that read interleaved float32. Mirror dispatchPolar's
-    // up-cast-and-recurse convention instead.
-    if (real.dtype() == DType::Float16 || real.dtype() == DType::BFloat16) {
-        return dispatchComplexTensor(real.to(DType::Float32), imag.to(DType::Float32));
+    // Normalize both operands to a single common float dtype before dispatch so
+    // that the shader's two read buffers (binding 0 = real, binding 1 = imag)
+    // share the element width that in_size below is computed from. This also
+    // up-casts Float16/BFloat16 to a genuine interleaved Complex64 (8 B/elem):
+    // the old packed-F16 fast path wrote one uint32 (two packed F16) per
+    // element while labelling the tensor Complex64, leaving half the
+    // allocation uninitialised. Mirror dispatchPolar's up-cast-and-recurse
+    // convention. Only recurse when an actual cast is required to avoid
+    // infinite recursion on the already-normalized case.
+    const DType common_dtype = use_double ? DType::Float64 : DType::Float32;
+    if (real.dtype() != common_dtype || imag.dtype() != common_dtype) {
+        return dispatchComplexTensor(real.to(common_dtype), imag.to(common_dtype));
     }
 
     int32_t device_id = real.device().index;
-    bool is_float64 = (real.dtype() == DType::Float64);
+    bool is_float64 = use_double;
 
     if (is_float64) {
         vulkan::ensure_fp64_supported(device_id, "ComplexTensor");

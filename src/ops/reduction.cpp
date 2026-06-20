@@ -8,7 +8,20 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/utils/profiling.hpp"
 
+#include <iomanip>
+#include <sstream>
+
 namespace tenzor {
+
+// Serialise a double with full round-trip precision (17 significant digits) so
+// that range bounds passed to backends via string attributes are not truncated
+// (std::to_string(double) emits only 6 fractional digits). std::stod on the
+// backend side accepts this format, including scientific notation.
+static std::string double_to_string_full(double v) {
+    std::ostringstream oss;
+    oss << std::setprecision(17) << v;
+    return oss.str();
+}
 
 // Type promotion helpers matching PyTorch semantics:
 // - Integer sum/prod accumulate in Int64 to prevent overflow
@@ -295,7 +308,8 @@ auto histogramdd(const Tensor& input, std::vector<int64_t> bins,
         std::string ranges_str;
         for (size_t i = 0; i < r.size(); ++i) {
             if (i > 0) ranges_str += ',';
-            ranges_str += std::to_string(r[i].first) + ',' + std::to_string(r[i].second);
+            ranges_str += double_to_string_full(r[i].first) + ',' +
+                          double_to_string_full(r[i].second);
         }
         attrs.set(AttrKey::RangesList, ranges_str);
     }
@@ -369,7 +383,10 @@ auto nanstd(const Tensor& input, std::optional<int64_t> dim, bool keepdim, int64
 auto aminmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> std::pair<Tensor, Tensor> {
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim,
+                  normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "aminmax"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     auto results = dispatch<OpId::Aminmax>(inputs, attrs);
     return {results[0], results[1]};
@@ -464,34 +481,62 @@ auto fmin(const Tensor& a, const Tensor& b) -> Tensor {
     return dispatch<OpId::Fmin>(inputs)[0];
 }
 
+// When dim is None, PyTorch flattens the whole tensor and reduces it. We must
+// decide this at the op layer and always pass an explicit, canonical Dim so the
+// backends do not fall back to conflicting registry defaults (CPU=0, CUDA=-1),
+// which silently diverge on rank>=2 tensors. Returns the (possibly flattened)
+// contiguous input and a definite reduction dim, normalising negative dims.
+static auto prepare_flatten_reduce(const Tensor& input, std::optional<int64_t> dim,
+                                   const char* op) -> std::pair<Tensor, int64_t> {
+    if (dim.has_value()) {
+        int64_t d = normalize_reduce_dim(dim.value(),
+                                         static_cast<int64_t>(input.shape().size()), op);
+        return {input.contiguous(), d};
+    }
+    // No dim: flatten to 1-D and reduce along axis 0 (matches PyTorch dim=None).
+    return {reshape(input.contiguous(), {-1}), 0};
+}
+
 auto quantile(const Tensor& input, double q, std::optional<int64_t> dim,
               bool keepdim) -> Tensor {
-    std::array<Tensor, 1> inputs = {input.contiguous()};
+    if (!(q >= 0.0 && q <= 1.0)) {  // NaN-safe
+        throw std::invalid_argument("quantile: q must be in [0, 1]");
+    }
+    auto [prepared, d] = prepare_flatten_reduce(input, dim, "quantile");
+    std::array<Tensor, 1> inputs = {prepared};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Alpha, q);  // reuse Alpha for the quantile value
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::Dim, d);
     attrs.set(AttrKey::Keepdim, keepdim);
     return dispatch<OpId::Quantile>(inputs, attrs)[0];
 }
 
 auto nanquantile(const Tensor& input, double q, std::optional<int64_t> dim,
                  bool keepdim) -> Tensor {
-    std::array<Tensor, 1> inputs = {input.contiguous()};
+    if (!(q >= 0.0 && q <= 1.0)) {  // NaN-safe
+        throw std::invalid_argument("nanquantile: q must be in [0, 1]");
+    }
+    auto [prepared, d] = prepare_flatten_reduce(input, dim, "nanquantile");
+    std::array<Tensor, 1> inputs = {prepared};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Alpha, q);
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::Dim, d);
     attrs.set(AttrKey::Keepdim, keepdim);
     return dispatch<OpId::Nanquantile>(inputs, attrs)[0];
 }
 
 auto nanmedian(const Tensor& input, std::optional<int64_t> dim) -> Tensor {
-    std::array<Tensor, 1> inputs = {input.contiguous()};
+    auto [prepared, d] = prepare_flatten_reduce(input, dim, "nanmedian");
+    std::array<Tensor, 1> inputs = {prepared};
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::Dim, d);
     return dispatch<OpId::Nanmedian>(inputs, attrs)[0];
 }
 
 auto histc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
+    if (bins <= 0) {
+        throw std::invalid_argument("histc: bins must be positive");
+    }
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::N, bins);

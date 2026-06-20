@@ -12,6 +12,7 @@
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include "../mps_backend.hpp"
+#include "../mps_buffer_util.h"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -26,6 +27,15 @@
 #include <utility>
 #include <vector>
 #include "../mps_cmd_check.h"
+
+// Single definition of the keep-alive box declared in mps_buffer_util.h. ObjC
+// classes register once with the runtime, so exactly one @implementation across
+// all TUs that include the header — defined here.
+@implementation TZMpsTensorBox
+- (void)dealloc {
+    delete _tensor;
+}
+@end
 
 namespace tenzor::mps {
 
@@ -84,25 +94,13 @@ id<MTLComputePipelineState> get_pipeline(const std::string& name) {
     return pipeline;
 }
 
-// Forward declaration: the allocator's buffer lookup lives in mps_backend.mm.
-id<MTLBuffer> pooled_buffer_for(void* ptr);
-
-// Get the MTLBuffer for a tensor's data. Prefer reusing the allocator's own
-// buffer (contiguous tensors: data_ptr() == allocation base, so the returned
-// buffer is used at offset 0). This avoids churning a throwaway MTLBuffer per
-// operand per op and the page-alignment fragility of newBufferWithBytesNoCopy.
-// Views (offset into an allocation) miss the lookup and fall back to the no-copy
-// wrapper.
+// Get the MTLBuffer for a tensor's data. Delegates to the shared resolver
+// (mps_buffer_util.h): contiguous/allocation-base tensors reuse the allocator's
+// pooled buffer at offset 0; offset views are materialized to a contiguous copy
+// (with the copy kept alive for the buffer's lifetime) instead of being wrapped
+// via the page-alignment-fragile newBufferWithBytesNoCopy on an offset pointer.
 id<MTLBuffer> get_buffer(const Tensor& tensor) {
-    void* ptr = const_cast<void*>(tensor.data_ptr());
-    if (id<MTLBuffer> pooled = pooled_buffer_for(ptr)) {
-        return pooled;
-    }
-    size_t bytes = tensor.numel() * dtype_size(tensor.dtype());
-    return [g_device newBufferWithBytesNoCopy:ptr
-                                       length:bytes
-                                      options:MTLResourceStorageModeShared
-                                  deallocator:nil];
+    return mps_buffer_for(g_device, tensor);
 }
 
 // Phase 3.3: append a dtype suffix so we dispatch the right-typed
@@ -352,6 +350,28 @@ Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b) {
             " vs " + std::to_string(K2) + ")");
     }
 
+    // Both operands must share a dtype, and the MPSMatrixDescriptor element
+    // size / dataType must match the actual storage. Hardcoding Float32 +
+    // sizeof(float) reads a Float16 buffer (2-byte storage) as Float32 (4-byte)
+    // — garbage values plus an implied ~2x heap over-read. Mirror conv2d's
+    // dtype guard.
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("MPS matmul: operand dtypes must match (got " +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
+    MPSDataType mps_dt;
+    size_t elem_size;
+    switch (a.dtype()) {
+        case DType::Float32: mps_dt = MPSDataTypeFloat32; elem_size = sizeof(float);    break;
+        case DType::Float16: mps_dt = MPSDataTypeFloat16; elem_size = sizeof(uint16_t); break;
+        default:
+            throw std::runtime_error(
+                std::string("MPS matmul: unsupported dtype ") +
+                std::string(dtype_name(a.dtype())) +
+                " (only Float32/Float16 implemented)");
+    }
+
     std::vector<int64_t> out_shape{M, N};
     Tensor output(out_shape, a.dtype(), a.device());
 
@@ -359,18 +379,18 @@ Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b) {
     MPSMatrixDescriptor* desc_a = [MPSMatrixDescriptor
         matrixDescriptorWithRows:M
                          columns:K
-                        rowBytes:K * sizeof(float)
-                        dataType:MPSDataTypeFloat32];
+                        rowBytes:K * elem_size
+                        dataType:mps_dt];
     MPSMatrixDescriptor* desc_b = [MPSMatrixDescriptor
         matrixDescriptorWithRows:K
                          columns:N
-                        rowBytes:N * sizeof(float)
-                        dataType:MPSDataTypeFloat32];
+                        rowBytes:N * elem_size
+                        dataType:mps_dt];
     MPSMatrixDescriptor* desc_c = [MPSMatrixDescriptor
         matrixDescriptorWithRows:M
                          columns:N
-                        rowBytes:N * sizeof(float)
-                        dataType:MPSDataTypeFloat32];
+                        rowBytes:N * elem_size
+                        dataType:mps_dt];
 
     id<MTLBuffer> buf_a = get_buffer(a);
     id<MTLBuffer> buf_b = get_buffer(b);
@@ -426,6 +446,17 @@ Tensor mps_linear_kernel(const Tensor& input, const Tensor& weight, const Tensor
 Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices) {
     ensure_initialized();
 
+    // embedding_kernel is declared `device const float*` only — no _f16 variant
+    // exists. Reading a Float16 weight table through the F32 shader reinterprets
+    // 2-byte storage as 4-byte float (garbage output + a 2x heap over-read), so
+    // reject non-Float32 weights until typed embedding shaders land.
+    if (weight.dtype() != DType::Float32) {
+        throw std::runtime_error(
+            std::string("MPS embedding: unsupported weight dtype ") +
+            std::string(dtype_name(weight.dtype())) +
+            " (only Float32 implemented)");
+    }
+
     auto weight_shape = weight.shape();
     int64_t embedding_dim = weight_shape[1];
     int64_t num_indices = indices.numel();
@@ -442,6 +473,8 @@ Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices) {
     id<MTLBuffer> buf_indices = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
     uint32_t dim = static_cast<uint32_t>(embedding_dim);
+    // Vocabulary size for the in-shader bounds check on each token id.
+    uint32_t num_emb = static_cast<uint32_t>(weight_shape[0]);
 
     id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
@@ -450,6 +483,7 @@ Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices) {
     [encoder setBuffer:buf_indices offset:0 atIndex:1];
     [encoder setBuffer:buf_out offset:0 atIndex:2];
     [encoder setBytes:&dim length:sizeof(dim) atIndex:3];
+    [encoder setBytes:&num_emb length:sizeof(num_emb) atIndex:4];
 
     size_t total = static_cast<size_t>(num_indices * embedding_dim);
     MTLSize grid = MTLSizeMake(total, 1, 1);
@@ -478,6 +512,31 @@ Tensor mps_softmax_kernel(const Tensor& input, int64_t dim) {
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim)
         throw std::invalid_argument("mps_softmax: dim out of range");
+
+    // The 2D shaders treat `cols` as the contiguous last axis (input[row*cols+j]).
+    // For a non-contiguous input or a softmax over any non-last dim, that layout
+    // assumption is wrong, so materialize/permute the softmax dim to last on-device
+    // (mirroring mps_sum_kernel), run the 2D softmax, then inverse-permute back.
+    if (!input.is_contiguous()) {
+        return mps_softmax_kernel(input.contiguous(), dim);
+    }
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+        auto softmaxed = mps_softmax_kernel(transposed, ndim - 1);
+        // Build the inverse permutation so the output dims line back up with input.
+        std::vector<int64_t> inv(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+        OpAttributes ipattrs;
+        ipattrs.set(AttrKey::Dims, inv);
+        return dispatch(OpId::Permute, {softmaxed}, ipattrs)[0].contiguous();
+    }
+
     // Flatten to 2D: rows x cols where cols is the softmax dimension
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
@@ -870,6 +929,25 @@ Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
         return mps_max_kernel(input.contiguous(), dim, keepdim, out_indices);
     }
     int64_t ndim = static_cast<int64_t>(input.shape().size());
+
+    // dim < 0 is the reduce-all contract (matching mps_sum_kernel/mps_mean_kernel
+    // and the CPU reduction: max() with no dim arrives here as the -1 sentinel).
+    // Without this branch the code fell through to the last-dim reduction and
+    // silently reduced only the final axis — wrong values/indices/shape and a
+    // divergence from sum/mean and CPU parity. Flatten to 1D, reduce the single
+    // axis, then (keepdim) reshape to an all-ones shape of the original rank.
+    if (dim < 0) {
+        std::vector<int64_t> flat_shape{input.numel()};
+        Tensor flat = input.reshape(flat_shape);
+        Tensor values = mps_max_kernel(flat, /*dim=*/0, /*keepdim=*/false, out_indices);
+        if (keepdim && ndim > 0) {
+            std::vector<int64_t> kshape(static_cast<size_t>(ndim), 1);
+            values = values.reshape(kshape);
+            out_indices = out_indices.reshape(kshape);
+        }
+        return values;
+    }
+
     if (dim >= 0 && dim != ndim - 1) {
         std::vector<int64_t> perm;
         perm.reserve(ndim);
@@ -890,7 +968,11 @@ Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
     Tensor values({num_rows}, input.dtype(), input.device());
     Tensor indices({num_rows}, DType::Int32, input.device());
 
-    auto pipeline = get_pipeline("max_reduce_kernel");
+    // Select the dtype-matched reduction shader. max_reduce_kernel is declared
+    // `device const float*`; a Float16 buffer routed here would be read as F32
+    // (wrong values + a 2x heap over-read). shader_name_for_dtype picks the
+    // _f16 variant for Float16 and throws for unsupported dtypes.
+    auto pipeline = get_pipeline(shader_name_for_dtype("max_reduce_kernel", input.dtype()));
     id<MTLBuffer> buf_in = get_buffer(input);
     id<MTLBuffer> buf_vals = get_buffer(values);
     id<MTLBuffer> buf_idxs = get_buffer(indices);
@@ -933,12 +1015,32 @@ Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
 // ============================================================================
 
 static Tensor dispatch_comparison(const std::string& shader_name,
-                                   const Tensor& a, const Tensor& b) {
+                                   const Tensor& a_in, const Tensor& b_in) {
     ensure_initialized();
-    auto shape = a.shape();
-    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    Tensor output(shape_vec, DType::Bool, a.device());
-    size_t numel = a.numel();
+
+    // Like dispatch_binary: the comparison Metal kernels index a[id]/b[id] over
+    // the output numel and assume both operands are contiguous in the output
+    // shape. The op layer only validates broadcast compatibility and makes
+    // operands contiguous — it does NOT materialize them to the output shape —
+    // so a smaller broadcast operand or a 1-element scalar (the common
+    // x>scalar / x==0 case) would make b[id] read past the end of b's buffer
+    // (OOB GPU read / wrong booleans). Broadcast-and-materialize first.
+    std::vector<int64_t> out_shape =
+        ::tenzor::broadcast_shapes(a_in.shape(), b_in.shape());
+
+    auto matches = [&](const Tensor& t) {
+        auto s = t.shape();
+        return t.is_contiguous() &&
+               s.size() == out_shape.size() &&
+               std::equal(s.begin(), s.end(), out_shape.begin());
+    };
+    Tensor a = matches(a_in) ? a_in
+                             : ::tenzor::broadcast_to(a_in, out_shape).contiguous();
+    Tensor b = matches(b_in) ? b_in
+                             : ::tenzor::broadcast_to(b_in, out_shape).contiguous();
+
+    Tensor output(out_shape, DType::Bool, a.device());
+    size_t numel = output.numel();
 
     auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
     id<MTLBuffer> buf_a = get_buffer(a);
@@ -1193,6 +1295,33 @@ Tensor mps_softmax_backward_kernel(const Tensor& grad_output, const Tensor& soft
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim)
         throw std::invalid_argument("mps_softmax_backward: dim out of range");
+
+    // The shader assumes the reduced axis is the contiguous last axis
+    // (base = row*num_classes; arr[base+j]). For non-contiguous inputs or a
+    // reduction over a non-last dim that layout is wrong (silently wrong grads),
+    // so mirror the forward: materialize / permute the reduce dim to last for
+    // BOTH operands consistently, run the 2D backward, then inverse-permute.
+    if (!grad_output.is_contiguous() || !softmax_out.is_contiguous()) {
+        return mps_softmax_backward_kernel(grad_output.contiguous(),
+                                           softmax_out.contiguous(), dim);
+    }
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto grad_t = dispatch(OpId::Permute, {grad_output}, pattrs)[0].contiguous();
+        auto sm_t   = dispatch(OpId::Permute, {softmax_out}, pattrs)[0].contiguous();
+        auto result = mps_softmax_backward_kernel(grad_t, sm_t, ndim - 1);
+        std::vector<int64_t> inv(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+        OpAttributes ipattrs;
+        ipattrs.set(AttrKey::Dims, inv);
+        return dispatch(OpId::Permute, {result}, ipattrs)[0].contiguous();
+    }
+
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
         if (static_cast<int64_t>(i) != dim) rows *= shape[i];
@@ -1232,6 +1361,31 @@ Tensor mps_logsoftmax_kernel(const Tensor& input, int64_t dim) {
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim)
         throw std::invalid_argument("mps_logsoftmax: dim out of range");
+
+    // The shader assumes the reduced axis is the contiguous last axis
+    // (base = row*num_classes; arr[base+j]). For a non-contiguous input or a
+    // reduction over any non-last dim that layout is wrong, so materialize /
+    // permute the reduce dim to last on-device (mirroring mps_softmax_kernel),
+    // run the 2D logsoftmax, then inverse-permute back.
+    if (!input.is_contiguous()) {
+        return mps_logsoftmax_kernel(input.contiguous(), dim);
+    }
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+        auto result = mps_logsoftmax_kernel(transposed, ndim - 1);
+        std::vector<int64_t> inv(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+        OpAttributes ipattrs;
+        ipattrs.set(AttrKey::Dims, inv);
+        return dispatch(OpId::Permute, {result}, ipattrs)[0].contiguous();
+    }
+
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
         if (static_cast<int64_t>(i) != dim) rows *= shape[i];
@@ -1270,6 +1424,33 @@ Tensor mps_logsoftmax_backward_kernel(const Tensor& grad_output, const Tensor& l
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim)
         throw std::invalid_argument("mps_logsoftmax_backward: dim out of range");
+
+    // The shader assumes the reduced axis is the contiguous last axis
+    // (base = row*num_classes; arr[base+j]). For non-contiguous inputs or a
+    // reduction over a non-last dim that layout is wrong (silently wrong grads),
+    // so mirror the forward: materialize / permute the reduce dim to last for
+    // BOTH operands consistently, run the 2D backward, then inverse-permute.
+    if (!grad_output.is_contiguous() || !logsoftmax_out.is_contiguous()) {
+        return mps_logsoftmax_backward_kernel(grad_output.contiguous(),
+                                              logsoftmax_out.contiguous(), dim);
+    }
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto grad_t = dispatch(OpId::Permute, {grad_output}, pattrs)[0].contiguous();
+        auto ls_t   = dispatch(OpId::Permute, {logsoftmax_out}, pattrs)[0].contiguous();
+        auto result = mps_logsoftmax_backward_kernel(grad_t, ls_t, ndim - 1);
+        std::vector<int64_t> inv(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+        OpAttributes ipattrs;
+        ipattrs.set(AttrKey::Dims, inv);
+        return dispatch(OpId::Permute, {result}, ipattrs)[0].contiguous();
+    }
+
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
         if (static_cast<int64_t>(i) != dim) rows *= shape[i];
@@ -1309,6 +1490,18 @@ Tensor mps_logsoftmax_backward_kernel(const Tensor& grad_output, const Tensor& l
 Tensor mps_embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                       int64_t num_embeddings) {
     ensure_initialized();
+
+    // embedding_backward_kernel uses `device atomic_float*` (F32-only); no _f16
+    // variant exists. A Float16 grad_output/grad_weight routed here would be
+    // read/written as F32 (corrupt grads + a 2x heap over-access), so reject
+    // non-Float32 until typed embedding-backward shaders land.
+    if (grad_output.dtype() != DType::Float32) {
+        throw std::runtime_error(
+            std::string("MPS embedding backward: unsupported grad dtype ") +
+            std::string(dtype_name(grad_output.dtype())) +
+            " (only Float32 implemented)");
+    }
+
     int64_t num_indices = indices.numel();
     auto grad_shape = grad_output.shape();
     int64_t embed_dim = grad_shape.back();
@@ -1321,6 +1514,8 @@ Tensor mps_embedding_backward_kernel(const Tensor& grad_output, const Tensor& in
 
     uint32_t n_idx = static_cast<uint32_t>(num_indices);
     uint32_t e_dim = static_cast<uint32_t>(embed_dim);
+    // Vocabulary size for the in-shader bounds check on each token id.
+    uint32_t num_emb = static_cast<uint32_t>(num_embeddings);
     size_t total = static_cast<size_t>(num_indices * embed_dim);
 
     auto pipeline = get_pipeline("embedding_backward_kernel");
@@ -1339,6 +1534,7 @@ Tensor mps_embedding_backward_kernel(const Tensor& grad_output, const Tensor& in
     [encoder setBuffer:buf_out offset:0 atIndex:2];
     [encoder setBytes:&n_idx length:sizeof(n_idx) atIndex:3];
     [encoder setBytes:&e_dim length:sizeof(e_dim) atIndex:4];
+    [encoder setBytes:&num_emb length:sizeof(num_emb) atIndex:5];
 
     MTLSize grid = MTLSizeMake(total, 1, 1);
     NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
@@ -1369,13 +1565,28 @@ std::pair<Tensor, Tensor> mps_dropout_kernel(const Tensor& input, float p, bool 
     size_t numel = input.numel();
     float scale = 1.0f / (1.0f - p);
 
-    // Generate random mask on CPU, then use it on GPU
-    // (Metal has no built-in RNG in compute shaders)
+    // Generate the keep/drop mask on the host (Metal compute shaders have no
+    // built-in RNG), but derive randomness from the framework RNG instead of
+    // std::rand(): pull ONE base seed via get_global_seed() — which honors
+    // manual_seed() and advances deterministically — then draw a per-element
+    // uniform with a counter-based splitmix64 keyed by (seed, index). This is
+    // thread-safe, reproducible, and matches the CPU dropout's drop rule
+    // (r < p => drop). std::rand() was non-thread-safe, low-resolution
+    // (RAND_MAX often 32767), and ignored the user seed.
+    const uint64_t base_seed = ::tenzor::get_global_seed();
+    auto counter_uniform = [](uint64_t seed, uint64_t index) -> float {
+        uint64_t z = seed + (index + 1) * 0x9E3779B97F4A7C15ULL;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        return static_cast<float>(z >> 40) * (1.0f / 16777216.0f);  // [0,1)
+    };
+
     Tensor mask({static_cast<int64_t>(numel)}, DType::Int32, input.device());
     auto* mask_ptr = reinterpret_cast<uint32_t*>(const_cast<void*>(mask.data_ptr()));
     for (size_t i = 0; i < numel; ++i) {
-        float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
-        mask_ptr[i] = (r >= p) ? 1u : 0u;
+        float r = counter_uniform(base_seed, static_cast<uint64_t>(i));
+        mask_ptr[i] = (r < p) ? 0u : 1u;  // drop when r < p, else keep
     }
 
     auto shape = input.shape();
@@ -1449,6 +1660,17 @@ std::vector<Tensor> mps_layer_norm_backward_kernel(
     const Tensor& weight, const Tensor& mean, const Tensor& rstd,
     int64_t normalized_size) {
     ensure_initialized();
+
+    // layer_norm_backward_kernel is declared `device const float*` only — no
+    // _f16 variant exists. Routing a Float16 input/grad through the F32 shader
+    // reads/writes 2-byte storage as 4-byte float (garbage gradients + a 2x heap
+    // over-access), so reject non-Float32 until a typed shader lands.
+    if (input.dtype() != DType::Float32) {
+        throw std::runtime_error(
+            std::string("MPS layer_norm backward: unsupported dtype ") +
+            std::string(dtype_name(input.dtype())) +
+            " (only Float32 implemented)");
+    }
 
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());

@@ -130,7 +130,8 @@ struct BatchConfig {
 class DynamicBatcher {
 public:
     DynamicBatcher(std::shared_ptr<jit::CompiledModule> model,
-                   BatchConfig config = {});
+                   BatchConfig config = {},
+                   std::string model_name = {});
     ~DynamicBatcher();
 
     /**
@@ -154,6 +155,11 @@ public:
 private:
     std::shared_ptr<jit::CompiledModule> model_;
     BatchConfig config_;
+    // Model name used as the key into MetricsRegistry so execute_batch() can
+    // record per-batch metrics (total_batch_count / total_batch_size) against
+    // the same ModelMetrics the request handlers update. Empty disables batch
+    // metric recording (e.g. a batcher constructed without a serving name).
+    std::string model_name_;
     std::atomic<bool> running_{false};
     std::thread batch_thread_;
 

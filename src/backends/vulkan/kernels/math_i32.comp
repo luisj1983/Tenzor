@@ -36,6 +36,15 @@ void main() {
         case 3: // div
             result[idx] = (val_b != 0) ? (val_a / val_b) : 0;
             break;
+        case 24: // fmod (binary, truncated; matches torch.fmod)
+            result[idx] = (val_b != 0) ? (val_a % val_b) : 0;
+            break;
+        case 25: { // remainder (binary, floored; matches torch.remainder)
+            int r = (val_b != 0) ? (val_a % val_b) : 0;
+            if (r != 0 && ((r < 0) != (val_b < 0))) r += val_b;
+            result[idx] = r;
+            break;
+        }
         case 7: // neg (unary)
             result[idx] = -val_a;
             break;

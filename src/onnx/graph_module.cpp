@@ -89,7 +89,19 @@ auto GraphModule::run_graph(const std::vector<Variable>& inputs)
                 "GraphModule: op '" + op.name + "' has neither module nor compute_fn");
         }
 
-        for (size_t i = 0; i < op.outputs.size() && i < output_vars.size(); ++i) {
+        // The op must produce exactly as many Variables as it declares output
+        // names. Validate here so an under-/over-producing op is reported at the
+        // producer (with op name/type and expected-vs-produced counts) rather
+        // than surfacing later as a misleading "value not found" / "output not
+        // found" at a downstream consumer. Mirrors the early count checks used
+        // for inputs (line 47) and module inputs (line 76).
+        if (output_vars.size() != op.outputs.size()) {
+            throw std::runtime_error(
+                "GraphModule: op '" + op.name + "' (" + op.op_type +
+                ") declares " + std::to_string(op.outputs.size()) +
+                " output(s) but produced " + std::to_string(output_vars.size()));
+        }
+        for (size_t i = 0; i < op.outputs.size(); ++i) {
             values[op.outputs[i]] = output_vars[i];
         }
     }

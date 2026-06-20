@@ -129,6 +129,12 @@ auto RAdam::initialize_buffers() -> void {
             // R.16: half-precision params get Float32 state buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+        } else {
+            // A null param preceding a valid one must not shift later buffers:
+            // keep exp_avg_/exp_avg_sq_ index-aligned with parameters_ so
+            // step_impl()'s exp_avg_[i]/exp_avg_sq_[i] lookups stay correct.
+            exp_avg_.push_back(Tensor{});
+            exp_avg_sq_.push_back(Tensor{});
         }
     }
 }

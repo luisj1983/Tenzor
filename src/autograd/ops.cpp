@@ -3344,14 +3344,13 @@ auto grid_sample(const Variable& input,
     grad_fn->align_corners_ = align_corners;
     grad_fn->save_for_backward({input.tensor(), grid.tensor()});
 
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
-    if (auto fn = grid.grad_fn()) next_funcs.push_back(fn);
-    grad_fn->set_next_functions(std::move(next_funcs));
-
-    std::vector<Variable> input_vars{input};
-    if (grid.requires_grad()) input_vars.push_back(grid);
-    grad_fn->set_input_variables(std::move(input_vars));
+    // GridSampleBackward::backward always returns {grad_input, grad_grid} in a
+    // fixed 2-element order, and the engine routes input_grads[i] into
+    // next_functions[i] positionally. Use index-aligned placeholders (keeping
+    // nullptr entries the engine harmlessly skips) so the grid gradient is
+    // never misrouted into the input's subgraph when input is a leaf.
+    grad_fn->set_next_functions({input.grad_fn(), grid.grad_fn()});
+    grad_fn->set_input_variables({input, grid});
 
     Variable output(out_t, true);
     output.set_grad_fn(grad_fn);
@@ -4087,7 +4086,7 @@ auto nanmean(const Variable& input, std::optional<int64_t> dim, bool keepdim)
 // masked_fill(x, mask, value): mask is a plain Tensor (not a Variable), value
 // is a constant scalar. Saves the mask so backward can zero grad at masked
 // positions.
-auto masked_fill(const Variable& input, const Tensor& mask, float value)
+auto masked_fill(const Variable& input, const Tensor& mask, double value)
     -> Variable {
     auto result = tenzor::masked_fill(input.tensor(), mask, value);
     if (!input.requires_grad() || !is_grad_enabled()) {

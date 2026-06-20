@@ -85,20 +85,43 @@ float readBF16COut(uint idx) {
     return (idx & 1u) == 0u ? pair.x : pair.y;
 }
 
+// Round a float to its BF16 bit pattern (round-to-nearest-even), matching packBF16x2.
+uint roundBF16(float val) {
+    uint b = floatBitsToUint(val);
+    return (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+}
+
+// Write a single BF16 element via an atomicCompSwap CAS loop that updates only the
+// target 16-bit half. A plain read-modify-write races between adjacent threads whose
+// elements share the same 32-bit word (last-writer-wins drops one half-word update).
 void writeBF16GradGates(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = grad_gates[word_idx];
-    vec2 pair = unpackBF16x2(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    grad_gates[word_idx] = packBF16x2(pair);
+    uint half_offset = (idx & 1u) * 16u;
+    uint new_bits = roundBF16(val);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = grad_gates[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(grad_gates[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
 }
 
 void writeBF16GradCPrev(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = grad_c_prev[word_idx];
-    vec2 pair = unpackBF16x2(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    grad_c_prev[word_idx] = packBF16x2(pair);
+    uint half_offset = (idx & 1u) * 16u;
+    uint new_bits = roundBF16(val);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = grad_c_prev[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(grad_c_prev[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
 }
 
 float sigmoid(float x) {

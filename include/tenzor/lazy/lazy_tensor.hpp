@@ -19,6 +19,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -128,10 +129,18 @@ public:
     auto is_materialized() const -> bool;
 
     /// Get the cached result (only valid if is_materialized()).
-    auto materialized() const -> const Tensor&;
+    /// Returns BY VALUE: the refcount bump happens under materialize_mutex_ so
+    /// the returned handle can never alias storage a concurrent
+    /// set_materialized()/materialize_with() frees.
+    auto materialized() const -> Tensor;
 
     /// Set the materialized result.
     void set_materialized(Tensor t);
+
+    /// Compute-once primitive. Runs compute() at most once for this node's
+    /// lifetime under materialize_mutex_ (serialises shared nodes reachable
+    /// from multiple graphs) and returns the cached result by value.
+    auto materialize_with(const std::function<Tensor()>& compute) -> Tensor;
 
     /// Check if this is an input node (wraps existing data).
     auto is_input() const -> bool { return is_input_; }

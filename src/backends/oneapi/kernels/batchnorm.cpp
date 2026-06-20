@@ -1128,70 +1128,130 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 #endif // TENZOR_HAS_ONEDNN
 
 // Update running statistics: running = (1 - momentum) * running + momentum * batch
+//
+// IMPORTANT: batch_mean/batch_var do NOT necessarily share running_mean's dtype.
+// batchnorm2d_mean_var() deliberately emits Float32 batch statistics for
+// Float16/BFloat16 inputs (to avoid low-precision overflow), while the running
+// stats of an f16/bf16 module remain Float16/BFloat16. Reading the batch buffers
+// with the running-stats type (a blind reinterpret cast in get_data_ptr) would
+// reinterpret 4-byte float data as 2-byte half/bf16 and corrupt the result.
+// Therefore each batch element is loaded in float precision according to the
+// batch tensor's OWN dtype, and only the destination store uses the running dtype.
 auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
                                       const Tensor& batch_mean, const Tensor& batch_var,
                                       float momentum, sycl::queue& queue) -> void {
     const int64_t C = batch_mean.shape()[0];
 
+    if (batch_mean.dtype() != batch_var.dtype()) {
+        throw std::runtime_error(
+            "batchnorm2d_update_running_stats: batch_mean and batch_var must share a dtype");
+    }
+
+    // Runtime selector for how to interpret the batch-stats buffers. Both buffers
+    // share a dtype (checked above); we capture all plausibly-typed pointers and
+    // pick the active one per element inside the kernel based on this enum.
+    enum class BatchKind { F32, F64, F16, BF16 };
+    BatchKind batch_kind;
+    switch (batch_mean.dtype()) {
+        case DType::Float32:  batch_kind = BatchKind::F32;  break;
+        case DType::Float64:  batch_kind = BatchKind::F64;  break;
+        case DType::Float16:  batch_kind = BatchKind::F16;  break;
+        case DType::BFloat16: batch_kind = BatchKind::BF16; break;
+        default:
+            throw std::runtime_error(
+                "Unsupported batch-stats dtype for batchnorm2d_update_running_stats");
+    }
+
+    // Raw byte pointers reinterpreted per-kind inside the kernel. Using the actual
+    // batch dtype avoids the Float32-as-half type-confusion bug.
+    const float*    bm_f32  = static_cast<const float*>(batch_mean.data_ptr());
+    const float*    bv_f32  = static_cast<const float*>(batch_var.data_ptr());
+    const double*   bm_f64  = static_cast<const double*>(batch_mean.data_ptr());
+    const double*   bv_f64  = static_cast<const double*>(batch_var.data_ptr());
+    const sycl::half* bm_f16 = static_cast<const sycl::half*>(batch_mean.data_ptr());
+    const sycl::half* bv_f16 = static_cast<const sycl::half*>(batch_var.data_ptr());
+    const uint16_t* bm_bf16 = static_cast<const uint16_t*>(batch_mean.data_ptr());
+    const uint16_t* bv_bf16 = static_cast<const uint16_t*>(batch_var.data_ptr());
+
+    // Load batch mean/var for channel c in double precision (lossless for every
+    // supported batch dtype) so the subsequent running update can downconvert to
+    // either float or double domain without precision surprises.
+    auto load_batch = [=](int64_t c, double& out_mean, double& out_var) {
+        switch (batch_kind) {
+            case BatchKind::F32:
+                out_mean = static_cast<double>(bm_f32[c]);
+                out_var  = static_cast<double>(bv_f32[c]);
+                break;
+            case BatchKind::F64:
+                out_mean = bm_f64[c];
+                out_var  = bv_f64[c];
+                break;
+            case BatchKind::F16:
+                out_mean = static_cast<double>(static_cast<float>(bm_f16[c]));
+                out_var  = static_cast<double>(static_cast<float>(bv_f16[c]));
+                break;
+            case BatchKind::BF16:
+                out_mean = static_cast<double>(bf16_to_f32(bm_bf16[c]));
+                out_var  = static_cast<double>(bf16_to_f32(bv_bf16[c]));
+                break;
+        }
+    };
+
     if (running_mean.dtype() == DType::Float32) {
         float* run_mean_ptr = get_data_ptr<float>(running_mean);
         float* run_var_ptr = get_data_ptr<float>(running_var);
-        const float* batch_mean_ptr = get_data_ptr<const float>(batch_mean);
-        const float* batch_var_ptr = get_data_ptr<const float>(batch_var);
 
         queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
             const int64_t c = c_id[0];
-            run_mean_ptr[c] = (1.0f - momentum) * run_mean_ptr[c] + momentum * batch_mean_ptr[c];
-            run_var_ptr[c] = (1.0f - momentum) * run_var_ptr[c] + momentum * batch_var_ptr[c];
+            double batch_mean_v, batch_var_v;
+            load_batch(c, batch_mean_v, batch_var_v);
+            run_mean_ptr[c] = (1.0f - momentum) * run_mean_ptr[c] + momentum * static_cast<float>(batch_mean_v);
+            run_var_ptr[c] = (1.0f - momentum) * run_var_ptr[c] + momentum * static_cast<float>(batch_var_v);
         }).wait();
     }
     else if (running_mean.dtype() == DType::Float64) {
         double* run_mean_ptr = get_data_ptr<double>(running_mean);
         double* run_var_ptr = get_data_ptr<double>(running_var);
-        const double* batch_mean_ptr = get_data_ptr<const double>(batch_mean);
-        const double* batch_var_ptr = get_data_ptr<const double>(batch_var);
 
         const double momentum_d = static_cast<double>(momentum);
         queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
             const int64_t c = c_id[0];
-            run_mean_ptr[c] = (1.0 - momentum_d) * run_mean_ptr[c] + momentum_d * batch_mean_ptr[c];
-            run_var_ptr[c] = (1.0 - momentum_d) * run_var_ptr[c] + momentum_d * batch_var_ptr[c];
+            double batch_mean_v, batch_var_v;
+            load_batch(c, batch_mean_v, batch_var_v);
+            run_mean_ptr[c] = (1.0 - momentum_d) * run_mean_ptr[c] + momentum_d * batch_mean_v;
+            run_var_ptr[c] = (1.0 - momentum_d) * run_var_ptr[c] + momentum_d * batch_var_v;
         }).wait();
     }
     else if (running_mean.dtype() == DType::Float16) {
         sycl::half* run_mean_ptr = get_data_ptr<sycl::half>(running_mean);
         sycl::half* run_var_ptr = get_data_ptr<sycl::half>(running_var);
-        const sycl::half* batch_mean_ptr = get_data_ptr<const sycl::half>(batch_mean);
-        const sycl::half* batch_var_ptr = get_data_ptr<const sycl::half>(batch_var);
 
         queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
             const int64_t c = c_id[0];
             // Use float for intermediate calculations for numerical stability
             float run_mean = static_cast<float>(run_mean_ptr[c]);
             float run_var = static_cast<float>(run_var_ptr[c]);
-            float batch_mean = static_cast<float>(batch_mean_ptr[c]);
-            float batch_var = static_cast<float>(batch_var_ptr[c]);
+            double batch_mean_v, batch_var_v;
+            load_batch(c, batch_mean_v, batch_var_v);
 
-            run_mean_ptr[c] = sycl::half((1.0f - momentum) * run_mean + momentum * batch_mean);
-            run_var_ptr[c] = sycl::half((1.0f - momentum) * run_var + momentum * batch_var);
+            run_mean_ptr[c] = sycl::half((1.0f - momentum) * run_mean + momentum * static_cast<float>(batch_mean_v));
+            run_var_ptr[c] = sycl::half((1.0f - momentum) * run_var + momentum * static_cast<float>(batch_var_v));
         }).wait();
     }
     else if (running_mean.dtype() == DType::BFloat16) {
         uint16_t* run_mean_ptr = get_data_ptr<uint16_t>(running_mean);
         uint16_t* run_var_ptr = get_data_ptr<uint16_t>(running_var);
-        const uint16_t* batch_mean_ptr = get_data_ptr<const uint16_t>(batch_mean);
-        const uint16_t* batch_var_ptr = get_data_ptr<const uint16_t>(batch_var);
 
         queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
             const int64_t c = c_id[0];
             // Use float for intermediate calculations for numerical stability
             float run_mean = bf16_to_f32(run_mean_ptr[c]);
             float run_var = bf16_to_f32(run_var_ptr[c]);
-            float batch_mean = bf16_to_f32(batch_mean_ptr[c]);
-            float batch_var = bf16_to_f32(batch_var_ptr[c]);
+            double batch_mean_v, batch_var_v;
+            load_batch(c, batch_mean_v, batch_var_v);
 
-            run_mean_ptr[c] = f32_to_bf16((1.0f - momentum) * run_mean + momentum * batch_mean);
-            run_var_ptr[c] = f32_to_bf16((1.0f - momentum) * run_var + momentum * batch_var);
+            run_mean_ptr[c] = f32_to_bf16((1.0f - momentum) * run_mean + momentum * static_cast<float>(batch_mean_v));
+            run_var_ptr[c] = f32_to_bf16((1.0f - momentum) * run_var + momentum * static_cast<float>(batch_var_v));
         }).wait();
     }
     else {

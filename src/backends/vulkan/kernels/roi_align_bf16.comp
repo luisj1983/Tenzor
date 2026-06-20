@@ -46,14 +46,14 @@ void writeBF16(uint element_idx, float value) {
     uint new_half = bf16_bits << shift;
 
     uint prev = output_data[word_idx];
-    uint desired = (prev & ~mask) | new_half;
     for (uint attempt = 0u; attempt < 65536u; ++attempt) {
-        desired = (prev & ~mask) | new_half;
+        uint desired = (prev & ~mask) | new_half;
         uint observed = atomicCompSwap(output_data[word_idx], prev, desired);
         if (observed == prev) return;
         prev = observed;
     }
-    output_data[word_idx] = desired;
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word written by another invocation.
 }
 
 float bilinear_interpolate(uint base_offset, float y, float x) {

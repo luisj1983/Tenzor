@@ -2620,7 +2620,7 @@ __global__ void fractional_maxpool2d_forward_impl_f64(
         if (h_end <= h_start) h_end = min(h_start + 1, H);
         if (w_end <= w_start) w_end = min(w_start + 1, W);
 
-        double max_val = -1e308;
+        double max_val = -std::numeric_limits<double>::infinity();
         int64_t max_idx = h_start * W + w_start;
 
         for (int64_t h = h_start; h < h_end; ++h) {
@@ -2951,7 +2951,7 @@ __global__ void fractional_maxpool3d_forward_impl_f64(
         if (h_end <= h_start) h_end = min(h_start + 1, H);
         if (w_end <= w_start) w_end = min(w_start + 1, W);
 
-        double max_val = -1e308;
+        double max_val = -std::numeric_limits<double>::infinity();
         int64_t max_idx = d_start * H * W + h_start * W + w_start;
 
         for (int64_t d = d_start; d < d_end; ++d) {

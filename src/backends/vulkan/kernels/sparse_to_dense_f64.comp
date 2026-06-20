@@ -20,14 +20,14 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     if (row >= n_rows) return;
 
-    for (uint col = tid; col < n_cols; col += 256) {
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
         dense[row * n_cols + col] = 0.0lf;
     }
     barrier();
 
     uint row_start = uint(row_offsets[row]);
     uint row_end = uint(row_offsets[row + 1]);
-    for (uint i = row_start + tid; i < row_end; i += 256) {
+    for (uint i = row_start + tid; i < row_end; i += gl_WorkGroupSize.x) {
         uint col = uint(col_indices[i]);
         dense[row * n_cols + col] = values[i];
     }

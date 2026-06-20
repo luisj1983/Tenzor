@@ -793,7 +793,16 @@ static int stbi__sse2_available(void)
 #endif
 
 #ifndef STBI_MAX_DIMENSIONS
-#define STBI_MAX_DIMENSIONS (1 << 24)
+// TENZOR LOCAL HARDENING (re-apply when re-vendoring upstream stb_image):
+// Upstream default is (1 << 24) = 16,777,216 per axis. With stb's mad2/mad3
+// product guards intact this is not a memory-corruption issue, but it still
+// permits a decompression-bomb / allocation DoS: a tiny crafted PNG/GIF can
+// declare e.g. 16384x16384x4 (~1 GiB) — well under both the (1<<24) axis cap
+// and the INT_MAX product limit — forcing a multi-hundred-MB to ~2 GB malloc
+// when an untrusted image is fed through the data loader. Lower the per-axis
+// cap to a sane project bound. Callers that genuinely need larger images can
+// still #define STBI_MAX_DIMENSIONS before including this header.
+#define STBI_MAX_DIMENSIONS 32768
 #endif
 
 ///////////////////////////////////////////////

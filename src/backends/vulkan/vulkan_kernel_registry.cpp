@@ -1206,14 +1206,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::EmbeddingBagBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [grad_output, indices, offsets]
+            // inputs: [grad_output, indices, offsets] (+ [max_indices] for mode="max").
+            // For mode="max" the autograd node appends the forward's per-(bag,feature)
+            // argmax element indices (Int64) as a 4th input so the kernel can route the
+            // gradient to the winning element's vocabulary row. Pass it through when
+            // present; otherwise hand an empty Tensor (sum/mean never touch binding 4).
             int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
             int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
             std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
             bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
+            Tensor max_indices = (inputs.size() > 3) ? inputs[3] : Tensor();
             return {get_vulkan_backend()->dispatchEmbeddingBagBackward(
-                inputs[0], inputs[1], inputs[2], num_embeddings, embedding_dim,
-                mode, include_last_offset)};
+                inputs[0], inputs[1], inputs[2], max_indices, num_embeddings,
+                embedding_dim, mode, include_last_offset)};
         });
 
     // CTC Loss (audit Phase 3.7 + AA.11)
@@ -3176,8 +3181,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     // SearchSorted — native GPU binary search shader
     table.register_single_output_kernel(OpId::SearchSorted,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-            return get_vulkan_backend()->dispatchSearchSorted(inputs[0], inputs[1]);
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool right = attrs.get_bool(AttrKey::Right, false);
+            return get_vulkan_backend()->dispatchSearchSorted(inputs[0], inputs[1], right);
         });
 
     // GumbelSoftmax — composed from existing Vulkan ops (no dedicated shader needed)

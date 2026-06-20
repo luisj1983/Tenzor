@@ -27,7 +27,19 @@ namespace {
 // Calculate output size for convolution
 auto calculate_output_size(int64_t input_size, int64_t kernel_size,
                            int64_t stride, int64_t padding, int64_t dilation) -> int64_t {
-    return (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    // Numerator can be negative when the effective dilated kernel exceeds the
+    // padded input. C++ integer division truncates toward zero, so for a
+    // numerator in (-stride, 0) it would yield 0 and produce a spurious
+    // out_size == 1 that slips past the downstream out_size <= 0 guard. Use
+    // floor-division semantics (matching PyTorch) so an invalid geometry maps
+    // to a non-positive size that the caller's guard rejects.
+    int64_t numerator = input_size + 2 * padding - dilation * (kernel_size - 1) - 1;
+    if (numerator < 0) {
+        // floor(numerator / stride) for numerator < 0 and stride > 0.
+        int64_t q = -((-numerator + stride - 1) / stride);
+        return q + 1;
+    }
+    return numerator / stride + 1;
 }
 
 // Pad a 3D tensor [N, C, L] in the last dimension
@@ -383,9 +395,13 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
         }
         backward_fn->set_input_variables(input_vars);
 
+        // next_functions must have one slot per input variable in the SAME
+        // order as input_vars so the engine's positional routing reaches
+        // non-leaf weight/bias gradients (grad_fn() is nullptr for leaves).
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
+        next_funcs.reserve(input_vars.size());
+        for (const auto& var : input_vars) {
+            next_funcs.push_back(var.grad_fn());
         }
         backward_fn->set_next_functions(next_funcs);
     }
@@ -713,9 +729,13 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         }
         backward_fn->set_input_variables(input_vars);
 
+        // next_functions must have one slot per input variable in the SAME
+        // order as input_vars so the engine's positional routing reaches
+        // non-leaf weight/bias gradients (grad_fn() is nullptr for leaves).
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
+        next_funcs.reserve(input_vars.size());
+        for (const auto& var : input_vars) {
+            next_funcs.push_back(var.grad_fn());
         }
         backward_fn->set_next_functions(next_funcs);
     }
@@ -1031,9 +1051,13 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
         }
         backward_fn->set_input_variables(input_vars);
 
+        // next_functions must have one slot per input variable in the SAME
+        // order as input_vars so the engine's positional routing reaches
+        // non-leaf weight/bias gradients (grad_fn() is nullptr for leaves).
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
+        next_funcs.reserve(input_vars.size());
+        for (const auto& var : input_vars) {
+            next_funcs.push_back(var.grad_fn());
         }
         backward_fn->set_next_functions(next_funcs);
     }
@@ -1390,8 +1414,12 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
         if (bias_it != parameters_.end()) input_vars.push_back(*bias_it->second);
         backward_fn->set_input_variables(input_vars);
 
+        // next_functions must have one slot per input variable in the SAME
+        // order as input_vars so the engine's positional routing reaches
+        // non-leaf weight/bias gradients (grad_fn() is nullptr for leaves).
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+        next_funcs.reserve(input_vars.size());
+        for (const auto& var : input_vars) next_funcs.push_back(var.grad_fn());
         backward_fn->set_next_functions(next_funcs);
     }
 
@@ -1721,9 +1749,13 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
         }
         backward_fn->set_input_variables(input_vars);
 
+        // next_functions must have one slot per input variable in the SAME
+        // order as input_vars so the engine's positional routing reaches
+        // non-leaf weight/bias gradients (grad_fn() is nullptr for leaves).
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
+        next_funcs.reserve(input_vars.size());
+        for (const auto& var : input_vars) {
+            next_funcs.push_back(var.grad_fn());
         }
         backward_fn->set_next_functions(next_funcs);
     }
@@ -2078,9 +2110,13 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         }
         backward_fn->set_input_variables(input_vars);
 
+        // next_functions must have one slot per input variable in the SAME
+        // order as input_vars so the engine's positional routing reaches
+        // non-leaf weight/bias gradients (grad_fn() is nullptr for leaves).
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
+        next_funcs.reserve(input_vars.size());
+        for (const auto& var : input_vars) {
+            next_funcs.push_back(var.grad_fn());
         }
         backward_fn->set_next_functions(next_funcs);
     }
@@ -2295,9 +2331,13 @@ auto DeformableConv2d::forward(const Variable& input, const Variable& offset,
         }
         backward_fn->set_input_variables(input_vars);
 
+        // next_functions must have one slot per input variable in the SAME
+        // order as input_vars (input, offset, weight[, bias][, mask]) so the
+        // engine's positional routing reaches non-leaf weight/bias/mask
+        // gradients (grad_fn() is nullptr for leaves).
         std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
-        if (offset.grad_fn()) next_funcs.push_back(offset.grad_fn());
+        next_funcs.reserve(input_vars.size());
+        for (const auto& var : input_vars) next_funcs.push_back(var.grad_fn());
         backward_fn->set_next_functions(next_funcs);
     }
 

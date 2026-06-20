@@ -425,9 +425,14 @@ auto Cutout::operator()(const Tensor& input, const Tensor& target)
     int64_t H = shape[shape.size() - 2];
     int64_t W = shape[shape.size() - 1];
 
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
     // Work with an independent deep copy; assignment shares storage, which would
     // mutate the caller's input tensor in place.
-    Tensor output = input.clone();
+    Tensor output = in.clone();
     float* data = static_cast<float*>(output.data_ptr());
 
     // Total elements per spatial plane
@@ -456,7 +461,7 @@ auto Cutout::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -988,9 +993,14 @@ auto RandomErasing::operator()(const Tensor& input, const Tensor& target)
     int64_t W = shape[2];
     float area = static_cast<float>(H * W);
 
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
     // Independent deep copy: assignment shares storage and would erase regions of
     // the caller's input tensor in place.
-    Tensor output = input.clone();
+    Tensor output = in.clone();
     float* data = static_cast<float*>(output.data_ptr());
 
     std::uniform_real_distribution<float> scale_dist(scale_min_, scale_max_);
@@ -1023,7 +1033,7 @@ auto RandomErasing::operator()(const Tensor& input, const Tensor& target)
         break;
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -1646,10 +1656,11 @@ void apply_aug_op(AugOp op, float magnitude, float* data, int64_t C, int64_t H, 
 
     case AugOp::Contrast: {
         float factor = 1.0f + sign * magnitude * 0.9f;
-        // Compute mean
-        float mean = 0.0f;
-        for (int64_t i = 0; i < total; ++i) mean += data[i];
-        mean /= static_cast<float>(total);
+        // Compute mean (accumulate in double to avoid precision loss over
+        // C*H*W elements, matching the ColorJitter contrast path).
+        double sum = 0.0;
+        for (int64_t i = 0; i < total; ++i) sum += data[i];
+        float mean = static_cast<float>(sum / static_cast<double>(total));
         for (int64_t i = 0; i < total; ++i) {
             data[i] = mean + factor * (data[i] - mean);
         }

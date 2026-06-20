@@ -18,9 +18,21 @@ layout(push_constant) uniform PushConstants {
     uint op;             // 0=sum, 1=mean, 2=max, 3=min
 } params;
 
-// Specialization constant: subgroup size (set at pipeline creation time)
-layout(constant_id = 1) const uint SUBGROUP_SIZE = 32;
+// NOTE on subgroup size:
+//   This shader does NOT assume a fixed/compile-time subgroup size. The host
+//   dispatch only overrides specialization constant 0 (WORKGROUP_SIZE) and never
+//   sets a subgroup-size constant, and the real hardware subgroup size varies per
+//   device (8/16/32/64...). Relying on a hard-coded 32 silently under-counts sums
+//   on devices whose subgroupSize < 32 (the assumed "single subgroup" of 32 lanes
+//   would actually span multiple hardware subgroups, so subgroupAdd would only
+//   reduce within each real subgroup). Instead we use the runtime subgroup
+//   built-ins (gl_SubgroupID / gl_NumSubgroups / gl_SubgroupInvocationID), exactly
+//   like reduction_tree.comp: each subgroup reduces internally, writes one partial
+//   to shared memory, then a shared-memory tree reduces the per-subgroup partials.
+//   This is correct for any hardware subgroup size.
 
+// WORKGROUP_SIZE is the maximum number of subgroups (subgroupSize >= 1), so this
+// is always large enough to hold one partial per subgroup.
 shared float shared_data[WORKGROUP_SIZE];
 
 void main() {
@@ -65,49 +77,61 @@ void main() {
         }
     }
 
-    shared_data[tid] = accum;
+    // Step 1: reduce each thread's accumulator within its hardware subgroup.
+    // This uses the real runtime subgroup size, so it is correct on every device.
+    float subgroup_result;
+    switch (params.op) {
+        case 0:
+        case 1:
+            subgroup_result = subgroupAdd(accum);
+            break;
+        case 2:
+            subgroup_result = subgroupMax(accum);
+            break;
+        case 3:
+            subgroup_result = subgroupMin(accum);
+            break;
+        default:
+            subgroup_result = accum;
+            break;
+    }
+
+    // Step 2: each subgroup writes its single partial result to shared memory.
+    if (gl_SubgroupInvocationID == 0u) {
+        shared_data[gl_SubgroupID] = subgroup_result;
+    }
     barrier();
 
-    // Parallel reduction in shared memory — stop before subgroup size
-    for (uint s = WORKGROUP_SIZE / 2; s >= SUBGROUP_SIZE; s >>= 1) {
-        if (tid < s) {
+    // Step 3: shared-memory tree reduction over the per-subgroup partials.
+    // `count` is the number of live partials this round; `stride` folds the upper
+    // half onto the lower half. Using (count+1)/2 makes this correct for a
+    // non-power-of-two number of subgroups (the lone middle element when count is
+    // odd is simply carried forward, never double-counted).
+    for (uint count = gl_NumSubgroups; count > 1u; count = (count + 1u) / 2u) {
+        uint stride = (count + 1u) / 2u;
+        if (tid + stride < count) {
             switch (params.op) {
                 case 0:
                 case 1:
-                    shared_data[tid] += shared_data[tid + s];
+                    shared_data[tid] += shared_data[tid + stride];
                     break;
                 case 2:
-                    shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                    shared_data[tid] = max(shared_data[tid], shared_data[tid + stride]);
                     break;
                 case 3:
-                    shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                    shared_data[tid] = min(shared_data[tid], shared_data[tid + stride]);
                     break;
             }
         }
         barrier();
     }
 
-    // Final reduction within a single subgroup — no barriers needed
-    if (tid < SUBGROUP_SIZE) {
-        float val = shared_data[tid];
-        switch (params.op) {
-            case 0:
-            case 1:
-                val = subgroupAdd(val);
-                break;
-            case 2:
-                val = subgroupMax(val);
-                break;
-            case 3:
-                val = subgroupMin(val);
-                break;
+    // Step 4: thread 0 holds the fully-reduced value.
+    if (tid == 0u) {
+        float val = shared_data[0];
+        if (params.op == 1) { // mean
+            val /= float(params.reduce_size);
         }
-
-        if (tid == 0) {
-            if (params.op == 1) { // mean
-                val /= float(params.reduce_size);
-            }
-            output_data[output_idx] = val;
-        }
+        output_data[output_idx] = val;
     }
 }

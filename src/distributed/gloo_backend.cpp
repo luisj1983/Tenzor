@@ -266,8 +266,8 @@ auto RendezvousStore::delete_key(const std::string& key) -> bool {
         connect_to_master();
         std::string command = "DEL:" + key;
         uint32_t len = command.size();
-        ::send(socket_fd_, &len, sizeof(len), 0);
-        ::send(socket_fd_, command.c_str(), len, 0);
+        send_all(socket_fd_, &len, sizeof(len), "del len");
+        send_all(socket_fd_, command.c_str(), len, "del payload");
         return true;
     } catch (...) {
         return false;
@@ -392,8 +392,21 @@ auto RendezvousStore::run_master_server() -> void {
     struct sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(master_port_);
+    // Bind to the specific master interface rather than INADDR_ANY: this
+    // rendezvous store is an unauthenticated key-value service, so exposing it
+    // on every interface invites remote read/write/MITM. master_addr_ is
+    // rank 0's own address; wildcard/localhost/unresolvable values fall back to
+    // loopback instead of all-interfaces.
+    {
+        std::string bind_addr = master_addr_;
+        if (bind_addr.empty() || bind_addr == "0.0.0.0" || bind_addr == "localhost") {
+            bind_addr = "127.0.0.1";
+        }
+        if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        }
+    }
 
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         ::close(server_fd);
@@ -596,7 +609,12 @@ auto GlooBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     }
     ring_all_reduce(tensor, ring_op);
     if (op == ReduceOp::AVG && world_size_ > 0) {
-        tensor = tenzor::div(tensor, static_cast<double>(world_size_));
+        // dtype/device-matched in-place divide: preserves Int32/Int64 dtype
+        // (truncating division) instead of promoting to Float32 like
+        // tenzor::div, matching NCCL/MPI/ProcessGroup AVG semantics.
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   tensor.dtype(), tensor.device());
+        tensor /= scalar;
     }
 }
 
@@ -616,7 +634,9 @@ auto GlooBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
         // finish the average here. Without this, reduce(AVG) returned the
         // unaveraged sum (off by world_size); ring_all_reduce divides similarly.
         if (op == ReduceOp::AVG && world_size_ > 0) {
-            tensor = tenzor::div(tensor, static_cast<double>(world_size_));
+            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                       tensor.dtype(), tensor.device());
+            tensor /= scalar;
         }
     } else {
         // Send to destination
@@ -747,7 +767,9 @@ auto GlooBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
     output = accum[rank_];
 
     if (op == ReduceOp::AVG && world_size_ > 0) {
-        output = tenzor::div(output, static_cast<double>(world_size_));
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   output.dtype(), output.device());
+        output /= scalar;
     }
 }
 
@@ -805,10 +827,6 @@ auto GlooBackend::finalize() -> void {
         }
     }
     connections_.clear();
-
-    if (accept_thread_ && accept_thread_->joinable()) {
-        accept_thread_->join();
-    }
 
     if (server_socket_ >= 0) {
         ::close(server_socket_);
@@ -911,8 +929,14 @@ auto GlooBackend::init_connections() -> void {
                                        " but got " + std::to_string(received_rank));
             }
 
-            // Send our rank ID
-            ::send(client_fd, &rank_, sizeof(int), 0);
+            // Send our rank ID (full-transfer write; a short send would
+            // truncate the peer's matching recv and fail its rank check).
+            try {
+                send_all(client_fd, &rank_, sizeof(int), "handshake rank id");
+            } catch (...) {
+                ::close(client_fd);
+                throw;
+            }
 
             connections_[peer_rank] = std::make_shared<TCPConnection>(client_fd);
         } else {
@@ -957,15 +981,6 @@ auto GlooBackend::create_server_socket() -> int {
     return sockfd;
 }
 
-auto GlooBackend::accept_connections() -> void {
-    for (int i = 0; i < world_size_ - 1; ++i) {
-        int client_fd = accept(server_socket_, nullptr, nullptr);
-        if (client_fd >= 0) {
-            // Connection accepted (connection will be stored when needed)
-        }
-    }
-}
-
 auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnection> {
     // Read peer's port from the store (with retries)
     int peer_port = read_port_from_store(peer_rank);
@@ -1006,8 +1021,14 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
     for (int retry = 0; retry < max_retries; ++retry) {
         if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
             // Connection successful - perform handshake
-            // Send our rank ID
-            ::send(sockfd, &rank_, sizeof(int), 0);
+            // Send our rank ID (full-transfer write; a short send would
+            // truncate the peer's matching recv and fail its rank check).
+            try {
+                send_all(sockfd, &rank_, sizeof(int), "handshake rank id");
+            } catch (...) {
+                ::close(sockfd);
+                throw;
+            }
 
             // Receive peer rank ID for verification
             int received_rank = -1;
@@ -1084,8 +1105,16 @@ auto GlooBackend::read_port_from_store(int rank) -> int {
         throw std::runtime_error("Failed to read from rendezvous store");
     }
 
+    // Validate the extraction: a rendezvous race can leave the rank file empty
+    // or partially written when the reader opens it mid-write. An unchecked
+    // `file >> port` leaves port=0 on failure, which then feeds htons(0) into
+    // connect_to_rank and yields a confusing connect failure instead of a
+    // clear rendezvous error. Reject failed extraction and out-of-range ports.
     int port;
-    file >> port;
+    if (!(file >> port) || port <= 0 || port > 65535) {
+        throw std::runtime_error(
+            "Invalid port in rendezvous store for rank " + std::to_string(rank));
+    }
     return port;
 }
 
@@ -1149,9 +1178,18 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
 
     conn->recv(cpu_tensor.data_ptr(), data_size);
 
-    // Copy back to original device if needed
+    // Write the received data back into the caller's tensor. For a non-CPU
+    // destination get_cpu_buffer produced a separate CPU staging copy, so move
+    // it to the original device. For a CPU destination get_cpu_buffer returns a
+    // NEW contiguous tensor whenever the caller's tensor was non-contiguous, so
+    // the bytes landed in that copy and must be reflected back; mirror
+    // ring_all_reduce's explicit CPU else-branch instead of silently dropping
+    // the data. (For a contiguous CPU tensor get_cpu_buffer shares storage and
+    // this is a no-op rebind.)
     if (tensor.device().type != Device::Type::CPU) {
         tensor = cpu_tensor.to(tensor.device());
+    } else {
+        tensor = cpu_tensor;
     }
 }
 
@@ -1165,96 +1203,13 @@ auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceO
             result = result * operand;
             break;
         case ReduceOp::MIN:
-            // Element-wise minimum operation with proper dtype support
-            {
-                size_t numel = result.numel();
-
-                switch (result.dtype()) {
-                    case DType::Float32: {
-                        auto* result_ptr = static_cast<float*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const float*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    case DType::Float64: {
-                        auto* result_ptr = static_cast<double*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const double*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    case DType::Int32: {
-                        auto* result_ptr = static_cast<int32_t*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const int32_t*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    case DType::Int64: {
-                        auto* result_ptr = static_cast<int64_t*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const int64_t*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    default:
-                        throw std::invalid_argument(
-                            "MIN reduction not supported for dtype: " +
-                            std::to_string(static_cast<int>(result.dtype()))
-                        );
-                }
-            }
+            // Stride-aware element-wise minimum. The previous data_ptr() loop
+            // indexed linearly and corrupted non-contiguous result/operand.
+            result = tenzor::minimum(result, operand);
             break;
         case ReduceOp::MAX:
-            // Element-wise maximum operation with proper dtype support
-            {
-                size_t numel = result.numel();
-
-                switch (result.dtype()) {
-                    case DType::Float32: {
-                        auto* result_ptr = static_cast<float*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const float*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    case DType::Float64: {
-                        auto* result_ptr = static_cast<double*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const double*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    case DType::Int32: {
-                        auto* result_ptr = static_cast<int32_t*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const int32_t*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    case DType::Int64: {
-                        auto* result_ptr = static_cast<int64_t*>(result.data_ptr());
-                        const auto* operand_ptr = static_cast<const int64_t*>(operand.data_ptr());
-                        for (size_t i = 0; i < numel; ++i) {
-                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
-                        }
-                        break;
-                    }
-                    default:
-                        throw std::invalid_argument(
-                            "MAX reduction not supported for dtype: " +
-                            std::to_string(static_cast<int>(result.dtype()))
-                        );
-                }
-            }
+            // Stride-aware element-wise maximum (see MIN).
+            result = tenzor::maximum(result, operand);
             break;
         default:
             throw std::invalid_argument("Unsupported reduce operation");
@@ -1404,10 +1359,13 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
 }
 
 auto GlooBackend::get_cpu_buffer(const Tensor& tensor) -> Tensor {
+    // Callers index the returned buffer linearly (data_ptr + i) and memcpy
+    // contiguous ranges, so it must be contiguous; a non-contiguous CPU view
+    // would otherwise be read/written with the wrong layout.
     if (tensor.device().type == Device::Type::CPU) {
-        return tensor;
+        return tensor.is_contiguous() ? tensor : tensor.contiguous();
     }
-    return tensor.to(Device::cpu());
+    return tensor.to(Device::cpu()).contiguous();
 }
 
 auto GlooBackend::validate_cpu_accessible([[maybe_unused]] const Tensor& tensor) -> void {

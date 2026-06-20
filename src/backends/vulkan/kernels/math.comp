@@ -242,6 +242,14 @@ void main() {
                 result[idx] = floatBitsToUint(val_a * val_a * val_a);
             } else if (params.param == -1.0) {
                 result[idx] = floatBitsToUint(1.0 / val_a);
+            } else if (val_a < 0.0 && params.param == trunc(params.param)) {
+                // Negative base with an integer exponent: pow(x,y) = exp2(y*log2(x))
+                // is NaN for x<0, but x^n is well-defined for integer n. Compute
+                // the magnitude on |x| and restore the sign from the exponent's
+                // parity, matching std::pow on CPU (e.g. pow(-2,4) == 16).
+                float mag = pow(abs(val_a), params.param);
+                bool odd = mod(abs(params.param), 2.0) != 0.0;
+                result[idx] = floatBitsToUint(odd ? -mag : mag);
             } else {
                 result[idx] = floatBitsToUint(pow(val_a, params.param));
             }
@@ -274,7 +282,9 @@ void main() {
             result[idx] = floatBitsToUint(log2(val_a));
             break;
         case 17: // log10 (unary)
-            result[idx] = floatBitsToUint(log2(val_a) / log2(10.0));
+            // Multiply by the precomputed reciprocal 1/log2(10) = log10(2) to avoid
+            // the runtime division of two rounded log2 results (composes ULP error).
+            result[idx] = floatBitsToUint(log2(val_a) * 0.30102999566398120);
             break;
         case 18: // log1p (unary)
             result[idx] = floatBitsToUint(log(1.0 + val_a));
@@ -330,24 +340,36 @@ void main() {
             result[idx] = floatBitsToUint(sqrt(val_a * val_a + val_b * val_b));
             break;
         case 34: { // copysign (binary)
-            float mag = abs(val_a);
-            result[idx] = floatBitsToUint(val_b < 0.0 ? -mag : mag);
+            // Copy the actual sign bit of val_b (handles -0.0 and NaN signs),
+            // matching std::copysign on CPU and math_broadcast.comp.
+            result[idx] = (bits_b & 0x80000000u) | (bits_a & 0x7FFFFFFFu);
             break;
         }
         case 35: { // nextafter (binary) - approximation via ULP step
             if (val_a == val_b) {
-                result[idx] = bits_a;
+                // Covers +0 == -0; nextafter(x, x) == x. Return the target's
+                // bit pattern (val_a == val_b) so the sign of the result
+                // matches the target, mirroring std::nextafter.
+                result[idx] = bits_b;
+            } else if (val_a == 0.0) {
+                // Special-case both +0.0 and -0.0 before the magnitude-step
+                // logic. The smallest-magnitude step away from zero is the
+                // smallest subnormal in the direction of val_b. Since val_a
+                // != val_b here, val_b determines the direction.
+                if (val_b > 0.0) result[idx] = 0x00000001u; // -> smallest +denorm
+                else result[idx] = 0x80000001u;             // -> smallest -denorm
             } else {
                 uint ua = bits_a;
-                // For positive values or zero moving toward positive: increment
-                // For negative values moving toward negative: increment magnitude
-                if ((val_a >= 0.0 && val_b > val_a) || (val_a < 0.0 && val_b > val_a)) {
-                    if (val_a >= 0.0) ua = ua + 1u;
+                // Step one ULP in the direction of val_b. For a value moving
+                // toward +inf (val_b > val_a): increment the bit pattern for
+                // positives, decrement (toward zero) for negatives. The
+                // opposite for moving toward -inf.
+                if (val_b > val_a) {
+                    if (val_a > 0.0) ua = ua + 1u;
                     else ua = ua - 1u;
                 } else {
                     if (val_a > 0.0) ua = ua - 1u;
-                    else if (val_a < 0.0) ua = ua + 1u;
-                    else ua = 0x80000001u; // -0 -> smallest negative denorm
+                    else ua = ua + 1u;
                 }
                 result[idx] = ua;
             }

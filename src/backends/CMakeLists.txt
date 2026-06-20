@@ -24,8 +24,14 @@ if(TENZOR_BUILD_CUDA)
     endif()
 endif()
 
-if(TENZOR_BUILD_ROCM)
+if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     add_subdirectory(rocm)
+elseif(TENZOR_BUILD_ROCM)
+    message(WARNING
+        "TENZOR_BUILD_ROCM is ON but no ROCm/HIP toolchain was found at "
+        "configure time; disabling the ROCm backend. Install ROCm or pass "
+        "-DTENZOR_BUILD_ROCM=OFF to silence this warning.")
+    set(TENZOR_BUILD_ROCM OFF CACHE BOOL "Build ROCm backend" FORCE)
 endif()
 
 if(TENZOR_BUILD_ONEAPI)

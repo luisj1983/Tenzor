@@ -475,15 +475,39 @@ auto may_alias(const Tensor& a, const Tensor& b) -> bool {
     if (!sa || !sb) return false;
     if (sa.get() != sb.get()) return false;
 
-    // Same storage: compute byte spans. This overestimates touched bytes for
-    // strided views (safe — the alternative would be to walk the stride
-    // pattern, which is both expensive and unnecessary here).
-    const auto esize_a = static_cast<int64_t>(a.dtype_size());
-    const auto esize_b = static_cast<int64_t>(b.dtype_size());
-    const auto start_a = a.offset() * esize_a;
-    const auto start_b = b.offset() * esize_b;
-    const auto end_a   = start_a + a.numel() * esize_a;
-    const auto end_b   = start_b + b.numel() * esize_b;
+    // Same storage: compute the true min/max reachable byte span by walking the
+    // stride pattern, exactly as data<T>() does. A simple [offset, offset+numel)
+    // span would walk only UPWARD from the base offset and miss negative-stride
+    // views (e.g. from flip / as_strided), whose reachable elements lie BELOW
+    // the base offset — producing a false negative that bypasses the in-place
+    // alias guard and lets a kernel read/write overlapping memory.
+    const auto reachable_byte_span = [](const Tensor& t) -> std::pair<int64_t, int64_t> {
+        const auto esize = static_cast<int64_t>(t.dtype_size());
+        const int64_t base = t.offset();
+        int64_t min_off = base;
+        int64_t max_off = base;
+        if (t.numel() > 0) {
+            const auto shape = t.shape();
+            const auto strides = t.strides();
+            const int64_t nd = static_cast<int64_t>(shape.size());
+            for (int64_t d = 0; d < nd; ++d) {
+                if (shape[d] > 0) {
+                    const int64_t extent = (shape[d] - 1) * strides[d];
+                    if (extent >= 0) {
+                        max_off += extent;
+                    } else {
+                        min_off += extent;
+                    }
+                }
+            }
+        }
+        // Byte range is [min_off*esize, (max_off+1)*esize): the last reachable
+        // element occupies one full element of storage.
+        return {min_off * esize, (max_off + 1) * esize};
+    };
+
+    const auto [start_a, end_a] = reachable_byte_span(a);
+    const auto [start_b, end_b] = reachable_byte_span(b);
     return start_a < end_b && start_b < end_a;
 }
 
@@ -773,6 +797,16 @@ auto Tensor::to(Device device) const -> Tensor {
         copy_kind = CopyKind::DeviceToHost;
     } else {
         copy_kind = CopyKind::DeviceToDevice;
+    }
+
+    // Cross-device-TYPE transfer (e.g. CUDA -> ROCm): the source pointer lives
+    // in the source device's address space and cannot be dereferenced by the
+    // destination backend's copy(). Bounce through host. Same-type transfers
+    // (including cross-index, which the backend handles via peer access) keep
+    // the direct DeviceToDevice path.
+    if (copy_kind == CopyKind::DeviceToDevice &&
+        cont.impl_->device.type != device.type) {
+        return cont.to(Device::cpu()).to(device);
     }
 
     // Get backend for the copy operation
@@ -1720,6 +1754,13 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = make_intrusive<TensorImpl>(*impl_);
         result.impl_->shape.erase(result.impl_->shape.begin() + d);
         result.impl_->strides.erase(result.impl_->strides.begin() + d);
+        // Keep dimension names in sync with the shrinking rank: drop the name
+        // for the removed axis. Guard on size so we never index a stale or
+        // mismatched names list (named dims are experimental).
+        if (result.impl_->names_.has_value() &&
+            static_cast<int64_t>(result.impl_->names_->size()) > d) {
+            result.impl_->names_->erase(result.impl_->names_->begin() + d);
+        }
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
@@ -1728,11 +1769,20 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         // Squeeze all dimensions with size 1
         std::vector<int64_t> new_shape;
         std::vector<int64_t> new_strides;
+        // Rebuild dimension names keeping only the surviving (non-singleton)
+        // axes, so names_ stays the same length as the reduced shape. Only
+        // populated when the source names list matches the source rank.
+        const bool has_valid_names =
+            impl_->names_.has_value() &&
+            static_cast<int64_t>(impl_->names_->size()) == ndims;
+        std::optional<DimnameList> new_names;
+        if (has_valid_names) new_names.emplace();
 
         for (int64_t i = 0; i < ndims; ++i) {
             if (impl_->shape[i] != 1) {
                 new_shape.push_back(impl_->shape[i]);
                 new_strides.push_back(impl_->strides[i]);
+                if (has_valid_names) new_names->push_back((*impl_->names_)[i]);
             }
         }
 
@@ -1743,6 +1793,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = make_intrusive<TensorImpl>(*impl_);
         result.impl_->shape = std::move(new_shape);
         result.impl_->strides = std::move(new_strides);
+        if (has_valid_names) result.impl_->names_ = std::move(new_names);
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 

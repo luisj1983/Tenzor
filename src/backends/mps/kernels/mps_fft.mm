@@ -106,7 +106,17 @@ void vdsp_fft_1d_complex(const float* in_real, const float* in_imag,
         vDSP_DFT_Execute(setup, in_real, in_imag, out_real, out_imag);
         vDSP_DFT_DestroySetup(setup);
     } else {
-        // Fallback: use vDSP_fft_zop for power-of-2 sizes
+        // Fallback: use vDSP_fft_zop, which supports power-of-2 sizes only.
+        // Zero-padding a non-power-of-2 signal up to the next power of 2 and
+        // taking that transform does NOT yield the DFT of the original signal
+        // (the bin frequencies differ), so silently truncating the padded
+        // result would return numerically wrong values. Fail loudly instead.
+        if (!is_power_of_2(n)) {
+            throw std::runtime_error(
+                "MPS FFT: vDSP_DFT setup unavailable for non-power-of-2 length " +
+                std::to_string(n) +
+                " (vDSP_DFT_zop supports only sizes f*2^k, f in {1,3,5,15})");
+        }
         int64_t n_padded = next_pow2(n);
         int log2n = log2_int(n_padded);
 
@@ -374,10 +384,12 @@ Tensor mps_ifft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                                  out_re.data(), out_im.data(),
                                  N_out, false);
 
-            // vDSP inverse FFT does NOT divide by N; apply our normalization
-            float inv_scale = scale / static_cast<float>(N_out);
-            scale_array(out_re.data(), N_out, inv_scale);
-            scale_array(out_im.data(), N_out, inv_scale);
+            // vDSP_DFT_INVERSE is unnormalized; get_norm_factor() already
+            // encodes the full inverse normalization (backward -> 1/N,
+            // ortho -> 1/sqrt(N), forward -> 1.0). Apply it exactly once,
+            // mirroring the forward kernel which applies `scale` alone.
+            scale_array(out_re.data(), N_out, scale);
+            scale_array(out_im.data(), N_out, scale);
 
             for (int64_t i = 0; i < N_out; ++i) {
                 int64_t idx = outer * N_out * layout.inner_size + i * layout.inner_size + inner;

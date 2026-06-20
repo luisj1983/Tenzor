@@ -50,9 +50,10 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/binary_search.h>
 
-// Forward-declare zeros to avoid including creation.hpp
+// Forward-declare zeros / complex to avoid including creation.hpp
 namespace tenzor {
 auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+auto complex(const Tensor& real, const Tensor& imag) -> Tensor;
 }
 
 namespace tenzor {
@@ -1098,27 +1099,22 @@ Tensor rocm_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool uppe
     rocsparse_handle handle = get_rocsparse_handle();
     const rocsparse_datatype roc_dtype = get_rocsparse_data_type(dtype);
 
-    // L matrix descriptor.
-    rocsparse_spmat_descr mat_L;
-    ROCSPARSE_CHECK(rocsparse_create_csr_descr(
-        &mat_L, N, N, nnz,
-        const_cast<void*>(static_cast<const void*>(L_crow.data<int64_t>())),
-        const_cast<void*>(static_cast<const void*>(L_col.data<int64_t>())),
-        const_cast<void*>(L_vals.data_ptr()),
-        rocsparse_indextype_i64, rocsparse_indextype_i64,
-        rocsparse_index_base_zero, roc_dtype));
-    SpMatGuard L_guard(mat_L);
-
     // Fill mode + diagonal type.
     rocsparse_fill_mode fill_mode = upper ? rocsparse_fill_mode_upper
                                           : rocsparse_fill_mode_lower;
     rocsparse_diag_type diag_type = rocsparse_diag_type_non_unit;
-    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
-        mat_L, rocsparse_spmat_fill_mode, &fill_mode, sizeof(fill_mode)));
-    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
-        mat_L, rocsparse_spmat_diag_type, &diag_type, sizeof(diag_type)));
 
-    // Dense vector descriptors.
+    // Fetch (or build) a cached, already-preprocessed SpSV descriptor for L.
+    // On a hot key (e.g. every column of a trsm with the same L), the O(nnz)
+    // buffer_size + preprocess passes are reused and only stage_compute runs
+    // below with the per-call vec_x / vec_y. The cached descriptor pins its
+    // own i32 index buffers and preprocess workspace, so the L_crow / L_col /
+    // L_vals tensors here only need to remain alive long enough to seed the
+    // entry on a miss; the cache key is keyed on their device pointers.
+    SpSVCacheEntry* entry = sparse_trsv_lru_lookup_or_build(
+        L_crow, L_col, L_vals, N, nnz, dtype, fill_mode, diag_type);
+
+    // Dense vector descriptors for this call's RHS / solution.
     rocsparse_dnvec_descr vec_x;
     ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(
         &vec_x, N, const_cast<void*>(b_gpu.data_ptr()), roc_dtype));
@@ -1134,33 +1130,27 @@ Tensor rocm_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool uppe
     void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
                                             : static_cast<void*>(&alpha_d);
 
-    // Stage 1: buffer size.
-    size_t buffer_size = 0;
+    // Stage 3 only: the descriptor in the cache has already had buffer_size +
+    // preprocess run against entry->workspace. Re-run stage_compute against the
+    // live vec_x / vec_y. rocSPARSE keys the analysis on the matrix descriptor,
+    // so swapping the dense vectors is valid.
+    size_t buffer_size = entry->workspace_size;
     ROCSPARSE_CHECK(rocsparse_spsv(
-        handle, rocsparse_operation_none, alpha, mat_L, vec_x, vec_y,
+        handle, rocsparse_operation_none, alpha, entry->mat_descr, vec_x, vec_y,
         roc_dtype, rocsparse_spsv_alg_default,
-        rocsparse_spsv_stage_buffer_size, &buffer_size, nullptr));
-    HipBuffer workspace(buffer_size);
-
-    // Stage 2: preprocess.
-    ROCSPARSE_CHECK(rocsparse_spsv(
-        handle, rocsparse_operation_none, alpha, mat_L, vec_x, vec_y,
-        roc_dtype, rocsparse_spsv_alg_default,
-        rocsparse_spsv_stage_preprocess, &buffer_size, workspace.ptr));
-
-    // Stage 3: compute.
-    ROCSPARSE_CHECK(rocsparse_spsv(
-        handle, rocsparse_operation_none, alpha, mat_L, vec_x, vec_y,
-        roc_dtype, rocsparse_spsv_alg_default,
-        rocsparse_spsv_stage_compute, &buffer_size, workspace.ptr));
+        rocsparse_spsv_stage_compute, &buffer_size,
+        entry->workspace ? entry->workspace->ptr : nullptr));
 
     HIP_CHECK_SPARSE(hipDeviceSynchronize());
     return result;
 }
 
-// Multi-RHS triangular solve: loops per column calling SpSV. As on the
-// CUDA side, this is O(K) suboptimal — rocsparse has SpSM (multi-RHS)
-// but caching descriptors and workspace across K calls is a follow-up.
+// Multi-RHS triangular solve: loops per column calling SpSV. The per-RHS
+// rocsparse_spsv buffer_size + preprocess passes are amortised across all K
+// columns by the SpSV LRU cache (sparse_trsv_lru_lookup_or_build): the first
+// column builds and caches the preprocessed descriptor for L, every subsequent
+// column hits the cache and only runs stage_compute. So this pays one O(nnz)
+// preprocess for the whole trsm, not one per column.
 Tensor rocm_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper) {
     auto L_shape = L.shape();
     if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
@@ -1184,13 +1174,22 @@ Tensor rocm_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool uppe
                    : B.contiguous();
     auto X = zeros(std::vector<int64_t>{N, K}, dtype, Device::rocm());
 
+    // Convert L to a CSR SparseTensor on GPU exactly once and reuse it for
+    // every column. This keeps L's CSR buffer pointers stable across the loop,
+    // which is what the SpSV LRU cache keys on — so the first column builds and
+    // caches the preprocessed descriptor and every subsequent column hits the
+    // cache. Re-running ensure_csr_on_gpu per column would mint fresh tensors
+    // with new device pointers each iteration and defeat the cache (one full
+    // O(nnz) preprocess per RHS instead of one for the whole solve).
+    SparseTensor L_csr = ensure_csr_on_gpu(L);
+
     for (int64_t k = 0; k < K; ++k) {
         // Gather B[:, k] into a contiguous 1D buffer on GPU. B is (N, K)
         // row-major, so column k is a strided view; materialise it with a
         // single contiguous copy instead of one hipMemcpy per element.
         auto b_col = B_gpu.slice(1, k, k + 1).squeeze(1).contiguous();
 
-        auto x_col = rocm_sparse_trsv_kernel(L, b_col, upper);
+        auto x_col = rocm_sparse_trsv_kernel(L_csr, b_col, upper);
 
         // Scatter x_col back into X[:, k] with a single strided 2D copy
         // (matching sparse_trsm_standalone_hip) instead of N tiny memcpys.
@@ -1224,6 +1223,29 @@ SparseTensor rocm_coalesce(const SparseTensor& sparse) {
     if (sparse.layout() != SparseLayout::COO) return sparse;
     if (sparse.nnz() == 0) return sparse;
 
+    // Complex values: thrust reduce_by_key here operates on the native real
+    // value dtypes only. SparseTensor::coalesce() performs the Complex
+    // real/imag split *after* the ROCm dispatch, so a Complex COO tensor
+    // reaches us directly. Split into real/imag halves (which share the same
+    // indices, hence the same sort permutation and identical coalesced
+    // indices), coalesce each, and recombine — mirroring the CPU/Vulkan branch
+    // in SparseTensor::coalesce().
+    {
+        DType vd = sparse.values().dtype();
+        if (vd == DType::Complex64 || vd == DType::Complex128) {
+            auto shp = sparse.shape();
+            std::vector<int64_t> shape_vec(shp.begin(), shp.end());
+            Tensor re = ::tenzor::real(sparse.values());
+            Tensor im = ::tenzor::imag(sparse.values());
+            SparseTensor st_re = SparseTensor::sparse_coo(sparse.indices(), re, shape_vec);
+            SparseTensor st_im = SparseTensor::sparse_coo(sparse.indices(), im, shape_vec);
+            SparseTensor co_re = rocm_coalesce(st_re);
+            SparseTensor co_im = rocm_coalesce(st_im);
+            Tensor merged = ::tenzor::complex(co_re.values(), co_im.values());
+            return SparseTensor::sparse_coo(co_re.indices(), merged, shape_vec);
+        }
+    }
+
     auto sp_shape = sparse.shape();
     int64_t sparse_dim = static_cast<int64_t>(sp_shape.size());
     int64_t nnz = sparse.nnz();
@@ -1231,6 +1253,23 @@ SparseTensor rocm_coalesce(const SparseTensor& sparse) {
     Tensor indices = sparse.indices().contiguous();
     Tensor values = sparse.values().contiguous();
     const int64_t* idx_ptr = indices.data<int64_t>();
+
+    // The thrust gather / reduce_by_key / final copy paths below implement
+    // Float32, Float64, Int32 and Int64 — matching the value dtypes the CPU /
+    // Vulkan branch of SparseTensor::coalesce() supports natively (its widening
+    // table folds Float16/BFloat16/FP8 -> Float32 and Int8/UInt8/Bool -> Int32
+    // before dispatch, and the Complex split above handles Complex). For any
+    // other value dtype the reduce branch would be skipped, leaving new_nnz==0
+    // and silently returning an EMPTY coalesced COO tensor (which
+    // rocm_coo_to_csc would then propagate). Guard explicitly, mirroring
+    // rocm_spmm/spmv.
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64 &&
+        values.dtype() != DType::Int32 && values.dtype() != DType::Int64) {
+        throw std::runtime_error(
+            "rocm_coalesce: unsupported value dtype " +
+            std::string(dtype_name(values.dtype())) +
+            " (supported: Float32/Float64/Int32/Int64, plus Complex via split)");
+    }
 
     // Compute strides for linearized keys
     std::vector<int64_t> h_strides(sparse_dim);
@@ -1294,6 +1333,18 @@ SparseTensor rocm_coalesce(const SparseTensor& sparse) {
                        thrust::device_pointer_cast(perm_ptr + nnz),
                        thrust::device_pointer_cast(values.data<double>()),
                        thrust::device_pointer_cast(sorted_vals.data<double>()));
+    } else if (values.dtype() == DType::Int32) {
+        thrust::gather(thrust::hip::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<int32_t>()),
+                       thrust::device_pointer_cast(sorted_vals.data<int32_t>()));
+    } else if (values.dtype() == DType::Int64) {
+        thrust::gather(thrust::hip::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<int64_t>()),
+                       thrust::device_pointer_cast(sorted_vals.data<int64_t>()));
     }
 
     // Reduce duplicates by key
@@ -1319,6 +1370,24 @@ SparseTensor rocm_coalesce(const SparseTensor& sparse) {
             thrust::device_pointer_cast(sorted_vals.data<double>()),
             thrust::device_pointer_cast(ok_ptr),
             thrust::device_pointer_cast(out_vals.data<double>()));
+        new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
+    } else if (values.dtype() == DType::Int32) {
+        auto end = thrust::reduce_by_key(
+            thrust::hip::par,
+            thrust::device_pointer_cast(keys_ptr),
+            thrust::device_pointer_cast(keys_ptr + nnz),
+            thrust::device_pointer_cast(sorted_vals.data<int32_t>()),
+            thrust::device_pointer_cast(ok_ptr),
+            thrust::device_pointer_cast(out_vals.data<int32_t>()));
+        new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
+    } else if (values.dtype() == DType::Int64) {
+        auto end = thrust::reduce_by_key(
+            thrust::hip::par,
+            thrust::device_pointer_cast(keys_ptr),
+            thrust::device_pointer_cast(keys_ptr + nnz),
+            thrust::device_pointer_cast(sorted_vals.data<int64_t>()),
+            thrust::device_pointer_cast(ok_ptr),
+            thrust::device_pointer_cast(out_vals.data<int64_t>()));
         new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
     }
 
@@ -1348,6 +1417,12 @@ SparseTensor rocm_coalesce(const SparseTensor& sparse) {
     } else if (values.dtype() == DType::Float64) {
         HIP_CHECK_SPARSE(hipMemcpy(final_vals.data<double>(), out_vals.data<double>(),
                                    new_nnz * sizeof(double), hipMemcpyDeviceToDevice));
+    } else if (values.dtype() == DType::Int32) {
+        HIP_CHECK_SPARSE(hipMemcpy(final_vals.data<int32_t>(), out_vals.data<int32_t>(),
+                                   new_nnz * sizeof(int32_t), hipMemcpyDeviceToDevice));
+    } else if (values.dtype() == DType::Int64) {
+        HIP_CHECK_SPARSE(hipMemcpy(final_vals.data<int64_t>(), out_vals.data<int64_t>(),
+                                   new_nnz * sizeof(int64_t), hipMemcpyDeviceToDevice));
     }
 
     return SparseTensor::sparse_coo(new_indices, final_vals,
@@ -1425,21 +1500,13 @@ SparseTensor rocm_coo_to_csc(const SparseTensor& sparse) {
     HIP_CHECK_SPARSE(hipMemcpy(ccol_ptr + 1, bounds_ptr,
                                ncols * sizeof(int64_t), hipMemcpyDeviceToDevice));
 
-    // Gather sorted values
-    Tensor sorted_vals = zeros({nnz}, values.dtype(), Device::rocm());
-    if (values.dtype() == DType::Float32) {
-        thrust::gather(thrust::hip::par,
-                       thrust::device_pointer_cast(perm_ptr),
-                       thrust::device_pointer_cast(perm_ptr + nnz),
-                       thrust::device_pointer_cast(values.data<float>()),
-                       thrust::device_pointer_cast(sorted_vals.data<float>()));
-    } else if (values.dtype() == DType::Float64) {
-        thrust::gather(thrust::hip::par,
-                       thrust::device_pointer_cast(perm_ptr),
-                       thrust::device_pointer_cast(perm_ptr + nnz),
-                       thrust::device_pointer_cast(values.data<double>()),
-                       thrust::device_pointer_cast(sorted_vals.data<double>()));
-    }
+    // Gather sorted values. `perm_t` is the device-side permutation that sorts
+    // the COO by column-major key; reorder values with index_select so this
+    // covers every value dtype (Float32/Float64/Int32/Int64 and Complex) with
+    // a single dtype-agnostic path, matching the dtypes rocm_coalesce now
+    // accepts. (Complex64/Complex128 reach here because rocm_coalesce returns a
+    // coalesced Complex COO via its real/imag split.)
+    Tensor sorted_vals = ::tenzor::index_select(values, /*dim=*/0, perm_t);
 
     return SparseTensor::sparse_csc(ccol, sorted_rows, sorted_vals,
                                     std::vector<int64_t>{nrows, ncols});
@@ -1857,13 +1924,18 @@ template <typename T>
 __global__ void spgemm_count_hip(
     const int64_t* __restrict__ a_crow, const int64_t* __restrict__ a_col,
     const int64_t* __restrict__ b_crow, const int64_t* __restrict__ b_col,
-    int64_t* __restrict__ row_nnz, int64_t M, int64_t N)
+    int64_t* __restrict__ row_nnz, int64_t M, int64_t K, int64_t N)
 {
     int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= M) return;
     int64_t count = 0;
     for (int64_t ja = a_crow[row]; ja < a_crow[row + 1]; ++ja) {
         int64_t k = a_col[ja];
+        // Guard against malformed/untrusted A column indices: k indexes B's
+        // rows, so an out-of-range value would dereference b_crow[k]/[k+1] out
+        // of bounds. Matches the column-index bounds checks in the other CSR
+        // kernels (csr_spmv / csr_spmm / csr_sparse_add).
+        if (k < 0 || k >= K) continue;
         count += b_crow[k + 1] - b_crow[k];
     }
     row_nnz[row] = count;
@@ -1878,7 +1950,7 @@ __global__ void spgemm_fill_hip(
     const T* __restrict__ b_vals,
     const int64_t* __restrict__ c_crow, int64_t* __restrict__ c_col,
     T* __restrict__ c_vals, int64_t* __restrict__ c_row_nnz,
-    int64_t M, int64_t N)
+    int64_t M, int64_t K, int64_t N)
 {
     int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= M) return;
@@ -1886,6 +1958,10 @@ __global__ void spgemm_fill_hip(
     int64_t write_pos = c_start;
     for (int64_t ja = a_crow[row]; ja < a_crow[row + 1]; ++ja) {
         int64_t k = a_col[ja];
+        // See spgemm_count_hip: skip out-of-range A column indices so the
+        // b_crow[k]/[k+1] dereferences below stay in bounds. Skipping in count
+        // and fill identically keeps the per-row nnz consistent between passes.
+        if (k < 0 || k >= K) continue;
         T a_val = a_vals[ja];
         for (int64_t jb = b_crow[k]; jb < b_crow[k + 1]; ++jb) {
             int64_t col = b_col[jb];
@@ -1930,7 +2006,7 @@ auto spgemm_standalone_typed_hip(
     int64_t* d_rnnz; HIP_CHECK_SPARSE_SA(hipMalloc(&d_rnnz, M * sizeof(int64_t)));
     hipLaunchKernelGGL(spgemm_count_hip<T>, dim3(nblk), dim3(BLK), 0, stream,
         a_crow.data<int64_t>(), a_col.data<int64_t>(),
-        b_crow.data<int64_t>(), b_col.data<int64_t>(), d_rnnz, M, N);
+        b_crow.data<int64_t>(), b_col.data<int64_t>(), d_rnnz, M, K, N);
 
     // Pass 2: prefix sum
     int64_t* d_crow_ub; HIP_CHECK_SPARSE_SA(hipMalloc(&d_crow_ub, (M + 1) * sizeof(int64_t)));
@@ -1965,7 +2041,7 @@ auto spgemm_standalone_typed_hip(
     hipLaunchKernelGGL(spgemm_fill_hip<T>, dim3(nblk), dim3(BLK), 0, stream,
         a_crow.data<int64_t>(), a_col.data<int64_t>(), a_vals.data<T>(),
         b_crow.data<int64_t>(), b_col.data<int64_t>(), b_vals.data<T>(),
-        d_crow_ub, d_col_ub, d_vals_ub, d_annz, M, N);
+        d_crow_ub, d_col_ub, d_vals_ub, d_annz, M, K, N);
 
     // Compact
     int64_t* d_crow_f; HIP_CHECK_SPARSE_SA(hipMalloc(&d_crow_f, (M + 1) * sizeof(int64_t)));

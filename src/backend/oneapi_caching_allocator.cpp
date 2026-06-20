@@ -41,6 +41,11 @@ OneAPICachingAllocator& OneAPICachingAllocator::get() {
 void OneAPICachingAllocator::initialize(void* queue, int device_index) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Re-initialization after a release_all() must clear the released flag,
+    // otherwise free()/allocate() stay permanently disabled. Reset before the
+    // already-initialized early-return so it runs on every initialize() call.
+    released_ = false;
+
     auto& device_alloc = device_allocators_[device_index];
     if (device_alloc.initialized) {
         return;  // Already initialized
@@ -465,6 +470,15 @@ void OneAPICachingAllocator::set_alignment(size_t alignment) {
 void OneAPICachingAllocator::set_max_cached_memory(size_t max_bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     max_cached_memory_ = max_bytes;
+    // Trim already-cached blocks down to the new limit immediately; otherwise
+    // the limit only takes effect on the next free() and memory_cached() can
+    // report more than the configured maximum. enforce_cache_limit assumes the
+    // mutex is held (as on the free() path), which it is here.
+    if (max_cached_memory_ > 0) {
+        for (auto& entry : device_allocators_) {
+            enforce_cache_limit(entry.first);
+        }
+    }
 }
 
 void OneAPICachingAllocator::set_min_split_size(size_t min_size) {
@@ -596,14 +610,12 @@ void OneAPICachingAllocator::enforce_cache_limit(int device) {
     // Helper to release from a free block set
     auto release_from_set = [&](std::set<OneAPIBlock*, OneAPIBlockComparator>& free_set) {
         while (device_alloc.stats.cached_bytes > max_cached_memory_ && !free_set.empty()) {
-            // Release largest block first
-            auto it = free_set.rbegin();
-            OneAPIBlock* block = *it;
-
-            // Convert reverse iterator to forward iterator for erase
-            auto forward_it = std::next(it).base();
-            free_set.erase(forward_it);
-
+            // Release largest block first. Do NOT erase it here: release_block
+            // erases it from the free set itself and uses that erase's count to
+            // decide whether to subtract its size from cached_bytes. Erasing it
+            // first made release_block see was_cached==0, so cached_bytes was
+            // never decremented and the cache never shrank.
+            OneAPIBlock* block = *free_set.rbegin();
             release_block(block);
         }
     };

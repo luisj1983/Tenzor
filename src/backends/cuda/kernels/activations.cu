@@ -70,6 +70,24 @@ template<typename T> struct AccumType { using type = T; };
 template<> struct AccumType<__half> { using type = float; };
 template<> struct AccumType<__nv_bfloat16> { using type = float; };
 
+// One-block-per-row grid (used by softmax / log_softmax forward+backward).
+// `batch_size` is int64_t; a plain `int num_blocks = batch_size` would
+// truncate to a wrong/negative value once the number of rows exceeds INT_MAX
+// (~2.1e9), silently leaving most rows uncomputed. CUDA caps gridDim.x at
+// 2^31-1, so validate before launch and return an unsigned grid extent.
+static unsigned int softmax_grid_blocks(int64_t batch_size) {
+    if (batch_size < 0) {
+        throw std::runtime_error("softmax: negative batch size");
+    }
+    constexpr int64_t kMaxGridDimX = 2147483647LL;  // CUDA gridDim.x limit
+    if (batch_size > kMaxGridDimX) {
+        throw std::runtime_error(
+            "softmax: number of rows " + std::to_string(batch_size) +
+            " exceeds maximum CUDA grid dimension " + std::to_string(kMaxGridDimX));
+    }
+    return static_cast<unsigned int>(batch_size);
+}
+
 static auto compute_reduction_shape(
     const std::vector<int64_t>& input_shape,
     int64_t dim,
@@ -1465,7 +1483,7 @@ extern "C" {
     void softmax_forward_float(const float* input, float* output,
                               int64_t batch_size, int64_t dim_size,
                               cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
@@ -1475,7 +1493,7 @@ extern "C" {
     void softmax_forward_double(const double* input, double* output,
                                int64_t batch_size, int64_t dim_size,
                                cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
@@ -1486,7 +1504,7 @@ extern "C" {
                                float* grad_input,
                                int64_t batch_size, int64_t dim_size,
                                cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
@@ -1497,7 +1515,7 @@ extern "C" {
                                 double* grad_input,
                                 int64_t batch_size, int64_t dim_size,
                                 cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
@@ -1609,7 +1627,7 @@ extern "C" {
     void log_softmax_forward_float(const float* input, float* output,
                                    int64_t batch_size, int64_t dim_size,
                                    cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         log_softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
@@ -1619,7 +1637,7 @@ extern "C" {
     void log_softmax_forward_double(const double* input, double* output,
                                     int64_t batch_size, int64_t dim_size,
                                     cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
@@ -1630,7 +1648,7 @@ extern "C" {
                                     float* grad_input,
                                     int64_t batch_size, int64_t dim_size,
                                     cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         log_softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
@@ -1641,7 +1659,7 @@ extern "C" {
                                      double* grad_input,
                                      int64_t batch_size, int64_t dim_size,
                                      cudaStream_t stream) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
@@ -3313,19 +3331,19 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<float>(), result.data<float>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<double>(), result.data<double>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
         softmax_forward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
@@ -3333,7 +3351,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
             batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
         softmax_forward_kernel<__nv_bfloat16><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
@@ -3389,19 +3407,19 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
     }
 
     if (output.dtype() == DType::Float32) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<float>(), output.data<float>(), result.data<float>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float64) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<double>(), output.data<double>(), result.data<double>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
         softmax_backward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
@@ -3410,7 +3428,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::BFloat16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
         softmax_backward_kernel<__nv_bfloat16><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
@@ -3463,19 +3481,19 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         log_softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<float>(), result.data<float>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<double>(), result.data<double>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
         log_softmax_forward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
@@ -3483,7 +3501,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
             batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
         log_softmax_forward_kernel<__nv_bfloat16><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
@@ -3538,19 +3556,19 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
     }
 
     if (output.dtype() == DType::Float32) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         log_softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<float>(), output.data<float>(), result.data<float>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float64) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<double>(), output.data<double>(), result.data<double>(), batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
         log_softmax_backward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
@@ -3559,7 +3577,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::BFloat16) {
-        int num_blocks = batch_size;
+        unsigned int num_blocks = softmax_grid_blocks(batch_size);
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
         log_softmax_backward_kernel<__nv_bfloat16><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
@@ -4449,29 +4467,133 @@ __global__ void nanmean_div_f32(const float* sum, const int64_t* count, float* o
     }
 }
 
+// ============================================================================
+// Dim-specific nanmean reduction kernel (mirrors nansum_along_dim_kernel but
+// divides the NaN-ignoring sum by the per-slice count of non-NaN elements).
+// ============================================================================
+template<typename T>
+__global__ void nanmean_along_dim_kernel(
+    const T* input,
+    T* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[DIM_META_MAX_RANK];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    using Acc = typename AccumType<T>::type;
+    Acc sum = Acc(0);
+    int64_t count = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        Acc v = Acc(input[in_idx]);
+        if (!isnan(static_cast<float>(v))) {
+            sum = sum + v;
+            count++;
+        }
+    }
+    output[out_idx] = (count > 0) ? T(sum / Acc(count)) : T(Acc(0));
+}
+
+template<typename T>
+static void launch_dim_nanmean(
+    const T* d_input,
+    T* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+    if (output_size == 0 || dim_size == 0) return;
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    nanmean_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 Tensor nanmean_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    if (dim < 0) {
+        // Full reduction over the whole tensor -> {1} scalar.
+        DType orig_dtype = inputs[0].dtype();
+        Tensor input = inputs[0];
+        if (input.dtype() != DType::Float32) {
+            input = input.to(DType::Float32);
+        }
+        int64_t n = input.numel();
+
+        // Compute nansum on GPU
+        Tensor sum_result({1}, DType::Float32, input.device());
+        nansum_all_f32<<<1, 256, 0, stream>>>(input.data<float>(), sum_result.data<float>(), n);
+
+        // Count non-NaN elements on GPU
+        Tensor count_result({1}, DType::Int64, input.device());
+        count_non_nan_all_f32<<<1, 256, 0, stream>>>(input.data<float>(), count_result.data<int64_t>(), n);
+
+        // Divide sum by count on GPU
+        Tensor result({1}, DType::Float32, input.device());
+        nanmean_div_f32<<<1, 1, 0, stream>>>(sum_result.data<float>(), count_result.data<int64_t>(), result.data<float>());
+        CUDA_CHECK(cudaGetLastError());
+
+        return (orig_dtype != DType::Float32) ? result.to(orig_dtype) : result;
+    }
+
+    // Dim-specific reduction: native CUDA kernel (mirrors nansum_dispatch).
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
     DType orig_dtype = inputs[0].dtype();
     Tensor input = inputs[0];
-    if (input.dtype() != DType::Float32) {
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
         input = input.to(DType::Float32);
     }
-    int64_t n = input.numel();
 
-    // Compute nansum on GPU
-    Tensor sum_result({1}, DType::Float32, input.device());
-    nansum_all_f32<<<1, 256, 0, stream>>>(input.data<float>(), sum_result.data<float>(), n);
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    int64_t normalized_dim = dim;
+    if (dim < 0) normalized_dim = ndim + dim;
 
-    // Count non-NaN elements on GPU
-    Tensor count_result({1}, DType::Int64, input.device());
-    count_non_nan_all_f32<<<1, 256, 0, stream>>>(input.data<float>(), count_result.data<int64_t>(), n);
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim
+    );
 
-    // Divide sum by count on GPU
-    Tensor result({1}, DType::Float32, input.device());
-    nanmean_div_f32<<<1, 1, 0, stream>>>(sum_result.data<float>(), count_result.data<int64_t>(), result.data<float>());
+    Tensor result(output_shape, input.dtype(), input.device());
+
+    auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+    auto strides_vec = std::vector<int64_t>(input.strides().begin(), input.strides().end());
+
+    if (input.dtype() == DType::Float32) {
+        launch_dim_nanmean(input.data<float>(), result.data<float>(), shape_vec, strides_vec, normalized_dim);
+    } else if (input.dtype() == DType::Float64) {
+        launch_dim_nanmean(input.data<double>(), result.data<double>(), shape_vec, strides_vec, normalized_dim);
+    }
     CUDA_CHECK(cudaGetLastError());
-
-    return (orig_dtype != DType::Float32) ? result.to(orig_dtype) : result;
+    return (orig_dtype != input.dtype()) ? result.to(orig_dtype) : result;
 }
 
 // Aminmax: compute min and max in a single pass
@@ -4504,20 +4626,136 @@ __global__ void aminmax_all_f32(const float* input, float* out_min, float* out_m
     }
 }
 
+// ============================================================================
+// Dim-specific aminmax reduction kernel: per-slice min and max along `dim`.
+// Mirrors nansum_along_dim_kernel's stride-based addressing so it is correct
+// for any reduced axis (the public API passes a contiguous input).
+// ============================================================================
+template<typename T>
+__global__ void aminmax_along_dim_kernel(
+    const T* input,
+    T* out_min,
+    T* out_max,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[DIM_META_MAX_RANK];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    auto offset_at = [&](int64_t i) -> int64_t {
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            int64_t coord = (d == dim) ? i : indices[d];
+            in_idx += coord * meta.strides[d];
+        }
+        return in_idx;
+    };
+
+    T mn = input[offset_at(0)];
+    T mx = mn;
+    for (int64_t i = 1; i < dim_size; i++) {
+        T v = input[offset_at(i)];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    out_min[out_idx] = mn;
+    out_max[out_idx] = mx;
+}
+
+template<typename T>
+static void launch_dim_aminmax(
+    const T* d_input,
+    T* d_min,
+    T* d_max,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+    if (output_size == 0 || dim_size == 0) return;
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    aminmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_min, d_max, meta, ndim, dim, output_size, dim_size
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 std::vector<Tensor> aminmax_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    if (dim < 0) {
+        // Full reduction over the whole tensor -> two {1} scalars.
+        DType orig_dtype = inputs[0].dtype();
+        Tensor input = inputs[0];
+        if (input.dtype() != DType::Float32) {
+            input = input.to(DType::Float32);
+        }
+        int64_t n = input.numel();
+        Tensor min_result({1}, DType::Float32, input.device());
+        Tensor max_result({1}, DType::Float32, input.device());
+        aminmax_all_f32<<<1, 256, 0, stream>>>(
+            input.data<float>(), min_result.data<float>(), max_result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        if (orig_dtype != DType::Float32) {
+            min_result = min_result.to(orig_dtype);
+            max_result = max_result.to(orig_dtype);
+        }
+        return {min_result, max_result};
+    }
+
+    // Dim-specific reduction: native CUDA kernel.
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
     DType orig_dtype = inputs[0].dtype();
     Tensor input = inputs[0];
-    if (input.dtype() != DType::Float32) {
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
         input = input.to(DType::Float32);
     }
-    int64_t n = input.numel();
-    Tensor min_result({1}, DType::Float32, input.device());
-    Tensor max_result({1}, DType::Float32, input.device());
-    aminmax_all_f32<<<1, 256, 0, stream>>>(
-        input.data<float>(), min_result.data<float>(), max_result.data<float>(), n);
+
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    int64_t normalized_dim = dim;
+    if (dim < 0) normalized_dim = ndim + dim;
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim
+    );
+
+    Tensor min_result(output_shape, input.dtype(), input.device());
+    Tensor max_result(output_shape, input.dtype(), input.device());
+
+    auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+    auto strides_vec = std::vector<int64_t>(input.strides().begin(), input.strides().end());
+
+    if (input.dtype() == DType::Float32) {
+        launch_dim_aminmax(input.data<float>(), min_result.data<float>(), max_result.data<float>(),
+                           shape_vec, strides_vec, normalized_dim);
+    } else if (input.dtype() == DType::Float64) {
+        launch_dim_aminmax(input.data<double>(), min_result.data<double>(), max_result.data<double>(),
+                           shape_vec, strides_vec, normalized_dim);
+    }
     CUDA_CHECK(cudaGetLastError());
-    if (orig_dtype != DType::Float32) {
+    if (orig_dtype != input.dtype()) {
         min_result = min_result.to(orig_dtype);
         max_result = max_result.to(orig_dtype);
     }
@@ -4526,37 +4764,49 @@ std::vector<Tensor> aminmax_dispatch(std::span<const Tensor> inputs, const OpAtt
 
 // IndexAdd, IndexCopy, IndexFill CUDA kernels
 __global__ void index_add_f32(float* output, const float* source, const int64_t* index,
-                               int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+                               int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                               int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    atomicAdd(&output[(o * dim_size + index[k]) * inner + j],
+    int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;
+    if (ix < 0 || ix >= dim_size) { atomicExch(error_flag, 1); return; }
+    atomicAdd(&output[(o * dim_size + ix) * inner + j],
               source[(o * idx_n + k) * inner + j]);
 }
 
 __global__ void index_copy_f32(float* output, const float* source, const int64_t* index,
-                                int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+                                int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    output[(o * dim_size + index[k]) * inner + j] = source[(o * idx_n + k) * inner + j];
+    int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;
+    if (ix < 0 || ix >= dim_size) { atomicExch(error_flag, 1); return; }
+    output[(o * dim_size + ix) * inner + j] = source[(o * idx_n + k) * inner + j];
 }
 
 __global__ void index_fill_f32(float* output, const int64_t* index, float value,
-                                int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+                                int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    output[(o * dim_size + index[k]) * inner + j] = value;
+    int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;
+    if (ix < 0 || ix >= dim_size) { atomicExch(error_flag, 1); return; }
+    output[(o * dim_size + ix) * inner + j] = value;
 }
 
 Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -4572,9 +4822,21 @@ Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& at
     for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
     int64_t total = outer * idx_n * inner;
     if (total > 0 && output.dtype() == DType::Float32) {
+        // Device-side OOB index error flag (matches the CPU std::out_of_range
+        // contract; avoids out-of-bounds device writes on malformed indices).
+        CudaBuffer error_buf(sizeof(int));
+        CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
         dim3 grid((total + 255) / 256), block(256);
-        index_add_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner);
+        index_add_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner, error_buf.as<int>());
         CUDA_CHECK(cudaGetLastError());
+        int host_error = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_error) {
+            throw std::out_of_range("index_add: index out of range for dim of size " +
+                                    std::to_string(dim_size));
+        }
     } else if (total > 0) {
         auto dev = output.device();
         auto f32_out = inputs[0].to(DType::Float32);
@@ -4798,9 +5060,20 @@ Tensor index_copy_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
     for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
     int64_t total = outer * idx_n * inner;
     if (total > 0 && output.dtype() == DType::Float32) {
+        // Device-side OOB index error flag (matches CPU std::out_of_range).
+        CudaBuffer error_buf(sizeof(int));
+        CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
         dim3 grid((total + 255) / 256), block(256);
-        index_copy_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner);
+        index_copy_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner, error_buf.as<int>());
         CUDA_CHECK(cudaGetLastError());
+        int host_error = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_error) {
+            throw std::out_of_range("index_copy: index out of range for dim of size " +
+                                    std::to_string(dim_size));
+        }
     } else if (total > 0) {
         auto dev = output.device();
         auto f32_out = inputs[0].to(DType::Float32);
@@ -4825,9 +5098,20 @@ Tensor index_fill_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
     for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
     int64_t total = outer * idx_n * inner;
     if (total > 0 && output.dtype() == DType::Float32) {
+        // Device-side OOB index error flag (matches CPU std::out_of_range).
+        CudaBuffer error_buf(sizeof(int));
+        CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
         dim3 grid((total + 255) / 256), block(256);
-        index_fill_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[1].data<int64_t>(), static_cast<float>(value), outer, dim_size, idx_n, inner);
+        index_fill_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[1].data<int64_t>(), static_cast<float>(value), outer, dim_size, idx_n, inner, error_buf.as<int>());
         CUDA_CHECK(cudaGetLastError());
+        int host_error = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_error) {
+            throw std::out_of_range("index_fill: index out of range for dim of size " +
+                                    std::to_string(dim_size));
+        }
     } else if (total > 0) {
         auto dev = output.device();
         auto f32_out = inputs[0].to(DType::Float32);

@@ -433,15 +433,36 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                                 T* o_row = o_bh + qi * head_dim;
                                 scale_vector(o_row, rescale, head_dim);
 
-                                // Add current contribution
+                                // Add current contribution. `weight` is the
+                                // *pre-dropout* softmax numerator exp(dot-new_max);
+                                // it always feeds the softmax denominator (row_sum)
+                                // so the denominator is the full softmax sum over
+                                // ALL keys. Dropout is applied only to the V
+                                // accumulation term (`o_weight`), exactly matching
+                                // the backward which builds P = exp/sum_ALL first
+                                // (Step 3) then masks/scales P (Step 3b). Folding
+                                // dropout_scale into row_sum (the old behaviour)
+                                // made it cancel against the denominator and turned
+                                // the forward into a renormalized-over-survivors
+                                // softmax that the backward never differentiates.
                                 T weight = std::exp(dot - new_max);
+                                T o_weight = weight;
 
-                                // Apply dropout to the attention weight (post-softmax)
-                                // Philox counter: (batch, head, qi, ki) uniquely identifies
-                                // each attention weight element. Philox emits Float32
-                                // uniform — promote to T for the compare so the dropout
-                                // mask is bit-identical across float and double paths.
+                                // Apply dropout to the V-accumulation weight only
+                                // (post-softmax masking). Philox counter:
+                                // (batch, head, qi, ki) uniquely identifies each
+                                // attention weight element. Philox emits Float32
+                                // uniform — promote to T for the compare so the
+                                // dropout mask is bit-identical across float and
+                                // double paths.
                                 if (apply_dropout) {
+                                    // Counter words hold (b,h,qi,ki) truncated to
+                                    // uint32. This bounds each index to < 2^32; a
+                                    // single dimension at that size is physically
+                                    // unreachable (petabytes), and the backward
+                                    // (Step 3b) truncates identically so the masks
+                                    // stay bit-consistent. Documented limit, not a
+                                    // correctness gap.
                                     Philox4x32 philox;
                                     philox.counter[0] = static_cast<uint32_t>(b);
                                     philox.counter[1] = static_cast<uint32_t>(h);
@@ -456,17 +477,20 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                                     T rand_val = static_cast<T>(
                                         Philox4x32::uint32_to_uniform(rng_out[0]));
                                     if (rand_val < dropout_p_T) {
-                                        weight = T(0);  // Drop this attention connection
+                                        o_weight = T(0);  // Drop this attention connection
                                     } else {
-                                        weight *= dropout_scale_T;  // Inverted dropout scaling
+                                        o_weight *= dropout_scale_T;  // Inverted dropout scaling
                                     }
                                 }
 
+                                // Denominator uses the undropped weight so the
+                                // softmax normalization (and LSE) is over the full
+                                // key set, not just survivors.
                                 row_sum[qi] += weight;
 
                                 // Weighted V accumulation (SIMD-vectorized FMA; overloads for float/double)
                                 const T* v_row = v_bh + ki * head_dim;
-                                fma_vector(o_row, weight, v_row, head_dim);
+                                fma_vector(o_row, o_weight, v_row, head_dim);
 
                                 row_max[qi] = new_max;
                             }

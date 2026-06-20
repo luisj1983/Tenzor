@@ -1174,6 +1174,10 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
         dim += shape.size();
     }
 
+    if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+        throw std::runtime_error("log_softmax_backward dimension out of range");
+    }
+
     Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()), out_cont.dtype(), out_cont.device());
 
     if (out_cont.dtype() == DType::Float32) {
@@ -2286,6 +2290,8 @@ class LinearKernelFloat32;
 class LinearKernelFloat64;
 class LinearKernelFloat16;
 class LinearKernelBFloat16;
+class LinearBiasAddFloat32;
+class LinearBiasAddFloat64;
 
 auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, sycl::queue& queue) -> Tensor {
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
@@ -2312,6 +2318,42 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         float* out_ptr = get_data_ptr<float>(output);
         const float* b_ptr = bias ? get_data_ptr<const float>(*bias) : nullptr;
 
+#ifdef TENZOR_HAS_ONEMKL
+        // output[B,O] = input[B,I] @ weight[O,I]^T via oneMKL GEMM.
+        // Row-major C[M=B,N=O] = A(input)[M=B,K=I] @ op(B=weight)[K=I,N=O]
+        // (weight is stored [O,I], so op(weight)=trans). In column-major:
+        // gemm(transB, transA, N, M, K, alpha, weight, ldb=I, input, lda=I, beta, out, ldc=O)
+        if (batch_size > 0 && out_features > 0 && in_features > 0) {
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            try {
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::trans,     // weight stored [O,I] -> need [I,O]
+                    ::oneapi::mkl::transpose::nontrans,  // input [B,I]
+                    out_features, batch_size, in_features,
+                    alpha,
+                    w_ptr, in_features,
+                    in_ptr, in_features,
+                    beta,
+                    out_ptr, out_features,
+                    ::oneapi::mkl::blas::compute_mode::standard
+                );
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F32 linear) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F32 linear): ") + e.what());
+            }
+            if (b_ptr) {
+                int64_t of = out_features;
+                queue.parallel_for<LinearBiasAddFloat32>(
+                    sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
+                    out_ptr[id[0] * of + id[1]] += b_ptr[id[1]];
+                });
+            }
+            queue.wait_and_throw();
+        }
+#else
         queue.parallel_for<LinearKernelFloat32>(
             sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
             int64_t b = id[0];
@@ -2322,6 +2364,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
             }
             out_ptr[b * out_features + o] = sum + (b_ptr ? b_ptr[o] : 0.0f);
         });
+#endif
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -2329,6 +2372,38 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         double* out_ptr = get_data_ptr<double>(output);
         const double* b_ptr = bias ? get_data_ptr<const double>(*bias) : nullptr;
 
+#ifdef TENZOR_HAS_ONEMKL
+        if (batch_size > 0 && out_features > 0 && in_features > 0) {
+            const double alpha = 1.0;
+            const double beta = 0.0;
+            try {
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::trans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    out_features, batch_size, in_features,
+                    alpha,
+                    w_ptr, in_features,
+                    in_ptr, in_features,
+                    beta,
+                    out_ptr, out_features,
+                    ::oneapi::mkl::blas::compute_mode::standard
+                );
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F64 linear) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F64 linear): ") + e.what());
+            }
+            if (b_ptr) {
+                int64_t of = out_features;
+                queue.parallel_for<LinearBiasAddFloat64>(
+                    sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
+                    out_ptr[id[0] * of + id[1]] += b_ptr[id[1]];
+                });
+            }
+            queue.wait_and_throw();
+        }
+#else
         queue.parallel_for<LinearKernelFloat64>(
             sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
             int64_t b = id[0];
@@ -2339,6 +2414,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
             }
             out_ptr[b * out_features + o] = sum + (b_ptr ? b_ptr[o] : 0.0);
         });
+#endif
     }
     else if (in_cont.dtype() == DType::Float16) {
         // Compute in float32 for precision
@@ -2510,6 +2586,51 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
         float* gw_ptr = get_data_ptr<float>(grad_weight);
         float* gb_ptr = get_data_ptr<float>(grad_bias);
 
+#ifdef TENZOR_HAS_ONEMKL
+        if (batch_size > 0 && out_features > 0 && in_features > 0) {
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            try {
+                // grad_input[B,I] = grad_output[B,O] @ weight[O,I]
+                // Row-major C[M=B,N=I] = A(grad)[B,O] @ B(weight)[O,I]; K=O.
+                // column-major: gemm(nontrans(weight), nontrans(grad), N=I, M=B, K=O,
+                //               weight, ldb=I, grad, lda=O, gi, ldc=I)
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    in_features, batch_size, out_features,
+                    alpha,
+                    w_ptr, in_features,
+                    g_ptr, out_features,
+                    beta,
+                    gi_ptr, in_features,
+                    ::oneapi::mkl::blas::compute_mode::standard
+                );
+                // grad_weight[O,I] = grad_output[B,O]^T @ input[B,I]
+                // Row-major C[M=O,N=I] = A(grad^T)[O,B] @ B(input)[B,I]; K=B.
+                // column-major: gemm(nontrans(input), trans(grad), N=I, M=O, K=B,
+                //               input, ldb=I, grad, lda=O, gw, ldc=I)
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::trans,
+                    in_features, out_features, batch_size,
+                    alpha,
+                    i_ptr, in_features,
+                    g_ptr, out_features,
+                    beta,
+                    gw_ptr, in_features,
+                    ::oneapi::mkl::blas::compute_mode::standard
+                );
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F32 linear_backward) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F32 linear_backward): ") + e.what());
+            }
+            queue.wait_and_throw();
+        }
+#else
         // grad_input = grad_output @ weight
         queue.parallel_for<LinearBackwardGradInputFloat32>(
             sycl::range<2>(batch_size, in_features), [=](sycl::id<2> id) {
@@ -2533,6 +2654,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
             }
             gw_ptr[o * in_features + i] = sum;
         });
+#endif
 
         // grad_bias = sum(grad_output, dim=0)
         queue.parallel_for<LinearBackwardGradBiasFloat32>(
@@ -2552,6 +2674,45 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
         double* gw_ptr = get_data_ptr<double>(grad_weight);
         double* gb_ptr = get_data_ptr<double>(grad_bias);
 
+#ifdef TENZOR_HAS_ONEMKL
+        if (batch_size > 0 && out_features > 0 && in_features > 0) {
+            const double alpha = 1.0;
+            const double beta = 0.0;
+            try {
+                // grad_input[B,I] = grad_output[B,O] @ weight[O,I]
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    in_features, batch_size, out_features,
+                    alpha,
+                    w_ptr, in_features,
+                    g_ptr, out_features,
+                    beta,
+                    gi_ptr, in_features,
+                    ::oneapi::mkl::blas::compute_mode::standard
+                );
+                // grad_weight[O,I] = grad_output[B,O]^T @ input[B,I]
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::trans,
+                    in_features, out_features, batch_size,
+                    alpha,
+                    i_ptr, in_features,
+                    g_ptr, out_features,
+                    beta,
+                    gw_ptr, in_features,
+                    ::oneapi::mkl::blas::compute_mode::standard
+                );
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F64 linear_backward) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F64 linear_backward): ") + e.what());
+            }
+            queue.wait_and_throw();
+        }
+#else
         queue.parallel_for<LinearBackwardGradInputFloat64>(
             sycl::range<2>(batch_size, in_features), [=](sycl::id<2> id) {
             int64_t b = id[0];
@@ -2573,6 +2734,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
             }
             gw_ptr[o * in_features + i] = sum;
         });
+#endif
 
         queue.parallel_for<LinearBackwardGradBiasFloat64>(
             sycl::range<1>(out_features), [=](sycl::id<1> o) {
@@ -2647,12 +2809,19 @@ auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& qu
 
     queue.parallel_for<DropoutPhiloxMaskKernel>(
         sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            uint32_t counter = static_cast<uint32_t>(idx[0]);
+            // Use the full 64-bit element index so elements differing by a
+            // multiple of 2^32 map to distinct Philox counters (no aliasing
+            // for tensors with > 2^32 elements).
+            uint64_t lin = static_cast<uint64_t>(idx[0]);
+            uint32_t idx_lo = static_cast<uint32_t>(lin & 0xFFFFFFFFu);
+            uint32_t idx_hi = static_cast<uint32_t>(lin >> 32);
             uint32_t key = seed_val;
 
-            // Philox 4x32-10 counter-based RNG
-            uint32_t c0 = counter;
-            uint32_t c1 = ~counter;
+            // Philox 4x32-10 counter-based RNG. Seed both counter words from
+            // the 64-bit index; mix the high word with the key so the two
+            // halves remain decorrelated even when idx_hi == 0.
+            uint32_t c0 = idx_lo;
+            uint32_t c1 = idx_hi ^ key;
             uint32_t k0 = key;
             uint32_t k1 = ~key;
 
@@ -3252,15 +3421,19 @@ auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input,
 // sig(-x) = (x >= 0) ? exp(-x)/(1+exp(-x)) : 1/(1+exp(x))
 auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                  sycl::queue& queue) -> Tensor {
-    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                      input.dtype(), input.device());
+    // Ensure inputs are contiguous so flat [idx] indexing walks storage in logical order
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
 
-    const int64_t numel = input.numel();
+    Tensor grad_input(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                      in_cont.dtype(), in_cont.device());
+
+    const int64_t numel = in_cont.numel();
     if (numel == 0) return grad_input;
 
-    if (input.dtype() == DType::Float32) {
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         queue.parallel_for<LogSigmoidBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -3271,9 +3444,9 @@ auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
             grad_in_ptr[idx] = grad_out_ptr[idx] * sig_neg_x;
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         queue.parallel_for<LogSigmoidBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -3284,9 +3457,9 @@ auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
             grad_in_ptr[idx] = grad_out_ptr[idx] * sig_neg_x;
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
 
         queue.parallel_for<LogSigmoidBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -3297,9 +3470,9 @@ auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
             grad_in_ptr[idx] = sycl::half(static_cast<float>(grad_out_ptr[idx]) * sig_neg_x);
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
 
         queue.parallel_for<LogSigmoidBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {

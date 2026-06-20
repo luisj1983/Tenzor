@@ -33,13 +33,21 @@ uint readBF16Bits(uint element_idx) {
 
 void writeBF16Bits(uint element_idx, uint bits16) {
     uint pair_idx = element_idx / 2;
-    uint offset = element_idx % 2;
-    if (offset == 0) {
-        uint existing = keys_out[pair_idx] & 0xFFFF0000u;
-        keys_out[pair_idx] = existing | (bits16 & 0xFFFFu);
-    } else {
-        uint existing = keys_out[pair_idx] & 0x0000FFFFu;
-        keys_out[pair_idx] = existing | ((bits16 & 0xFFFFu) << 16);
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_half = (bits16 & 0xFFFFu) << half_offset;
+    uint mask = 0xFFFFu << half_offset;
+
+    // Two BF16 keys share one uint32 word. Concurrent invocations may target
+    // the two halves of the same word (e.g. consecutive dest = 2k, 2k+1 from
+    // atomicAdd), so a plain read-modify-write would drop one key. Use an
+    // atomicCompSwap retry loop to make the half-word update race-free
+    // (same pattern as index_select_bf16.comp writeBF16).
+    uint old_word = keys_out[pair_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | new_half;
+        uint result = atomicCompSwap(keys_out[pair_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
     }
 }
 

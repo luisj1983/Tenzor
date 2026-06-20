@@ -1,0 +1,63 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Batch Normalization 2D Backward — Pass 3 (Float64 variant): compute grad_input.
+// Float64 analogue of batchnorm2d_backward_grad_input.comp. Consumes the final
+// per-channel grad_gamma / grad_beta produced by the F64 two-pass reduction
+// (batchnorm2d_backward_f64.comp + reduce_partial_sums_f64.comp). Using the
+// identity
+//   grad_gamma[c] = sum_grad_norm (sum of grad_out * normalized over N*H*W)
+//   grad_beta[c]  = sum_grad       (sum of grad_out)
+// the input gradient is
+//   grad_in = gamma * invstd * (grad_out - sum_grad/N - normalized * sum_grad_norm/N)
+// with N = batch * spatial_size.
+//
+// F64 cannot be widened to F32 without precision loss, and the F32 corrector
+// (batchnorm2d_backward_grad_input.comp) uses F32 buffers, so this dedicated
+// double-precision corrector is required.
+//
+// Dispatch: one thread per element (same as the F32 grad_input pass).
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 1) buffer Input      { double input_data[]; };
+layout(binding = 2) buffer Mean       { double mean_data[]; };
+layout(binding = 3) buffer InvStd     { double invstd_data[]; };
+layout(binding = 4) buffer Gamma      { double gamma_data[]; };
+layout(binding = 5) buffer GradInput  { double grad_input[]; };
+layout(binding = 6) buffer GradGamma  { double grad_gamma[]; };   // sum_grad_norm per channel
+layout(binding = 7) buffer GradBeta   { double grad_beta[]; };    // sum_grad per channel
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint spatial_size;
+    float eps;
+    uint has_gamma;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+
+    double x = input_data[idx];
+    double grad_out = grad_output[idx];
+    double mean = mean_data[c];
+    double inv_std = invstd_data[c];
+    double normalized = (x - mean) * inv_std;
+
+    double N = double(params.batch * params.spatial_size);
+    double mean_grad = grad_beta[c] / N;
+    double mean_grad_norm = grad_gamma[c] / N;
+
+    double gamma = (params.has_gamma != 0u) ? gamma_data[c] : 1.0lf;
+    double grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+    grad_input[idx] = gamma * inv_std * grad_normalized;
+}

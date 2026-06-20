@@ -625,7 +625,14 @@ private:
         // standard trace-based JIT semantic ("the branch taken during
         // tracing is the branch baked into the compiled module").
         Variable cond_var = eval(*iff.cond, env);
-        bool cond_val = cond_var.tensor().item<float>() != 0.0f;
+        // Read the condition as a scalar Float32 value. The condition tensor
+        // inherits ctx_dtype_ (baked into literals/binops), so it may be
+        // Float64/Float16/BFloat16; item<float>() throws on dtype != Float32.
+        // Mirror eval_scalar: cast to CPU Float32 before reading the scalar.
+        Tensor cond_t = cond_var.tensor();
+        if (cond_t.dtype() != DType::Float32) cond_t = cond_t.to(DType::Float32);
+        if (cond_t.device().type != Device::Type::CPU) cond_t = cond_t.to(Device::cpu());
+        bool cond_val = cond_t.data<float>()[0] != 0.0f;
         const auto& body = cond_val ? iff.then_body : iff.else_body;
         exec_block(body, env, returned);
     }

@@ -1147,15 +1147,16 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
+        const float alpha_f = static_cast<float>(alpha);
 #ifdef TENZOR_HAS_AVX512
         const size_t simd_width = 16;
         const size_t simd_end = (n / simd_width) * simd_width;
+        const __m512 alpha_vec = _mm512_set1_ps(alpha_f);
+        const __m512 zero = _mm512_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
-            __m512 alpha_vec = _mm512_set1_ps(alpha);
-            __m512 zero = _mm512_setzero_ps();
             __mmask16 mask = _mm512_cmp_ps_mask(x, zero, _CMP_GT_OQ);
             __m512 negative_part = _mm512_mul_ps(x, alpha_vec);
             __m512 result = _mm512_mask_blend_ps(mask, negative_part, x);
@@ -1163,17 +1164,17 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         }
 
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha * in_data[i];
+            out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha_f * in_data[i];
         }
 #elif defined(TENZOR_HAS_AVX2)
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
+        const __m256 alpha_vec = _mm256_set1_ps(alpha_f);
+        const __m256 zero = _mm256_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
-            __m256 alpha_vec = _mm256_set1_ps(alpha);
-            __m256 zero = _mm256_setzero_ps();
             __m256 mask = _mm256_cmp_ps(x, zero, _CMP_GT_OQ);
             __m256 negative_part = _mm256_mul_ps(x, alpha_vec);
             __m256 result = _mm256_blendv_ps(negative_part, x, mask);
@@ -1181,12 +1182,12 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         }
 
         for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha * in_data[i];
+            out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha_f * in_data[i];
         }
 #else
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha * in_data[i];
+            out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha_f * in_data[i];
         }
 #endif
     } else if (input.dtype() == DType::Float64) {
@@ -1344,6 +1345,8 @@ static auto compute_max_along_dim(const float* data, const std::vector<int64_t>&
 
     std::vector<float> max_vals(outer_size * inner_size, -std::numeric_limits<float>::infinity());
 
+    // Rows (outer index i) are independent; each writes disjoint max_idx slots.
+    #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
     for (int64_t i = 0; i < outer_size; ++i) {
         for (int64_t k = 0; k < inner_size; ++k) {
             for (int64_t j = 0; j < dim_size; ++j) {
@@ -1396,7 +1399,9 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
-        // Use Float32 accumulation for numerical stability
+        // Use Float32 accumulation for numerical stability. Rows (outer i) are
+        // independent and write disjoint output slots -> safe to parallelize.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 // Find max (Float32 accumulation)
@@ -1455,24 +1460,33 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
-        // Compute exp(x - max) and sum
+        // Compute exp(x - max) and sum (Kahan-compensated to match the
+        // Float16/BFloat16 paths' precision over long reduction dims).
+        // Rows (outer i) are independent -> safe to parallelize.
         std::vector<float> sum_exp(outer_size * inner_size, 0.0f);
 
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 int64_t max_idx = i * inner_size + k;
                 float max_val = max_vals[max_idx];
 
+                float sum = 0.0f, comp = 0.0f;
                 for (int64_t j = 0; j < dim_size; ++j) {
                     int64_t idx = (i * dim_size + j) * inner_size + k;
                     float exp_val = std::exp(in_data[idx] - max_val);
                     out_data[idx] = exp_val;
-                    sum_exp[max_idx] += exp_val;
+                    float y = exp_val - comp;
+                    float t = sum + y;
+                    comp = (t - sum) - y;
+                    sum = t;
                 }
+                sum_exp[max_idx] = sum;
             }
         }
 
         // Normalize
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 int64_t max_idx = i * inner_size + k;
@@ -1503,7 +1517,8 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
-        // Simple implementation for double
+        // Simple implementation for double. Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 // Find max
@@ -1548,7 +1563,8 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
-        // Use Float32 accumulation for numerical stability
+        // Use Float32 accumulation for numerical stability. Rows independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float max_val = -std::numeric_limits<float>::infinity();
@@ -1622,7 +1638,8 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             inner_size *= shape[i];
         }
 
-        // Use Float32 accumulation for numerical stability
+        // Use Float32 accumulation for numerical stability. Rows independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float sum = 0.0f;
@@ -1658,7 +1675,8 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             inner_size *= shape[i];
         }
 
-        // Compute sum(grad_output * softmax) for each position
+        // Compute sum(grad_output * softmax) for each position. Rows independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float sum = 0.0f;
@@ -1694,6 +1712,8 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             inner_size *= shape[i];
         }
 
+        // Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 double sum = 0.0;
@@ -1729,6 +1749,8 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             inner_size *= shape[i];
         }
 
+        // Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float sum = 0.0f;
@@ -1792,7 +1814,8 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
-        // Use Float32 accumulation for numerical stability
+        // Use Float32 accumulation for numerical stability. Rows independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 // Find max (Float32 accumulation)
@@ -1843,25 +1866,31 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
-        // Compute log(sum(exp(x - max)))
+        // Compute log(sum(exp(x - max))). Rows (outer i) are independent.
         std::vector<float> log_sum_exp(outer_size * inner_size, 0.0f);
 
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 int64_t max_idx = i * inner_size + k;
                 float max_val = max_vals[max_idx];
-                float sum_exp = 0.0f;
+                float sum_exp = 0.0f, comp = 0.0f;  // Kahan-compensated
 
                 for (int64_t j = 0; j < dim_size; ++j) {
                     int64_t idx = (i * dim_size + j) * inner_size + k;
-                    sum_exp += std::exp(in_data[idx] - max_val);
+                    float e = std::exp(in_data[idx] - max_val);
+                    float y = e - comp;
+                    float t = sum_exp + y;
+                    comp = (t - sum_exp) - y;
+                    sum_exp = t;
                 }
 
                 log_sum_exp[max_idx] = std::log(sum_exp);
             }
         }
 
-        // Compute log_softmax = x - max - log_sum_exp
+        // Compute log_softmax = x - max - log_sum_exp. Rows independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 int64_t max_idx = i * inner_size + k;
@@ -1893,6 +1922,8 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
+        // Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 // Find max
@@ -1936,6 +1967,8 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             inner_size *= shape[i];
         }
 
+        // Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float max_val = -std::numeric_limits<float>::infinity();
@@ -2008,7 +2041,8 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             inner_size *= shape[i];
         }
 
-        // Use Float32 accumulation for numerical stability
+        // Use Float32 accumulation for numerical stability. Rows independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float sum_grad = 0.0f;
@@ -2044,6 +2078,8 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             inner_size *= shape[i];
         }
 
+        // Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float sum_grad = 0.0f;
@@ -2079,6 +2115,8 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             inner_size *= shape[i];
         }
 
+        // Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 double sum_grad = 0.0;
@@ -2114,6 +2152,8 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             inner_size *= shape[i];
         }
 
+        // Rows (outer i) are independent.
+        #pragma omp parallel for schedule(static) if(outer_size * inner_size * dim_size > ACTIVATION_OMP_THRESHOLD)
         for (int64_t i = 0; i < outer_size; ++i) {
             for (int64_t k = 0; k < inner_size; ++k) {
                 float sum_grad = 0.0f;
@@ -2758,6 +2798,13 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
 // ============================================================================
 
 auto relu_inplace_kernel(Tensor& input) -> void {
+    // In-place kernels iterate with flat data[i] and cannot materialise a
+    // contiguous copy (the result must be written back into `input` itself),
+    // so a non-contiguous view (transpose/permute/slice) would read/write the
+    // wrong logical elements. Reject it explicitly; callers must contiguify.
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("relu_inplace: input must be contiguous");
+    }
     if (input.dtype() == DType::Float32) {
         float* data = input.data<float>();
         size_t n = input.numel();
@@ -2794,6 +2841,9 @@ auto relu_inplace_kernel(Tensor& input) -> void {
 }
 
 auto sigmoid_inplace_kernel(Tensor& input) -> void {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("sigmoid_inplace: input must be contiguous");
+    }
     if (input.dtype() == DType::Float32) {
         float* data = input.data<float>();
         size_t n = input.numel();
@@ -2830,6 +2880,9 @@ auto sigmoid_inplace_kernel(Tensor& input) -> void {
 }
 
 auto tanh_inplace_kernel(Tensor& input) -> void {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("tanh_inplace: input must be contiguous");
+    }
     if (input.dtype() == DType::Float32) {
         float* data = input.data<float>();
         size_t n = input.numel();
@@ -2866,6 +2919,9 @@ auto tanh_inplace_kernel(Tensor& input) -> void {
 }
 
 auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("leaky_relu_inplace: input must be contiguous");
+    }
     if (input.dtype() == DType::Float32) {
         float* data = input.data<float>();
         size_t n = input.numel();
@@ -2908,6 +2964,9 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
     constexpr double INV_SQRT2_D = 0.7071067811865475244;
     constexpr float  INV_SQRT2_F = 0.70710678f;
 
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("gelu_inplace: input must be contiguous");
+    }
     if (input.dtype() == DType::Float32) {
         float* data = input.data<float>();
         size_t n = input.numel();

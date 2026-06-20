@@ -127,6 +127,20 @@ auto ElasticTrainer::check_and_recover() -> bool {
     auto dead = health_monitor_->dead_workers();
     if (dead.empty()) return false;
 
+    // Honor the configured restart budget. check_and_recover() and run() share
+    // the single restart_count_ member, so the same bound that terminates run()'s
+    // recovery loop (restart_count_ > config_.max_restarts) must gate the
+    // monitor-driven path too. Without this a caller polling check_and_recover()
+    // in a loop could recover indefinitely past the budget and corrupt run()'s
+    // accounting. Once exhausted, report that no (further) recovery is possible.
+    if (restart_count_ >= config_.max_restarts) {
+        TENZOR_LOG_ERROR(
+            "[ElasticTrainer] Detected {} dead worker(s) but max restarts "
+            "exhausted ({}); cannot recover.",
+            dead.size(), config_.max_restarts);
+        return false;
+    }
+
     // Audit I.4: route to unified logger.
     TENZOR_LOG_WARN("[ElasticTrainer] Detected {} dead worker(s), recovering...",
                     dead.size());
@@ -167,13 +181,19 @@ auto ElasticTrainer::check_and_recover() -> bool {
         TENZOR_LOG_ERROR("[ElasticTrainer] Re-rendezvous failed: {}", e.what());
         // leave() has already zeroed rank_/world_size_ inside the rendezvous
         // object, so this rank is no longer a member. Restore a consistent
-        // state: stop the still-running monitor (which is probing the stale
+        // state: tear down the still-running monitor (which is probing the stale
         // pre-leave worker set) and reset current_* to the sentinels so a later
         // check_and_recover() does not recompute worker_ids from a world this
         // rank already left.
-        if (health_monitor_) {
-            health_monitor_->stop();
-        }
+        //
+        // Destroy the monitor (reset) rather than merely stop() it: stop() only
+        // halts the monitor thread but leaves health_monitor_ non-null, which
+        // makes the lazy-init guard at the top of this function (`if
+        // (!health_monitor_)`) skip re-construction+start() on the next call,
+        // permanently disabling failure detection. Resetting forces the guard to
+        // re-arm a fresh monitor against the new world once a subsequent join()
+        // succeeds.
+        health_monitor_.reset();
         current_rank_ = -1;
         current_world_size_ = 0;
         return false;

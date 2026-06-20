@@ -155,6 +155,10 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
             NewOpAttributes attrs;
             attrs.set(AttrKey::InputScale,      static_cast<double>(in_scale));
             attrs.set(AttrKey::WeightScaleQ,    static_cast<double>(wt_scale));
+            // forward_quantized returns the dequantized FP32 result, so the
+            // kernel's output_scale must be 1.0 (combined_scale =
+            // input_scale * weight_scale / output_scale). Any output
+            // requantization is handled by forward_quantized_output.
             attrs.set(AttrKey::OutputScale,     1.0);
             attrs.set(AttrKey::InputZeroPoint,  static_cast<int64_t>(in_zp));
             attrs.set(AttrKey::WeightZeroPoint, static_cast<int64_t>(wt_zp));
@@ -264,7 +268,7 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
         kernels::quantized_linear_per_channel_kernel(
             input_data, weight_data, bias_data, output_data,
             batch_size, in_features_, out_features_,
-            input_scale, weight_scales, bias_scale_,
+            input_scale, weight_scales, /*output_scale=*/1.0f,
             input_zp, weight_zps
         );
     } else {
@@ -274,7 +278,7 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
         kernels::quantized_linear_kernel(
             input_data, weight_data, bias_data, output_data,
             batch_size, in_features_, out_features_,
-            input_scale, weight_scale, bias_scale_,
+            input_scale, weight_scale, /*output_scale=*/1.0f,
             input_zp, weight_zp
         );
     }
@@ -395,6 +399,11 @@ auto QuantizedConv2d::forward_impl(const Variable& input) -> Variable {
 
 auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor {
     auto input_shape = input.shape();
+    if (input_shape.size() != 4) {
+        throw std::runtime_error(
+            "QuantizedConv2d::forward_quantized: expected rank-4 NCHW input, got rank " +
+            std::to_string(input_shape.size()));
+    }
     int64_t batch = input_shape[0];
     int64_t h_in = input_shape[2];
     int64_t w_in = input_shape[3];
@@ -405,6 +414,12 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
     // Compute output dimensions
     int64_t h_out = (h_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
     int64_t w_out = (w_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
+    if (h_out <= 0 || w_out <= 0) {
+        throw std::runtime_error(
+            "QuantizedConv2d: computed output dims h_out=" + std::to_string(h_out) +
+            " w_out=" + std::to_string(w_out) +
+            " are non-positive; check kernel/stride/padding/dilation");
+    }
 
     // Allocate output on CPU
     Tensor output({batch, out_channels_, h_out, w_out}, DType::Float32, Device::cpu());
@@ -1943,8 +1958,12 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
     int64_t batch = x.shape()[1];
     int64_t num_directions = bidirectional_ ? 2 : 1;
 
-    auto h_n = zeros({num_layers_ * num_directions, batch, hidden_size_}, x.dtype());
     Tensor output;
+
+    // Collect the final hidden state for each (layer, direction), indexed by
+    // layer*num_directions+dir so the stacked result matches the standard
+    // RNN h_n layout [num_layers*num_directions, batch, hidden].
+    std::vector<Tensor> final_h(num_layers_ * num_directions);
 
     for (int64_t layer = 0; layer < num_layers_; ++layer) {
         Tensor layer_output;
@@ -2000,6 +2019,9 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
                 std::reverse(outputs.begin(), outputs.end());
             }
 
+            // Record the final hidden state for this (layer, direction).
+            final_h[idx] = h.unsqueeze(0);  // [1, batch, hidden]
+
             auto dir_output = cat(outputs, 0);
             if (dir == 0) {
                 layer_output = dir_output;
@@ -2014,6 +2036,10 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
     if (batch_first_) {
         output = output.permute({1, 0, 2});
     }
+
+    // Stack the per-(layer,direction) final hidden states into h_n with shape
+    // [num_layers*num_directions, batch, hidden].
+    auto h_n = cat(final_h, 0);
 
     return {Variable(output, false), Variable(h_n, false)};
 }
@@ -2700,6 +2726,23 @@ auto QuantizedEmbeddingBag::forward_quantized(const Tensor& indices,
     int64_t total_indices = indices_cpu.numel();
     float* out_data = output.data<float>();
 
+    // Validate offsets before iterating: they index into idx_data and a
+    // malformed offsets tensor (out-of-range or non-monotonic) would cause
+    // out-of-bounds reads of idx_data in the accumulation loop below.
+    for (int64_t b = 0; b < num_bags; ++b) {
+        if (off_data[b] < 0 || off_data[b] > total_indices) {
+            throw std::out_of_range(
+                "QuantizedEmbeddingBag: offset " + std::to_string(off_data[b]) +
+                " at bag " + std::to_string(b) + " is out of range [0, " +
+                std::to_string(total_indices) + "]");
+        }
+        if (b + 1 < num_bags && off_data[b + 1] < off_data[b]) {
+            throw std::out_of_range(
+                "QuantizedEmbeddingBag: offsets are not monotonically "
+                "non-decreasing at bag " + std::to_string(b));
+        }
+    }
+
     for (int64_t b = 0; b < num_bags; ++b) {
         int64_t start = off_data[b];
         int64_t end = (b + 1 < num_bags) ? off_data[b + 1] : total_indices;
@@ -2731,8 +2774,19 @@ auto QuantizedEmbeddingBag::forward_quantized(const Tensor& indices,
             }
         }
 
+        // Empty bags return a zero row for all modes (matching PyTorch
+        // EmbeddingBag semantics). In particular this overwrites the -inf
+        // initialization used by Max mode, which the accumulation loop never
+        // touches for an empty bag.
+        if (bag_size == 0) {
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                out_row[j] = 0.0f;
+            }
+            continue;
+        }
+
         // Apply mean reduction
-        if (mode_ == Mode::Mean && bag_size > 0) {
+        if (mode_ == Mode::Mean) {
             float inv_size = 1.0f / static_cast<float>(bag_size);
             for (int64_t j = 0; j < embedding_dim_; ++j) {
                 out_row[j] *= inv_size;

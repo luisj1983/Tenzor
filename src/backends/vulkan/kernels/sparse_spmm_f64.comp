@@ -25,7 +25,7 @@ void main() {
     uint row_start = uint(row_offsets[row]);
     uint row_end = uint(row_offsets[row + 1]);
 
-    for (uint col = tid; col < n_cols; col += 256) {
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
         float64_t sum = 0.0lf;
         for (uint i = row_start; i < row_end; i++) {
             sum += values[i] * B[uint(col_indices[i]) * n_cols + col];

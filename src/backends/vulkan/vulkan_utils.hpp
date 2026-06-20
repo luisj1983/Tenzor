@@ -24,6 +24,19 @@ namespace tenzor {
 namespace vulkan {
 
 /**
+ * @brief Number of STORAGE_BUFFER bindings declared by every compute pipeline's
+ *        descriptor set layout.
+ *
+ * vkAllocateDescriptorSets consumes descriptors according to the layout
+ * (this many per set) regardless of how many bindings a shader actually uses.
+ * This single constant must be used by the layout-build loops
+ * (getPipeline/getPipelineSpecialized), the descriptor-pool per-type
+ * reservation (DescriptorPool::createPool), and the device-limit clamp in
+ * initVulkan, so the three cannot drift out of sync.
+ */
+static constexpr uint32_t kStorageBuffersPerSet = 12;
+
+/**
  * @brief Exception class for Vulkan errors
  */
 class VulkanError : public std::runtime_error {
@@ -496,7 +509,7 @@ class DescriptorPool {
     static VkDescriptorPool createPool(VkDevice device, uint32_t maxSets) {
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSize.descriptorCount = maxSets * 8; // Up to 8 buffers per set
+        poolSize.descriptorCount = maxSets * kStorageBuffersPerSet; // Per-set STORAGE_BUFFER bindings
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;

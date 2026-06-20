@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // One-sided Jacobi SVD for m >= n, arbitrary size, Float64.
-// See linalg_svd_global.comp for the algorithm.
+// See linalg_svd_global.comp for the algorithm and full_matrices handling.
 layout(local_size_x = 32) in;
 
 layout(set = 0, binding = 0) buffer InputBuf { float64_t data_in[]; };
@@ -14,6 +14,7 @@ layout(push_constant) uniform PushConstants {
     uint m;
     uint n;
     uint batch;
+    uint full_matrices; // 0=reduced (u_cols=n), 1=full (u_cols=m)
 };
 
 shared float64_t sh_c;
@@ -26,11 +27,16 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     if (batch_idx >= batch) return;
 
-    uint u_off = batch_idx * m * n;
-    uint v_off = batch_idx * n * n;
+    // U row stride: m in full mode, n in reduced mode (m >= n so k == n).
+    uint u_cols = (full_matrices == 1u) ? m : n;
+    uint in_off = batch_idx * m * n;        // A is always m x n
+    uint u_off  = batch_idx * m * u_cols;   // U is m x u_cols
+    uint v_off  = batch_idx * n * n;
 
     for (uint idx = tid; idx < m * n; idx += gl_WorkGroupSize.x) {
-        data_u[u_off + idx] = data_in[u_off + idx];
+        uint r = idx / n;
+        uint c = idx - r * n;
+        data_u[u_off + r * u_cols + c] = data_in[in_off + idx];
     }
     for (uint idx = tid; idx < n * n; idx += gl_WorkGroupSize.x) {
         uint r = idx / n;
@@ -48,8 +54,8 @@ void main() {
                 if (tid == 0u) {
                     float64_t a = 0.0lf, b = 0.0lf, c = 0.0lf;
                     for (uint r = 0; r < m; r++) {
-                        float64_t ui = data_u[u_off + r * n + i];
-                        float64_t uj = data_u[u_off + r * n + j];
+                        float64_t ui = data_u[u_off + r * u_cols + i];
+                        float64_t uj = data_u[u_off + r * u_cols + j];
                         a += ui * ui;
                         b += uj * uj;
                         c += ui * uj;
@@ -73,10 +79,10 @@ void main() {
                     float64_t cs = sh_c;
                     float64_t sn = sh_s;
                     for (uint r = tid; r < m; r += gl_WorkGroupSize.x) {
-                        float64_t ui = data_u[u_off + r * n + i];
-                        float64_t uj = data_u[u_off + r * n + j];
-                        data_u[u_off + r * n + i] = cs * ui - sn * uj;
-                        data_u[u_off + r * n + j] = sn * ui + cs * uj;
+                        float64_t ui = data_u[u_off + r * u_cols + i];
+                        float64_t uj = data_u[u_off + r * u_cols + j];
+                        data_u[u_off + r * u_cols + i] = cs * ui - sn * uj;
+                        data_u[u_off + r * u_cols + j] = sn * ui + cs * uj;
                     }
                     for (uint r = tid; r < n; r += gl_WorkGroupSize.x) {
                         float64_t vi = data_v[v_off + r * n + i];
@@ -95,14 +101,49 @@ void main() {
     for (uint j = tid; j < n; j += gl_WorkGroupSize.x) {
         float64_t s = 0.0lf;
         for (uint r = 0; r < m; r++) {
-            float64_t uj = data_u[u_off + r * n + j];
+            float64_t uj = data_u[u_off + r * u_cols + j];
             s += uj * uj;
         }
         float64_t sigma = sqrt(s);
         data_s[batch_idx * n + j] = sigma;
         float64_t inv = (sigma > 1e-300lf) ? 1.0lf / sigma : 0.0lf;
         for (uint r = 0; r < m; r++) {
-            data_u[u_off + r * n + j] *= inv;
+            data_u[u_off + r * u_cols + j] *= inv;
+        }
+    }
+    barrier();
+
+    // Orthonormal completion of U from m x n to m x m (full mode, tall matrices).
+    // See linalg_svd_global.comp for the rationale (single-thread sequential
+    // Gram-Schmidt, working vector held in global memory for m > 32).
+    if (full_matrices == 1u && m > n && tid == 0u) {
+        uint filled = n;
+        for (uint cand = 0; cand < m && filled < m; cand++) {
+            for (uint r = 0; r < m; r++) {
+                data_u[u_off + r * u_cols + filled] = (r == cand) ? 1.0lf : 0.0lf;
+            }
+            for (uint col = 0; col < filled; col++) {
+                float64_t dot = 0.0lf;
+                for (uint r = 0; r < m; r++) {
+                    dot += data_u[u_off + r * u_cols + filled] * data_u[u_off + r * u_cols + col];
+                }
+                for (uint r = 0; r < m; r++) {
+                    data_u[u_off + r * u_cols + filled] -= dot * data_u[u_off + r * u_cols + col];
+                }
+            }
+            float64_t nrm = 0.0lf;
+            for (uint r = 0; r < m; r++) {
+                float64_t w = data_u[u_off + r * u_cols + filled];
+                nrm += w * w;
+            }
+            nrm = sqrt(nrm);
+            if (nrm > 1e-12lf) {
+                float64_t inv = 1.0lf / nrm;
+                for (uint r = 0; r < m; r++) {
+                    data_u[u_off + r * u_cols + filled] *= inv;
+                }
+                filled++;
+            }
         }
     }
 }

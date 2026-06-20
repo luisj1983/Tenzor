@@ -63,14 +63,23 @@ auto to_lite_tensor(const Tensor& t) -> LiteTensor {
     int64_t numel = 1;
     for (int32_t i = 0; i < out.ndim; ++i) {
         out.shape[i] = t.size(i);
-        numel *= out.shape[i];
+        if (__builtin_mul_overflow(numel, static_cast<int64_t>(out.shape[i]), &numel)) {
+            throw std::overflow_error(
+                "to_lite_tensor: shape element count overflows int64");
+        }
     }
     // Row-major (contiguous) strides for the output buffer.
     for (int32_t i = out.ndim - 1; i >= 0; --i) {
         out.strides[i] = (i == out.ndim - 1) ? 1 : out.strides[i + 1] * out.shape[i + 1];
     }
 
-    const auto nbytes = static_cast<size_t>(numel * dtype_size(out.dtype));
+    int64_t signed_nbytes;
+    if (__builtin_mul_overflow(numel, static_cast<int64_t>(dtype_size(out.dtype)),
+                               &signed_nbytes)) {
+        throw std::overflow_error(
+            "to_lite_tensor: tensor byte size overflows int64");
+    }
+    const auto nbytes = static_cast<size_t>(signed_nbytes);
     out.data = (numel > 0) ? std::malloc(nbytes) : nullptr;
     if (numel > 0 && out.data == nullptr) {
         throw std::bad_alloc{};

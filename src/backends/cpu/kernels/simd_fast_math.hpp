@@ -103,6 +103,11 @@ inline __m256 exp_avx2(__m256 x) {
     __m256 c5 = _mm256_set1_ps(EXP_C5);
     __m256 c6 = _mm256_set1_ps(EXP_C6);
 
+    // Preserve NaN: the clamp below maps NaN to a finite value (dropping NaN
+    // propagation that the scalar path keeps). Capture the mask first, blend
+    // NaN back into the result before returning.
+    __m256 exp_nan_mask = _mm256_cmp_ps(x, x, _CMP_UNORD_Q);
+
     // Clamp to avoid overflow/underflow
     __m256 max_val = _mm256_set1_ps(88.3762626647949f);
     __m256 min_val = _mm256_set1_ps(-88.3762626647949f);
@@ -144,7 +149,9 @@ inline __m256 exp_avx2(__m256 x) {
     ki = _mm256_slli_epi32(ki, 23);  // Shift to exponent position
     __m256 scale = _mm256_castsi256_ps(_mm256_add_epi32(ki, _mm256_set1_epi32(0x3f800000)));
 
-    return _mm256_mul_ps(p, scale);
+    __m256 exp_res = _mm256_mul_ps(p, scale);
+    __m256 exp_nan_val = _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN());
+    return _mm256_blendv_ps(exp_res, exp_nan_val, exp_nan_mask);
 }
 
 /**
@@ -232,6 +239,9 @@ inline __m256 log_avx2(__m256 x) {
  * tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
  */
 inline __m256 tanh_avx2(__m256 x) {
+    // Preserve NaN: the clamp below maps NaN to a finite value before exp,
+    // dropping NaN propagation that the scalar path keeps.
+    __m256 tanh_nan_mask = _mm256_cmp_ps(x, x, _CMP_UNORD_Q);
     // Clamp for numerical stability
     __m256 clamp = _mm256_set1_ps(TANH_CLAMP);
     x = _mm256_min_ps(_mm256_max_ps(x, _mm256_sub_ps(_mm256_setzero_ps(), clamp)), clamp);
@@ -245,7 +255,9 @@ inline __m256 tanh_avx2(__m256 x) {
     __m256 num = _mm256_sub_ps(exp2x, one);
     __m256 den = _mm256_add_ps(exp2x, one);
 
-    return _mm256_div_ps(num, den);
+    __m256 tanh_res = _mm256_div_ps(num, den);
+    __m256 tanh_nan_val = _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN());
+    return _mm256_blendv_ps(tanh_res, tanh_nan_val, tanh_nan_mask);
 }
 
 /**
@@ -310,6 +322,9 @@ inline __m512 exp_avx512(__m512 x) {
     __m512 c5 = _mm512_set1_ps(EXP_C5);
     __m512 c6 = _mm512_set1_ps(EXP_C6);
 
+    // Preserve NaN across the clamp (see exp_avx2).
+    __mmask16 exp_nan_mask = _mm512_cmp_ps_mask(x, x, _CMP_UNORD_Q);
+
     // Clamp
     __m512 max_val = _mm512_set1_ps(88.3762626647949f);
     __m512 min_val = _mm512_set1_ps(-88.3762626647949f);
@@ -334,7 +349,9 @@ inline __m512 exp_avx512(__m512 x) {
     ki = _mm512_slli_epi32(ki, 23);
     __m512 scale = _mm512_castsi512_ps(_mm512_add_epi32(ki, _mm512_set1_epi32(0x3f800000)));
 
-    return _mm512_mul_ps(p, scale);
+    __m512 exp_res = _mm512_mul_ps(p, scale);
+    __m512 exp_nan_val = _mm512_set1_ps(std::numeric_limits<float>::quiet_NaN());
+    return _mm512_mask_blend_ps(exp_nan_mask, exp_res, exp_nan_val);
 }
 
 /**
@@ -401,6 +418,8 @@ inline __m512 log_avx512(__m512 x) {
  * @brief AVX-512 vectorized tanh
  */
 inline __m512 tanh_avx512(__m512 x) {
+    // Preserve NaN across the clamp (see tanh_avx2).
+    __mmask16 tanh_nan_mask = _mm512_cmp_ps_mask(x, x, _CMP_UNORD_Q);
     __m512 clamp = _mm512_set1_ps(TANH_CLAMP);
     x = _mm512_min_ps(_mm512_max_ps(x, _mm512_sub_ps(_mm512_setzero_ps(), clamp)), clamp);
 
@@ -411,7 +430,9 @@ inline __m512 tanh_avx512(__m512 x) {
     __m512 num = _mm512_sub_ps(exp2x, one);
     __m512 den = _mm512_add_ps(exp2x, one);
 
-    return _mm512_div_ps(num, den);
+    __m512 tanh_res = _mm512_div_ps(num, den);
+    __m512 tanh_nan_val = _mm512_set1_ps(std::numeric_limits<float>::quiet_NaN());
+    return _mm512_mask_blend_ps(tanh_nan_mask, tanh_res, tanh_nan_val);
 }
 
 /**

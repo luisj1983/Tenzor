@@ -66,8 +66,7 @@ void main() {
             if (abs(v_k) < 1e-30) {
                 tau_k = 0.0;
             } else {
-                tau_k = -2.0 * v_k * v_k / (norm_sq - A[base + (col_start + k) * n + col] * A[base + (col_start + k) * n + col] + v_k * v_k);
-                // Simplified: tau = 2 / (1 + sum(v[k+1:]^2) / v_k^2)
+                // tau = 2 / (1 + sum(v[k+1:]^2) / v_k^2), with v[k] = 1 implicit.
                 float sub_norm = norm_sq - A[base + (col_start + k) * n + col] * A[base + (col_start + k) * n + col];
                 tau_k = (sub_norm + v_k * v_k) / (v_k * v_k);
                 tau_k = 2.0 / tau_k;

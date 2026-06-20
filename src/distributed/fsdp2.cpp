@@ -307,38 +307,19 @@ auto FSDP2::unshard_params() -> void {
                                                        slot_it->second.shape().end()) == full_shape;
 
                 if (!slot_valid) {
-                    // EE.13: if a slot exists from a prior shard cycle (e.g.
-                    // shard_parameters() was called mid-training via
-                    // add_param_group), reuse its TensorImpl via the in-place
-                    // zero_/add_ path so saved-for-backward activations that
-                    // captured the prior unsharded layout remain valid.
-                    // R.18 preserved.
+                    // First unshard for this parameter (or layout/dtype change
+                    // due to mixed-precision reconfiguration).  Take ownership
+                    // of the freshly-allgathered tensor; subsequent cycles
+                    // will copy into this slot in-place.
                     //
-                    // Only on the very first shard (no prior slot) — or when
-                    // dtype/device/numel/shape genuinely changed (mixed
-                    // precision reconfig) and the slot bytes can no longer
-                    // be reused — take the fresh-adoption path.
-                    auto existing_it = unsharded_dst_.find(name);
-                    bool has_prior_slot = (existing_it != unsharded_dst_.end()) &&
-                                          existing_it->second.is_valid();
-                    bool shape_compatible = has_prior_slot &&
-                                            existing_it->second.dtype() == full.dtype() &&
-                                            existing_it->second.device() == full.device() &&
-                                            existing_it->second.numel() == full.numel() &&
-                                            std::vector<int64_t>(
-                                                existing_it->second.shape().begin(),
-                                                existing_it->second.shape().end()) == full_shape;
-                    if (shape_compatible) {
-                        Tensor& slot = existing_it->second;
-                        slot.zero_();
-                        add_(slot, full);
-                    } else {
-                        // First unshard for this parameter (or layout/dtype change
-                        // due to mixed-precision reconfiguration).  Take ownership
-                        // of the freshly-allgathered tensor; subsequent cycles
-                        // will copy into this slot in-place.
-                        unsharded_dst_[name] = full;
-                    }
+                    // Note: slot_valid already encodes the full predicate set
+                    // (exists && valid && dtype/device/numel/shape match), so a
+                    // separate "shape_compatible" in-place-reuse branch here
+                    // would be unreachable — when !slot_valid, the slot bytes
+                    // can never be reused.  full() is freshly all-gathered
+                    // storage, independent of any DTensor internal buffer, so
+                    // adopting it directly does not alias.
+                    unsharded_dst_[name] = full;
                 } else {
                     Tensor& slot = slot_it->second;
                     slot.zero_();
@@ -394,7 +375,18 @@ auto FSDP2::reshard_params() -> void {
                                                        slot_it->second.shape().end()) == local_shape;
 
                 if (!slot_valid) {
-                    sharded_dst_[name] = local;
+                    // local is a shallow copy of dt's internal local_tensor_
+                    // (DTensor::local_tensor() returns a const Tensor& sharing
+                    // the same TensorImpl/Storage).  Nothing rebinds
+                    // local_tensor_ across cycles, so adopting `local` directly
+                    // would make the persistent slot alias dt.local_tensor_.
+                    // On the next reshard the in-place `slot.zero_(); add_(slot,
+                    // local)` would then operate on a single self-aliased
+                    // buffer (the dispatch alias guard does not fire for
+                    // same-impl references), zeroing the parameter shard.
+                    // clone() gives the slot independent storage so subsequent
+                    // in-place copies are well-defined.
+                    sharded_dst_[name] = local.clone();
                 } else {
                     Tensor& slot = slot_it->second;
                     slot.zero_();

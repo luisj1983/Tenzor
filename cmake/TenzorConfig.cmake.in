@@ -15,7 +15,11 @@ set(Tenzor_MPS_FOUND @TENZOR_MPS_BUILT@)
 # Find required dependencies
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
-find_dependency(OpenMP)
+# OpenMP is optional for the core library (see root CMakeLists), so only
+# require it downstream if it was actually found at build time.
+if(@TENZOR_OPENMP_FOUND@)
+    find_dependency(OpenMP)
+endif()
 
 # Model Hub dependencies (CURL + OpenSSL are linked PUBLIC when enabled)
 if(@TENZOR_BUILD_MODEL_HUB@)

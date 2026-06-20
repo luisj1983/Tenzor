@@ -2675,12 +2675,28 @@ void register_nn(py::module_& m) {
         }
 
         // Infer num_features from the most authoritative source.
+        //
+        // weight/bias/running_mean/running_var are 1-D [C] tensors in PyTorch.
+        // shape() returns a std::span whose operator[] is unchecked, so we must
+        // confirm rank >= 1 before indexing [0]; otherwise a 0-dim (scalar)
+        // tensor would be undefined behaviour instead of a clean error.
+        auto require_1d = [](const auto& shp, const char* name) {
+            if (shp.size() != 1) {
+                throw std::invalid_argument(
+                    std::string("F.batch_norm: ") + name +
+                    " must be a 1-D tensor of shape [C]; got rank " +
+                    std::to_string(shp.size()) + ".");
+            }
+        };
         int64_t num_features = -1;
         if (weight.has_value()) {
+            require_1d(weight->shape(), "weight");
             num_features = static_cast<int64_t>(weight->shape()[0]);
         } else if (bias.has_value()) {
+            require_1d(bias->shape(), "bias");
             num_features = static_cast<int64_t>(bias->shape()[0]);
         } else if (has_stats) {
+            require_1d(running_mean->shape(), "running_mean");
             num_features = static_cast<int64_t>(running_mean->shape()[0]);
         } else {
             auto in_shape = input.tensor().shape();
@@ -2690,6 +2706,30 @@ void register_nn(py::module_& m) {
                     "(N, C, ...).");
             }
             num_features = static_cast<int64_t>(in_shape[1]);
+        }
+
+        // Validate every caller-provided affine/stat tensor is 1-D [C] and
+        // matches num_features. This is a HARD requirement before copy_into:
+        // copy_into sizes its byte count from the destination's numel(), so a
+        // length-mismatched running_mean / running_var would cause copy_into to
+        // read past the end of the shorter buffer (heap OOB read) when seeding
+        // the layer, or past the layer buffer when copying stats back. Catch it
+        // here with a clear error instead.
+        auto require_features = [&](const auto& shp, const char* name) {
+            require_1d(shp, name);
+            if (static_cast<int64_t>(shp[0]) != num_features) {
+                throw std::invalid_argument(
+                    std::string("F.batch_norm: ") + name + " has length " +
+                    std::to_string(shp[0]) +
+                    " but expected num_features=" +
+                    std::to_string(num_features) + ".");
+            }
+        };
+        if (weight.has_value()) require_features(weight->shape(), "weight");
+        if (bias.has_value()) require_features(bias->shape(), "bias");
+        if (has_stats) {
+            require_features(running_mean->shape(), "running_mean");
+            require_features(running_var->shape(), "running_var");
         }
 
         // Build a transient layer in non-affine mode. The caller's affine

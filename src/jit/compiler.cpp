@@ -24,6 +24,12 @@ namespace jit {
 // ============================================================================
 
 auto DeadCodeEliminationPass::run(Graph& graph) -> bool {
+    // Reachability is rooted at the graph's declared outputs. A graph that has
+    // nodes but no declared outputs gives us no roots, so every node would look
+    // unreachable and be erased. That is never the intent (it would gut a
+    // subgraph whose outputs were not populated), so leave such graphs alone.
+    if (graph.outputs().empty()) return false;
+
     auto reachable = mark_reachable_nodes(graph);
 
     bool modified = false;
@@ -38,6 +44,20 @@ auto DeadCodeEliminationPass::run(Graph& graph) -> bool {
         } else {
             ++it;
         }
+    }
+
+    // Recurse into control-flow subgraphs of the surviving nodes. Each subgraph
+    // is a self-contained graph (it receives its inputs through forward(), it
+    // does not capture outer-graph values directly), so DCE can be applied to it
+    // independently, rooted at that subgraph's own outputs.
+    for (const auto& node : nodes) {
+        if (reachable.find(node.get()) == reachable.end()) continue;
+        auto& then_g = node->then_branch();
+        auto& else_g = node->else_branch();
+        auto& body_g = node->body();
+        if (then_g) modified |= run(*then_g);
+        if (else_g) modified |= run(*else_g);
+        if (body_g) modified |= run(*body_g);
     }
 
     return modified;
@@ -68,22 +88,12 @@ auto DeadCodeEliminationPass::mark_reachable_nodes(const Graph& graph) -> std::u
                     worklist.push_back(producer.get());
                 }
             }
-            // Mark all nodes in subgraphs as reachable (If/Loop branches)
-            if (node->then_branch()) {
-                for (const auto& sub_node : node->then_branch()->nodes()) {
-                    worklist.push_back(sub_node.get());
-                }
-            }
-            if (node->else_branch()) {
-                for (const auto& sub_node : node->else_branch()->nodes()) {
-                    worklist.push_back(sub_node.get());
-                }
-            }
-            if (node->body()) {
-                for (const auto& sub_node : node->body()->nodes()) {
-                    worklist.push_back(sub_node.get());
-                }
-            }
+            // NOTE: subgraph (then_branch/else_branch/body) nodes are NOT marked
+            // reachable here. Each subgraph is a self-contained graph and is
+            // dead-code-eliminated independently (rooted at its own outputs) by
+            // the recursive DeadCodeEliminationPass::run call. Marking every
+            // subgraph node reachable would both prevent intra-body DCE and keep
+            // otherwise-dead outer producers alive.
         }
     }
 
@@ -238,6 +248,26 @@ auto CommonSubexpressionEliminationPass::nodes_equivalent(const Node& a, const N
     // Stateful ops: never equivalent, even if inputs match. Two independent
     // Dropout draws must produce independent random masks.
     if (is_stateful_op(a.op_type())) return false;
+
+    // Control-flow nodes (If/Loop) carry their semantics in subgraph bodies
+    // (then_branch/else_branch/body) which are NOT part of get_all_attrs() and
+    // are therefore never compared below. Two If/Loop nodes with identical
+    // inputs and scalar attrs but structurally different branch/body graphs are
+    // distinct computations and must never be merged. Bail out whenever either
+    // node carries any subgraph.
+    if (a.then_branch() || a.else_branch() || a.body() ||
+        b.then_branch() || b.else_branch() || b.body()) {
+        return false;
+    }
+
+    // Nodes carrying tensor attributes (e.g. Constant's "value" payload) are
+    // never deduplicated: the tensor data is not part of the comparison below,
+    // so two such nodes differing only in their tensor payload would otherwise
+    // be wrongly merged (every Constant would collapse into the first one).
+    if (!std::get<4>(const_cast<Node&>(a).get_all_attrs()).empty() ||
+        !std::get<4>(const_cast<Node&>(b).get_all_attrs()).empty()) {
+        return false;
+    }
 
     // Same number of inputs
     if (a.inputs().size() != b.inputs().size()) return false;
@@ -999,6 +1029,36 @@ auto FuseAttentionPass::run(Graph& graph) -> bool {
         }
         if (!qk_matmul || qk_matmul->inputs().size() < 2) continue;
 
+        // The other operand of the scale Mul (the one not produced by the QK
+        // MatMul) MUST be a scalar (numel()==1) Constant for this to be a true
+        // softmax scale. If it is a non-scalar tensor (an elementwise mask/scale),
+        // a computed value, or a Constant with numel()!=1, the fused
+        // FlashAttention executor (which only applies scores*scale with a scalar
+        // scale) would silently drop the elementwise-multiply semantics and
+        // diverge from eager. In that case, skip fusion.
+        {
+            bool has_scalar_const_scale = false;
+            auto qk_out_id = qk_matmul->outputs().empty()
+                                 ? std::string{}
+                                 : qk_matmul->outputs()[0]->id();
+            for (size_t inp = 0; inp < scale_node->inputs().size(); ++inp) {
+                auto value = scale_node->inputs()[inp];
+                // Skip the operand coming from the QK MatMul.
+                if (!qk_out_id.empty() && value->id() == qk_out_id) continue;
+                auto producer = value->node();
+                if (producer && producer->op_type() == OpType::Constant) {
+                    Tensor scale_tensor = producer->get_tensor_attr("value");
+                    if (scale_tensor.numel() == 1) {
+                        has_scalar_const_scale = true;
+                    }
+                }
+                // Whether or not it was a scalar const, it is the non-MatMul
+                // operand; we only fuse if it qualified as a scalar scale.
+                break;
+            }
+            if (!has_scalar_const_scale) continue;
+        }
+
         // Verify Q*K^T matmul output is only used by the scale node
         if (!qk_matmul->outputs().empty() && qk_matmul->outputs()[0]->uses().size() > 1) {
             continue;
@@ -1642,7 +1702,11 @@ auto StrengthReductionPass::reduce_node(std::shared_ptr<Node> node, Graph& graph
             recip_node->set_tensor_attr("value", recip_tensor);
 
             std::string recip_val_id = recip_node->name() + "_out";
-            auto recip_val = graph.create_value(recip_val_id, input1->shape(),
+            // The reciprocal tensor is built with shape {1} above, so the graph
+            // Value must declare the same shape. The divisor constant may carry
+            // a different numel()==1 shape (e.g. {}, {1,1}); using input1->shape()
+            // would desync the Value's declared shape from its tensor payload.
+            auto recip_val = graph.create_value(recip_val_id, std::vector<int64_t>{1},
                 input1->dtype(), input1->device());
             recip_val->set_node(recip_node);
             recip_node->add_output(recip_val);
@@ -1909,21 +1973,74 @@ auto LICMPass::run(Graph& graph) -> bool {
             }
         }
 
-        // Hoist invariant nodes before the loop
+        // Hoist invariant nodes before the loop.
+        //
+        // A loop-invariant body node computes the same value every iteration, so
+        // we evaluate it once in the OUTER graph and thread the result into the
+        // loop body as an extra loop-carried (passthrough) value. This keeps the
+        // body's consumers valid: they continue to reference the very same Value
+        // object, which we convert from a body-internal result into a body INPUT.
+        //
+        // The executor (graph.cpp Loop case) treats the body positionally:
+        //   Loop node inputs : [max_iter, cond, carried_0, carried_1, ...]
+        //   body inputs      : [iter,     cond, carried_0, carried_1, ...]
+        //   body outputs     : [cond,           carried_0, carried_1, ...]
+        // Appending one new value to the Loop node inputs, the body inputs, and
+        // the body outputs keeps these three lists index-consistent so the new
+        // carried value is initialised from the hoisted result and passed through
+        // unchanged on every iteration.
         for (auto& inv_node : invariant_nodes) {
+            // The invariant node must produce exactly one output for the carried
+            // threading below to be well-defined.
+            if (inv_node->outputs().size() != 1) continue;
+
+            // 1. Re-create the node in the outer graph with a FRESH unique output
+            //    id (ids must not be shared across the outer and body scopes).
             auto hoisted = graph.create_node(inv_node->op_type());
             for (const auto& input : inv_node->inputs()) {
                 auto outer_val = graph.get_value(input->id());
                 if (outer_val) hoisted->add_input(outer_val);
             }
-            for (const auto& output : inv_node->outputs()) {
-                auto outer_val = graph.create_value(
-                    output->id(), output->shape(), output->dtype(), output->device());
-                outer_val->set_node(hoisted);
-                hoisted->add_output(outer_val);
+            // Copy scalar/vector/bool/tensor attrs so the hoisted op is identical.
+            {
+                auto src = inv_node->get_all_attrs();
+                auto dst = hoisted->get_all_attrs();
+                std::get<0>(dst) = std::get<0>(src);
+                std::get<1>(dst) = std::get<1>(src);
+                std::get<2>(dst) = std::get<2>(src);
+                std::get<3>(dst) = std::get<3>(src);
+                std::get<4>(dst) = std::get<4>(src);
             }
+
+            auto body_output = inv_node->outputs()[0];
+            std::string hoisted_id = hoisted->name() + "_licm";
+            auto hoisted_val = graph.create_value(
+                hoisted_id, body_output->shape(), body_output->dtype(),
+                body_output->device());
+            hoisted_val->set_node(hoisted);
+            hoisted->add_output(hoisted_val);
             graph.add_node(hoisted);
+
+            // 2. Remove the producer from the body. The body Value object stays
+            //    alive (its consumers still hold it) and becomes a graph input.
             body->remove_node(inv_node);
+            body_output->set_node(nullptr);
+
+            // 3. Thread the hoisted result into the body as a new loop-carried
+            //    value: append to body inputs (so consumers read it), append the
+            //    same value to body outputs (passthrough to keep the carried set
+            //    stable across iterations), and append the hoisted outer value to
+            //    the Loop node inputs (the initial carried value).
+            auto body_inputs = body->inputs();
+            body_inputs.push_back(body_output);
+            body->set_inputs(std::move(body_inputs));
+
+            auto body_outputs = body->outputs();
+            body_outputs.push_back(body_output);
+            body->set_outputs(std::move(body_outputs));
+
+            node->add_input(hoisted_val);
+
             modified = true;
         }
     }
@@ -2504,14 +2621,42 @@ auto DTypeOptimizationPass::run(Graph& graph) -> bool {
                 downcast_values.erase(output->id());
             }
         } else {
-            // Neutral ops: inherit dtype from primary input
-            if (!node->inputs().empty()) {
-                auto& primary_input = node->inputs()[0];
-                if (downcast_values.count(primary_input->id()) > 0) {
+            // Neutral ops (e.g. elementwise Add/Sub/Mul/Div): inherit dtype from
+            // the primary input. These ops may be multi-input, so relabeling the
+            // output to target_dtype_ based on the primary input alone would
+            // desync the label from the actual computed dtype whenever a sibling
+            // input is still Float32 (or some other dtype) — corrupting the
+            // downstream upcast/output-cast decisions keyed off downcast_values.
+            //
+            // To keep the label honest we mirror the compute-heavy branch:
+            // when the primary input is downcast, every Float32 sibling is cast
+            // to target_dtype_ so the whole op truly runs in the downcast dtype.
+            // If a sibling carries a dtype that is neither downcast nor Float32
+            // (e.g. Float64), the operands cannot be unified safely, so we leave
+            // the output label untouched (it keeps its original dtype).
+            if (!node->inputs().empty() &&
+                downcast_values.count(node->inputs()[0]->id()) > 0) {
+                bool can_downcast = true;
+                for (size_t i = 0; i < node->inputs().size(); ++i) {
+                    auto& input_val = node->inputs()[i];
+                    if (downcast_values.count(input_val->id()) > 0) continue;
+                    if (input_val->dtype() != DType::Float32) {
+                        can_downcast = false;
+                        break;
+                    }
+                }
+                if (can_downcast) {
+                    for (size_t i = 0; i < node->inputs().size(); ++i) {
+                        auto& input_val = node->inputs()[i];
+                        if (downcast_values.count(input_val->id()) > 0) continue;
+                        // Remaining non-downcast inputs are all Float32 here.
+                        insertions.push_back({input_val, node, i, target_dtype_});
+                    }
                     for (auto& output : node->outputs()) {
                         output->set_dtype(target_dtype_);
                         downcast_values.insert(output->id());
                     }
+                    changed = true;
                 }
             }
         }

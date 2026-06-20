@@ -115,13 +115,21 @@ auto quantized_linear_hip(
     int32_t output_zero_point,
     hipStream_t stream
 ) -> Tensor {
-    auto input_shape = input.shape();
-    auto weight_shape = weight.shape();
+    // The kernel flat-indexes input/weight from shape-derived row offsets
+    // (input_row = input + b*in_features, weight_row = weight + o*in_features),
+    // which is only valid for contiguous storage. Materialize contiguous copies
+    // for non-contiguous views (transposed/sliced) to avoid reading at wrong
+    // offsets, matching the roi_align/vision sibling kernels.
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+
+    auto input_shape = input_c.shape();
+    auto weight_shape = weight_c.shape();
     int64_t batch_size = input_shape[0];
     int64_t in_features = input_shape[1];
     int64_t out_features = weight_shape[0];
 
-    Tensor output({batch_size, out_features}, DType::Float32, input.device());
+    Tensor output({batch_size, out_features}, DType::Float32, input_c.device());
 
     // Dequantized Float32 output: scale = input_scale * weight_scale (NO division
     // by output_scale). This op produces a dequantized result, not a requantized
@@ -137,8 +145,8 @@ auto quantized_linear_hip(
 
     hipLaunchKernelGGL(quantized_linear_kernel_hip,
         blocks, threads, 0, stream,
-        input.data<int8_t>(),
-        weight.data<int8_t>(),
+        input_c.data<int8_t>(),
+        weight_c.data<int8_t>(),
         bias ? bias->data<float>() : nullptr,
         output.data<float>(),
         batch_size, in_features, out_features,
@@ -359,13 +367,26 @@ auto quantized_conv2d_hip(
     int32_t output_zero_point,
     hipStream_t stream
 ) -> Tensor {
-    auto input_shape = input.shape();
+    // im2col and the GEMM/dequant kernels flat-index input/weight/bias from
+    // shape-derived offsets, which is only valid for contiguous storage.
+    // Materialize contiguous copies for non-contiguous views, matching the
+    // roi_align/vision sibling kernels.
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c;
+    const Tensor* bias_ptr = bias;
+    if (bias != nullptr) {
+        bias_c = bias->is_contiguous() ? *bias : bias->contiguous();
+        bias_ptr = &bias_c;
+    }
+
+    auto input_shape = input_c.shape();
     int64_t batch = input_shape[0];
     int64_t in_channels = input_shape[1];
     int64_t h_in = input_shape[2];
     int64_t w_in = input_shape[3];
 
-    auto weight_shape = weight.shape();
+    auto weight_shape = weight_c.shape();
     int64_t out_channels = weight_shape[0];
     int64_t kernel_size = weight_shape[2];
 
@@ -379,7 +400,7 @@ auto quantized_conv2d_hip(
     int64_t h_out = (h_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     int64_t w_out = (w_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
-    Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, input.device());
+    Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, input_c.device());
 
     // Dequantized Float32 output: scale = input_scale * weight_scale (NO division
     // by output_scale). This op produces a dequantized result, not a requantized
@@ -435,7 +456,7 @@ auto quantized_conv2d_hip(
 
             hipLaunchKernelGGL(im2col_int8_kernel,
                 dim3(im2col_blocks), dim3(THREADS), 0, stream,
-                input.data<int8_t>(),
+                input_c.data<int8_t>(),
                 col_buffer,
                 batch, in_channels, in_channels_per_group, ic_base, h_in, w_in,
                 kernel_size, stride, padding, dilation,
@@ -446,7 +467,7 @@ auto quantized_conv2d_hip(
             // Step 1b: zero-point correction sums for this group.
             //   weight_col_sums[oc_local] = sum_k weight[oc_base+oc_local][k]
             //   row_sums[m]               = sum_k col_buffer[m][k] (padding = input_zp)
-            const int8_t* weight_group = weight.data<int8_t>() + oc_base * K;
+            const int8_t* weight_group = weight_c.data<int8_t>() + oc_base * K;
 
             hipLaunchKernelGGL(quant_row_sum_kernel,
                 dim3(static_cast<int>((N + THREADS - 1) / THREADS)), dim3(THREADS), 0, stream,
@@ -498,7 +519,7 @@ auto quantized_conv2d_hip(
                 dim3(dequant_blocks), dim3(THREADS), 0, stream,
                 gemm_output,
                 output.data<float>(),
-                bias ? bias->data<float>() : nullptr,
+                bias_ptr ? bias_ptr->data<float>() : nullptr,
                 weight_col_sums,
                 row_sums,
                 total_output,

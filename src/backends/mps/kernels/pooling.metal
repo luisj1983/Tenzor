@@ -13,6 +13,46 @@
 using namespace metal;
 
 // ============================================================================
+// Atomic half accumulation
+// ============================================================================
+//
+// MSL does not provide native atomics for `half`. Pooling backward kernels
+// scatter gradients into `grad_input`, and with overlapping windows (stride <
+// kernel, or adaptive pooling, where multiple output positions reference the
+// same input element) several threads can update the same slot concurrently.
+// A plain read-modify-write (`dst = dst + val`) races and silently drops
+// contributions.
+//
+// To keep the half backward pass correct without a separate float scratch
+// buffer (which would require host-side allocation), we emulate an atomic
+// half add via a compare-exchange loop on the enclosing 32-bit word. Each
+// 32-bit word holds two consecutive halves; we update only the target lane
+// and retry on contention, leaving the sibling half untouched.
+inline void atomic_add_half(device half* base, uint idx, float val) {
+    // Word that contains the target half and which 16-bit lane it occupies.
+    uint word_idx = idx >> 1;        // idx / 2
+    uint lane     = idx & 1u;        // 0 -> low half, 1 -> high half
+    uint shift    = lane * 16u;
+
+    device atomic_uint* aword =
+        reinterpret_cast<device atomic_uint*>(base) + word_idx;
+
+    uint expected = atomic_load_explicit(aword, memory_order_relaxed);
+    bool done = false;
+    while (!done) {
+        uint cur_bits = (expected >> shift) & 0xFFFFu;
+        half cur = as_type<half>(ushort(cur_bits));
+        half updated = half(float(cur) + val);
+        uint new_bits = uint(as_type<ushort>(updated));
+        uint desired = (expected & ~(0xFFFFu << shift)) | (new_bits << shift);
+        done = atomic_compare_exchange_weak_explicit(
+            aword, &expected, desired,
+            memory_order_relaxed, memory_order_relaxed);
+        // On failure `expected` is refreshed with the current word; retry.
+    }
+}
+
+// ============================================================================
 // Shared parameter structures
 // ============================================================================
 
@@ -186,17 +226,13 @@ kernel void maxpool2d_backward_kernel_f16(
     constant uint& num_output      [[buffer(3)]],
     uint tid [[thread_position_in_grid]])
 {
-    // Half atomics not universally available — scatter via float conversion.
-    // For correctness with overlapping windows, use a serial approach per
-    // output element. The host side must zero grad_input before dispatch.
+    // Overlapping max-pool windows (stride < kernel) can map several output
+    // positions to the same input slot, so concurrent threads must accumulate
+    // atomically. The host zero-initializes grad_input before dispatch.
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        // Atomic float add on the half buffer is not available in MSL.
-        // Use a simple non-atomic write. The host must ensure no overlapping
-        // windows in the backward, or use the float backward path.
-        // For safety, promote to float path on the host side for f16 backward.
-        grad_input[idx] = grad_input[idx] + grad_output[tid];
+        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
     }
 }
 
@@ -381,9 +417,9 @@ kernel void avgpool2d_backward_kernel_f16(
             int iw = int(ow * p.stride_w) - int(p.pad_w) + int(kw);
             if (iw < 0 || uint(iw) >= p.in_width) continue;
             uint idx = input_base + uint(ih) * p.in_width + uint(iw);
-            // Non-atomic for f16 — host should use float backward when
-            // overlapping windows are possible, or accept approximation.
-            grad_input[idx] = half(float(grad_input[idx]) + grad_val);
+            // Overlapping windows can target the same input slot from
+            // multiple threads; accumulate atomically.
+            atomic_add_half(grad_input, idx, grad_val);
         }
     }
 }
@@ -524,7 +560,7 @@ kernel void adaptive_avgpool2d_backward_kernel_f16(
     for (uint ih = h_start; ih < h_end; ++ih) {
         for (uint iw = w_start; iw < w_end; ++iw) {
             uint idx = input_base + ih * p.in_width + iw;
-            grad_input[idx] = half(float(grad_input[idx]) + grad_val);
+            atomic_add_half(grad_input, idx, grad_val);
         }
     }
 }
@@ -642,7 +678,7 @@ kernel void adaptive_maxpool2d_backward_kernel_f16(
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        grad_input[idx] = half(float(grad_input[idx]) + float(grad_output[tid]));
+        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
     }
 }
 
@@ -747,7 +783,7 @@ kernel void maxpool1d_backward_kernel_f16(
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        grad_input[idx] = half(float(grad_input[idx]) + float(grad_output[tid]));
+        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
     }
 }
 
@@ -890,7 +926,7 @@ kernel void avgpool1d_backward_kernel_f16(
         int il = int(ol * p.stride) - int(p.padding) + int(k);
         if (il < 0 || uint(il) >= p.in_length) continue;
         uint idx = input_base + uint(il);
-        grad_input[idx] = half(float(grad_input[idx]) + grad_val);
+        atomic_add_half(grad_input, idx, grad_val);
     }
 }
 
@@ -1011,7 +1047,7 @@ kernel void adaptive_avgpool1d_backward_kernel_f16(
 
     for (uint il = l_start; il < l_end; ++il) {
         uint idx = input_base + il;
-        grad_input[idx] = half(float(grad_input[idx]) + grad_val);
+        atomic_add_half(grad_input, idx, grad_val);
     }
 }
 
@@ -1118,6 +1154,6 @@ kernel void adaptive_maxpool1d_backward_kernel_f16(
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        grad_input[idx] = half(float(grad_input[idx]) + float(grad_output[tid]));
+        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
     }
 }

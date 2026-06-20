@@ -308,34 +308,82 @@ auto ExportedProgram::save(const std::string& path) const -> void {
     if (!graph_in.is_open()) {
         throw std::runtime_error("ExportedProgram::save: failed to read temp graph file");
     }
-    auto graph_size = static_cast<size_t>(graph_in.tellg());
+    // tellg() returns streampos(-1) on failure; guard before casting to size_t
+    // (which would wrap to SIZE_MAX and force a bad_alloc / huge allocation),
+    // mirroring the bounds checks on the load path.
+    std::streampos graph_pos = graph_in.tellg();
+    if (graph_pos < 0) {
+        throw std::runtime_error(
+            "ExportedProgram::save: failed to size temp graph file");
+    }
+    auto graph_size = static_cast<size_t>(graph_pos);
     graph_in.seekg(0);
     std::vector<char> graph_bytes(graph_size);
     graph_in.read(graph_bytes.data(), static_cast<std::streamsize>(graph_size));
+    if (graph_in.gcount() != static_cast<std::streamsize>(graph_size)) {
+        throw std::runtime_error(
+            "ExportedProgram::save: failed to read back temp graph file");
+    }
     graph_in.close();
     // tmp_guard removes graph_tmp at function exit.
 
-    // 2. Write the TZEP file.
-    std::ofstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("ExportedProgram::save: failed to open " + path);
+    // 2. Write the entire TZEP image to a unique sibling temp file first, then
+    //    atomically rename() it onto `path`. This keeps the save atomic: if a
+    //    write fails (disk full, I/O error) or the process crashes mid-write,
+    //    an existing good model at `path` is never clobbered with a partial
+    //    image. rename() on the same filesystem is atomic.
+    std::string out_tmp = make_unique_graph_tmp(path);
+    TempFileGuard out_guard(out_tmp);
+    {
+        std::ofstream file(out_tmp, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error(
+                "ExportedProgram::save: failed to open temp output for " + path);
+        }
+
+        write_uint32(file, TZEP_MAGIC);
+        write_uint32(file, TZEP_VERSION);
+        write_uint64(file, impl_->n_inputs);
+        write_uint64(file, impl_->n_outputs);
+
+        // State dict
+        write_uint64(file, impl_->state.size());
+        for (const auto& [name, tensor] : impl_->state) {
+            write_string(file, name);
+            write_tensor(file, tensor);
+        }
+
+        // Graph blob
+        write_uint64(file, graph_size);
+        file.write(graph_bytes.data(), static_cast<std::streamsize>(graph_size));
+
+        // A failed write (failbit/badbit) turns subsequent write() into no-ops
+        // and would otherwise silently produce a truncated/corrupt file. Flush
+        // and check before committing.
+        file.flush();
+        if (!file) {
+            throw std::runtime_error(
+                "ExportedProgram::save: write failed for " + path);
+        }
+        file.close();
+        // Re-check after close to catch buffered flush failures surfaced only
+        // at close time.
+        if (!file) {
+            throw std::runtime_error(
+                "ExportedProgram::save: failed to finalize write for " + path);
+        }
     }
 
-    write_uint32(file, TZEP_MAGIC);
-    write_uint32(file, TZEP_VERSION);
-    write_uint64(file, impl_->n_inputs);
-    write_uint64(file, impl_->n_outputs);
-
-    // State dict
-    write_uint64(file, impl_->state.size());
-    for (const auto& [name, tensor] : impl_->state) {
-        write_string(file, name);
-        write_tensor(file, tensor);
+    // 3. Atomically commit: rename temp over the target. On success the temp no
+    //    longer exists, so dismiss the guard to avoid removing the live file.
+    std::error_code ec;
+    std::filesystem::rename(out_tmp, path, ec);
+    if (ec) {
+        throw std::runtime_error(
+            "ExportedProgram::save: failed to commit " + path + ": " +
+            ec.message());
     }
-
-    // Graph blob
-    write_uint64(file, graph_size);
-    file.write(graph_bytes.data(), static_cast<std::streamsize>(graph_size));
+    out_guard.dismiss();
 }
 
 auto ExportedProgram::load(const std::string& path,

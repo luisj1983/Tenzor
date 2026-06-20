@@ -21,6 +21,9 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
 
+#include <limits>
+#include <stdexcept>
+
 namespace tenzor::mps {
 
 // ============================================================================
@@ -69,14 +72,26 @@ static auto mps_permute_kernel(const Tensor& input, const std::vector<int64_t>& 
     return result;
 }
 
+// Sentinel used by the registry to mean "squeeze all size-1 dims".
+static constexpr int64_t kSqueezeAllDims = std::numeric_limits<int64_t>::min();
+
 static auto mps_squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
-    if (dim >= 0) {
-        auto& r_shape = result.mutable_shape();
-        auto& r_strides = result.mutable_strides();
-        r_shape.erase(r_shape.begin() + dim);
-        r_strides.erase(r_strides.begin() + dim);
+    if (dim != kSqueezeAllDims) {
+        // Explicit dim: normalize negatives, then squeeze only if size == 1
+        // (PyTorch semantics — a non-size-1 dim is a no-op, never dropped).
+        const int64_t ndim = input.ndim();
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::runtime_error("squeeze: dim out of range");
+        }
+        if (input.shape()[dim] == 1) {
+            auto& r_shape = result.mutable_shape();
+            auto& r_strides = result.mutable_strides();
+            r_shape.erase(r_shape.begin() + dim);
+            r_strides.erase(r_strides.begin() + dim);
+        }
     } else {
         std::vector<int64_t> new_shape;
         std::vector<int64_t> new_strides;
@@ -97,12 +112,20 @@ static auto mps_squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
 }
 
 static auto mps_unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    // PyTorch accepts dim in [-(ndim+1), ndim]; normalize negatives so that
+    // unsqueeze(-1) inserts at the end rather than dereferencing before
+    // begin() (UB / heap corruption in std::vector::insert).
+    const int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim + 1;
+    if (dim < 0 || dim > ndim) {
+        throw std::runtime_error("unsqueeze: dim out of range");
+    }
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
     auto& r_shape = result.mutable_shape();
     auto& r_strides = result.mutable_strides();
     r_shape.insert(r_shape.begin() + dim, 1);
-    int64_t new_stride = (dim < input.ndim()) ? input.strides()[dim] : 1;
+    int64_t new_stride = (dim < ndim) ? input.strides()[dim] : 1;
     r_strides.insert(r_strides.begin() + dim, new_stride);
     return result;
 }
@@ -630,7 +653,10 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
 
     table.register_single_output_kernel(OpId::Squeeze,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            // Use a sentinel that cannot collide with a real (possibly negative)
+            // axis so that squeeze(-1)/squeeze(-2) are NOT mistaken for
+            // squeeze-all. Mirrors the CPU backend's contract.
+            int64_t dim = attrs.get_int(AttrKey::Dim, kSqueezeAllDims);
             return mps_squeeze_kernel(inputs[0], dim);
         });
 
@@ -940,7 +966,11 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Cross, mps_cross_kernel);
     table.register_single_output_kernel(OpId::Polygamma,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t order = attrs.get_int(AttrKey::Order, 0);
+            // AttrKey::Order is stored as a double by the producer
+            // (src/ops/math.cpp), matching every other backend. Reading it
+            // with get_int would reinterpret the double's bit pattern as an
+            // int64 (n=1 -> 4607182418800017408), so read it as a float.
+            int64_t order = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
             return mps_polygamma_kernel(inputs[0], order);
         });
 
@@ -1346,20 +1376,21 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         });
     table.register_single_output_kernel(OpId::DropoutBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            // grad * mask * scale — reuse the mask from forward
-            float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
-            float scale = 1.0f / (1.0f - p);
-            // inputs[0] = grad, inputs[1] = mask
-            // Use element-wise multiplication via shared memory
-            auto shape = inputs[0].shape();
-            std::vector<int64_t> sv(shape.begin(), shape.end());
-            Tensor output(sv, inputs[0].dtype(), inputs[0].device());
-            const float* g = static_cast<const float*>(inputs[0].data_ptr());
-            const float* m = static_cast<const float*>(inputs[1].data_ptr());
-            float* o = static_cast<float*>(const_cast<void*>(output.data_ptr()));
-            for (size_t i = 0; i < static_cast<size_t>(inputs[0].numel()); ++i)
-                o[i] = g[i] * m[i] * scale;
-            return output;
+            // grad_in = grad * mask * scale — reuse the mask from forward.
+            // inputs[0] = grad, inputs[1] = mask.
+            // Compute entirely with the native element-wise Mul kernel so that
+            // every dtype (Float16/BFloat16/Float32/Float64/...) and any
+            // non-contiguous / broadcast layout is handled correctly. A raw
+            // float* loop here would read half words as 32-bit floats (garbage
+            // and OOB for Float16/BFloat16), drop precision for Float64, and
+            // ignore strides for non-contiguous grad/mask.
+            double p = attrs.get_float(AttrKey::P, 0.5);
+            double scale = 1.0 / (1.0 - p);
+            // grad * mask (native, dtype/stride/broadcast correct)
+            Tensor gm = mps_mul_kernel(inputs[0], inputs[1]);
+            // * scale: scalar tensor of the same dtype/device, broadcast-mul.
+            Tensor scale_t = tenzor::full({1}, scale, gm.dtype(), gm.device());
+            return mps_mul_kernel(gm, scale_t);
         });
 
     // ================================================================
@@ -1369,7 +1400,17 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
 
     // Helper: dispatch to CPU but use shared memory (MPS unified memory
     // means .to(cpu) and .to(mps) are effectively free on Apple Silicon)
+    // IMPORTANT: these Accelerate (CPU round-trip) fallbacks must NEVER
+    // clobber a native Metal kernel that was already registered earlier in
+    // this same function. The alphabetical Phase 8.6 catch-all block below
+    // names many OpIds that already have native GPU kernels (MatMul, Mul,
+    // Div, Sub, Neg, Log, Sigmoid, Tanh, Pow, Cross, Take, bitwise ops, …).
+    // Registration runs top-to-bottom and the later write wins, so without
+    // this guard the native kernels would be silently replaced by a
+    // .to(cpu)->dispatch->.to(mps) round-trip — a CPU fallback for a GPU
+    // backend. Skip registration whenever any kernel already exists.
     auto mps_accelerate_single = [&](OpId op) {
+        if (table.has_kernel(op)) return;  // keep native Metal kernel
         table.register_single_output_kernel(op,
             [op](std::span<const Tensor> inputs,
                  const OpAttributes& attrs) -> Tensor {
@@ -1382,6 +1423,7 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             });
     };
     auto mps_accelerate_multi = [&](OpId op) {
+        if (table.has_kernel(op)) return;  // keep native Metal kernel
         table.register_kernel(op, [op](std::span<const Tensor> inputs,
                                         const OpAttributes& attrs) {
             auto dev = inputs[0].device();

@@ -590,22 +590,23 @@ public:
         const auto& input = saved_tensors()[0];
 
         if (training_) {
-            // Training draws an independent random slope per negative element in
-            // forward. The kernel-based midpoint backward (below) would apply the
-            // fixed slope (lower+upper)/2 to every negative element, which is NOT
-            // the slope actually applied, making the gradient wrong everywhere
-            // x<=0. The kernel discards the noise mask, so we instead reconstruct
-            // the exact per-element slope from the saved input and output:
-            //   y = x for x>0, y = a*x for x<=0  =>  a = y/x  (x != 0)
-            // slope = 1 for x>0, y/x for x<0, and 0 at the measure-zero kink x==0.
-            const Tensor& output = saved_tensors()[1];
+            // Training draws an independent random slope per element in forward.
+            // The forward (in rrelu() below) samples that per-element slope as a
+            // noise tensor and applies y = where(x>0, x, slope*x). RReLU is
+            // piecewise-linear, so dy/dx = where(x>0, 1, slope) using the EXACT
+            // same slope tensor that produced the forward output. We saved that
+            // noise tensor for backward (mirroring how Dropout saves its mask),
+            // so the gradient matches the realised forward slope element-for-
+            // element instead of an unrelated fixed midpoint.
+            const Tensor& noise_slope = saved_tensors()[1];
             Tensor zeros = ::tenzor::zeros_like(input);
             Tensor ones = ::tenzor::ones_like(input);
-            // Safe denominator avoids div-by-zero at x==0 (masked out below).
-            Tensor safe_input = ::tenzor::where(::tenzor::eq(input, zeros), ones, input);
-            Tensor slope_neg = ::tenzor::div(output, safe_input);
-            Tensor slope = ::tenzor::where(::tenzor::gt(input, zeros), ones, slope_neg);
-            return {::tenzor::mul(grad_output, slope)};
+            // Use the SAME predicate as the forward output construction (x>=0 is
+            // the identity branch, matching the reference kernel), so the
+            // gradient is exactly the derivative of the realised forward map:
+            //   y = where(x>=0, x, slope*x)  =>  dy/dx = where(x>=0, 1, slope).
+            Tensor dydx = ::tenzor::where(::tenzor::ge(input, zeros), ones, noise_slope);
+            return {::tenzor::mul(grad_output, dydx)};
         }
 
         // Eval mode: forward uses the deterministic midpoint slope, so the
@@ -635,6 +636,55 @@ private:
 };
 
 auto rrelu(const Variable& input, double lower, double upper, bool training) -> Variable {
+    const bool needs_grad = input.requires_grad() && is_grad_enabled();
+
+    // Training + grad path: sample the per-element random slope as a noise
+    // tensor in the autograd layer (mirroring how Dropout draws and saves its
+    // mask), build the output from that noise, and save the noise for backward.
+    // This guarantees the gradient uses the EXACT slope realised in the forward
+    // map y = where(x>=0, x, slope*x), instead of the kernel's fixed midpoint
+    // slope (which discards the per-element noise). Doing the draw with
+    // device-native ops keeps it backend-agnostic and cross-backend consistent.
+    if (training && needs_grad) {
+        const Tensor& x = input.tensor();
+        const auto in_dtype = x.dtype();
+        const auto in_device = x.device();
+        std::vector<int64_t> shape_vec(x.shape().begin(), x.shape().end());
+
+        // Uniform[lower, upper) per element. Draw in Float32 so a half input
+        // dtype does not quantize the slope distribution, then cast to the
+        // input dtype to match the realised arithmetic precision of the output.
+        Tensor u = ::tenzor::rand(shape_vec, DType::Float32, in_device);
+        const double span = upper - lower;
+        Tensor slope_f32 = ::tenzor::add(::tenzor::mul(u, span), lower);
+        Tensor slope = (in_dtype == DType::Float32) ? slope_f32
+                                                    : slope_f32.to(in_dtype);
+
+        // Forward map (identity for x>=0, scaled by the realised slope for x<0).
+        Tensor zeros = ::tenzor::zeros_like(x);
+        Tensor neg_branch = ::tenzor::mul(slope, x);
+        Tensor result_tensor = ::tenzor::where(::tenzor::ge(x, zeros), x, neg_branch);
+
+        auto grad_fn = std::make_shared<RReLUBackward>(lower, upper, training);
+        // Save the input (for the x>=0 predicate) and the realised per-element
+        // noise slope (for the x<0 gradient).
+        grad_fn->save_for_backward({x, slope});
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        grad_fn->set_next_functions(next_funcs);
+
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        grad_fn->set_input_variables(input_vars);
+
+        Variable output(result_tensor, true);
+        output.set_grad_fn(grad_fn);
+        return output;
+    }
+
     OpAttributes attrs;
     attrs.set(AttrKey::Lower, lower);
     attrs.set(AttrKey::High, upper);
@@ -643,19 +693,14 @@ auto rrelu(const Variable& input, double lower, double upper, bool training) -> 
     std::vector<Tensor> inputs_vec = {input.tensor()};
     auto result_tensor = dispatch(OpId::RReLU, inputs_vec, attrs)[0];
 
-    if (!input.requires_grad() || !is_grad_enabled()) {
+    if (!needs_grad) {
         return Variable(result_tensor, false);
     }
 
+    // Eval + grad path: the forward used the deterministic midpoint slope, so
+    // the kernel's midpoint backward is exact. Only the input is needed.
     auto grad_fn = std::make_shared<RReLUBackward>(lower, upper, training);
-    // In training mode the per-element slope must be reconstructed from the
-    // output (y = a*x for x<=0), so save both input and output. Eval mode only
-    // needs the input for the deterministic midpoint backward.
-    if (training) {
-        grad_fn->save_for_backward({input.tensor(), result_tensor});
-    } else {
-        grad_fn->save_for_backward({input.tensor()});
-    }
+    grad_fn->save_for_backward({input.tensor()});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
     if (input.grad_fn()) {

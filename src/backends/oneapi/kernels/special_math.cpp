@@ -11,14 +11,18 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/core/shape.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 #ifdef TENZOR_HAS_ONEMKL
 #include <oneapi/mkl/vm.hpp>
@@ -30,6 +34,24 @@ namespace oneapi {
 // =========================================================================
 // Helpers (mirror those in math.cpp)
 // =========================================================================
+
+// Broadcast two operands of an elementwise binary special-math op to their
+// common NumPy-broadcast shape and make both contiguous. The OneAPI binary
+// kernels in this file index both operands at the same flat index, so they
+// require equal, contiguous shapes; without this they would read out of bounds
+// and diverge from the CPU binary_math_kernel broadcast path. Mirrors the lerp
+// wrapper in src/ops/math.cpp.
+inline auto broadcast_binary_operands(const Tensor& a, const Tensor& b)
+    -> std::pair<Tensor, Tensor> {
+    if (a.shape().size() == b.shape().size() &&
+        std::equal(a.shape().begin(), a.shape().end(), b.shape().begin()) &&
+        a.is_contiguous() && b.is_contiguous()) {
+        return {a, b};
+    }
+    auto bshape = broadcast_shapes(a.shape(), b.shape());
+    return {broadcast_to(a, bshape).contiguous(),
+            broadcast_to(b, bshape).contiguous()};
+}
 
 
 // =========================================================================
@@ -412,18 +434,22 @@ inline double polygamma_dev_f64(int n, double x) {
                          -1.0 / 30.0, 5.0 / 66.0, -691.0 / 2730.0 };
     double y2_inv = y_inv * y_inv;
     double y_pow = sycl::pow(y_inv, static_cast<double>(n));  // 1/y^n
-    // Falling factorial (2k+n-1)(2k+n-2)...(n) built iteratively.
+    // Build the FULL factorial (2k+n-1)! iteratively. The CPU reference
+    // (math.cpp factd(2k+n-1)) uses the complete factorial, so we must too.
+    // ff = (2k+n-1)!/(n-1)! after the per-step multiplies below; multiplying
+    // the term by fact_nm1 = (n-1)! recovers the full (2k+n-1)! numerator.
     double ff = 1.0;
     for (int k = 1; k <= 6; ++k) {
-        // ff starts at (n-1)! after k=0; for k-th term we need (2k+n-1)!/(n-1)!.
-        // Multiply by the next two factors each step: (2k+n-2) and (2k+n-1).
+        // ff accumulates (2k+n-1)!/(n-1)!: each step appends the two new
+        // factors (2k+n-2) and (2k+n-1).
         ff *= static_cast<double>(2 * k + n - 2);
         ff *= static_cast<double>(2 * k + n - 1);
         y_pow *= y2_inv;
         // (2k)! denominator: 2, 24, 720, 40320, 3628800, 479001600
         static const double fact_2k[] = { 2.0, 24.0, 720.0, 40320.0,
                                           3628800.0, 479001600.0 };
-        asymptotic += B[k - 1] * ff * y_pow / fact_2k[k - 1];
+        // B_{2k} * (2k+n-1)! / (2k)! / y^{2k+n}, with (2k+n-1)! = ff * (n-1)!.
+        asymptotic += B[k - 1] * ff * fact_nm1 * y_pow / fact_2k[k - 1];
     }
 
     return shift_sum + sign * asymptotic;
@@ -839,7 +865,8 @@ inline double beta_dev_f64(double a, double b) {
     return sycl::exp(sycl::lgamma(a) + sycl::lgamma(b) - sycl::lgamma(a + b));
 }
 
-auto beta_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto beta_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   a.dtype(), a.device());
     const int64_t numel = a.numel();
@@ -884,7 +911,8 @@ auto beta_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor
 // =========================================================================
 // Hurwitz zeta ζ(s, q)
 // =========================================================================
-auto zeta_kernel(const Tensor& s, const Tensor& q, sycl::queue& queue) -> Tensor {
+auto zeta_kernel(const Tensor& s_in, const Tensor& q_in, sycl::queue& queue) -> Tensor {
+    auto [s, q] = broadcast_binary_operands(s_in, q_in);
     Tensor output(std::vector<int64_t>(s.shape().begin(), s.shape().end()),
                   s.dtype(), s.device());
     const int64_t numel = s.numel();
@@ -1027,7 +1055,8 @@ auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, sycl::que
 // =========================================================================
 // LogAddExp: max(a,b) + log1p(exp(-|a-b|))
 // =========================================================================
-auto logaddexp_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto logaddexp_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   a.dtype(), a.device());
     const int64_t numel = a.numel();
@@ -1078,7 +1107,8 @@ auto logaddexp_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> T
 // =========================================================================
 // LogAddExp2: max(a,b) + log2(1 + exp2(-|a-b|))
 // =========================================================================
-auto logaddexp2_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto logaddexp2_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   a.dtype(), a.device());
     const int64_t numel = a.numel();
@@ -1129,7 +1159,8 @@ auto logaddexp2_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> 
 // =========================================================================
 // XLogY: x*log(y), with x==0 -> 0
 // =========================================================================
-auto xlogy_kernel(const Tensor& x, const Tensor& y, sycl::queue& queue) -> Tensor {
+auto xlogy_kernel(const Tensor& x_in, const Tensor& y_in, sycl::queue& queue) -> Tensor {
+    auto [x, y] = broadcast_binary_operands(x_in, y_in);
     Tensor output(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
                   x.dtype(), x.device());
     const int64_t numel = x.numel();
@@ -1221,25 +1252,39 @@ auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm,
         T* data = result.data<T>();
         const double p_d = p;
         const double max_d = maxnorm;
-        queue.parallel_for(sycl::range<1>(dim_size), [=](sycl::id<1> idx) {
-            int64_t d = idx[0];
-            // Per-slice p-norm
-            double norm_acc = 0.0;
-            for (int64_t o = 0; o < outer; ++o) {
-                for (int64_t i = 0; i < inner; ++i) {
-                    int64_t pos = (o * dim_size + d) * inner + i;
-                    double v = static_cast<double>(data[pos]);
-                    norm_acc += sycl::pow(sycl::fabs(v), p_d);
-                }
+        const int64_t slice_count = outer * inner;  // elements reduced per slice
+        // One work-group per normalized slice `d`; the group cooperatively
+        // reduces the slice's p-norm and then rescales it. This parallelizes
+        // the previously-serial O(outer*inner) inner reduction across the
+        // device instead of running one thread per slice.
+        const size_t wg = 128;
+        sycl::nd_range<1> ndr(sycl::range<1>(static_cast<size_t>(dim_size) * wg),
+                              sycl::range<1>(wg));
+        queue.parallel_for(ndr, [=](sycl::nd_item<1> item) {
+            const int64_t d = static_cast<int64_t>(item.get_group(0));
+            auto grp = item.get_group();
+            const int64_t lid = static_cast<int64_t>(item.get_local_id(0));
+            const int64_t lsz = static_cast<int64_t>(item.get_local_range(0));
+
+            // Strided partial sum of |v|^p over the slice. Index mapping:
+            // flat = o*inner + i, pos = (o*dim_size + d)*inner + i.
+            double partial = 0.0;
+            for (int64_t flat = lid; flat < slice_count; flat += lsz) {
+                int64_t o = flat / inner;
+                int64_t i = flat - o * inner;
+                int64_t pos = (o * dim_size + d) * inner + i;
+                double v = static_cast<double>(data[pos]);
+                partial += sycl::pow(sycl::fabs(v), p_d);
             }
+            double norm_acc = sycl::reduce_over_group(grp, partial, sycl::plus<double>());
             double norm_val = sycl::pow(norm_acc, 1.0 / p_d);
             if (norm_val > max_d) {
                 double scale = max_d / norm_val;
-                for (int64_t o = 0; o < outer; ++o) {
-                    for (int64_t i = 0; i < inner; ++i) {
-                        int64_t pos = (o * dim_size + d) * inner + i;
-                        data[pos] = static_cast<T>(static_cast<double>(data[pos]) * scale);
-                    }
+                for (int64_t flat = lid; flat < slice_count; flat += lsz) {
+                    int64_t o = flat / inner;
+                    int64_t i = flat - o * inner;
+                    int64_t pos = (o * dim_size + d) * inner + i;
+                    data[pos] = static_cast<T>(static_cast<double>(data[pos]) * scale);
                 }
             }
         }).wait();

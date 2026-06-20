@@ -53,6 +53,9 @@ namespace {
 
 auto format_bytes(int64_t bytes) -> std::string {
     char buf[64];
+    // Counters can momentarily go negative under concurrent alloc/dealloc with
+    // relaxed ordering; never report a negative size.
+    if (bytes < 0) bytes = 0;
     if (bytes >= (1LL << 30)) {
         std::snprintf(buf, sizeof(buf), "%.2f GiB", static_cast<double>(bytes) / (1LL << 30));
     } else if (bytes >= (1LL << 20)) {

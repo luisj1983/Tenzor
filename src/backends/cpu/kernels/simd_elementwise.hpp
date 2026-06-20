@@ -95,7 +95,8 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
             // Scalar tail using F16C scalar intrinsics
             for (; i < end; ++i) {
                 float val = _cvtsh_ss(static_cast<unsigned short>(in_u16[i]));
-                out_u16[i] = _cvtss_sh(op(val), _MM_FROUND_TO_NEAREST_INT);
+                out_u16[i] = _cvtss_sh(op(val),
+                    _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
             }
         };
         if (n >= ELEMENTWISE_OMP_THRESHOLD) {
@@ -212,7 +213,8 @@ void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
             for (; i < end; ++i) {
                 float va = _cvtsh_ss(static_cast<unsigned short>(a_u16[i]));
                 float vb = _cvtsh_ss(static_cast<unsigned short>(b_u16[i]));
-                out_u16[i] = _cvtss_sh(op(va, vb), _MM_FROUND_TO_NEAREST_INT);
+                out_u16[i] = _cvtss_sh(op(va, vb),
+                    _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
             }
         };
         if (n >= ELEMENTWISE_OMP_THRESHOLD) {

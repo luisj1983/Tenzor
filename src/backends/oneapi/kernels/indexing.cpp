@@ -35,6 +35,9 @@ class IndexSelectKernelBool;
 class MaskedFillKernelFloat32;
 class MaskedFillKernelFloat64;
 class MaskedFillKernelFloat16;
+class MaskedFillKernelInt32;
+class MaskedFillKernelInt64;
+class MaskedFillKernelBool;
 class GatherKernelBFloat16;
 class ScatterKernelBFloat16;
 class IndexSelectKernelBFloat16;
@@ -642,12 +645,21 @@ auto index_select_kernel(const Tensor& input_in, int64_t dim, const Tensor& inde
 }
 
 // Masked fill - fill elements where mask is true with value
-auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sycl::queue& queue) -> Tensor {
+auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, double value, sycl::queue& queue) -> Tensor {
     auto input_shape = input.shape();
-    auto mask_shape = mask.shape();
+    auto mask_shape = mask_in.shape();
     if (!std::equal(input_shape.begin(), input_shape.end(), mask_shape.begin(), mask_shape.end())) {
         throw std::invalid_argument("MaskedFill: input and mask must have same shape");
     }
+
+    // Accept non-Bool masks (e.g. a Float32 attention mask) like the CPU
+    // backend: any non-zero element is true. Normalize to Bool once so the
+    // branches below (which read `const bool*`) don't reinterpret float/int
+    // mask bytes as bool (which silently selects the wrong elements).
+    Tensor mask_storage;
+    const Tensor& mask = (mask_in.dtype() == DType::Bool)
+        ? mask_in
+        : (mask_storage = mask_in.to(DType::Bool));
 
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
@@ -658,9 +670,10 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
         const float* input_ptr = get_data_ptr<const float>(input);
         const bool* mask_ptr = get_data_ptr<const bool>(mask);
         float* output_ptr = get_data_ptr<float>(output);
+        const float value_f = static_cast<float>(value);
 
         queue.parallel_for<MaskedFillKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            output_ptr[idx] = mask_ptr[idx] ? value : input_ptr[idx];
+            output_ptr[idx] = mask_ptr[idx] ? value_f : input_ptr[idx];
         });
     }
     else if (input.dtype() == DType::Float64) {
@@ -687,10 +700,40 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
         const uint16_t* input_ptr = get_data_ptr<const uint16_t>(input);
         const bool* mask_ptr = get_data_ptr<const bool>(mask);
         uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
-        const uint16_t value_bf16 = f32_to_bf16(value);
+        const uint16_t value_bf16 = f32_to_bf16(static_cast<float>(value));
 
         queue.parallel_for<MaskedFillKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             output_ptr[idx] = mask_ptr[idx] ? value_bf16 : input_ptr[idx];
+        });
+    }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* input_ptr = get_data_ptr<const int32_t>(input);
+        const bool* mask_ptr = get_data_ptr<const bool>(mask);
+        int32_t* output_ptr = get_data_ptr<int32_t>(output);
+        const int32_t value_i = static_cast<int32_t>(value);
+
+        queue.parallel_for<MaskedFillKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            output_ptr[idx] = mask_ptr[idx] ? value_i : input_ptr[idx];
+        });
+    }
+    else if (input.dtype() == DType::Int64) {
+        const int64_t* input_ptr = get_data_ptr<const int64_t>(input);
+        const bool* mask_ptr = get_data_ptr<const bool>(mask);
+        int64_t* output_ptr = get_data_ptr<int64_t>(output);
+        const int64_t value_i = static_cast<int64_t>(value);
+
+        queue.parallel_for<MaskedFillKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            output_ptr[idx] = mask_ptr[idx] ? value_i : input_ptr[idx];
+        });
+    }
+    else if (input.dtype() == DType::Bool) {
+        const bool* input_ptr = get_data_ptr<const bool>(input);
+        const bool* mask_ptr = get_data_ptr<const bool>(mask);
+        bool* output_ptr = get_data_ptr<bool>(output);
+        const bool value_b = (value != 0.0);
+
+        queue.parallel_for<MaskedFillKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            output_ptr[idx] = mask_ptr[idx] ? value_b : input_ptr[idx];
         });
     }
     else if (input.dtype() == DType::Complex64) {
@@ -698,7 +741,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
         const float* input_ptr = reinterpret_cast<const float*>(input.data_ptr());
         const bool* mask_ptr = get_data_ptr<const bool>(mask);
         float* output_ptr = reinterpret_cast<float*>(output.data_ptr());
-        const float value_f = value;
+        const float value_f = static_cast<float>(value);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const size_t b = idx[0] * 2;
             output_ptr[b]     = mask_ptr[idx] ? value_f : input_ptr[b];
@@ -727,18 +770,31 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
 
 // Masked select - select elements where mask is true
 // Uses device-side prefix sum to avoid host roundtrips
-auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& queue) -> Tensor {
-    auto input_shape = input.shape();
-    auto mask_shape = mask.shape();
+auto masked_select_kernel(const Tensor& input_in, const Tensor& mask_in, sycl::queue& queue) -> Tensor {
+    auto input_shape = input_in.shape();
+    auto mask_shape = mask_in.shape();
     if (!std::equal(input_shape.begin(), input_shape.end(), mask_shape.begin(), mask_shape.end())) {
         throw std::invalid_argument("MaskedSelect: input and mask must have same shape");
     }
+
+    // The kernel reads input and mask by flat (physical) index, so both must be
+    // contiguous. The op layer only contiguifies on the broadcast path; an
+    // equal-shape but non-contiguous (e.g. transposed) view would otherwise be
+    // read in the wrong physical order.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
 
     const int64_t numel = input.numel();
     if (numel == 0) {
         return Tensor({0}, input.dtype(), input.device());
     }
 
+    // Accept non-Bool masks (nonzero = true), matching the CPU backend.
+    // .to(DType::Bool) yields a contiguous tensor; an already-Bool mask must be
+    // contiguified explicitly since it is read by flat index.
+    Tensor mask_storage;
+    const Tensor& mask = (mask_in.dtype() == DType::Bool)
+        ? (mask_in.is_contiguous() ? mask_in : (mask_storage = mask_in.contiguous()))
+        : (mask_storage = mask_in.to(DType::Bool));
     const bool* mask_ptr = get_data_ptr<const bool>(mask);
 
     // Phase 1: Create int32 mask on device (bool -> 0/1)
@@ -821,7 +877,12 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& 
 // Nonzero operation - find indices of non-zero elements
 // Returns shape (num_nonzero, ndim) with Int64 dtype
 // Uses device-side prefix sum to avoid host roundtrips
-auto nonzero_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto nonzero_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // The kernel reads input by flat (physical) index and decodes coordinates
+    // with strides derived from shape (contiguous assumption), so a
+    // non-contiguous (e.g. transposed) view must be made contiguous first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+
     const int64_t numel = input.numel();
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
@@ -2170,7 +2231,7 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
 // masked_scatter kernel — native SYCL with exclusive_scan prefix sum
 // ============================================================================
 
-auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
+auto masked_scatter_kernel(const Tensor& input, const Tensor& mask_in,
                            const Tensor& source, sycl::queue& queue) -> Tensor {
     int64_t numel = input.numel();
     int64_t src_numel = source.numel();
@@ -2180,6 +2241,11 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
 
     if (numel == 0) return output;
 
+    // Accept non-Bool masks (nonzero = true), matching the CPU backend.
+    Tensor mask_storage;
+    const Tensor& mask = (mask_in.dtype() == DType::Bool)
+        ? mask_in
+        : (mask_storage = mask_in.to(DType::Bool));
     const bool* mask_ptr = get_data_ptr<const bool>(mask);
 
     // Step 1: Convert bool mask to int32 on device for prefix sum

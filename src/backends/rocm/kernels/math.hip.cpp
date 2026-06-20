@@ -1385,6 +1385,11 @@ auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
+        // Free the broadcast metadata before throwing to avoid leaking the
+        // device stride/shape buffers on the unsupported-dtype path.
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for add operation");
     }
 
@@ -1588,6 +1593,11 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
+        // Free the broadcast metadata before throwing to avoid leaking the
+        // device stride/shape buffers on the unsupported-dtype path.
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for sub operation");
     }
 
@@ -1798,6 +1808,11 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
+        // Free the broadcast metadata before throwing to avoid leaking the
+        // device stride/shape buffers on the unsupported-dtype path.
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for mul operation");
     }
 
@@ -1988,6 +2003,11 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
+        // Free the broadcast metadata before throwing to avoid leaking the
+        // device stride/shape buffers on the unsupported-dtype path.
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for div operation");
     }
 
@@ -4197,7 +4217,8 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
         HIP_CHECK(hipGetLastError());
     }
 
-    HIP_CHECK(hipFree(d_states));
+    // d_states freed by HipBuffer RAII destructor (matches rand_kernel/randn_kernel);
+    // an explicit hipFree here would double-free the buffer.
     return result;
 }
 
@@ -8323,6 +8344,9 @@ auto cummax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> std:
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
     int64_t total_slices = outer_size * inner_size;
 
+    // empty tensor (zero-sized non-reduced dim): zero-grid launch fails on HIP
+    if (total_slices == 0 || dim_size == 0) return {values, indices_out};
+
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(total_slices, grid_dim, block_dim);
 
@@ -8403,6 +8427,9 @@ auto cummin_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> std:
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
     int64_t total_slices = outer_size * inner_size;
 
+    // empty tensor (zero-sized non-reduced dim): zero-grid launch fails on HIP
+    if (total_slices == 0 || dim_size == 0) return {values, indices_out};
+
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(total_slices, grid_dim, block_dim);
 
@@ -8477,6 +8504,9 @@ auto fmax_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
     int64_t n = a_cont.numel();
     Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
                   a_cont.dtype(), a_cont.device());
+
+    // empty tensor: zero-grid launch would fail on HIP
+    if (n == 0) return output;
 
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(n, grid_dim, block_dim);
@@ -8556,6 +8586,9 @@ auto fmin_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
     int64_t n = a_cont.numel();
     Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
                   a_cont.dtype(), a_cont.device());
+
+    // empty tensor: zero-grid launch would fail on HIP
+    if (n == 0) return output;
 
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(n, grid_dim, block_dim);
@@ -8789,6 +8822,9 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
     Tensor values(out_shape, dtype, device);
     Tensor indices_out(out_shape, DType::Int64, device);
 
+    // empty tensor (zero-sized non-reduced dim): zero-grid launch fails on HIP
+    if (total_slices == 0) return {values, indices_out};
+
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(total_slices, grid_dim, block_dim);
 
@@ -8944,6 +8980,10 @@ static auto quantile_nanquantile_impl(const Tensor& input, double q, int64_t dim
     if (out_shape.empty()) out_shape.push_back(1);
 
     Tensor output(out_shape, dtype, device);
+
+    // empty tensor (zero-sized non-reduced dim): zero-grid launch fails on HIP
+    if (total_slices == 0) return output;
+
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(total_slices, grid_dim, block_dim);
 
@@ -9020,6 +9060,12 @@ __global__ void histc_hip_f32(const float* __restrict__ input, float* __restrict
 auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val,
                   hipStream_t stream) -> Tensor
 {
+    // bins must be positive: bins<=0 yields a zero-width (div-by-zero) bin and
+    // an out-of-bounds atomicAdd(&output[-1], ...). torch.histc requires bins>0.
+    if (bins <= 0) {
+        throw std::runtime_error("histc ROCm: bins must be positive");
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     int64_t n = input_cont.numel();
     const auto device = input_cont.device();

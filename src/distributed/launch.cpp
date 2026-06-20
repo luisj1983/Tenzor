@@ -17,6 +17,7 @@
 #include <iostream>
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
@@ -488,6 +489,51 @@ auto spawn(const LaunchConfig& config, WorkerFn worker_fn) -> std::vector<int> {
 namespace {
 
 /**
+ * @brief Determine whether an address is obviously local (loopback).
+ *
+ * Recognizes the common loopback spellings without performing any DNS
+ * resolution: "localhost", the IPv4 loopback block 127.0.0.0/8, and the
+ * IPv6 loopback "::1" (with optional surrounding brackets). Used to skip
+ * the blocking TCP reachability probe when the master is the local host,
+ * since a loopback connect would either succeed trivially or block waiting
+ * for a listener that has not started yet.
+ *
+ * @param addr Hostname or IP address (as provided in MASTER_ADDR)
+ * @return true if the address is a recognized loopback address
+ */
+auto is_local_address(const std::string& addr) -> bool {
+    // Strip optional IPv6 brackets, e.g. "[::1]".
+    std::string host = addr;
+    if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+        host = host.substr(1, host.size() - 2);
+    }
+
+    // Case-insensitive hostname compare for "localhost".
+    std::string lower = host;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower == "localhost") {
+        return true;
+    }
+
+    // IPv6 loopback.
+    if (host == "::1") {
+        return true;
+    }
+
+    // IPv4 loopback block 127.0.0.0/8: any address of the form 127.x.y.z.
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+    struct in_addr v4{};
+    if (inet_pton(AF_INET, host.c_str(), &v4) == 1) {
+        // ntohl gives host-order; high byte 127 means loopback block.
+        return (ntohl(v4.s_addr) >> 24) == 127;
+    }
+#endif
+
+    return false;
+}
+
+/**
  * @brief Check TCP reachability of master_addr:master_port with timeout.
  *
  * Attempts a non-blocking TCP connect to verify the address is resolvable
@@ -728,8 +774,10 @@ auto init_from_env(const std::string& backend) -> void {
     // -- Validate MASTER_ADDR reachability with TCP socket timeout --
     // Only check reachability from non-rank-0 processes (rank 0 may be
     // the master itself and hasn't started listening yet) and when the
-    // address is not obviously local.
-    if (rank != 0) {
+    // address is not obviously local (a loopback connect would either
+    // succeed trivially or block on a listener that has not started yet,
+    // so the probe carries no useful signal there).
+    if (rank != 0 && !is_local_address(master_addr)) {
         std::string reach_error = check_master_reachability(
             master_addr, master_port, /*timeout_ms=*/5000);
         if (!reach_error.empty()) {

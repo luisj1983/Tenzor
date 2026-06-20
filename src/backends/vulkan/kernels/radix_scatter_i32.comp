@@ -12,20 +12,30 @@ layout(push_constant) uniform PushConstants {
     uint n;
     uint digit;
     uint n_wgs;
+    uint descending; // 0 = ascending, 1 = descending
 };
 
 shared uint local_offsets[256];
 
+// Must derive exactly the same digit as the histogram pass, so apply the same
+// descending key inversion here: an ascending LSD radix over the inverted key
+// yields descending values with stable (ascending-index) tie order.
 uint int32_to_sortable(int val) {
-    return uint(val) ^ 0x80000000u;
+    uint sortable = uint(val) ^ 0x80000000u;
+    if (descending != 0u) sortable = ~sortable;
+    return sortable;
 }
 
 void main() {
     uint lid = gl_LocalInvocationID.x;
     uint wg_id = gl_WorkGroupID.x;
 
-    if (lid < 256) {
-        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    // Load all 256 bucket offsets into shared memory. Stride by the workgroup
+    // size so every bucket is covered regardless of whether wgSize is <256 or
+    // >256 (local_size_x is specialized to the device workgroup size, which the
+    // Vulkan spec allows to be as small as 128 or as large as 1024).
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        local_offsets[b] = histos[b * n_wgs + wg_id];
     }
     barrier();
 
@@ -33,7 +43,7 @@ void main() {
     uint tile_start = wg_id * tile_size;
     uint tile_end = min(tile_start + tile_size, n);
 
-    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+    for (uint i = tile_start + lid; i < tile_end; i += gl_WorkGroupSize.x) {
         uint sortable = int32_to_sortable(keys_in[i]);
         uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
         uint dest = atomicAdd(local_offsets[digit_val], 1);

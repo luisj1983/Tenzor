@@ -3,6 +3,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/vision.hpp"
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 
 namespace tenzor::data::datasets {
@@ -36,7 +37,8 @@ ImageFolder::ImageFolder(const std::string& root_dir,
         for (const auto& entry : fs::directory_iterator(class_dir)) {
             if (!entry.is_regular_file()) continue;
             std::string ext = entry.path().extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             for (const auto& allowed : extensions) {
                 if (ext == allowed) {
                     samples_.push_back({entry.path(), label});

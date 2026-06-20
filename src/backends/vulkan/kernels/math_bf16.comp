@@ -22,13 +22,30 @@ float readBF16(uint packed, uint offset) {
     return uintBitsToFloat(bits << 16);
 }
 
+// Helper to convert one float32 to bfloat16 bits (round-to-nearest-even).
+// Inf/NaN are special-cased so the biased rounding carry cannot propagate
+// through the exponent into the sign bit (which would silently turn a NaN
+// into a finite value). This matches the CPU backend which preserves NaN/Inf.
+uint floatToBF16(float v) {
+    uint b = floatBitsToUint(v);
+    if ((b & 0x7F800000u) == 0x7F800000u) {
+        // Inf or NaN: take the high 16 bits directly (no rounding bias).
+        uint bf = b >> 16;
+        // If the source is a NaN whose surviving mantissa bits are all zero,
+        // the truncation would yield an Inf encoding. Force a quiet NaN by
+        // setting the BF16 quiet bit so NaN-ness is preserved.
+        if ((b & 0x007FFFFFu) != 0u) {
+            bf |= 0x0040u;
+        }
+        return bf & 0xFFFFu;
+    }
+    // Finite: round-to-nearest-even.
+    return ((b + 0x7FFFu + ((b >> 16) & 1u)) >> 16) & 0xFFFFu;
+}
+
 // Helper to pack two bfloat16 values (round-to-nearest-even)
 uint packBF16Pair(float v0, float v1) {
-    uint b0 = floatBitsToUint(v0);
-    uint b1 = floatBitsToUint(v1);
-    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
-    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
-    return bf0 | (bf1 << 16);
+    return floatToBF16(v0) | (floatToBF16(v1) << 16);
 }
 
 void main() {

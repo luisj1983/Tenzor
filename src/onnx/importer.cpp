@@ -87,8 +87,22 @@ auto load_external_tensor_bytes(const tenzor_onnx::TensorProto& t,
     int64_t length = -1;
     for (const auto& kv : t.external_data()) {
         if (kv.key() == "location")    location = kv.value();
-        else if (kv.key() == "offset") offset = std::stoll(kv.value());
-        else if (kv.key() == "length") length = std::stoll(kv.value());
+        else if (kv.key() == "offset") {
+            try { offset = std::stoll(kv.value()); }
+            catch (const std::exception&) {
+                throw std::runtime_error(
+                    "ONNXImporter: tensor '" + t.name() +
+                    "' has malformed external_data offset value '" + kv.value() + "'");
+            }
+        }
+        else if (kv.key() == "length") {
+            try { length = std::stoll(kv.value()); }
+            catch (const std::exception&) {
+                throw std::runtime_error(
+                    "ONNXImporter: tensor '" + t.name() +
+                    "' has malformed external_data length value '" + kv.value() + "'");
+            }
+        }
     }
     if (location.empty()) {
         throw std::runtime_error(
@@ -398,13 +412,13 @@ auto ONNXTensorData::to_tensor(Device device) const -> Tensor {
     // Validate the shape (rejects negative dims / numel overflow) BEFORE
     // allocating the tensor from attacker-controlled proto dims.
     int64_t n = numel();
-    Tensor tensor(shape, tenzor_dtype, device);
-
-    // Copy raw data
+    // Validate the raw-data size against the declared shape BEFORE allocating
+    // the tensor, so an attacker-declared huge shape carrying little/no data
+    // cannot trigger a giant (multi-TB) allocation ahead of the size check.
     if (!raw_data.empty()) {
         size_t expected_bytes;
         if (__builtin_mul_overflow(static_cast<size_t>(n),
-                                   tensor.dtype_size(), &expected_bytes)) {
+                                   dtype_size(tenzor_dtype), &expected_bytes)) {
             throw std::runtime_error(
                 "ONNX tensor '" + name + "' byte size overflows size_t");
         }
@@ -414,7 +428,12 @@ auto ONNXTensorData::to_tensor(Device device) const -> Tensor {
                 std::to_string(expected_bytes) + " bytes, got " + std::to_string(raw_data.size())
             );
         }
+    }
 
+    Tensor tensor(shape, tenzor_dtype, device);
+
+    // Copy raw data
+    if (!raw_data.empty()) {
         // For CPU tensors, direct memcpy
         if (device == Device::cpu()) {
             std::memcpy(tensor.data_ptr(), raw_data.data(), raw_data.size());
@@ -799,6 +818,19 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
             {"Pow", {2, 1}},  {"MatMul", {2, 1}},{"Gemm", {2, 1}},    {"Where", {3, 1}},
             {"Expand", {2, 1}},{"Tile", {2, 1}}, {"Gather", {2, 1}},  {"Reshape", {2, 1}},
             {"Range", {3, 1}},{"LinalgSolve", {2, 1}}, {"TopK", {2, 2}},
+            // Converters below subscript node.inputs past index 0 with the
+            // unchecked vector operator[]; an under-supplied (untrusted) model
+            // would otherwise read OOB. These minimums equal the number of
+            // operands each converter actually dereferences.
+            {"Slice", {3, 1}},                       // data, starts, ends
+            {"Conv", {2, 1}},  {"ConvTranspose", {2, 1}},  // X, W
+            {"BatchNormalization", {5, 1}},          // X, scale, bias, mean, var
+            {"LayerNormalization", {3, 1}},          // X, scale, bias
+            {"InstanceNormalization", {3, 1}},       // X, scale, bias
+            {"GroupNormalization", {3, 1}},          // X, scale, bias
+            {"LSTM", {3, 1}}, {"GRU", {3, 1}}, {"RNN", {3, 1}},  // X, W, R
+            {"QuantizeLinear", {2, 1}},              // x, y_scale
+            {"DequantizeLinear", {2, 1}},            // x, x_scale
         };
         auto it = kMinArity.find(node.op_type);
         const size_t min_in = (it != kMinArity.end()) ? it->second.first : 1;
@@ -1259,6 +1291,16 @@ auto ONNXImporter::convert_split(const ONNXImportNode& node) -> void {
         int64_t base = dim / num_outputs;
         split_sizes.assign(num_outputs - 1, base);
         split_sizes.push_back(dim - base * (num_outputs - 1));
+    }
+
+    // The number of split chunks must match the declared output count, else
+    // the registration loop below would index node.outputs out of bounds with
+    // an attacker-controlled 'split' attribute length.
+    if (split_sizes.size() != node.outputs.size()) {
+        throw std::runtime_error(
+            "ONNX Split: 'split' length (" + std::to_string(split_sizes.size()) +
+            ") does not match number of outputs (" +
+            std::to_string(node.outputs.size()) + ")");
     }
 
     // Manually split the tensor using slice
@@ -2393,6 +2435,22 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
         steps_vec.assign(num_slices, 1);
     }
 
+    // Per the ONNX spec, starts/ends/axes/steps must all share a single length.
+    // A malformed (untrusted) model with mismatched lengths would otherwise let
+    // the loop below read ends[i] past the raw Int64 buffer and
+    // axes_vec[i]/steps_vec[i] past their std::vectors (OOB). Enforce equality up
+    // front so every per-index access is in bounds.
+    if (ends_t.numel() != num_slices ||
+        static_cast<int64_t>(axes_vec.size()) != num_slices ||
+        static_cast<int64_t>(steps_vec.size()) != num_slices) {
+        throw std::runtime_error(
+            "ONNX Slice: starts/ends/axes/steps must all have the same length; got "
+            "starts=" + std::to_string(num_slices) +
+            ", ends=" + std::to_string(ends_t.numel()) +
+            ", axes=" + std::to_string(axes_vec.size()) +
+            ", steps=" + std::to_string(steps_vec.size()));
+    }
+
     auto result = input;
     for (int64_t i = 0; i < num_slices; ++i) {
         int64_t dim = axes_vec[i];
@@ -2588,6 +2646,14 @@ auto ONNXImporter::convert_resize(const ONNXImportNode& node) -> void {
         }
     } else if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
         auto scales_t = get_host_input(node.inputs[2]);
+        // ONNX requires len(scales) == rank(input); without this check the
+        // loop below reads input.shape()[i] past the end for an over-long,
+        // attacker-controlled scales tensor (out-of-bounds read).
+        if (scales_t.numel() != input.ndim()) {
+            throw std::runtime_error(
+                "ONNX Resize: scales length (" + std::to_string(scales_t.numel()) +
+                ") must equal input rank (" + std::to_string(input.ndim()) + ")");
+        }
         auto scales_f32 = scales_t.to(DType::Float32);
         const float* scales = scales_f32.data<float>();
         // scales includes batch and channel dims
@@ -2836,13 +2902,17 @@ auto ONNXImporter::convert_pow(const ONNXImportNode& node) -> void {
     bool used_scalar = false;
     if (exponent.numel() >= 1) {
         // Read the exponent on the host so we can inspect its values without
-        // dereferencing a device pointer.
+        // dereferencing a device pointer. Use Float64 (not Float32) so a
+        // non-float-exact exponent on a Float64 graph (e.g. 1.0/3.0, or an
+        // integer > 2^24) keeps full precision: tenzor::pow already takes a
+        // double, and inspecting/comparing in double avoids collapsing two
+        // distinct Float64 exponents that happen to round to the same float.
         Tensor host_exp =
             (exponent.device().type == Device::Type::CPU)
-                ? exponent.to(DType::Float32)
-                : exponent.to(Device::cpu()).to(DType::Float32);
-        const float* exp_data = static_cast<const float*>(host_exp.data_ptr());
-        float first = exp_data[0];
+                ? exponent.to(DType::Float64)
+                : exponent.to(Device::cpu()).to(DType::Float64);
+        const double* exp_data = static_cast<const double*>(host_exp.data_ptr());
+        double first = exp_data[0];
         bool all_equal = true;
         for (int64_t i = 1; i < host_exp.numel(); ++i) {
             if (exp_data[i] != first) { all_equal = false; break; }

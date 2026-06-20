@@ -121,12 +121,14 @@ public:
         while (std::getline(meminfo, line)) {
             if (line.find("MemTotal:") == 0) {
                 size_t kb = 0;
-                sscanf(line.c_str(), "MemTotal: %zu kB", &kb);
-                info.total_memory = kb * 1024;
+                if (sscanf(line.c_str(), "MemTotal: %zu kB", &kb) == 1) {
+                    info.total_memory = kb * 1024;
+                }
             } else if (line.find("MemAvailable:") == 0) {
                 size_t kb = 0;
-                sscanf(line.c_str(), "MemAvailable: %zu kB", &kb);
-                info.available_memory = kb * 1024;
+                if (sscanf(line.c_str(), "MemAvailable: %zu kB", &kb) == 1) {
+                    info.available_memory = kb * 1024;
+                }
             }
         }
         #elif defined(_WIN32)

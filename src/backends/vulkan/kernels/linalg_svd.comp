@@ -100,7 +100,9 @@ void main() {
 
     // Sort s_vals descending and apply the same permutation to U columns and
     // V columns (thread 0 does a simple selection sort — n ≤ 32 so cost is
-    // negligible).
+    // negligible). When full_matrices is requested and m > k, also orthonormally
+    // complete U's trailing columns (k..m-1) so U is a full m×m orthogonal basis
+    // matching the CPU/CUDA reference (LAPACK jobz 'A').
     if (tid == 0) {
         for (uint i = 0; i < k; i++) {
             uint maxIdx = i;
@@ -118,6 +120,33 @@ void main() {
                 }
             }
         }
+
+        // Orthonormal completion of U from m×k to m×m (full mode, tall matrices).
+        if (full_matrices == 1u && m > k) {
+            uint filled = k;            // number of orthonormal columns so far
+            // Try each canonical basis vector e_cand and Gram-Schmidt it against
+            // the already-accepted columns; keep it if a non-degenerate remainder
+            // survives. m ≤ 32, so at most m candidates are needed.
+            for (uint cand = 0; cand < m && filled < m; cand++) {
+                // w = e_cand
+                float w[32];
+                for (uint r = 0; r < m; r++) w[r] = (r == cand) ? 1.0 : 0.0;
+                // Subtract projections onto existing columns 0..filled-1.
+                for (uint col = 0; col < filled; col++) {
+                    float dot = 0.0;
+                    for (uint r = 0; r < m; r++) dot += w[r] * U[r][col];
+                    for (uint r = 0; r < m; r++) w[r] -= dot * U[r][col];
+                }
+                float nrm = 0.0;
+                for (uint r = 0; r < m; r++) nrm += w[r] * w[r];
+                nrm = sqrt(nrm);
+                if (nrm > 1e-6) {
+                    float inv = 1.0 / nrm;
+                    for (uint r = 0; r < m; r++) U[r][filled] = w[r] * inv;
+                    filled++;
+                }
+            }
+        }
     }
     barrier();
 
@@ -126,17 +155,22 @@ void main() {
         data_s[batch_idx * k + tid] = s_vals[tid];
     }
 
-    // Write U (shape m × k) — note the correct batch stride uses m*k, not m*n_cols.
-    uint u_offset = batch_idx * m * k;
+    // U column count: m in full mode, k in reduced mode.
+    uint u_cols = (full_matrices == 1u) ? m : k;
+    // Vt row count: n in full mode (V is full n×n), k in reduced mode.
+    uint vt_rows = (full_matrices == 1u) ? n_cols : k;
+
+    // Write U (shape m × u_cols). Batch stride uses m*u_cols.
+    uint u_offset = batch_idx * m * u_cols;
     for (uint row = 0; row < m; row++) {
-        if (tid < k) {
-            data_u[u_offset + row * k + tid] = U[row][tid];
+        if (tid < u_cols) {
+            data_u[u_offset + row * u_cols + tid] = U[row][tid];
         }
     }
 
-    // Write Vt (shape n × n — V^T). V^T[i,j] = V[j,i].
-    uint vt_offset = batch_idx * n_cols * n_cols;
-    for (uint row = 0; row < n_cols; row++) {
+    // Write Vt (shape vt_rows × n — V^T). V^T[i,j] = V[j,i].
+    uint vt_offset = batch_idx * vt_rows * n_cols;
+    for (uint row = 0; row < vt_rows; row++) {
         if (tid < n_cols) {
             data_vt[vt_offset + row * n_cols + tid] = V[tid][row];
         }

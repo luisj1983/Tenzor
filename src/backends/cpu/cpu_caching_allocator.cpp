@@ -1161,9 +1161,22 @@ size_t CPUCachingAllocator::evict_partial_free_ranges(size_t required_bytes) {
             const uintptr_t aligned_end =
                 (base + static_cast<uintptr_t>(best_size)) & ~(pg - 1);
             if (aligned_end > aligned_start) {
-                ::madvise(reinterpret_cast<void*>(aligned_start),
-                          static_cast<size_t>(aligned_end - aligned_start),
-                          MADV_DONTNEED);
+                void* const advise_ptr = reinterpret_cast<void*>(aligned_start);
+                const size_t advise_len =
+                    static_cast<size_t>(aligned_end - aligned_start);
+#if defined(__APPLE__)
+                // On Darwin MADV_DONTNEED for anonymous memory is largely
+                // advisory and does not reliably return physical pages to the
+                // OS; MADV_FREE has the right semantics there. Fall back to
+                // MADV_DONTNEED only if MADV_FREE is unsupported (EINVAL on
+                // older Darwin).
+                if (::madvise(advise_ptr, advise_len, MADV_FREE) != 0 &&
+                    errno == EINVAL) {
+                    ::madvise(advise_ptr, advise_len, MADV_DONTNEED);
+                }
+#else
+                ::madvise(advise_ptr, advise_len, MADV_DONTNEED);
+#endif
             }
         }
 #endif

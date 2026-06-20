@@ -107,11 +107,11 @@ auto distributed_all_reduce(
     // try/catch around distributed_all_reduce vs. backward() needed two
     // different handlers for the same logical precondition.
     if (pg == nullptr) {
-        throw std::invalid_argument(
+        throw std::runtime_error(
             "distributed_all_reduce: process_group must not be null");
     }
     if (!is_differentiable_reduce(op)) {
-        throw std::invalid_argument(
+        throw std::runtime_error(
             std::string("distributed_all_reduce: ReduceOp::") +
             reduce_op_name(op) +
             " is not differentiable. Only SUM and AVG are supported here.");

@@ -238,7 +238,16 @@ auto nested_mul_scalar(const NestedTensor& a, double scalar) -> NestedTensor {
 auto nested_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
     if (dim < 0) dim += input.ndim();
     if (dim != input.ragged_dim()) {
-        // Softmax along a regular dim — operate on values directly.
+        // Softmax along a regular dim — operate on values directly. The values
+        // tensor has the leading batch dim (0) collapsed into the ragged axis,
+        // so a regular nested dim maps to values_dim = dim - 1. dim==0 here
+        // means the batch dim (and it is not the ragged dim), which is not a
+        // valid per-element softmax axis — reject it instead of silently
+        // computing values_dim = -1 (the last feature axis).
+        if (dim == 0) {
+            throw std::runtime_error(
+                "nested_softmax: softmax over the batch dim (dim=0) is not supported");
+        }
         int64_t values_dim = dim - 1;
         OpAttributes attrs;
         attrs.set(AttrKey::Dim, values_dim);
@@ -265,6 +274,13 @@ auto nested_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
 auto nested_log_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
     if (dim < 0) dim += input.ndim();
     if (dim != input.ragged_dim()) {
+        // See nested_softmax: dim==0 in the regular-dim path is the batch dim
+        // (not the ragged dim) and is not a valid per-element axis; reject it
+        // rather than silently computing values_dim = -1.
+        if (dim == 0) {
+            throw std::runtime_error(
+                "nested_log_softmax: log_softmax over the batch dim (dim=0) is not supported");
+        }
         int64_t values_dim = dim - 1;
         OpAttributes attrs;
         attrs.set(AttrKey::Dim, values_dim);

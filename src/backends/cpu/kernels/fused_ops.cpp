@@ -1614,6 +1614,37 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
         throw std::runtime_error("fused_attention: Q must be 3D or 4D");
     }
 
+    // Validate V's shape against K (the online-softmax loops read V with the
+    // SAME stride/extents as K: v + bh_kv*k_stride and v + (j0+t)*head_dim for
+    // seq_len_k rows). If V's seq_len or head_dim is smaller than K's, those
+    // reads run past V's buffer. Likewise the Q·K dot product assumes K's
+    // head_dim equals Q's head_dim. Validate both before launching the kernels.
+    if (K.ndim() != ndim || V.ndim() != ndim) {
+        throw std::runtime_error(
+            "fused_attention: Q, K, V must all have the same rank (" +
+            std::to_string(ndim) + ").");
+    }
+    {
+        auto k_shape = K.shape();
+        auto v_shape = V.shape();
+        bool v_matches_k =
+            (v_shape.size() == k_shape.size()) &&
+            std::equal(k_shape.begin(), k_shape.end(), v_shape.begin());
+        if (!v_matches_k) {
+            throw std::runtime_error(
+                "fused_attention: V.shape must equal K.shape (same heads, "
+                "seq_len_k and head_dim); V is read with K's stride and "
+                "extents.");
+        }
+    }
+    const int64_t k_head_dim = K.shape()[ndim - 1];
+    if (k_head_dim != head_dim) {
+        throw std::runtime_error(
+            "fused_attention: K head_dim (" + std::to_string(k_head_dim) +
+            ") must equal Q head_dim (" + std::to_string(head_dim) +
+            ") for the Q·K dot product.");
+    }
+
     Tensor output(std::vector<int64_t>(q_shape.begin(), q_shape.end()),
                   Q.dtype(), Q.device());
 
@@ -2382,8 +2413,13 @@ auto fused_conv2d_bn_relu_kernel(
 // =========================================================================
 
 // ---------------------------------------------------------------------------
-// Implementation: templatized on T so accumulators, loads and stores are
-// always done in the input precision.  Called for Float32 and Float64.
+// Implementation: templatized on T for loads/stores in the input precision.
+// All reductions (ds, db, and the per-feature grad_weight/grad_bias partials)
+// are accumulated in double regardless of T, mirroring the forward kernel's
+// double-accumulation strategy (fused_ln_sum_f64 / fused_ln_sumsq_f64). This
+// avoids reintroducing the float-accumulator cancellation that the forward was
+// hardened against, keeping the forward/backward precision symmetric on long
+// normalized dims. Called for Float32 and Float64.
 // ---------------------------------------------------------------------------
 template <typename T>
 static void fused_layer_norm_backward_impl(
@@ -2400,42 +2436,46 @@ static void fused_layer_norm_backward_impl(
 {
     #pragma omp parallel if(batch_size > 16)
     {
-        std::vector<T> local_gw(static_cast<size_t>(norm_size), T(0));
-        std::vector<T> local_gb(static_cast<size_t>(norm_size), T(0));
+        std::vector<double> local_gw(static_cast<size_t>(norm_size), 0.0);
+        std::vector<double> local_gb(static_cast<size_t>(norm_size), 0.0);
 
         #pragma omp for
         for (int64_t b = 0; b < batch_size; ++b) {
             const T* in_b = in_data + b * norm_size;
             const T* go_b = go_data + b * norm_size;
             T*       gi_b = gi_data + b * norm_size;
-            T m    = mean_data[b];
-            T rstd = inv_std_data[b];
+            double m    = static_cast<double>(mean_data[b]);
+            double rstd = static_cast<double>(inv_std_data[b]);
 
-            // dot products needed to form grad_input
-            T ds = T(0);  // sum(grad_output * weight * normalized)
-            T db = T(0);  // sum(grad_output * weight)
+            // dot products needed to form grad_input (double accumulation)
+            double ds = 0.0;  // sum(grad_output * weight * normalized)
+            double db = 0.0;  // sum(grad_output * weight)
             for (int64_t j = 0; j < norm_size; ++j) {
-                T normalized = (in_b[j] - m) * rstd;
-                T go_w       = go_b[j] * w_data[j];
+                double normalized = (static_cast<double>(in_b[j]) - m) * rstd;
+                double go_w = static_cast<double>(go_b[j]) *
+                              static_cast<double>(w_data[j]);
                 ds += go_w * normalized;
                 db += go_w;
-                local_gw[static_cast<size_t>(j)] += go_b[j] * normalized;
-                local_gb[static_cast<size_t>(j)] += go_b[j];
+                local_gw[static_cast<size_t>(j)] +=
+                    static_cast<double>(go_b[j]) * normalized;
+                local_gb[static_cast<size_t>(j)] += static_cast<double>(go_b[j]);
             }
 
-            T inv_n = T(1) / static_cast<T>(norm_size);
+            double inv_n = 1.0 / static_cast<double>(norm_size);
             for (int64_t j = 0; j < norm_size; ++j) {
-                T normalized = (in_b[j] - m) * rstd;
-                gi_b[j] = rstd * w_data[j] *
-                          (go_b[j] - inv_n * (db + normalized * ds));
+                double normalized = (static_cast<double>(in_b[j]) - m) * rstd;
+                double gi = rstd * static_cast<double>(w_data[j]) *
+                            (static_cast<double>(go_b[j]) -
+                             inv_n * (db + normalized * ds));
+                gi_b[j] = static_cast<T>(gi);
             }
         }
 
         #pragma omp critical
         {
             for (int64_t j = 0; j < norm_size; ++j) {
-                gw_data[j] += local_gw[static_cast<size_t>(j)];
-                gb_data[j] += local_gb[static_cast<size_t>(j)];
+                gw_data[j] += static_cast<T>(local_gw[static_cast<size_t>(j)]);
+                gb_data[j] += static_cast<T>(local_gb[static_cast<size_t>(j)]);
             }
         }
     }

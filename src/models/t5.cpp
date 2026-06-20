@@ -734,58 +734,36 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
         // bookkeeping runs on the CPU (logits live on the compute device).
         Tensor logits_host = logits.tensor();
         if (logits_host.device().type != Device::Type::CPU) logits_host = logits_host.cpu();
-        Tensor last_logits({batch_size, vocab_size}, logits_host.dtype(), Device::cpu());
 
-        // Dtype-generic last logits extraction
-        DType logits_dtype = logits_host.dtype();
-        if (logits_dtype == DType::Float16) {
-            auto* src = logits_host.data<Float16>();
-            auto* dst = last_logits.data<Float16>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
-                std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
-            }
-        } else if (logits_dtype == DType::Float32) {
-            auto* src = logits_host.data<float>();
-            auto* dst = last_logits.data<float>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
-                std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
-            }
-        } else if (logits_dtype == DType::Float64) {
-            auto* src = logits_host.data<double>();
-            auto* dst = last_logits.data<double>();
+        // Widen to Float32 once up front so the extraction, temperature scaling
+        // and selection are all dtype-agnostic. This covers every float dtype
+        // uniformly (Float16, BFloat16, Float32, Float64) instead of the prior
+        // per-dtype branching that silently skipped BFloat16 (and any other
+        // dtype), leaving the last-logits row at its zero-initialized value and
+        // producing degenerate generations.
+        if (logits_host.dtype() != DType::Float32) {
+            logits_host = logits_host.to(DType::Float32);
+        }
+
+        // Extract last token logits [batch, vocab_size] in Float32.
+        Tensor last_logits_f32({batch_size, vocab_size}, DType::Float32, Device::cpu());
+        {
+            const float* src = logits_host.data<const float>();
+            float* dst = last_logits_f32.data<float>();
             for (int64_t b = 0; b < batch_size; ++b) {
                 int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
                 std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
             }
         }
 
-        // Apply temperature
+        // Apply temperature on the Float32-widened logits (dtype-agnostic).
         if (temperature != 1.0) {
-            if (logits_dtype == DType::Float16) {
-                auto* data = last_logits.data<Float16>();
-                for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
-                    data[j] = Float16(float(data[j]) / static_cast<float>(temperature));
-                }
-            } else if (logits_dtype == DType::Float32) {
-                auto* data = last_logits.data<float>();
-                for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
-                    data[j] /= temperature;
-                }
-            } else if (logits_dtype == DType::Float64) {
-                auto* data = last_logits.data<double>();
-                for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
-                    data[j] /= temperature;
-                }
+            float* data = last_logits_f32.data<float>();
+            for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
+                data[j] /= static_cast<float>(temperature);
             }
         }
 
-        // Widen the (temperature-scaled) last logits to Float32 once for a
-        // dtype-generic selection step.
-        Tensor last_logits_f32 = (logits_dtype == DType::Float32)
-            ? last_logits
-            : last_logits.to(DType::Float32);
         const float* logits_data = last_logits_f32.data<const float>();
 
         Tensor next_tokens({batch_size, 1}, DType::Int64, Device::cpu());

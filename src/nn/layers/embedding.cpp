@@ -1150,10 +1150,20 @@ auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
     Tensor new_rows  = tenzor::mul(rows, scale);
     Tensor new_weight = tenzor::index_copy(weight, /*dim=*/0, flat_idx, new_rows);
 
-    auto new_var = std::make_shared<Variable>(
-        new_weight, parameters_["weight"]->requires_grad());
-    parameters_["weight"] = new_var;
-    weight_ = *new_var;
+    // Mutate the parameter's data in place rather than swapping in a fresh
+    // Variable. Optimizers capture parameters once at construction as
+    // std::shared_ptr<Variable> (Module::parameters() hands out the shared_ptr
+    // stored in parameters_). renorm_embeddings runs on every forward when
+    // max_norm_ > 0, so reassigning parameters_["weight"] to a new shared_ptr
+    // would orphan the Variable the optimizer is still updating, silently
+    // detaching the embedding weights from training. Writing into the existing
+    // Variable's tensor (the established optimizer-update pattern,
+    // `param->tensor() = ...`) preserves the parameter identity the optimizer
+    // captured. max_norm renorm is a non-differentiable, no_grad operation
+    // (new_weight has no grad_fn), matching PyTorch's in-place renorm.
+    parameters_["weight"]->tensor() = new_weight;
+    // Keep the legacy weight_ mirror pointing at the same data view.
+    weight_.set_data_view(new_weight);
 }
 
 auto Embedding::weight() -> Variable& {

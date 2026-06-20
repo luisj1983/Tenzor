@@ -82,10 +82,10 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
     // Update statistics
     dev_alloc->stats.allocated_bytes += block->size;
 
-    // Only subtract from cached_bytes if we got the block from cache
-    if (from_cache && dev_alloc->stats.cached_bytes >= block->size) {
-        dev_alloc->stats.cached_bytes -= block->size;
-    }
+    // cached_bytes was already decremented in try_allocate_from_cache when the
+    // block was removed from the free pool (and split_block re-added any
+    // remainder), so nothing to subtract here.
+    (void)from_cache;
 
     return block->ptr;
 }
@@ -344,6 +344,17 @@ Block* CachingAllocator::try_allocate_from_cache(size_t size, int device, cudaSt
 
         // Remove from free blocks
         device_alloc.free_blocks.erase(it);
+
+        // The block leaves the free pool: drop its full (pre-split) size from
+        // cached_bytes here. If it is then split, split_block re-adds the
+        // remainder. This preserves the invariant cached_bytes == sum of
+        // free_blocks sizes (the previous code subtracted the post-split size
+        // in allocate(), over-counting by the remainder on every split).
+        if (device_alloc.stats.cached_bytes >= block->size) {
+            device_alloc.stats.cached_bytes -= block->size;
+        } else {
+            device_alloc.stats.cached_bytes = 0;
+        }
 
         // Try to split if block is too large
         if (block->size >= size + min_split_size_) {

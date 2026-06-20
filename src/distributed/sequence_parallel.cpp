@@ -82,7 +82,16 @@ auto SequenceParallel::gather_sequence(const Tensor& input,
             "SequenceParallel.");
     }
 
-    std::vector<Tensor> gathered;
+    // ProcessGroupBase::all_gather requires the output vector to be
+    // pre-sized to world_size with correctly-shaped placeholder tensors;
+    // every concrete backend (NCCL/MPI/Gloo) throws std::invalid_argument
+    // if output.size() != world_size. Each rank contributes an identically
+    // shaped local chunk, so empty_like(input) is the correct placeholder
+    // (same pattern as post_attention_scatter below and tensor_parallel.cpp).
+    std::vector<Tensor> gathered(static_cast<size_t>(tp_size_));
+    for (auto& slot : gathered) {
+        slot = empty_like(input);
+    }
     pg->all_gather(gathered, input);
     // Concatenate all chunks along the sequence dimension.
     return cat(gathered, seq_dim);

@@ -862,7 +862,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor {
 }
 
 // Masked fill operation - fill elements with value where mask is true
-auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value) -> Tensor {
+auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, double value) -> Tensor {
     auto input_shape = input.shape();
 
     // C.6: broadcast the mask to input shape (matches the CUDA wrapper).
@@ -925,7 +925,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value)
     if (input.dtype() == DType::Float32) {
         const float* input_ptr = input.data<float>();
         float* output_ptr = output.data<float>();
-        const float fill_value = value;
+        const float fill_value = static_cast<float>(value);
 
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
@@ -957,7 +957,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value)
     } else if (input.dtype() == DType::Float16) {
         const Float16* input_ptr = input.data<Float16>();
         Float16* output_ptr = output.data<Float16>();
-        const Float16 fill_value = Float16(value);
+        const Float16 fill_value = Float16(static_cast<float>(value));
 
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
@@ -965,7 +965,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value)
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* input_ptr = input.data<BFloat16>();
         BFloat16* output_ptr = output.data<BFloat16>();
-        const BFloat16 fill_value = BFloat16(value);
+        const BFloat16 fill_value = BFloat16(static_cast<float>(value));
 
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
@@ -973,7 +973,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value)
     } else if (input.dtype() == DType::Bool) {
         const bool* input_ptr = input.data<bool>();
         bool* output_ptr = output.data<bool>();
-        const bool fill_value = (value != 0.0f);
+        const bool fill_value = (value != 0.0);
 
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
@@ -981,7 +981,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value)
     } else if (input.dtype() == DType::Complex64) {
         const std::complex<float>* input_ptr = input.data<std::complex<float>>();
         std::complex<float>* output_ptr = output.data<std::complex<float>>();
-        const std::complex<float> fill_value(value, 0.0f);
+        const std::complex<float> fill_value(static_cast<float>(value), 0.0f);
 
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
@@ -1277,7 +1277,11 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
             std::to_string(num_indices) + ")");
     }
 
-    Tensor result = input.is_contiguous() ? input : input.contiguous();
+    // put() is an out-of-place op (const-ref input, returns a new Tensor), so we
+    // must never mutate the caller's storage. contiguous() returns *this (shared
+    // storage) when already contiguous, so clone() that case; the non-contiguous
+    // path already materializes a fresh copy. Mirrors masked_scatter_kernel.
+    Tensor result = input.is_contiguous() ? input.clone() : input.contiguous();
     // Source is read in flat order; a non-contiguous source view would be read
     // with the wrong layout, so materialize a contiguous copy.
     Tensor source_c = source.is_contiguous() ? source : source.contiguous();

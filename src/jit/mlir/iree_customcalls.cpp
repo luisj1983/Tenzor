@@ -205,7 +205,36 @@ auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& inputs,
     const int64_t last_dim = rank - 1;
 
     const auto kv = parse_backend_config(backend_config);
-    (void)parse_int(kv.count("offset") ? kv.at("offset") : "", 0);
+    const int64_t offset =
+        parse_int(kv.count("offset") ? kv.at("offset") : "", 0);
+
+    // `offset` is the starting position index used for KV-cache incremental
+    // decode: the cos/sin tables are precomputed for absolute positions and
+    // `x` covers the window [offset, offset+seq_len). We mirror the reference
+    // RoPE (src/nn/layers/rope.cpp), which slices the position dimension of
+    // the cos/sin tables by [offset, offset+seq_len) before applying the
+    // rotation. For the in-graph path offset is always 0 so this is a no-op.
+    ::tenzor::Tensor cos_t = cos;
+    ::tenzor::Tensor sin_t = sin;
+    if (offset != 0) {
+        if (offset < 0) {
+            throw std::runtime_error(
+                "tenzor_rope_apply: offset must be non-negative, got " +
+                std::to_string(offset));
+        }
+        // The sequence/position axis of x is the dim immediately preceding the
+        // rotated feature dim; cos/sin carry the matching position axis on
+        // their leading dimension (shape (seq_len, ...)), exactly as the
+        // reference RoPE layer slices it.
+        if (rank < 2) {
+            throw std::runtime_error(
+                "tenzor_rope_apply: non-zero offset requires x to have a "
+                "sequence dimension (rank >= 2)");
+        }
+        const int64_t seq_len = x_shape[rank - 2];
+        cos_t = ::tenzor::narrow(cos_t, 0, offset, seq_len).contiguous();
+        sin_t = ::tenzor::narrow(sin_t, 0, offset, seq_len).contiguous();
+    }
 
     auto x1 = ::tenzor::narrow(x, last_dim, 0, H).contiguous();
     auto x2 = ::tenzor::narrow(x, last_dim, H, H).contiguous();
@@ -221,8 +250,8 @@ auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& inputs,
         }
         return out;
     };
-    auto cos_b = align_trailing(cos);
-    auto sin_b = align_trailing(sin);
+    auto cos_b = align_trailing(cos_t);
+    auto sin_b = align_trailing(sin_t);
 
     return x * cos_b + rotated * sin_b;
 }
@@ -418,6 +447,9 @@ static iree_status_t IREE_API_PTR call_shim_flash_attention(
         const bool causal = args->causal != 0;
 
         std::ostringstream cfg;
+        // float32 round-trip needs 9 significant digits; default ostream
+        // precision (6) would truncate the bit-exact i32-transported scale.
+        cfg.precision(9);
         cfg << "causal=" << (causal ? "true" : "false")
             << ",scale=" << scale;
         auto out = cc::dispatch_flash_attention({qt, kt, vt}, cfg.str());
@@ -459,6 +491,9 @@ static iree_status_t IREE_API_PTR call_shim_gqa(
         const bool causal = args->causal != 0;
 
         std::ostringstream cfg;
+        // float32 round-trip needs 9 significant digits; default ostream
+        // precision (6) would truncate the bit-exact i32-transported scale.
+        cfg.precision(9);
         cfg << "causal=" << (causal ? "true" : "false")
             << ",scale=" << scale;
         auto out = cc::dispatch_gqa({qt, kt, vt}, cfg.str());
@@ -544,6 +579,9 @@ static iree_status_t IREE_API_PTR call_shim_rms_norm(
         std::memcpy(&eps, &args->eps_bits, sizeof(eps));
 
         std::ostringstream cfg;
+        // float32 round-trip needs 9 significant digits; default ostream
+        // precision (6) would truncate the bit-exact i32-transported eps.
+        cfg.precision(9);
         cfg << "eps=" << eps;
         auto out = cc::dispatch_rms_norm({xt, wt}, cfg.str());
 

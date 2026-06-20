@@ -42,12 +42,14 @@ struct CDistKernelTag {};
 struct CDistL2Tag {};
 struct CDistL1Tag {};
 struct CDistLpTag {};
+struct CDistInfTag {};
+struct CDistP0Tag {};
 struct GammaSampleKernelTag {};
-struct TrapezoidKernelTag {};
-struct CumulativeTrapezoidKernelTag {};
-struct GradientKernelTag {};
-struct PairwiseDistKernelTag {};
-struct PdistKernelTag {};
+template<typename T> struct TrapezoidKernelTag {};
+template<typename T> struct CumulativeTrapezoidKernelTag {};
+template<typename T> struct GradientKernelTag {};
+template<typename T> struct PairwiseDistKernelTag {};
+template<typename T> struct PdistKernelTag {};
 
 }  // namespace
 
@@ -537,12 +539,11 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
 
 auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                   sycl::queue& queue) -> Tensor {
-    // Preserve the input dtype on output. Compute in Float64 when either
-    // input is Float64, otherwise compute in Float32 and narrow Float16 /
-    // BFloat16 back at the end.
-    const DType orig_dtype = (x1.dtype() == DType::Float64 || x2.dtype() == DType::Float64)
-                                 ? DType::Float64
-                                 : x1.dtype();
+    // Preserve the input dtype on output, keyed off x1 only to match the CPU
+    // (src/backends/cpu/kernels/math.cpp) and CUDA references. Compute in
+    // Float64 when x1 is Float64, otherwise compute in Float32 and narrow
+    // Float16 / BFloat16 back at the end.
+    const DType orig_dtype = x1.dtype();
     const DType compute_dtype = (orig_dtype == DType::Float64) ? DType::Float64
                                                                : DType::Float32;
 
@@ -606,6 +607,37 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                     }
                     out_ptr[(bi * P + p_idx) * R + r] = sum;
                 });
+        } else if (std::isinf(p)) {
+            // p=inf -> Chebyshev (max-abs); matches CPU/CUDA references.
+            queue.parallel_for<CDistInfTag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const float* a_b = a_ptr + bi * P * M;
+                    const float* b_b = b_ptr + bi * R * M;
+                    float max_val = 0.0f;
+                    for (int64_t m = 0; m < M; ++m) {
+                        max_val = sycl::fmax(max_val,
+                            sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]));
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = max_val;
+                });
+        } else if (p == 0.0) {
+            // p=0 -> count of unequal components; matches CPU/CUDA references.
+            queue.parallel_for<CDistP0Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const float* a_b = a_ptr + bi * P * M;
+                    const float* b_b = b_ptr + bi * R * M;
+                    float count = 0.0f;
+                    for (int64_t m = 0; m < M; ++m) {
+                        if (a_b[p_idx * M + m] != b_b[r * M + m]) count += 1.0f;
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = count;
+                });
         } else {
             queue.parallel_for<CDistLpTag>(sycl::range<3>(B, P, R),
                 [=](sycl::id<3> idx) {
@@ -656,6 +688,37 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                         sum += sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
                     }
                     out_ptr[(bi * P + p_idx) * R + r] = sum;
+                });
+        } else if (std::isinf(p)) {
+            // p=inf -> Chebyshev (max-abs); matches CPU/CUDA references.
+            queue.parallel_for<class CDistInfF64Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const double* a_b = a_ptr + bi * P * M;
+                    const double* b_b = b_ptr + bi * R * M;
+                    double max_val = 0.0;
+                    for (int64_t m = 0; m < M; ++m) {
+                        max_val = sycl::fmax(max_val,
+                            sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]));
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = max_val;
+                });
+        } else if (p == 0.0) {
+            // p=0 -> count of unequal components; matches CPU/CUDA references.
+            queue.parallel_for<class CDistP0F64Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const double* a_b = a_ptr + bi * P * M;
+                    const double* b_b = b_ptr + bi * R * M;
+                    double count = 0.0;
+                    for (int64_t m = 0; m < M; ++m) {
+                        if (a_b[p_idx * M + m] != b_b[r * M + m]) count += 1.0;
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = count;
                 });
         } else {
             queue.parallel_for<class CDistLpF64Tag>(sycl::range<3>(B, P, R),
@@ -899,7 +962,14 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
 
 auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
                        const Tensor* x_ptr, sycl::queue& queue) -> Tensor {
-    Tensor yf = (y.dtype() == DType::Float32) ? y.contiguous() : y.contiguous().to(DType::Float32);
+    // Compute in Float64 for Float64 input (preserving precision and the
+    // output dtype), otherwise compute in Float32 and narrow reduced-precision
+    // floats back. Mirrors the CPU/CUDA references.
+    const DType orig_dtype = y.dtype();
+    const DType compute_dtype =
+        (orig_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor yf = (y.dtype() == compute_dtype) ? y.contiguous() : y.contiguous().to(compute_dtype);
     auto shape = yf.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -915,43 +985,46 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    Tensor result(out_shape, DType::Float32, y.device());
+    Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;
-    if (n < 2 || total == 0) return result;
+    if (n < 2 || total == 0)
+        return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 
-    const float* y_ptr = get_data_ptr<const float>(yf);
-    float* out_ptr = get_data_ptr<float>(result);
     bool has_x = x_ptr != nullptr;
     Tensor xf;
-    const float* xd = nullptr;
     if (has_x) {
-        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : x_ptr->contiguous().to(DType::Float32);
-        xd = get_data_ptr<const float>(xf);
+        xf = (x_ptr->dtype() == compute_dtype) ? x_ptr->contiguous()
+                                               : x_ptr->contiguous().to(compute_dtype);
     }
 
-    float dx_f = static_cast<float>(dx);
     int64_t n_val = n, inner_val = inner;
 
-    queue.parallel_for<TrapezoidKernelTag>(sycl::range<1>(total), [=](sycl::id<1> id) {
-        int64_t idx = id[0];
-        int64_t o = idx / inner_val;
-        int64_t i_inner = idx % inner_val;
+    auto launch = [&]<typename T>(T*) {
+        const T* y_ptr = get_data_ptr<const T>(yf);
+        T* out_ptr = get_data_ptr<T>(result);
+        const T* xd = has_x ? get_data_ptr<const T>(xf) : nullptr;
+        T dx_f = static_cast<T>(dx);
+        queue.parallel_for<TrapezoidKernelTag<T>>(sycl::range<1>(total), [=](sycl::id<1> id) {
+            int64_t idx = id[0];
+            int64_t o = idx / inner_val;
+            int64_t i_inner = idx % inner_val;
 
-        float sum = 0.0f;
-        for (int64_t k = 0; k < n_val - 1; k++) {
-            int64_t idx_k  = (o * n_val + k) * inner_val + i_inner;
-            int64_t idx_k1 = (o * n_val + k + 1) * inner_val + i_inner;
-            float h = has_x ? (xd[idx_k1] - xd[idx_k]) : dx_f;
-            sum += 0.5f * (y_ptr[idx_k] + y_ptr[idx_k1]) * h;
-        }
-        out_ptr[idx] = sum;
-    });
+            T sum = T(0);
+            for (int64_t k = 0; k < n_val - 1; k++) {
+                int64_t idx_k  = (o * n_val + k) * inner_val + i_inner;
+                int64_t idx_k1 = (o * n_val + k + 1) * inner_val + i_inner;
+                T h = has_x ? (xd[idx_k1] - xd[idx_k]) : dx_f;
+                sum += T(0.5) * (y_ptr[idx_k] + y_ptr[idx_k1]) * h;
+            }
+            out_ptr[idx] = sum;
+        });
+    };
+    if (compute_dtype == DType::Float64) launch(static_cast<double*>(nullptr));
+    else                                 launch(static_cast<float*>(nullptr));
     queue.wait_and_throw();
-    // Half-precision dispatch: narrow the Float32 result back to the
-    // caller's reduced-precision dtype.
-    if (y.dtype() == DType::Float16 || y.dtype() == DType::BFloat16)
-        return result.to(y.dtype());
-    return result;
+    // Narrow the compute-dtype result back to the caller's dtype
+    // (Float16 / BFloat16 / Float64) when it differs.
+    return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
@@ -960,7 +1033,12 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
 
 auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
                                   const Tensor* x_ptr, sycl::queue& queue) -> Tensor {
-    Tensor yf = (y.dtype() == DType::Float32) ? y.contiguous() : y.contiguous().to(DType::Float32);
+    // Compute in Float64 for Float64 input, otherwise Float32; mirrors CPU/CUDA.
+    const DType orig_dtype = y.dtype();
+    const DType compute_dtype =
+        (orig_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor yf = (y.dtype() == compute_dtype) ? y.contiguous() : y.contiguous().to(compute_dtype);
     auto shape = yf.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -972,43 +1050,44 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = (n < 2) ? 0 : n - 1;
-    Tensor result(out_shape, DType::Float32, y.device());
+    Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;
-    if (n < 2 || total == 0) return result;
+    if (n < 2 || total == 0)
+        return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 
-    const float* y_ptr = get_data_ptr<const float>(yf);
-    float* out_ptr = get_data_ptr<float>(result);
     bool has_x = x_ptr != nullptr;
     Tensor xf;
-    const float* xd = nullptr;
     if (has_x) {
-        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : x_ptr->contiguous().to(DType::Float32);
-        xd = get_data_ptr<const float>(xf);
+        xf = (x_ptr->dtype() == compute_dtype) ? x_ptr->contiguous()
+                                               : x_ptr->contiguous().to(compute_dtype);
     }
 
-    float dx_f = static_cast<float>(dx);
     int64_t n_val = n, inner_val = inner;
 
-    queue.parallel_for<CumulativeTrapezoidKernelTag>(sycl::range<1>(total), [=](sycl::id<1> id) {
-        int64_t idx = id[0];
-        int64_t o = idx / inner_val;
-        int64_t i_inner = idx % inner_val;
+    auto launch = [&]<typename T>(T*) {
+        const T* y_ptr = get_data_ptr<const T>(yf);
+        T* out_ptr = get_data_ptr<T>(result);
+        const T* xd = has_x ? get_data_ptr<const T>(xf) : nullptr;
+        T dx_f = static_cast<T>(dx);
+        queue.parallel_for<CumulativeTrapezoidKernelTag<T>>(sycl::range<1>(total), [=](sycl::id<1> id) {
+            int64_t idx = id[0];
+            int64_t o = idx / inner_val;
+            int64_t i_inner = idx % inner_val;
 
-        float cumsum = 0.0f;
-        for (int64_t k = 0; k < n_val - 1; k++) {
-            int64_t idx_k  = (o * n_val + k) * inner_val + i_inner;
-            int64_t idx_k1 = (o * n_val + k + 1) * inner_val + i_inner;
-            float h = has_x ? (xd[idx_k1] - xd[idx_k]) : dx_f;
-            cumsum += 0.5f * (y_ptr[idx_k] + y_ptr[idx_k1]) * h;
-            out_ptr[(o * (n_val - 1) + k) * inner_val + i_inner] = cumsum;
-        }
-    });
+            T cumsum = T(0);
+            for (int64_t k = 0; k < n_val - 1; k++) {
+                int64_t idx_k  = (o * n_val + k) * inner_val + i_inner;
+                int64_t idx_k1 = (o * n_val + k + 1) * inner_val + i_inner;
+                T h = has_x ? (xd[idx_k1] - xd[idx_k]) : dx_f;
+                cumsum += T(0.5) * (y_ptr[idx_k] + y_ptr[idx_k1]) * h;
+                out_ptr[(o * (n_val - 1) + k) * inner_val + i_inner] = cumsum;
+            }
+        });
+    };
+    if (compute_dtype == DType::Float64) launch(static_cast<double*>(nullptr));
+    else                                 launch(static_cast<float*>(nullptr));
     queue.wait_and_throw();
-    // Half-precision dispatch: narrow the Float32 result back to the
-    // caller's reduced-precision dtype.
-    if (y.dtype() == DType::Float16 || y.dtype() == DType::BFloat16)
-        return result.to(y.dtype());
-    return result;
+    return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
@@ -1017,7 +1096,13 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
 
 auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
                       sycl::queue& queue) -> Tensor {
-    Tensor inf = (input.dtype() == DType::Float32) ? input.contiguous() : input.contiguous().to(DType::Float32);
+    // Compute in Float64 for Float64 input, otherwise Float32; mirrors CPU/CUDA.
+    const DType orig_dtype = input.dtype();
+    const DType compute_dtype =
+        (orig_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor inf = (input.dtype() == compute_dtype) ? input.contiguous()
+                                                  : input.contiguous().to(compute_dtype);
     auto shape = inf.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -1027,36 +1112,37 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
     for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
 
-    Tensor result(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
+    Tensor result(std::vector<int64_t>(shape.begin(), shape.end()), compute_dtype, input.device());
     int64_t total = outer * inner;
-    if (n < 2 || total == 0) return result;
+    if (n < 2 || total == 0)
+        return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 
-    const float* in_ptr = get_data_ptr<const float>(inf);
-    float* out_ptr = get_data_ptr<float>(result);
-    float h = static_cast<float>(spacing);
     int64_t n_val = n, inner_val = inner;
 
-    queue.parallel_for<GradientKernelTag>(sycl::range<1>(total), [=](sycl::id<1> id) {
-        int64_t idx = id[0];
-        int64_t o = idx / inner_val;
-        int64_t i_inner = idx % inner_val;
+    auto launch = [&]<typename T>(T*) {
+        const T* in_ptr = get_data_ptr<const T>(inf);
+        T* out_ptr = get_data_ptr<T>(result);
+        T h = static_cast<T>(spacing);
+        queue.parallel_for<GradientKernelTag<T>>(sycl::range<1>(total), [=](sycl::id<1> id) {
+            int64_t idx = id[0];
+            int64_t o = idx / inner_val;
+            int64_t i_inner = idx % inner_val;
 
-        auto at = [&](int64_t k) -> float {
-            return in_ptr[(o * n_val + k) * inner_val + i_inner];
-        };
+            auto at = [&](int64_t k) -> T {
+                return in_ptr[(o * n_val + k) * inner_val + i_inner];
+            };
 
-        out_ptr[(o * n_val + 0) * inner_val + i_inner] = (at(1) - at(0)) / h;
-        for (int64_t k = 1; k < n_val - 1; k++) {
-            out_ptr[(o * n_val + k) * inner_val + i_inner] = (at(k + 1) - at(k - 1)) / (2.0f * h);
-        }
-        out_ptr[(o * n_val + n_val - 1) * inner_val + i_inner] = (at(n_val - 1) - at(n_val - 2)) / h;
-    });
+            out_ptr[(o * n_val + 0) * inner_val + i_inner] = (at(1) - at(0)) / h;
+            for (int64_t k = 1; k < n_val - 1; k++) {
+                out_ptr[(o * n_val + k) * inner_val + i_inner] = (at(k + 1) - at(k - 1)) / (T(2) * h);
+            }
+            out_ptr[(o * n_val + n_val - 1) * inner_val + i_inner] = (at(n_val - 1) - at(n_val - 2)) / h;
+        });
+    };
+    if (compute_dtype == DType::Float64) launch(static_cast<double*>(nullptr));
+    else                                 launch(static_cast<float*>(nullptr));
     queue.wait_and_throw();
-    // Half-precision dispatch: narrow the Float32 result back to the
-    // caller's reduced-precision dtype.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
-        return result.to(input.dtype());
-    return result;
+    return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
@@ -1065,45 +1151,51 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
 
 auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
                                sycl::queue& queue) -> Tensor {
-    Tensor a = (x1.dtype() == DType::Float32) ? x1.contiguous() : x1.contiguous().to(DType::Float32);
-    Tensor b = (x2.dtype() == DType::Float32) ? x2.contiguous() : x2.contiguous().to(DType::Float32);
+    // Compute in Float64 for Float64 input, otherwise Float32; output dtype
+    // keyed off x1 to match the CPU/CUDA references.
+    const DType orig_dtype = x1.dtype();
+    const DType compute_dtype =
+        (orig_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor a = (x1.dtype() == compute_dtype) ? x1.contiguous() : x1.contiguous().to(compute_dtype);
+    Tensor b = (x2.dtype() == compute_dtype) ? x2.contiguous() : x2.contiguous().to(compute_dtype);
 
     int64_t N = a.shape()[0], D = a.shape()[1];
-    Tensor result({N}, DType::Float32, x1.device());
-    if (N == 0) return result;
+    Tensor result({N}, compute_dtype, x1.device());
+    if (N == 0)
+        return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 
-    const float* a_ptr = get_data_ptr<const float>(a);
-    const float* b_ptr = get_data_ptr<const float>(b);
-    float* out_ptr = get_data_ptr<float>(result);
-    float p_f = static_cast<float>(p);
-
-    queue.parallel_for<PairwiseDistKernelTag>(sycl::range<1>(N), [=](sycl::id<1> id) {
-        int64_t i = id[0];
-        float sum = 0.0f;
-        if (p_f == 2.0f) {
-            for (int64_t j = 0; j < D; j++) {
-                float diff = a_ptr[i * D + j] - b_ptr[i * D + j];
-                sum += diff * diff;
+    auto launch = [&]<typename T>(T*) {
+        const T* a_ptr = get_data_ptr<const T>(a);
+        const T* b_ptr = get_data_ptr<const T>(b);
+        T* out_ptr = get_data_ptr<T>(result);
+        T p_f = static_cast<T>(p);
+        queue.parallel_for<PairwiseDistKernelTag<T>>(sycl::range<1>(N), [=](sycl::id<1> id) {
+            int64_t i = id[0];
+            T sum = T(0);
+            if (p_f == T(2)) {
+                for (int64_t j = 0; j < D; j++) {
+                    T diff = a_ptr[i * D + j] - b_ptr[i * D + j];
+                    sum += diff * diff;
+                }
+                out_ptr[i] = sycl::sqrt(sum);
+            } else if (p_f == T(1)) {
+                for (int64_t j = 0; j < D; j++) {
+                    sum += sycl::fabs(a_ptr[i * D + j] - b_ptr[i * D + j]);
+                }
+                out_ptr[i] = sum;
+            } else {
+                for (int64_t j = 0; j < D; j++) {
+                    sum += sycl::pow(sycl::fabs(a_ptr[i * D + j] - b_ptr[i * D + j]), p_f);
+                }
+                out_ptr[i] = sycl::pow(sum, T(1) / p_f);
             }
-            out_ptr[i] = sycl::sqrt(sum);
-        } else if (p_f == 1.0f) {
-            for (int64_t j = 0; j < D; j++) {
-                sum += sycl::fabs(a_ptr[i * D + j] - b_ptr[i * D + j]);
-            }
-            out_ptr[i] = sum;
-        } else {
-            for (int64_t j = 0; j < D; j++) {
-                sum += sycl::pow(sycl::fabs(a_ptr[i * D + j] - b_ptr[i * D + j]), p_f);
-            }
-            out_ptr[i] = sycl::pow(sum, 1.0f / p_f);
-        }
-    });
+        });
+    };
+    if (compute_dtype == DType::Float64) launch(static_cast<double*>(nullptr));
+    else                                 launch(static_cast<float*>(nullptr));
     queue.wait_and_throw();
-    // Half-precision dispatch: narrow the Float32 result back to the
-    // caller's reduced-precision dtype.
-    if (x1.dtype() == DType::Float16 || x1.dtype() == DType::BFloat16)
-        return result.to(x1.dtype());
-    return result;
+    return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
@@ -1111,52 +1203,58 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
 // =========================================================================
 
 auto pdist_kernel(const Tensor& input, double p, sycl::queue& queue) -> Tensor {
-    Tensor inf = (input.dtype() == DType::Float32) ? input.contiguous() : input.contiguous().to(DType::Float32);
+    // Compute in Float64 for Float64 input, otherwise Float32; mirrors CPU/CUDA.
+    const DType orig_dtype = input.dtype();
+    const DType compute_dtype =
+        (orig_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor inf = (input.dtype() == compute_dtype) ? input.contiguous()
+                                                  : input.contiguous().to(compute_dtype);
     int64_t N = inf.shape()[0], D = inf.shape()[1];
     int64_t num_pairs = N * (N - 1) / 2;
 
-    Tensor result({num_pairs}, DType::Float32, input.device());
-    if (num_pairs == 0) return result;
+    Tensor result({num_pairs}, compute_dtype, input.device());
+    if (num_pairs == 0)
+        return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 
-    const float* data = get_data_ptr<const float>(inf);
-    float* out_ptr = get_data_ptr<float>(result);
-    float p_f = static_cast<float>(p);
+    auto launch = [&]<typename T>(T*) {
+        const T* data = get_data_ptr<const T>(inf);
+        T* out_ptr = get_data_ptr<T>(result);
+        T p_f = static_cast<T>(p);
+        queue.parallel_for<PdistKernelTag<T>>(sycl::range<1>(num_pairs), [=](sycl::id<1> id) {
+            int64_t idx = id[0];
+            // Map flat index to (i, j) pair where i < j
+            int64_t i = 0, offset = 0;
+            while (offset + (N - 1 - i) <= idx) {
+                offset += (N - 1 - i);
+                i++;
+            }
+            int64_t j = idx - offset + i + 1;
 
-    queue.parallel_for<PdistKernelTag>(sycl::range<1>(num_pairs), [=](sycl::id<1> id) {
-        int64_t idx = id[0];
-        // Map flat index to (i, j) pair where i < j
-        int64_t i = 0, offset = 0;
-        while (offset + (N - 1 - i) <= idx) {
-            offset += (N - 1 - i);
-            i++;
-        }
-        int64_t j = idx - offset + i + 1;
-
-        float sum = 0.0f;
-        if (p_f == 2.0f) {
-            for (int64_t d = 0; d < D; d++) {
-                float diff = data[i * D + d] - data[j * D + d];
-                sum += diff * diff;
+            T sum = T(0);
+            if (p_f == T(2)) {
+                for (int64_t d = 0; d < D; d++) {
+                    T diff = data[i * D + d] - data[j * D + d];
+                    sum += diff * diff;
+                }
+                out_ptr[idx] = sycl::sqrt(sum);
+            } else if (p_f == T(1)) {
+                for (int64_t d = 0; d < D; d++) {
+                    sum += sycl::fabs(data[i * D + d] - data[j * D + d]);
+                }
+                out_ptr[idx] = sum;
+            } else {
+                for (int64_t d = 0; d < D; d++) {
+                    sum += sycl::pow(sycl::fabs(data[i * D + d] - data[j * D + d]), p_f);
+                }
+                out_ptr[idx] = sycl::pow(sum, T(1) / p_f);
             }
-            out_ptr[idx] = sycl::sqrt(sum);
-        } else if (p_f == 1.0f) {
-            for (int64_t d = 0; d < D; d++) {
-                sum += sycl::fabs(data[i * D + d] - data[j * D + d]);
-            }
-            out_ptr[idx] = sum;
-        } else {
-            for (int64_t d = 0; d < D; d++) {
-                sum += sycl::pow(sycl::fabs(data[i * D + d] - data[j * D + d]), p_f);
-            }
-            out_ptr[idx] = sycl::pow(sum, 1.0f / p_f);
-        }
-    });
+        });
+    };
+    if (compute_dtype == DType::Float64) launch(static_cast<double*>(nullptr));
+    else                                 launch(static_cast<float*>(nullptr));
     queue.wait_and_throw();
-    // Half-precision dispatch: narrow the Float32 result back to the
-    // caller's reduced-precision dtype.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
-        return result.to(input.dtype());
-    return result;
+    return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 }
 
 }  // namespace oneapi

@@ -28,7 +28,9 @@ void main() {
     uint astart = active_start[b];
 
     if (deflated > 0u && deflated >= aend) {
-        aend = (deflated > 0u) ? deflated - 1u : 0u;
+        // deflated > 0u is guaranteed by the guard above, so deflated - 1u
+        // never underflows here.
+        aend = deflated - 1u;
         active_end[b] = aend;
     }
 

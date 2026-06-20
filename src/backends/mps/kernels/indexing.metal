@@ -137,6 +137,11 @@ kernel void scatter_kernel(
     uint dim_idx = (id / inner_size) % idx_dim_size;
     uint outer = id / (inner_size * idx_dim_size);
     int dst_dim = indices[id];
+    // Bounds-guard the user-supplied index before writing. An out-of-range or
+    // negative index would otherwise produce an out-of-bounds GPU write that can
+    // corrupt unrelated Metal allocations. `dst_dim` indexes the scattered
+    // dimension whose extent is `dim_size`.
+    if (dst_dim < 0 || uint(dst_dim) >= dim_size) return;
     // Replace-mode scatter (NOT additive — see scatter_add_kernel below).
     // Duplicate indices in `indices` are non-deterministic by design: the
     // documented semantic is last-writer-wins, and the order of competing
@@ -144,6 +149,87 @@ kernel void scatter_kernel(
     // Callers that need a deterministic result must ensure unique indices.
     output[(outer * dim_size + dst_dim) * inner_size + inner] = src[id];
 }
+
+// ============================================================================
+// Dtype-generic indexing (pure data movement).
+// index_select / gather / scatter are byte copies, so a single variant per
+// element SIZE covers every dtype correctly — the bit pattern is preserved
+// regardless of interpretation. Sizes:
+//   b1  = 1 byte  (Int8/UInt8/Bool)
+//   b2  = 2 bytes (Float16/BFloat16/Int16/UInt16)
+//   b4  = 4 bytes (Float32/Int32/UInt32)
+//   b8  = 8 bytes (Float64/Int64/Complex64)
+//   b16 = 16 bytes (Complex128)
+// ============================================================================
+
+template <typename T>
+kernel void index_select_kernel_dtype(
+    device const T* input         [[buffer(0)]],
+    device const int* indices     [[buffer(1)]],
+    device T* output              [[buffer(2)]],
+    constant uint& outer_size     [[buffer(3)]],
+    constant uint& dim_size       [[buffer(4)]],
+    constant uint& inner_size     [[buffer(5)]],
+    constant uint& index_size     [[buffer(6)]],
+    uint id                       [[thread_position_in_grid]])
+{
+    uint inner = id % inner_size;
+    uint idx = (id / inner_size) % index_size;
+    uint outer = id / (inner_size * index_size);
+    int src_idx = indices[idx];
+    output[id] = input[(outer * dim_size + src_idx) * inner_size + inner];
+}
+template [[host_name("index_select_kernel_b1")]]  kernel void index_select_kernel_dtype<uchar>(device const uchar*, device const int*, device uchar*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("index_select_kernel_b2")]]  kernel void index_select_kernel_dtype<ushort>(device const ushort*, device const int*, device ushort*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("index_select_kernel_b4")]]  kernel void index_select_kernel_dtype<uint>(device const uint*, device const int*, device uint*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("index_select_kernel_b8")]]  kernel void index_select_kernel_dtype<uint2>(device const uint2*, device const int*, device uint2*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("index_select_kernel_b16")]] kernel void index_select_kernel_dtype<uint4>(device const uint4*, device const int*, device uint4*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+
+template <typename T>
+kernel void gather_kernel_dtype(
+    device const T* input         [[buffer(0)]],
+    device const int* indices     [[buffer(1)]],
+    device T* output              [[buffer(2)]],
+    constant uint& outer_size     [[buffer(3)]],
+    constant uint& dim_size       [[buffer(4)]],
+    constant uint& inner_size     [[buffer(5)]],
+    constant uint& idx_dim_size   [[buffer(6)]],
+    uint id                       [[thread_position_in_grid]])
+{
+    uint inner = id % inner_size;
+    uint outer = id / (inner_size * idx_dim_size);
+    int src_dim = indices[id];
+    output[id] = input[(outer * dim_size + src_dim) * inner_size + inner];
+}
+template [[host_name("gather_kernel_b1")]]  kernel void gather_kernel_dtype<uchar>(device const uchar*, device const int*, device uchar*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("gather_kernel_b2")]]  kernel void gather_kernel_dtype<ushort>(device const ushort*, device const int*, device ushort*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("gather_kernel_b4")]]  kernel void gather_kernel_dtype<uint>(device const uint*, device const int*, device uint*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("gather_kernel_b8")]]  kernel void gather_kernel_dtype<uint2>(device const uint2*, device const int*, device uint2*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("gather_kernel_b16")]] kernel void gather_kernel_dtype<uint4>(device const uint4*, device const int*, device uint4*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+
+template <typename T>
+kernel void scatter_kernel_dtype(
+    device const T* src           [[buffer(0)]],
+    device const int* indices     [[buffer(1)]],
+    device T* output              [[buffer(2)]],
+    constant uint& outer_size     [[buffer(3)]],
+    constant uint& dim_size       [[buffer(4)]],
+    constant uint& inner_size     [[buffer(5)]],
+    constant uint& idx_dim_size   [[buffer(6)]],
+    uint id                       [[thread_position_in_grid]])
+{
+    uint inner = id % inner_size;
+    uint outer = id / (inner_size * idx_dim_size);
+    int dst_dim = indices[id];
+    // Bounds-guard the user-supplied index before writing (see scatter_kernel).
+    if (dst_dim < 0 || uint(dst_dim) >= dim_size) return;
+    output[(outer * dim_size + dst_dim) * inner_size + inner] = src[id];
+}
+template [[host_name("scatter_kernel_b1")]]  kernel void scatter_kernel_dtype<uchar>(device const uchar*, device const int*, device uchar*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("scatter_kernel_b2")]]  kernel void scatter_kernel_dtype<ushort>(device const ushort*, device const int*, device ushort*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("scatter_kernel_b4")]]  kernel void scatter_kernel_dtype<uint>(device const uint*, device const int*, device uint*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("scatter_kernel_b8")]]  kernel void scatter_kernel_dtype<uint2>(device const uint2*, device const int*, device uint2*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
+template [[host_name("scatter_kernel_b16")]] kernel void scatter_kernel_dtype<uint4>(device const uint4*, device const int*, device uint4*, constant uint&, constant uint&, constant uint&, constant uint&, uint);
 
 kernel void scatter_add_kernel(
     device const float* src       [[buffer(0)]],
@@ -159,6 +245,8 @@ kernel void scatter_add_kernel(
     uint dim_idx = (id / inner_size) % idx_dim_size;
     uint outer = id / (inner_size * idx_dim_size);
     int dst_dim = indices[id];
+    // Bounds-guard the user-supplied index before the atomic write.
+    if (dst_dim < 0 || uint(dst_dim) >= dim_size) return;
     uint dst_idx = (outer * dim_size + dst_dim) * inner_size + inner;
     atomic_fetch_add_explicit(&output[dst_idx], src[id], memory_order_relaxed);
 }
@@ -181,6 +269,8 @@ kernel void index_add_kernel(
     uint idx = (id / inner_size) % index_size;
     uint outer = id / (inner_size * index_size);
     int dst_dim = indices[idx];
+    // Bounds-guard the user-supplied index before the atomic write.
+    if (dst_dim < 0 || uint(dst_dim) >= dim_size) return;
     uint dst_idx = (outer * dim_size + dst_dim) * inner_size + inner;
     uint src_idx = (outer * index_size + idx) * inner_size + inner;
     // Duplicate indices accumulate into the same output cell — must use an
@@ -203,6 +293,8 @@ kernel void index_copy_kernel(
     uint idx = (id / inner_size) % index_size;
     uint outer = id / (inner_size * index_size);
     int dst_dim = indices[idx];
+    // Bounds-guard the user-supplied index before writing.
+    if (dst_dim < 0 || uint(dst_dim) >= dim_size) return;
     uint dst_idx = (outer * dim_size + dst_dim) * inner_size + inner;
     uint src_idx = (outer * index_size + idx) * inner_size + inner;
     // Replace-mode index_copy. Duplicate values in `indices` are
@@ -226,6 +318,8 @@ kernel void index_fill_kernel(
     uint idx = (id / inner_size) % index_size;
     uint outer = id / (inner_size * index_size);
     int dst_dim = indices[idx];
+    // Bounds-guard the user-supplied index before writing.
+    if (dst_dim < 0 || uint(dst_dim) >= dim_size) return;
     uint dst_idx = (outer * dim_size + dst_dim) * inner_size + inner;
     output[dst_idx] = value;
 }
@@ -261,9 +355,16 @@ kernel void put_kernel(
     device const float* source  [[buffer(0)]],
     device const int* indices   [[buffer(1)]],
     device float* output        [[buffer(2)]],
+    constant uint& out_size     [[buffer(3)]],
     uint id                     [[thread_position_in_grid]])
 {
-    output[indices[id]] = source[id];
+    int dst = indices[id];
+    // `dst` is a flat index into the destination buffer. Bounds-guard the
+    // user-supplied index before writing; an out-of-range or negative index
+    // would otherwise produce an out-of-bounds GPU write that can corrupt
+    // unrelated Metal allocations.
+    if (dst < 0 || uint(dst) >= out_size) return;
+    output[dst] = source[id];
 }
 
 // ============================================================================

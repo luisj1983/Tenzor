@@ -121,9 +121,11 @@ public:
             Tensor base_H = base_->entropy();
 
             // E[ Σ_t log|det J_t| ] via Monte-Carlo over the chain.
+            // Accumulate a running sum across draws (O(1) live tensors) and
+            // divide by N at the end, instead of materializing all N per-draw
+            // tensors and stacking them.
             const int N = 4096;
-            std::vector<Tensor> log_det_terms;
-            log_det_terms.reserve(static_cast<size_t>(N));
+            Tensor running;  // lazily initialized from the first draw
             for (int i = 0; i < N; ++i) {
                 Tensor x = base_->rsample({});
                 Tensor accum = tenzor::zeros(
@@ -134,12 +136,13 @@ public:
                     accum = accum + t->log_abs_det_jacobian(x, y);
                     x = std::move(y);
                 }
-                log_det_terms.push_back(accum);
+                if (i == 0) {
+                    running = std::move(accum);
+                } else {
+                    running = running + accum;
+                }
             }
-            auto stacked = tenzor::stack(
-                std::span<const Tensor>(log_det_terms.data(),
-                                        log_det_terms.size()), /*dim=*/0);
-            auto E_logdet = tenzor::mean(stacked, /*dim=*/0, /*keepdim=*/false);
+            auto E_logdet = running / static_cast<double>(N);
             return base_H + E_logdet;
         } catch (const ::tenzor::NotImplementedError&) {
             return distributions::detail::mc_entropy(

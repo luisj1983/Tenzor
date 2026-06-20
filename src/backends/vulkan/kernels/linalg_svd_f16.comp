@@ -20,6 +20,7 @@ layout(push_constant) uniform PushConstants {
 
 shared float U[32][32];
 shared float V[32][32];
+shared float s_vals[32];
 shared float converged;
 
 // Read Float16 from input buffer
@@ -170,7 +171,7 @@ void main() {
             norm += U[i][tid] * U[i][tid];
         }
         norm = sqrt(norm);
-        writeF16S(batch_idx * k + tid, norm);
+        s_vals[tid] = norm;
 
         if (norm > 1e-30) {
             for (uint i = 0; i < m; i++) {
@@ -180,18 +181,79 @@ void main() {
     }
     barrier();
 
-    // Write U as packed Float16
+    // Sort s_vals descending and apply the same permutation to U columns and
+    // V columns (thread 0 does a simple selection sort — n ≤ 32 so cost is
+    // negligible). When full_matrices is requested and m > k, also orthonormally
+    // complete U's trailing columns (k..m-1) so U is a full m×m orthogonal basis
+    // matching the CPU/LAPACK reference (jobz 'A'). Mirrors linalg_svd.comp for
+    // dtype parity and SVD convention.
+    if (tid == 0) {
+        for (uint i = 0; i < k; i++) {
+            uint maxIdx = i;
+            float maxVal = s_vals[i];
+            for (uint j = i + 1; j < k; j++) {
+                if (s_vals[j] > maxVal) { maxVal = s_vals[j]; maxIdx = j; }
+            }
+            if (maxIdx != i) {
+                float tmp_s = s_vals[i]; s_vals[i] = s_vals[maxIdx]; s_vals[maxIdx] = tmp_s;
+                for (uint r = 0; r < m; r++) {
+                    float t = U[r][i]; U[r][i] = U[r][maxIdx]; U[r][maxIdx] = t;
+                }
+                for (uint r = 0; r < n_cols; r++) {
+                    float t = V[r][i]; V[r][i] = V[r][maxIdx]; V[r][maxIdx] = t;
+                }
+            }
+        }
+
+        // Orthonormal completion of U from m×k to m×m (full mode, tall matrices).
+        if (full_matrices == 1u && m > k) {
+            uint filled = k;            // number of orthonormal columns so far
+            for (uint cand = 0; cand < m && filled < m; cand++) {
+                float w[32];
+                for (uint r = 0; r < m; r++) w[r] = (r == cand) ? 1.0 : 0.0;
+                for (uint col = 0; col < filled; col++) {
+                    float dot = 0.0;
+                    for (uint r = 0; r < m; r++) dot += w[r] * U[r][col];
+                    for (uint r = 0; r < m; r++) w[r] -= dot * U[r][col];
+                }
+                float nrm = 0.0;
+                for (uint r = 0; r < m; r++) nrm += w[r] * w[r];
+                nrm = sqrt(nrm);
+                if (nrm > 1e-6) {
+                    float inv = 1.0 / nrm;
+                    for (uint r = 0; r < m; r++) U[r][filled] = w[r] * inv;
+                    filled++;
+                }
+            }
+        }
+    }
+    barrier();
+
+    // Write S (size k per batch).
+    if (tid < k) {
+        writeF16S(batch_idx * k + tid, s_vals[tid]);
+    }
+
+    // U column count: m in full mode, k in reduced mode.
+    uint u_cols = (full_matrices == 1u) ? m : k;
+    // Vt row count: n in full mode (V is full n×n), k in reduced mode.
+    uint vt_rows = (full_matrices == 1u) ? n_cols : k;
+
+    // Write U as packed Float16 (shape m × u_cols). The batch stride uses
+    // m*u_cols, not m*n_cols — mat_offset_mn (m*n_cols) is only valid for the
+    // input A read.
+    uint u_offset = batch_idx * m * u_cols;
     for (uint row = 0; row < m; row++) {
-        if (tid < k) {
-            writeF16U(mat_offset_mn + row * k + tid, U[row][tid]);
+        if (tid < u_cols) {
+            writeF16U(u_offset + row * u_cols + tid, U[row][tid]);
         }
     }
 
-    // Write Vt (transpose of V) as packed Float16
-    uint vt_offset = batch_idx * n_cols * n_cols;
-    for (uint row = 0; row < n_cols; row++) {
+    // Write Vt (shape vt_rows × n — V^T). V^T[i,j] = V[j,i].
+    uint vt_offset = batch_idx * vt_rows * n_cols;
+    for (uint row = 0; row < vt_rows; row++) {
         if (tid < n_cols) {
-            writeF16Vt(vt_offset + tid * n_cols + row, V[row][tid]);
+            writeF16Vt(vt_offset + row * n_cols + tid, V[tid][row]);
         }
     }
 }

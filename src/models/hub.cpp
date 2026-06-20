@@ -84,7 +84,11 @@ public:
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration<double>(now - data->start_time).count();
 
-        if (elapsed < 0.1 && dlnow < dltotal) return 0;  // Update at most 10 times per second
+        // Throttle against the last emitted update (not the download start) so we
+        // genuinely emit at most ~10 updates/sec for the whole download. Always
+        // allow the final tick (dlnow >= dltotal) through.
+        auto since_last = std::chrono::duration<double>(now - data->last_time).count();
+        if (since_last < 0.1 && dlnow < dltotal) return 0;  // Update at most 10 times per second
 
         size_t total_downloaded = data->start_offset + dlnow;
         size_t total_size = data->start_offset + dltotal;
@@ -175,6 +179,31 @@ public:
 
         while (retries <= config.max_retries) {
             res = curl_easy_perform(curl);
+
+            // If we requested a resume (Range header) but the server replied
+            // 200 OK (full body) instead of 206 Partial Content, the full
+            // content was appended after the existing prefix, corrupting the
+            // file. Discard everything and restart a clean, non-resumed
+            // download.
+            if (res == CURLE_OK && start_offset > 0) {
+                long response_code = 0;
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+                if (response_code == 200) {
+                    outfile.close();
+                    std::error_code ec;
+                    fs::resize_file(dest_path, 0, ec);
+                    start_offset = 0;
+                    curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)0);
+                    mode = std::ios::binary | std::ios::out;  // truncate on reopen
+                    outfile.open(dest_path, mode);
+                    if (!outfile) {
+                        curl_easy_cleanup(curl);
+                        throw std::runtime_error("Failed to reopen output file: " + dest_path);
+                    }
+                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outfile);
+                    continue;  // re-download cleanly without resume
+                }
+            }
 
             if (res == CURLE_OK) {
                 break;

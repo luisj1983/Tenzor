@@ -1106,6 +1106,19 @@ auto mel_scale(const Tensor& spectrogram, int64_t n_mels,
     for (int64_t i = 0; i < n_points; ++i) {
         hz_points[i] = mel_to_hz(mel_points[i]);
         bins[i] = static_cast<int64_t>(std::floor((n_fft + 1) * hz_points[i] / sample_rate));
+        // Clamp FFT bin indices to the valid frequency range [0, n_freqs-1].
+        // Without clamping, an f_max above the Nyquist frequency (or large
+        // n_mels at low frequencies) produces bins that fall outside the
+        // spectrogram's frequency axis. The triangular-slope loops below guard
+        // writes with `k < n_freqs`, so overflowing bins silently skip their
+        // slope and collapse the whole mel filter row to zero, dropping that
+        // band entirely. Clamping (matching librosa/torchaudio) keeps the
+        // bins in range so every filter remains a valid triangle.
+        if (bins[i] < 0) {
+            bins[i] = 0;
+        } else if (bins[i] > n_freqs - 1) {
+            bins[i] = n_freqs - 1;
+        }
     }
 
     // Build triangular filterbank matrix (n_mels x n_freqs)

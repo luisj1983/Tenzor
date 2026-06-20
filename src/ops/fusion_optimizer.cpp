@@ -28,6 +28,75 @@ namespace ops {
 // Helper Functions
 // ==============================================================================
 
+namespace {
+
+// Guarded numeric attribute parsers. The raw std::sto* calls throw
+// std::invalid_argument / std::out_of_range on malformed input, which violates
+// the std::runtime_error contract used throughout execute_fused_op and aborts
+// the path with an unhelpful message. These wrappers rethrow std::runtime_error
+// naming the offending key and value so a builder bug is diagnosable.
+auto parse_attr_i64(const std::string& key, const std::string& value) -> int64_t {
+    try {
+        size_t pos = 0;
+        long long v = std::stoll(value, &pos);
+        if (pos != value.size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+        return static_cast<int64_t>(v);
+    } catch (const std::exception&) {
+        throw std::runtime_error(
+            "execute_fused_op: attribute '" + key + "' has non-integer value '" +
+            value + "'");
+    }
+}
+
+auto parse_attr_int(const std::string& key, const std::string& value) -> int {
+    try {
+        size_t pos = 0;
+        int v = std::stoi(value, &pos);
+        if (pos != value.size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+        return v;
+    } catch (const std::exception&) {
+        throw std::runtime_error(
+            "execute_fused_op: attribute '" + key + "' has non-integer value '" +
+            value + "'");
+    }
+}
+
+auto parse_attr_double(const std::string& key, const std::string& value) -> double {
+    try {
+        size_t pos = 0;
+        double v = std::stod(value, &pos);
+        if (pos != value.size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+        return v;
+    } catch (const std::exception&) {
+        throw std::runtime_error(
+            "execute_fused_op: attribute '" + key + "' has non-numeric value '" +
+            value + "'");
+    }
+}
+
+auto parse_attr_float(const std::string& key, const std::string& value) -> float {
+    try {
+        size_t pos = 0;
+        float v = std::stof(value, &pos);
+        if (pos != value.size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+        return v;
+    } catch (const std::exception&) {
+        throw std::runtime_error(
+            "execute_fused_op: attribute '" + key + "' has non-numeric value '" +
+            value + "'");
+    }
+}
+
+}  // namespace
+
 auto string_to_op_type(const std::string& op_name) -> OpType {
     static const std::unordered_map<std::string, OpType> name_map = {
         {"matmul", OpType::MatMul},
@@ -150,34 +219,57 @@ auto FusionGraph::get_outputs(size_t node_id) const -> std::vector<size_t> {
 auto FusionGraph::topological_sort() const -> std::vector<size_t> {
     std::vector<size_t> sorted;
     std::unordered_set<size_t> visited;
-    std::stack<size_t> stack;
+    std::stack<size_t> order_stack;  // post-order accumulation (reversed below)
 
-    // Helper function for DFS
-    std::function<void(size_t)> dfs = [&](size_t node_id) {
-        if (visited.count(node_id)) return;
-        visited.insert(node_id);
-
-        auto it = adjacency_list_.find(node_id);
-        if (it != adjacency_list_.end()) {
-            for (size_t neighbor : it->second) {
-                dfs(neighbor);
-            }
-        }
-
-        stack.push(node_id);
+    // Iterative post-order DFS. Recursion was replaced with an explicit stack
+    // of frames so that very deep (hundreds–thousands of sequential nodes)
+    // fusion graphs cannot overflow the call stack. Each frame tracks how many
+    // of its neighbors have been pushed; when all are exhausted the node is
+    // emitted in post-order, matching the previous recursive behaviour exactly.
+    struct Frame {
+        size_t node_id;
+        std::vector<size_t> neighbors;  // snapshot of adjacency for stable order
+        size_t next_index;              // index into neighbors not yet visited
     };
 
-    // Visit all nodes
-    for (size_t i = 0; i < nodes_.size(); ++i) {
-        if (nodes_[i] && !visited.count(i)) {
-            dfs(i);
+    auto snapshot_neighbors = [&](size_t node_id) -> std::vector<size_t> {
+        std::vector<size_t> ns;
+        auto it = adjacency_list_.find(node_id);
+        if (it != adjacency_list_.end()) {
+            ns.assign(it->second.begin(), it->second.end());
+        }
+        return ns;
+    };
+
+    for (size_t root = 0; root < nodes_.size(); ++root) {
+        if (!nodes_[root] || visited.count(root)) {
+            continue;
+        }
+
+        std::vector<Frame> frames;
+        visited.insert(root);
+        frames.push_back({root, snapshot_neighbors(root), 0});
+
+        while (!frames.empty()) {
+            Frame& top = frames.back();
+            if (top.next_index < top.neighbors.size()) {
+                size_t neighbor = top.neighbors[top.next_index++];
+                if (!visited.count(neighbor)) {
+                    visited.insert(neighbor);
+                    frames.push_back({neighbor, snapshot_neighbors(neighbor), 0});
+                }
+            } else {
+                // All neighbors processed: emit in post-order, then pop.
+                order_stack.push(top.node_id);
+                frames.pop_back();
+            }
         }
     }
 
-    // Extract sorted order
-    while (!stack.empty()) {
-        sorted.push_back(stack.top());
-        stack.pop();
+    // Extract sorted order (reverse of post-order).
+    while (!order_stack.empty()) {
+        sorted.push_back(order_stack.top());
+        order_stack.pop();
     }
 
     return sorted;
@@ -202,23 +294,49 @@ auto FusionGraph::has_cycle_util(
     std::unordered_set<size_t>& visited,
     std::unordered_set<size_t>& rec_stack
 ) const -> bool {
+    // Iterative DFS with an explicit recursion stack of frames. Replacing the
+    // former self-recursion avoids call-stack overflow on deep fusion graphs.
+    // rec_stack mirrors the set of nodes currently on the DFS path; a back edge
+    // into that set indicates a cycle (identical semantics to the recursive
+    // version). Nodes are removed from rec_stack when their frame is popped.
+    struct Frame {
+        size_t node_id;
+        std::vector<size_t> neighbors;
+        size_t next_index;
+    };
+
+    auto snapshot_neighbors = [&](size_t node_id) -> std::vector<size_t> {
+        std::vector<size_t> ns;
+        auto it = adjacency_list_.find(node_id);
+        if (it != adjacency_list_.end()) {
+            ns.assign(it->second.begin(), it->second.end());
+        }
+        return ns;
+    };
+
+    std::vector<Frame> frames;
     visited.insert(node);
     rec_stack.insert(node);
+    frames.push_back({node, snapshot_neighbors(node), 0});
 
-    auto it = adjacency_list_.find(node);
-    if (it != adjacency_list_.end()) {
-        for (size_t neighbor : it->second) {
-            if (!visited.count(neighbor)) {
-                if (has_cycle_util(neighbor, visited, rec_stack)) {
-                    return true;
-                }
-            } else if (rec_stack.count(neighbor)) {
-                return true;
+    while (!frames.empty()) {
+        Frame& top = frames.back();
+        if (top.next_index < top.neighbors.size()) {
+            size_t neighbor = top.neighbors[top.next_index++];
+            if (rec_stack.count(neighbor)) {
+                return true;  // back edge into the current path => cycle
             }
+            if (!visited.count(neighbor)) {
+                visited.insert(neighbor);
+                rec_stack.insert(neighbor);
+                frames.push_back({neighbor, snapshot_neighbors(neighbor), 0});
+            }
+        } else {
+            rec_stack.erase(top.node_id);
+            frames.pop_back();
         }
     }
 
-    rec_stack.erase(node);
     return false;
 }
 
@@ -679,21 +797,77 @@ auto FusionOptimizer::rewrite_graph(
         }
     }
 
-    // Process fusions first
-    for (size_t fusion_idx = 0; fusion_idx < fusions.size(); ++fusion_idx) {
-        const auto& fusion = fusions[fusion_idx];
+    // Two passes are required so external inputs are never dropped. Previously
+    // a fused node's external inputs were only mapped when their producer had
+    // *already* been processed (old_to_new_id populated), but non-fused
+    // producers were copied in a later loop, so any external input that came
+    // from a not-yet-copied node was silently dropped — leaving fused ops with
+    // fewer inputs than execute_fused_op expects.
+    //
+    // Pass 1: create every surviving node (each fusion collapses to one node,
+    //         each non-fused node copied 1:1) with EMPTY inputs and record the
+    //         old->new id mapping so the full mapping is available up front.
+    // Pass 2: wire inputs using the complete mapping via add_edge.
 
-        // Collect inputs from first node in fusion
+    // Pass 1a: create one node per fusion and map all its members to it.
+    for (const auto& fusion : fusions) {
+        // Create fused node — seed with the parameters captured from the matched
+        // nodes (dropout p/seed, scale, causal, ...) so execute_fused_op sees
+        // them, then tag the fusion type.
+        std::unordered_map<std::string, std::string> attrs = fusion.attributes;
+        attrs["fusion_type"] = fusion.fused_op_name;
+
+        size_t new_id = optimized.add_node(
+            OpType::Unknown,  // Fused ops have special type
+            "fused_" + fusion.fused_op_name,
+            {},  // inputs wired in pass 2
+            attrs
+        );
+
+        // Map all fused nodes to this new node
+        for (size_t old_id : fusion.node_ids) {
+            old_to_new_id[old_id] = new_id;
+        }
+    }
+
+    // Pass 1b: copy every non-fused node 1:1 (no inputs yet) and map its id.
+    for (const auto& node : graph.get_nodes()) {
+        if (!node || fused_nodes.count(node->id)) {
+            continue;
+        }
+
+        size_t new_id = optimized.add_node(
+            node->op_type,
+            node->op_name,
+            {},  // inputs wired in pass 2
+            node->attributes
+        );
+
+        old_to_new_id[node->id] = new_id;
+    }
+
+    // Pass 2a: wire fused-node external inputs. An external input is any input
+    // of a fused member that is not itself part of the same/another fusion's
+    // collapsed identity (i.e. not mapped to this fused node). Deduplicate per
+    // fused node so a shared producer is wired once.
+    for (const auto& fusion : fusions) {
+        // All members map to the same new id.
+        const size_t new_id = old_to_new_id[fusion.node_ids.front()];
+
         std::vector<size_t> fused_inputs;
-        for (size_t node_id : fusion.node_ids) {
-            const auto& node = graph.get_node(node_id);
+        for (size_t old_node_id : fusion.node_ids) {
+            const auto& node = graph.get_node(old_node_id);
             for (size_t input_id : node.inputs) {
-                if (fused_nodes.find(input_id) == fused_nodes.end()) {
-                    // Map to new ID if already processed
-                    if (old_to_new_id.count(input_id)) {
-                        fused_inputs.push_back(old_to_new_id[input_id]);
-                    }
+                // Skip inputs that are internal to this fusion (they collapse
+                // into new_id itself); keep genuine external producers.
+                auto it = old_to_new_id.find(input_id);
+                if (it == old_to_new_id.end()) {
+                    continue;  // producer pruned (e.g. dead node) — nothing to wire
                 }
+                if (it->second == new_id) {
+                    continue;  // intra-fusion edge
+                }
+                fused_inputs.push_back(it->second);
             }
         }
 
@@ -704,47 +878,24 @@ auto FusionOptimizer::rewrite_graph(
             fused_inputs.end()
         );
 
-        // Create fused node — seed with the parameters captured from the matched
-        // nodes (dropout p/seed, scale, causal, ...) so execute_fused_op sees
-        // them, then tag the fusion type.
-        std::unordered_map<std::string, std::string> attrs = fusion.attributes;
-        attrs["fusion_type"] = fusion.fused_op_name;
-
-        size_t new_id = optimized.add_node(
-            OpType::Unknown,  // Fused ops have special type
-            "fused_" + fusion.fused_op_name,
-            fused_inputs,
-            attrs
-        );
-
-        // Map all fused nodes to this new node
-        for (size_t old_id : fusion.node_ids) {
-            old_to_new_id[old_id] = new_id;
+        for (size_t producer_new_id : fused_inputs) {
+            optimized.add_edge(producer_new_id, new_id);
         }
     }
 
-    // Copy remaining nodes
+    // Pass 2b: wire non-fused node inputs from the complete mapping.
     for (const auto& node : graph.get_nodes()) {
         if (!node || fused_nodes.count(node->id)) {
             continue;
         }
-
-        // Map input IDs
-        std::vector<size_t> new_inputs;
+        const size_t new_id = old_to_new_id[node->id];
         for (size_t input_id : node->inputs) {
-            if (old_to_new_id.count(input_id)) {
-                new_inputs.push_back(old_to_new_id[input_id]);
+            auto it = old_to_new_id.find(input_id);
+            if (it == old_to_new_id.end()) {
+                continue;  // producer pruned — nothing to wire
             }
+            optimized.add_edge(it->second, new_id);
         }
-
-        size_t new_id = optimized.add_node(
-            node->op_type,
-            node->op_name,
-            new_inputs,
-            node->attributes
-        );
-
-        old_to_new_id[node->id] = new_id;
     }
 
     return optimized;
@@ -905,9 +1056,24 @@ auto build_fusion_graph_from_autograd(
     FusionGraph fusion_graph;
     std::unordered_map<GraphNode*, size_t> node_map;
 
-    // BFS traversal of autograd graph
+    // BFS traversal of autograd graph.
+    //
+    // Two passes are required: a fusion node's inputs are its autograd
+    // next_nodes (the producers that feed it), but during a single BFS those
+    // producers have not yet been assigned fusion IDs when the consumer is
+    // processed (they are enqueued *after* the current node). Wiring inputs
+    // inline therefore always finds an empty node_map entry, leaving every
+    // fusion node edgeless and defeating all pattern matchers.
+    //
+    // Pass 1: visit every reachable GraphNode, create its fusion node (with
+    //         empty inputs for now) and record its ID in node_map.
+    // Pass 2: re-walk the same nodes and wire each fusion node's inputs from
+    //         the now-complete node_map, using FusionGraph::add_edge so both
+    //         the adjacency list and producer/consumer outputs are populated.
+
     std::queue<std::shared_ptr<GraphNode>> queue;
     std::unordered_set<GraphNode*> visited;
+    std::vector<std::shared_ptr<GraphNode>> ordered_nodes;
 
     queue.push(root);
     visited.insert(root.get());
@@ -915,16 +1081,6 @@ auto build_fusion_graph_from_autograd(
     while (!queue.empty()) {
         auto node = queue.front();
         queue.pop();
-
-        // Create fusion node
-        std::vector<size_t> inputs;
-        for (const auto& weak_next : node->next_nodes) {
-            if (auto next = weak_next.lock()) {
-                if (node_map.count(next.get())) {
-                    inputs.push_back(node_map[next.get()]);
-                }
-            }
-        }
 
         // Audit C.5: replace the legacy "op_name = unknown; op_type =
         // Unknown" stub with a real OpId-based mapping. The Function
@@ -941,8 +1097,10 @@ auto build_fusion_graph_from_autograd(
             op_type = fusion_op_type_from_op_id(node->function->op_id());
         }
 
-        size_t fusion_id = fusion_graph.add_node(op_type, op_name, inputs);
+        // Pass 1: create the node with no inputs yet; edges are wired below.
+        size_t fusion_id = fusion_graph.add_node(op_type, op_name, {});
         node_map[node.get()] = fusion_id;
+        ordered_nodes.push_back(node);
 
         // Add neighbors to queue
         for (const auto& weak_next : node->next_nodes) {
@@ -950,6 +1108,21 @@ auto build_fusion_graph_from_autograd(
                 if (!visited.count(next.get())) {
                     visited.insert(next.get());
                     queue.push(next);
+                }
+            }
+        }
+    }
+
+    // Pass 2: wire edges now that every node has an ID. In autograd terms a
+    // node's next_nodes are its producers, so the producer feeds (is an input
+    // of) the current node: add_edge(producer_id, consumer_id).
+    for (const auto& node : ordered_nodes) {
+        const size_t consumer_id = node_map[node.get()];
+        for (const auto& weak_next : node->next_nodes) {
+            if (auto next = weak_next.lock()) {
+                auto it = node_map.find(next.get());
+                if (it != node_map.end()) {
+                    fusion_graph.add_edge(it->second, consumer_id);
                 }
             }
         }
@@ -992,13 +1165,13 @@ auto execute_fused_op(
         double eps = 1e-5;
 
         if (auto it = attributes.find("stride"); it != attributes.end()) {
-            stride = std::stoll(it->second);
+            stride = parse_attr_i64("stride", it->second);
         }
         if (auto it = attributes.find("padding"); it != attributes.end()) {
-            padding = std::stoll(it->second);
+            padding = parse_attr_i64("padding", it->second);
         }
         if (auto it = attributes.find("eps"); it != attributes.end()) {
-            eps = std::stod(it->second);
+            eps = parse_attr_double("eps", it->second);
         }
 
         OpAttributes attrs;
@@ -1105,7 +1278,7 @@ auto execute_fused_op(
             int op_type = 0;  // Default: ReLU((a + b) * c)
             if (auto op_type_it = attributes.find("op_type");
                 op_type_it != attributes.end()) {
-                op_type = std::stoi(op_type_it->second);
+                op_type = parse_attr_int("op_type", op_type_it->second);
             }
             Tensor result;
             switch (op_type) {
@@ -1151,7 +1324,7 @@ auto execute_fused_op(
         float scale = 1.0f;
         auto scale_it = attributes.find("scale");
         if (scale_it != attributes.end()) {
-            scale = std::stof(scale_it->second);
+            scale = parse_attr_float("scale", scale_it->second);
         } else {
             // Auto-compute scale as 1/sqrt(d_k)
             int64_t d_k = inputs[0].shape().back();  // Last dimension of Q
@@ -1165,11 +1338,29 @@ auto execute_fused_op(
         }
         double dropout_p = 0.0;
         if (auto it = attributes.find("dropout_p"); it != attributes.end()) {
-            dropout_p = std::stod(it->second);
+            dropout_p = parse_attr_double("dropout_p", it->second);
         }
         uint64_t dropout_seed = 0;
+        bool dropout_seed_provided = false;
         if (auto it = attributes.find("dropout_seed"); it != attributes.end()) {
-            dropout_seed = static_cast<uint64_t>(std::stoll(it->second));
+            dropout_seed = static_cast<uint64_t>(
+                parse_attr_i64("dropout_seed", it->second));
+            dropout_seed_provided = true;
+        }
+        // A matched Dropout node may carry a probability but no explicit seed
+        // (graph builders often omit it). Eliding dropout in that case would
+        // make the fused result diverge from the unfused
+        // Q@K.T -> softmax -> dropout -> @V graph during training. Derive a
+        // deterministic non-zero default seed so dropout still fires; philox is
+        // counter-based, so a fixed seed yields reproducible masks for a given
+        // shape. We avoid 0 specifically because some philox implementations
+        // treat 0 as "disabled".
+        if (dropout_p > 0.0 && !dropout_seed_provided) {
+            dropout_seed = 0x9E3779B97F4A7C15ULL;  // fractional bits of golden ratio
+        } else if (dropout_p > 0.0 && dropout_seed == 0) {
+            // Explicitly provided seed of 0 — promote to a deterministic
+            // non-zero value so dropout is not silently skipped.
+            dropout_seed = 0x9E3779B97F4A7C15ULL;
         }
 
         const bool has_mask = inputs.size() >= 4;
@@ -1234,7 +1425,9 @@ auto execute_fused_op(
         // Q@K.T -> softmax -> dropout -> @V graph). philox_dropout_mask returns
         // a pre-scaled (inverted) Bernoulli mask, so a plain multiply applies
         // the inverted-dropout scaling.
-        if (dropout_p > 0.0 && dropout_seed != 0) {
+        // dropout_seed is guaranteed non-zero whenever dropout_p > 0 (a default
+        // is derived above), so dropout is never silently elided.
+        if (dropout_p > 0.0) {
             auto shp = attention_weights.shape();
             std::vector<int64_t> shape_vec(shp.begin(), shp.end());
             Tensor mask = philox_dropout_mask(shape_vec, dropout_p, dropout_seed,

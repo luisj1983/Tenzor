@@ -243,14 +243,39 @@ auto ROCmBackend::deallocate(void* ptr) -> void {
         return;
     }
 
-    // Remove from tracking map for non-caching path too
+    // Look up (and remove) the recorded device for this allocation so the async
+    // free targets the pool of the device the pointer was allocated on, not the
+    // caller's current device (a multi-GPU hazard).
+    int device_id = -1;
     {
         std::lock_guard<std::mutex> lock(alloc_map_mutex_);
-        alloc_device_map_.erase(ptr);
+        auto it = alloc_device_map_.find(ptr);
+        if (it != alloc_device_map_.end()) {
+            device_id = it->second;
+            alloc_device_map_.erase(it);
+        }
+    }
+
+    // Fall back to hipPointerGetAttributes if not in our map (mirrors caching path).
+    if (device_id < 0) {
+        hipPointerAttribute_t attrs;
+        if (hipPointerGetAttributes(&attrs, ptr) == hipSuccess) {
+            device_id = attrs.device;
+        }
     }
 
 #if HIP_VERSION >= 50300000
-    if (hip_async_alloc_available()) {
+    // Only take the async-free path when we positively know the allocation's
+    // device. hipFreeAsync targets the *currently bound* device's default-stream
+    // pool, so freeing against the wrong device pool corrupts pool accounting on
+    // multi-GPU systems. If device_id could not be determined (untracked pointer
+    // and hipPointerGetAttributes failed) we must NOT guess the current device;
+    // fall through to the device-agnostic synchronous hipFree instead (mirrors
+    // the caching path's refusal to free against an unknown device).
+    if (device_id >= 0 && hip_async_alloc_available()) {
+        // Bind the allocation's device before the async free so it operates on
+        // the correct device's default-stream pool (mirrors allocate()).
+        check_hip_error(hipSetDevice(device_id), "hipSetDevice in deallocate");
         hipStream_t stream = nullptr;  // default stream
         hipError_t err = hipFreeAsync(ptr, stream);
         if (err == hipSuccess) return;

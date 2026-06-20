@@ -154,6 +154,119 @@ void main() {
                 res_bits = sign_b_bit | mag_a_bits;
                 break;
             }
+            case 35: { // nextafter (binary) - approximation via ULP step (mirrors math.comp)
+                if (val_a == val_b) {
+                    res_bits = bits_a;
+                } else {
+                    uint ua = bits_a;
+                    if ((val_a >= 0.0 && val_b > val_a) || (val_a < 0.0 && val_b > val_a)) {
+                        if (val_a >= 0.0) ua = ua + 1u;
+                        else ua = ua - 1u;
+                    } else {
+                        if (val_a > 0.0) ua = ua - 1u;
+                        else if (val_a < 0.0) ua = ua + 1u;
+                        else ua = 0x80000001u; // -0 -> smallest negative denorm
+                    }
+                    res_bits = ua;
+                }
+                break;
+            }
+            case 36: { // gcd (integer via float encoding) (mirrors math.comp)
+                int ia = int(val_a);
+                int ib = int(val_b);
+                ia = ia < 0 ? -ia : ia;
+                ib = ib < 0 ? -ib : ib;
+                while (ib != 0) { int t = ib; ib = ia - (ia / ib) * ib; ia = t; }
+                res_bits = floatBitsToUint(float(ia));
+                break;
+            }
+            case 37: { // lcm (integer via float encoding) (mirrors math.comp)
+                int ia = int(val_a);
+                int ib = int(val_b);
+                int oa = ia < 0 ? -ia : ia;
+                int ob = ib < 0 ? -ib : ib;
+                int ga = oa; int gb = ob;
+                while (gb != 0) { int t = gb; gb = ga - (ga / gb) * gb; ga = t; }
+                int g = ga;
+                res_bits = floatBitsToUint(g == 0 ? 0.0 : float((oa / g) * ob));
+                break;
+            }
+            case 38: { // igamma (binary) - lower regularized incomplete gamma P(a, x) (mirrors math.comp)
+                float a_ig = val_a;
+                float x_ig = val_b;
+                if (x_ig <= 0.0) { res_bits = floatBitsToUint(0.0); break; }
+                const float lan_g = 7.0;
+                const float lan_c0 =  0.99999999999980993;
+                const float lan_c1 = 676.5203681218851;
+                const float lan_c2 = -1259.1392167224028;
+                const float lan_c3 = 771.32342877765313;
+                const float lan_c4 = -176.61502916214059;
+                const float lan_c5 = 12.507343278686905;
+                const float lan_c6 = -0.13857109526572012;
+                const float lan_c7 = 9.9843695780195716e-6;
+                const float lan_c8 = 1.5056327351493116e-7;
+                float z = a_ig - 1.0;
+                float sx = lan_c0;
+                sx += lan_c1 / (z + 1.0);
+                sx += lan_c2 / (z + 2.0);
+                sx += lan_c3 / (z + 3.0);
+                sx += lan_c4 / (z + 4.0);
+                sx += lan_c5 / (z + 5.0);
+                sx += lan_c6 / (z + 6.0);
+                sx += lan_c7 / (z + 7.0);
+                sx += lan_c8 / (z + 8.0);
+                float t = z + lan_g + 0.5;
+                float lg = 0.9189385332046727 + (z + 0.5) * log(t) - t + log(sx);
+                float term = 1.0 / a_ig;
+                float sum = term;
+                for (int nn = 1; nn < 100; ++nn) {
+                    term *= x_ig / (a_ig + float(nn));
+                    sum += term;
+                    if (abs(term) < abs(sum) * 1e-7) break;
+                }
+                float res_ig = exp(-x_ig + a_ig * log(x_ig) - lg) * sum;
+                res_ig = clamp(res_ig, 0.0, 1.0);
+                res_bits = floatBitsToUint(res_ig);
+                break;
+            }
+            case 39: { // igammac (binary) - upper regularized incomplete gamma = 1 - igamma (mirrors math.comp)
+                float a_ig = val_a;
+                float x_ig = val_b;
+                if (x_ig <= 0.0) { res_bits = floatBitsToUint(1.0); break; }
+                const float lan_g = 7.0;
+                const float lan_c0 =  0.99999999999980993;
+                const float lan_c1 = 676.5203681218851;
+                const float lan_c2 = -1259.1392167224028;
+                const float lan_c3 = 771.32342877765313;
+                const float lan_c4 = -176.61502916214059;
+                const float lan_c5 = 12.507343278686905;
+                const float lan_c6 = -0.13857109526572012;
+                const float lan_c7 = 9.9843695780195716e-6;
+                const float lan_c8 = 1.5056327351493116e-7;
+                float z = a_ig - 1.0;
+                float sx = lan_c0;
+                sx += lan_c1 / (z + 1.0);
+                sx += lan_c2 / (z + 2.0);
+                sx += lan_c3 / (z + 3.0);
+                sx += lan_c4 / (z + 4.0);
+                sx += lan_c5 / (z + 5.0);
+                sx += lan_c6 / (z + 6.0);
+                sx += lan_c7 / (z + 7.0);
+                sx += lan_c8 / (z + 8.0);
+                float t = z + lan_g + 0.5;
+                float lg = 0.9189385332046727 + (z + 0.5) * log(t) - t + log(sx);
+                float term = 1.0 / a_ig;
+                float sum = term;
+                for (int nn = 1; nn < 100; ++nn) {
+                    term *= x_ig / (a_ig + float(nn));
+                    sum += term;
+                    if (abs(term) < abs(sum) * 1e-7) break;
+                }
+                float res_ig = exp(-x_ig + a_ig * log(x_ig) - lg) * sum;
+                res_ig = clamp(res_ig, 0.0, 1.0);
+                res_bits = floatBitsToUint(1.0 - res_ig);
+                break;
+            }
             case 42: { // fmax (binary) - NaN-propagating max: fmax(NaN, x) = x
                 float res;
                 if (isnan(val_a)) res = val_b;
@@ -205,14 +318,17 @@ void main() {
                 res = val_a * val_b;
                 break;
             case 3: // div
-                res = val_a / val_b;
+                res = (val_b != 0) ? (val_a / val_b) : 0;
                 break;
-            case 24: // fmod for integers (truncated)
-                res = val_a % val_b;
+            case 24: // fmod for integers (truncated, matches torch.fmod)
+                res = (val_b != 0) ? (val_a % val_b) : 0;
                 break;
-            case 25: // remainder for integers (truncated)
-                res = val_a % val_b;
+            case 25: { // remainder for integers (floored, matches torch.remainder)
+                int r = (val_b != 0) ? (val_a % val_b) : 0;
+                if (r != 0 && ((r < 0) != (val_b < 0))) r += val_b;
+                res = r;
                 break;
+            }
             case 26: // minimum
                 res = min(val_a, val_b);
                 break;

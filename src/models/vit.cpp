@@ -11,6 +11,7 @@
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/creation.hpp"  // tenzor::get_global_seed()
 #include <cmath>
 #include <random>
 #include <stdexcept>
@@ -130,15 +131,24 @@ auto ViTEmbeddings::initialize_parameters() -> void {
     int64_t seq_len = config_.seq_length();
     Tensor pos_tensor({1, seq_len, config_.hidden_size}, DType::Float32, Device::cpu());
 
-    // Initialize with truncated normal distribution
-    // Standard deviation = 0.02 (standard for ViT)
+    // Initialize with truncated normal distribution (std = 0.02), matching the
+    // ViT reference which truncates at +/-2 std. Seed from the project's global
+    // RNG so weight init respects tenzor::manual_seed() and is reproducible
+    // (creation.hpp: get_global_seed()), instead of std::random_device.
+    constexpr float kStd = 0.02f;
+    constexpr float kTrunc = 2.0f * kStd;  // truncate at +/-2 std
     float* pos_data = pos_tensor.data<float>();
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<float> dist(0.0f, 0.02f);
+    std::mt19937 gen(static_cast<std::mt19937::result_type>(get_global_seed()));
+    std::normal_distribution<float> dist(0.0f, kStd);
 
     for (int64_t i = 0; i < pos_tensor.numel(); ++i) {
-        pos_data[i] = dist(gen);
+        // Resample to keep the draw within +/-2 std (rejection sampling), which
+        // reproduces a true truncated-normal rather than a clamped one.
+        float sample = dist(gen);
+        while (sample < -kTrunc || sample > kTrunc) {
+            sample = dist(gen);
+        }
+        pos_data[i] = sample;
     }
 
     position_embeddings_ = Variable(pos_tensor, true);  // Requires gradient

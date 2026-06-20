@@ -204,7 +204,9 @@ DeepLabV3PlusDecoder::DeepLabV3PlusDecoder(int64_t num_classes,
 }
 
 auto DeepLabV3PlusDecoder::forward(const Variable& aspp_features,
-                                   const Variable& low_level_features)
+                                   const Variable& low_level_features,
+                                   int64_t output_h,
+                                   int64_t output_w)
     -> Variable
 {
     const auto& low_shape = low_level_features.tensor().shape();
@@ -232,10 +234,16 @@ auto DeepLabV3PlusDecoder::forward(const Variable& aspp_features,
     // Classify
     auto logits = classifier_->forward(refined);
 
-    // Final upsample to original resolution (4×)
-    int64_t output_h = target_h * 4;
-    int64_t output_w = target_w * 4;
-    auto output = nn::upsample_bilinear(logits, output_h, output_w);
+    // Final upsample to the original input resolution. When the caller threads
+    // the true input spatial size (output_h/output_w > 0) we upsample to that
+    // exact size so the segmentation map aligns per-pixel with the input. The
+    // low-level feature map is at stride 4, so target*4 only reconstructs the
+    // input size when H/W are divisible by 4; for non-multiple-of-4 inputs that
+    // estimate is off by 1-3 pixels. Falling back to target*4 only when no
+    // explicit size is supplied preserves backward compatibility.
+    const int64_t final_h = (output_h > 0) ? output_h : target_h * 4;
+    const int64_t final_w = (output_w > 0) ? output_w : target_w * 4;
+    auto output = nn::upsample_bilinear(logits, final_h, final_w);
 
     return output;
 }
@@ -265,11 +273,23 @@ DeepLabV3Plus::DeepLabV3Plus(int64_t num_classes,
 }
 
 auto DeepLabV3Plus::forward_impl(const Variable& input) -> Variable {
+    // Capture the true input spatial size so the decoder upsamples the final
+    // logits back to exactly (H, W) instead of inferring stride-4*4 = H'/W',
+    // which drifts by 1-3 px for inputs whose H/W are not multiples of 4.
+    const auto& in_shape = input.tensor().shape();
+    if (in_shape.size() != 4) {
+        throw std::runtime_error(
+            "DeepLabV3Plus::forward_impl: input must be 4D (N, C, H, W)");
+    }
+    const int64_t input_h = in_shape[2];
+    const int64_t input_w = in_shape[3];
+
     // Encode
     auto [aspp_features, low_level_features] = encoder_->forward_multi(input);
 
-    // Decode
-    auto output = decoder_->forward(aspp_features, low_level_features);
+    // Decode, upsampling logits to the original input resolution.
+    auto output =
+        decoder_->forward(aspp_features, low_level_features, input_h, input_w);
 
     return output;
 }
@@ -278,11 +298,11 @@ auto DeepLabV3Plus::predict(const Variable& input) -> Tensor {
     // Forward pass to get logits
     auto logits = forward(input);
 
-    // Apply softmax along channel dimension
-    auto probs = tenzor::softmax(logits, 1);
-
-    // Get class predictions via argmax
-    auto predictions = argmax(probs.tensor(), 1);
+    // Softmax is strictly monotonic per spatial position, so
+    // argmax(softmax(x)) == argmax(x). Take argmax over the channel dim
+    // directly on the logits and skip the redundant exp/sum/div over an
+    // [N, num_classes, H, W] tensor on the inference path.
+    auto predictions = argmax(logits.tensor(), 1);
 
     return predictions;
 }

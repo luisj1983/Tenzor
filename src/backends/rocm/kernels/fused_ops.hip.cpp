@@ -1262,6 +1262,19 @@ __global__ void flash_attention_v2_kernel_hip(
         const int kv_start = kv_block * Bc;
         const int kv_end_actual = (kv_start + Bc < seq_len_k) ? Bc : (seq_len_k - kv_start);
 
+        // Skip tiles that are fully causally masked. The smallest key position in
+        // this tile is kv_start; if even that exceeds q_row then every score in the
+        // tile would be -INFINITY, yielding tile_max = -INF and expf(-INF-(-INF)) =
+        // expf(NaN) = NaN. Since m_prev is finite (-1e30f) the online-softmax merge
+        // produces rescale_tile = 0 and l_new = l_prev + NaN*0 = NaN (IEEE-754
+        // NaN*0 = NaN), corrupting the whole output row and logsumexp. A fully
+        // masked tile contributes nothing to the softmax, so skip it entirely.
+        // All threads in the block evaluate the same condition, so this branch is
+        // uniform and does not desync the __syncthreads() calls below.
+        if (causal && kv_start > q_row) {
+            continue;
+        }
+
         // Cooperatively load K tile: K[kv_start:kv_start+Bc, :]
         for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE) {
             int row = idx / HEAD_DIM;
@@ -2676,12 +2689,15 @@ __global__ void fused_adagrad_step_kernel(
         g = g + T(weight_decay) * param[idx];
     }
 
-    float clr = lr / (T(1) + T(step - 1) * T(lr_decay));
+    // Compute the current learning rate in T so the Float64 instantiation keeps
+    // full precision (a float local would truncate the FP64 lr path back to single
+    // precision, diverging from native-FP64 Adagrad).
+    T clr = T(lr) / (T(1) + T(step - 1) * T(lr_decay));
 
     T sq = sum_sq[idx] + g * g;
     sum_sq[idx] = sq;
 
-    param[idx] = param[idx] - T(clr) * g / (sqrt(sq) + T(eps));
+    param[idx] = param[idx] - clr * g / (sqrt(sq) + T(eps));
 }
 
 auto fused_adagrad_step_hip(

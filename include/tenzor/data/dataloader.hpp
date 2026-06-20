@@ -181,6 +181,10 @@ private:
     // Shuffling
     std::vector<size_t> indices_;
     std::mt19937 rng_;
+    /// Base seed drawn once at construction (single-threaded). Worker threads
+    /// derive per-worker seeds from this instead of calling the shared rng_
+    /// concurrently (which would be a data race on the mt19937 state).
+    int64_t worker_base_seed_ = 0;
     size_t current_index_;
 
     // Multi-threading

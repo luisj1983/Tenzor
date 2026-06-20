@@ -719,7 +719,7 @@ namespace rocm {
     auto layer_norm_kernel_with_stats(const Tensor& input,
                                       const std::vector<int64_t>& normalized_shape,
                                       const Tensor* weight, const Tensor* bias,
-                                      float eps, hipStream_t stream)
+                                      double eps, hipStream_t stream)
         -> std::tuple<Tensor, Tensor, Tensor>;
     auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                     const Tensor& mean, const Tensor& rstd, const Tensor* weight,
@@ -727,7 +727,7 @@ namespace rocm {
     auto group_norm_kernel(const Tensor& input, int64_t num_groups, const Tensor* weight,
                           const Tensor* bias, float eps, hipStream_t stream) -> Tensor;
     auto group_norm_forward_with_stats(const Tensor& input, int64_t num_groups, const Tensor* weight,
-                                       const Tensor* bias, float eps, hipStream_t stream) -> std::vector<Tensor>;
+                                       const Tensor* bias, double eps, hipStream_t stream) -> std::vector<Tensor>;
     auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                     const Tensor& mean, const Tensor& rstd, int64_t num_groups,
                                     const Tensor* weight, hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
@@ -2221,11 +2221,40 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             orig_q_shape.assign(inputs[0].shape().begin(), inputs[0].shape().end());
             int64_t b = orig_q_shape[0], h = orig_q_shape[1];
             int64_t sq = orig_q_shape[2], d = orig_q_shape[3];
+            int64_t h_kv = inputs[1].shape()[1];
             int64_t sk = inputs[1].shape()[2];
             int64_t dv = inputs[2].shape()[3];
+            Tensor Kc = inputs[1].is_contiguous() ? inputs[1] : inputs[1].contiguous();
+            Tensor Vc = inputs[2].is_contiguous() ? inputs[2] : inputs[2].contiguous();
+            // GQA: when H_kv != H_q, broadcast K/V along the head dim before
+            // the 3D collapse (mirrors the FusedAttention 4D path). Without
+            // this the reshape to {b*h, sk, *} has a mismatched element count
+            // and throws.
+            if (h_kv != h) {
+                if (h % h_kv != 0) {
+                    throw std::invalid_argument(
+                        "FlashAttention ROCm: H_q must be a multiple of H_kv; got " +
+                        std::to_string(h) + " and " + std::to_string(h_kv));
+                }
+                int64_t reps = h / h_kv;
+                NewOpAttributes us; us.set(AttrKey::Dim, static_cast<int64_t>(2));
+                Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Kc}, us)[0];
+                Tensor Vu = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Vc}, us)[0];
+                std::vector<int64_t> exp_k = {b, h_kv, reps, sk, d};
+                std::vector<int64_t> exp_v = {b, h_kv, reps, sk, dv};
+                std::string s_k, s_v;
+                for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+                for (size_t i = 0; i < exp_v.size(); ++i) { if (i) s_v += ","; s_v += std::to_string(exp_v[i]); }
+                NewOpAttributes ek; ek.set(AttrKey::Shape, s_k);
+                NewOpAttributes ev; ev.set(AttrKey::Shape, s_v);
+                Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek)[0];
+                Tensor Ve = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Vu}, ev)[0];
+                Kc = Ke.contiguous().reshape({b, h, sk, d});
+                Vc = Ve.contiguous().reshape({b, h, sk, dv});
+            }
             Qi = tenzor::reshape(inputs[0].contiguous(), std::vector<int64_t>{b * h, sq, d});
-            Ki = tenzor::reshape(inputs[1].contiguous(), std::vector<int64_t>{b * h, sk, d});
-            Vi = tenzor::reshape(inputs[2].contiguous(), std::vector<int64_t>{b * h, sk, dv});
+            Ki = tenzor::reshape(Kc.contiguous(), std::vector<int64_t>{b * h, sk, d});
+            Vi = tenzor::reshape(Vc.contiguous(), std::vector<int64_t>{b * h, sk, dv});
         }
 
         // Audit A.11 — native Float64 path. The mainline kernel upcasts to
@@ -2275,11 +2304,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     cols = tenzor::reshape(cols, {1, S_k});
                     Tensor mask = tenzor::gt(cols.to(DType::Float64),
                                               rows.to(DType::Float64));
-                    Tensor neg_inf = tenzor::full(scores_shape,
-                        -std::numeric_limits<double>::infinity(),
+                    // Large finite negative sentinel: mask==0 at allowed
+                    // (lower-triangular) positions, and 0 * -inf would be NaN
+                    // per IEEE-754, poisoning every legal score. -1e30
+                    // underflows to 0 in softmax with the same masking effect.
+                    Tensor large_neg = tenzor::full(scores_shape, -1.0e30,
                         scores.dtype(), scores.device());
                     scores = tenzor::add(scores,
-                                          tenzor::mul(mask.to(scores.dtype()), neg_inf));
+                                          tenzor::mul(mask.to(scores.dtype()), large_neg));
                 }
                 NewOpAttributes sm_attrs;
                 sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
@@ -2414,9 +2446,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             scores = tenzor::mul(scores, scale_t);
 
             if (causal) {
-                // Per attention-contract.md sentinel rule: -INFINITY, not -1e9
-                // (FP16 saturates the latter to -65504, leaks gradient mass
-                // through softmax — Systemic #3).
+                // Masking is applied additively as scores + mask*sentinel,
+                // where mask==0 at allowed positions. A -INFINITY sentinel
+                // would make 0 * -inf == NaN per IEEE-754, poisoning every
+                // legal (lower-triangular) score. Use a large finite negative
+                // (-1e30): it underflows to 0 in softmax with the same masking
+                // effect and is far below the FP16-saturating -1e9 (-65504),
+                // so no gradient mass leaks (Systemic #3).
                 // scores is [BH, S_q, S_k]; the causal mask must be [S_q, S_k]
                 // (rows index query positions, cols index key positions). Using
                 // S_k for both dimensions silently assumes Sq == Sk and yields a
@@ -2429,10 +2465,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 rows = tenzor::reshape(rows, {S_q, 1});
                 cols = tenzor::reshape(cols, {1, S_k});
                 Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
-                Tensor neg_inf = tenzor::full(scores_shape,
-                                              -std::numeric_limits<float>::infinity(),
-                                              scores.dtype(), scores.device());
-                scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
+                Tensor large_neg = tenzor::full(scores_shape, -1.0e30,
+                                                scores.dtype(), scores.device());
+                scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), large_neg));
             }
 
             NewOpAttributes sm_attrs;
@@ -2516,10 +2551,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             Tensor half_t = tenzor::full({1}, static_cast<double>(half),
                                           abs_diff.dtype(), abs_diff.device());
             Tensor outside = tenzor::gt(abs_diff, half_t);
-            Tensor neg_inf = tenzor::full(scores_shape,
-                -std::numeric_limits<float>::infinity(),
+            // Use a large finite negative sentinel (mirrors the backward
+            // path): softmax(-1e30) underflows to 0 (same effect as -inf)
+            // without producing NaN at in-window positions, where
+            // outside==0 and 0 * -inf would be NaN per IEEE-754.
+            Tensor large_neg = tenzor::full(scores_shape, -1.0e30,
                 scores.dtype(), scores.device());
-            scores = scores + (outside.to(scores.dtype()) * neg_inf);
+            scores = scores + (outside.to(scores.dtype()) * large_neg);
             NewOpAttributes sm_attrs;
             sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
             std::vector<Tensor> sm_in = {scores};

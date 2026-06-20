@@ -457,7 +457,15 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
             float decay = static_cast<float>(1.0 - momentum_);
             float mom = static_cast<float>(momentum_);
             auto rm = running_mean_.tensor() * decay + batch_mean * mom;
-            auto rv = running_var_.tensor() * decay + batch_var * mom;
+            // Running variance uses the unbiased (Bessel-corrected) estimate,
+            // matching PyTorch and this codebase's BatchNorm2d; the biased
+            // batch_var is still used for the normalization above.
+            float bessel = (global_count > 1)
+                ? static_cast<float>(static_cast<double>(global_count) /
+                                     static_cast<double>(global_count - 1))
+                : 1.0f;
+            auto unbiased_var = batch_var * bessel;
+            auto rv = running_var_.tensor() * decay + unbiased_var * mom;
             auto& rm_buf = buffers_["running_mean"];
             auto& rv_buf = buffers_["running_var"];
             if (rm_buf) rm_buf->tensor() = rm;
@@ -468,6 +476,24 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
             // a future ctor change breaks the alias).
             running_mean_ = Variable(rm, false);
             running_var_ = Variable(rv, false);
+
+            // Increment num_batches_tracked through the buffer-map entry,
+            // mirroring the running_mean / running_var write-through above so
+            // state_dict / checkpoint parity with PyTorch holds (and a future
+            // momentum=None cumulative-moving-average path can read it).
+            // Stay on the buffer's native device: host-stage only on CPU,
+            // otherwise add on-device via ::tenzor::add (mirrors batchnorm.cpp).
+            if (auto& nbt_buf = buffers_["num_batches_tracked"]; nbt_buf) {
+                auto& nbt = nbt_buf->tensor();
+                if (nbt.device().type == Device::Type::CPU) {
+                    nbt.data<int64_t>()[0]++;
+                } else {
+                    Tensor one = ::tenzor::full({1}, 1.0, nbt.dtype(), nbt.device());
+                    nbt = ::tenzor::add(nbt, one);
+                }
+                // Keep the local Variable field aliased to the buffer entry.
+                num_batches_tracked_ = Variable(nbt, false);
+            }
         }
     } else {
         if (!track_running_stats_) {

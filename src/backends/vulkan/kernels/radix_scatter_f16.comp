@@ -15,14 +15,20 @@ layout(push_constant) uniform PushConstants {
     uint n;
     uint digit;  // 0 or 1 for 16-bit keys
     uint n_wgs;
+    uint descending; // 0 = ascending, 1 = descending
 };
 
 shared uint local_offsets[256];
 
 uint f16_to_sortable(uint bits16) {
-    // Float16 sign-bit flip for correct ordering
+    // Float16 sign-bit flip for correct ordering. For a descending sort invert
+    // all 16 bits of the sortable key so an ascending LSD radix yields
+    // descending values with stable (ascending-index) tie order, matching the
+    // histogram pass.
     uint mask = uint(-int(bits16 >> 15)) | 0x8000u;
-    return (bits16 ^ mask) & 0xFFFFu;
+    uint sortable = (bits16 ^ mask) & 0xFFFFu;
+    if (descending != 0u) sortable = (~sortable) & 0xFFFFu;
+    return sortable;
 }
 
 uint readF16Bits(uint element_idx) {
@@ -33,15 +39,22 @@ uint readF16Bits(uint element_idx) {
 }
 
 void writeF16Bits(uint element_idx, uint bits16) {
+    // Two elements with the same digit get consecutive destination indices that
+    // can share the SAME packed uint32 word. A plain read-modify-write of one
+    // 16-bit half would race with the concurrent write to the other half and
+    // lose updates. Merge only the targeted half with a CAS loop, mirroring
+    // updateU16 in scatter_i16.comp and atomicAddF16 in scatter_add_f16.comp.
     uint pair_idx = element_idx / 2;
-    uint offset = element_idx % 2;
-    if (offset == 0) {
-        uint existing = keys_out[pair_idx] & 0xFFFF0000u;
-        keys_out[pair_idx] = existing | (bits16 & 0xFFFFu);
-    } else {
-        uint existing = keys_out[pair_idx] & 0x0000FFFFu;
-        keys_out[pair_idx] = existing | ((bits16 & 0xFFFFu) << 16);
-    }
+    uint shift = (element_idx % 2) * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint half_word = (bits16 & 0xFFFFu) << shift;
+    uint old = keys_out[pair_idx];
+    uint expected;
+    do {
+        expected = old;
+        uint nw = (expected & ~mask) | half_word;
+        old = atomicCompSwap(keys_out[pair_idx], expected, nw);
+    } while (old != expected);
 }
 
 void main() {

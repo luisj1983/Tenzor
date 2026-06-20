@@ -188,15 +188,26 @@ auto SafeTensorsSerializer::parse_header_json(const std::string& json)
         // Skip __metadata__ entries
         skip_ws();
         if (pos < json.size() && json[pos] == '{') {
-            // Check if this is a tensor entry or metadata
-            size_t save_pos = pos;
-            ++pos;
-            skip_ws();
-            std::string first_key = parse_string();
-            pos = save_pos; // restore
+            // Determine whether this object value is metadata. The
+            // __metadata__ key is canonical, but a value object whose first
+            // key is "__metadata__" is also treated as metadata. Probe the
+            // first key WITHOUT throwing on an empty object ({}), which is
+            // legal SafeTensors output for __metadata__.
+            bool is_metadata = (tensor_name == "__metadata__");
+            if (!is_metadata) {
+                size_t save_pos = pos;
+                ++pos;            // consume '{'
+                skip_ws();
+                // Empty object: nothing to probe, not metadata-by-first-key.
+                if (pos < json.size() && json[pos] != '}') {
+                    std::string first_key = parse_string();
+                    if (first_key == "__metadata__") is_metadata = true;
+                }
+                pos = save_pos; // restore to the opening '{'
+            }
 
-            if (first_key == "__metadata__" || tensor_name == "__metadata__") {
-                // Skip the entire value
+            if (is_metadata) {
+                // Skip the entire value (balanced braces, handles {}).
                 int depth = 0;
                 while (pos < json.size()) {
                     if (json[pos] == '{') ++depth;
@@ -357,6 +368,50 @@ auto SafeTensorsSerializer::load(const std::string& path)
     // Data section starts at offset 8 + header_size
     size_t data_section_start = 8 + header_size;
 
+    // Available bytes in the data section (no underflow if file is exactly
+    // header-sized).
+    size_t data_section_len = (static_cast<uint64_t>(file_size) >= data_section_start)
+                                  ? static_cast<size_t>(file_size) - data_section_start
+                                  : 0;
+
+    // Validate that the declared tensor regions partition the data section
+    // contiguously with no gaps and no overlap (SafeTensors spec requires
+    // sorted, gap-free, non-overlapping offsets starting at 0). This rejects
+    // crafted files that alias tensors or leave dead space, which would
+    // otherwise load as if valid. Per-tensor bounds (data_end <=
+    // data_section_len, data_end >= data_start) are still enforced in the load
+    // loop below.
+    {
+        std::vector<std::pair<size_t, size_t>> regions; // (start, end)
+        regions.reserve(tensor_metas.size());
+        for (const auto& [name, meta] : tensor_metas) {
+            if (meta.data_end < meta.data_start) {
+                throw std::runtime_error("SafeTensors: tensor '" + name +
+                                          "' has data_end < data_start");
+            }
+            regions.emplace_back(meta.data_start, meta.data_end);
+        }
+        std::sort(regions.begin(), regions.end());
+
+        size_t expected_start = 0;
+        for (const auto& [start, end] : regions) {
+            if (start != expected_start) {
+                throw std::runtime_error(
+                    "SafeTensors: tensor data offsets are not contiguous "
+                    "(expected region to start at " + std::to_string(expected_start) +
+                    " but found " + std::to_string(start) +
+                    "); file has gaps or overlapping tensors");
+            }
+            expected_start = end;
+        }
+        if (!regions.empty() && expected_start != data_section_len) {
+            throw std::runtime_error(
+                "SafeTensors: tensor data offsets do not cover the data section "
+                "(regions end at " + std::to_string(expected_start) +
+                " but data section is " + std::to_string(data_section_len) + " bytes)");
+        }
+    }
+
     // Load tensors
     std::unordered_map<std::string, Tensor> result;
     result.reserve(tensor_metas.size());
@@ -368,12 +423,8 @@ auto SafeTensorsSerializer::load(const std::string& path)
                                       "' has data_end < data_start");
         }
         size_t data_size = meta.data_end - meta.data_start;
-        // Both start and end must lie within the file's data section. Compute the
-        // available span without overflow, then require data_end <= avail.
-        size_t avail = (static_cast<size_t>(file_size) >= data_section_start)
-                           ? static_cast<size_t>(file_size) - data_section_start
-                           : 0;
-        if (meta.data_end > avail) {
+        // Both start and end must lie within the file's data section.
+        if (meta.data_end > data_section_len) {
             throw std::runtime_error("SafeTensors: tensor '" + name +
                                       "' data extends past end of file");
         }

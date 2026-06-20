@@ -855,7 +855,8 @@ public:
                                int64_t embedding_dim, const std::string& mode,
                                bool include_last_offset) -> std::vector<Tensor>;
     auto dispatchEmbeddingBagBackward(const Tensor& grad_output, const Tensor& indices,
-                                       const Tensor& offsets, int64_t num_embeddings,
+                                       const Tensor& offsets, const Tensor& max_indices,
+                                       int64_t num_embeddings,
                                        int64_t embedding_dim, const std::string& mode,
                                        bool include_last_offset) -> Tensor;
 
@@ -952,7 +953,7 @@ public:
                               int64_t batch_size, int32_t device_id, bool is_f64);
 
     // SearchSorted (native GPU binary search shader)
-    auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor;
+    auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values, bool right = false) -> Tensor;
 
     // Quantized operations (native Int8 GPU shaders)
     auto dispatchQuantizedLinear(const Tensor& input, const Tensor& weight, const Tensor& bias,
@@ -964,6 +965,11 @@ public:
                                   int32_t input_zp, int32_t weight_zp) -> Tensor;
 
     // Sparse tensor operations (raw CSR components from kernel registry dispatch)
+    // Validate that a one-workgroup-per-row sparse dispatch (X dimension = M)
+    // does not exceed the device's maxComputeWorkGroupCount[0]. Throws a clear
+    // runtime_error naming the op, M, and the limit instead of issuing an
+    // invalid dispatch that drivers truncate or device-lose.
+    void checkSparseRowDispatch(int32_t device_id, const char* op_name, int64_t M) const;
     auto dispatchSparseSpMM(const Tensor& crow_indices, const Tensor& col_indices,
                              const Tensor& values, const Tensor& dense,
                              int64_t M, int64_t K, int64_t N) -> Tensor;

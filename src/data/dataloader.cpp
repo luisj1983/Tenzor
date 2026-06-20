@@ -1,8 +1,10 @@
 #include "tenzor/data/dataloader.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include <cassert>
 #include <chrono>
 #include <stdexcept>
+#include <algorithm>
 
 namespace tenzor {
 namespace data {
@@ -12,6 +14,7 @@ DataLoader::DataLoader(std::shared_ptr<Dataset> dataset, const DataLoaderConfig&
     : dataset_(std::move(dataset)),
       config_(config),
       rng_(std::random_device{}()),
+      worker_base_seed_(static_cast<int64_t>(rng_())),
       current_index_(0),
       stop_workers_(false),
       epoch_done_(false),
@@ -24,6 +27,10 @@ DataLoader::DataLoader(std::shared_ptr<Dataset> dataset, const DataLoaderConfig&
 
     if (config_.batch_size == 0) {
         throw std::invalid_argument("Batch size must be greater than 0");
+    }
+
+    if (config_.prefetch_factor == 0) {
+        throw std::invalid_argument("prefetch_factor must be greater than 0");
     }
 
     // Calculate number of batches
@@ -52,6 +59,7 @@ DataLoader::DataLoader(std::shared_ptr<Dataset> dataset,
                        bool drop_last)
     : dataset_(std::move(dataset)),
       rng_(std::random_device{}()),
+      worker_base_seed_(static_cast<int64_t>(rng_())),
       current_index_(0),
       stop_workers_(false),
       epoch_done_(false),
@@ -192,7 +200,9 @@ void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
     WorkerInfo info;
     info.worker_id = static_cast<int>(worker_id);
     info.num_workers = static_cast<int>(config_.num_workers);
-    info.seed = static_cast<int64_t>(rng_()) + static_cast<int64_t>(worker_id);
+    // Derive from the base seed drawn once at construction; never call the
+    // shared rng_ from worker threads (concurrent mt19937 mutation is a race).
+    info.seed = worker_base_seed_ + static_cast<int64_t>(worker_id);
     // rank and world_size remain at defaults (0 and 1) for single-process;
     // distributed launchers should set them via set_worker_info() before
     // constructing the DataLoader, or the Python layer handles it.
@@ -231,10 +241,13 @@ void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
                 size_t start_idx = batch_idx * config_.batch_size;
                 size_t end_idx = std::min(start_idx + config_.batch_size, dataset_->size());
 
-                // Skip if this is an incomplete batch and drop_last is true
-                if (config_.drop_last && (end_idx - start_idx) < config_.batch_size) {
-                    continue;
-                }
+                // Invariant: when drop_last is set, num_batches_ =
+                // dataset_size / batch_size, so every batch_idx < num_batches_
+                // (guaranteed by the guard above) maps to a full batch. The
+                // partial trailing batch is excluded by num_batches_ itself,
+                // hence no per-batch skip is needed here.
+                assert(!config_.drop_last ||
+                       (end_idx - start_idx) == config_.batch_size);
 
                 // Load samples
                 std::vector<std::pair<Tensor, Tensor>> samples;
@@ -252,8 +265,12 @@ void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
                 {
                     std::unique_lock<std::mutex> lock(queue_mutex_);
 
-                    // Wait if queue is full (implement prefetch limit)
-                    size_t max_queue_size = config_.num_workers * config_.prefetch_factor;
+                    // Wait if queue is full (implement prefetch limit). Clamp
+                    // to >= 1 so a prefetch_factor of 0 (settable via the
+                    // public field) cannot make the predicate always-false and
+                    // deadlock every worker.
+                    size_t max_queue_size =
+                        std::max<size_t>(1, config_.num_workers * config_.prefetch_factor);
                     worker_cv_.wait(lock, [this, max_queue_size] {
                         return stop_workers_ || batch_queue_.size() < max_queue_size;
                     });
@@ -345,11 +362,11 @@ auto DataLoader::get_next_batch_single_threaded() -> Batch {
     size_t start_idx = current_index_ * config_.batch_size;
     size_t end_idx = std::min(start_idx + config_.batch_size, dataset_->size());
 
-    // Skip if this is an incomplete batch and drop_last is true
-    if (config_.drop_last && (end_idx - start_idx) < config_.batch_size) {
-        current_index_ = num_batches_;  // Signal end
-        return Batch{};
-    }
+    // Invariant: when drop_last is set, num_batches_ = dataset_size /
+    // batch_size, so every current_index_ < num_batches_ (guaranteed by the
+    // guard above) maps to a full batch. The partial trailing batch is
+    // excluded by num_batches_ itself, hence no per-batch skip is needed here.
+    assert(!config_.drop_last || (end_idx - start_idx) == config_.batch_size);
 
     // Load samples
     std::vector<std::pair<Tensor, Tensor>> samples;

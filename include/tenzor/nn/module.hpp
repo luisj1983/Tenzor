@@ -261,6 +261,18 @@ public:
     auto unregister_module(const std::string& name) -> void;
 
     /**
+     * @brief Replace (or insert) a named submodule in place.
+     *
+     * Public counterpart to the protected register_module(), intended for model
+     * surgery such as quantization/fusion that swaps a child module for an
+     * equivalent one. Overwrites submodules_[name].
+     *
+     * @param name Submodule name.
+     * @param module Replacement submodule.
+     */
+    auto replace_module(const std::string& name, std::shared_ptr<Module> module) -> void;
+
+    /**
      * @brief Get all direct submodules.
      *
      * @return Map of (name -> submodule) pairs

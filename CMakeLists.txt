@@ -812,6 +812,14 @@ foreach(_b CUDA ROCM ONEAPI VULKAN MPS)
     endif()
 endforeach()
 
+# Reflect optional-dependency availability into the installed config so it
+# only find_dependency()s what was actually built against.
+if(OpenMP_CXX_FOUND)
+    set(TENZOR_OPENMP_FOUND TRUE)
+else()
+    set(TENZOR_OPENMP_FOUND FALSE)
+endif()
+
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TenzorConfig.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/TenzorConfig.cmake"

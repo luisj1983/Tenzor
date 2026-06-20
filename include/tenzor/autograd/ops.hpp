@@ -1534,7 +1534,7 @@ auto nanmean(const Variable& input,
 
 /** @brief masked_fill(x, mask, value): overwrite x[mask] with scalar value.
  *         Backward: grad_x = where(mask, 0, grad_y); value is non-diff scalar. */
-auto masked_fill(const Variable& input, const Tensor& mask, float value) -> Variable;
+auto masked_fill(const Variable& input, const Tensor& mask, double value) -> Variable;
 
 /** @brief masked_select(x, mask): flat gather at mask=true positions.
  *         Backward scatters grad_y back into zeros_like(x). */

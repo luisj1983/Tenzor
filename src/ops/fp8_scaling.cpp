@@ -35,6 +35,43 @@ auto fp8_max_value(DType fp8_dtype) -> float {
         std::string(dtype_name(fp8_dtype)));
 }
 
+namespace {
+
+/// FP8 format parameters needed to compute the per-element ULP (unit in the
+/// last place) used by stochastic rounding.
+///   mantissa_bits : explicit mantissa bits (E4M3 -> 3, E5M2 -> 2)
+///   emin          : minimum *normal* unbiased exponent
+///   emax          : maximum unbiased exponent of the largest finite value
+/// The ULP of a normal FP8 number with magnitude |x| and binade exponent
+/// e = floor(log2(|x|)) is 2^(e - mantissa_bits). In the subnormal region the
+/// spacing is constant and equals the ULP at e = emin, so clamping e to
+/// [emin, emax] yields the correct grid spacing across the whole range.
+struct FP8Params {
+    int mantissa_bits;
+    int emin;
+    int emax;
+};
+
+auto fp8_grid_params(DType fp8_dtype) -> FP8Params {
+    switch (fp8_dtype) {
+        // E4M3: 4 exp bits, bias 7. Normal exponents [1-7, ..]; largest finite
+        // value 448 = 1.75 * 2^8 -> emax = 8.
+        case DType::FP8_E4M3:     return {3, -6, 8};
+        // E5M2: 5 exp bits, bias 15. Largest finite 57344 = 1.75 * 2^15.
+        case DType::FP8_E5M2:     return {2, -14, 15};
+        // FNUZ variants use a bias one larger (no inf/nan encodings), so the
+        // minimum normal exponent shifts down by one; max value is unchanged.
+        case DType::FP8_E4M3FNUZ: return {3, -7, 8};
+        case DType::FP8_E5M2FNUZ: return {2, -15, 15};
+        default:
+            throw std::invalid_argument(
+                "fp8_grid_params: expected an FP8 dtype, got " +
+                std::string(dtype_name(fp8_dtype)));
+    }
+}
+
+} // namespace
+
 auto compute_amax(const Tensor& t) -> float {
     // abs -> max reduction, then pull scalar to CPU
     Tensor abs_t = tenzor::abs(t.to(DType::Float32));
@@ -73,20 +110,38 @@ auto quantize_to_fp8(const Tensor& input, DType fp8_dtype,
                                 full({1}, s, DType::Float32, input.device()));
 
     if (stochastic_rounding) {
-        // Stochastic rounding: add uniform noise in [-0.5, 0.5) before truncation
-        // This makes the expected value of the quantized result equal to the
-        // original value, reducing quantization bias during training.
+        // Stochastic rounding: perturb each element by uniform noise spanning one
+        // FP8 ULP (unit in the last place) *at that element's magnitude*, then let
+        // .to(fp8_dtype) round to nearest. Because FP8 is a floating-point grid,
+        // the spacing between representable values is not constant in `scaled`
+        // space (e.g. ~32 near 448 but ~0.06 near 1.0 for E4M3). Adding a fixed
+        // [-0.5, 0.5) perturbation would only be unbiased on a uniform integer
+        // grid; here it must be scaled per element so that
+        //   E[ to_fp8(scaled + noise) ] == scaled
+        // holds across the whole dynamic range.
+        FP8Params fp = fp8_grid_params(fp8_dtype);
+
+        // Binade exponent e = floor(log2(|scaled|)), clamped to the FP8 normal
+        // exponent range. Below emin the subnormal spacing is constant and equals
+        // the ULP at emin, so clamping is exactly right. log2(0) = -inf is folded
+        // to emin by the clamp, and the max binade is capped at emax.
+        Tensor abs_scaled = tenzor::abs(scaled);
+        Tensor exponent = tenzor::floor(tenzor::log2(abs_scaled));
+        exponent = tenzor::clamp(exponent,
+                                 static_cast<double>(fp.emin),
+                                 static_cast<double>(fp.emax));
+
+        // ulp = 2^(e - mantissa_bits)
+        Tensor ulp = tenzor::exp2(
+            tenzor::sub(exponent, static_cast<double>(fp.mantissa_bits)));
+
+        // noise in [-0.5, 0.5) * ulp
         auto shape_span = input.shape();
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
         Tensor noise = tenzor::rand(shape_vec, DType::Float32, input.device());
-        // Shift from [0, 1) to [-0.5, 0.5)
-        Tensor half_tensor = full({1}, 0.5f, DType::Float32, input.device());
-        noise = tenzor::sub(noise, half_tensor);
+        noise = tenzor::sub(noise, 0.5);          // [0, 1) -> [-0.5, 0.5)
+        noise = tenzor::mul(noise, ulp);          // scale to one ULP per element
 
-        // The noise magnitude should be relative to the FP8 ULP (unit in last place).
-        // For simplicity, we add noise scaled to 1 ULP of the target FP8 type.
-        // Since we've already scaled the input to the FP8 range, the noise
-        // should be in [-0.5, 0.5) at the quantization grid level.
         scaled = tenzor::add(scaled, noise);
     }
 

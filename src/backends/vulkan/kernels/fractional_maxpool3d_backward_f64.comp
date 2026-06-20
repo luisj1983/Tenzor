@@ -44,6 +44,7 @@ void main() {
     uint channel_idx = idx / params.out_spatial;
     uint base_in = channel_idx * params.D_H_W;
     int max_idx = indices_data[idx];
+    if (max_idx < 0 || uint(max_idx) >= params.D_H_W) return;
     uint target = base_in + uint(max_idx);
     float64_t grad_val = grad_out_data[idx];
     atomicAddF64(target, grad_val);

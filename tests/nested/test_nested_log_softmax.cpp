@@ -18,7 +18,8 @@ using namespace tenzor;
 class NestedLogSoftmaxParityTest : public tenzor::testing::BackendTest {};
 
 TEST_P(NestedLogSoftmaxParityTest, RaggedDimParity) {
-    // Test log-softmax along the ragged dimension (dim=0).
+    // Test log-softmax along the ragged dimension (dim=1; from_tensor_list
+    // builds a (batch, ragged, *) tensor with ragged_dim==1).
     // This exercises the NestedLogSoftmax kernel directly.
     std::vector<Tensor> segments = {
         randn({3, 8}, DType::Float32, Device::cpu()),
@@ -26,7 +27,7 @@ TEST_P(NestedLogSoftmaxParityTest, RaggedDimParity) {
         randn({2, 8}, DType::Float32, Device::cpu()),
     };
     auto nested_cpu = NestedTensor::from_tensor_list(segments);
-    auto result_cpu = nested_log_softmax(nested_cpu, 0);
+    auto result_cpu = nested_log_softmax(nested_cpu, 1);
     Tensor cpu_values = result_cpu.values();
 
     if (device.type == Device::Type::CPU) {
@@ -36,7 +37,7 @@ TEST_P(NestedLogSoftmaxParityTest, RaggedDimParity) {
     }
 
     auto nested_gpu = nested_cpu.to(device);
-    auto result_gpu = nested_log_softmax(nested_gpu, 0);
+    auto result_gpu = nested_log_softmax(nested_gpu, 1);
     Tensor gpu_values = result_gpu.values().to(Device::cpu());
 
     ASSERT_EQ(cpu_values.shape()[0], gpu_values.shape()[0]);
@@ -56,7 +57,7 @@ TEST_P(NestedLogSoftmaxParityTest, SingleSegmentRaggedDim) {
         randn({4, 16}, DType::Float32, Device::cpu()),
     };
     auto nested_cpu = NestedTensor::from_tensor_list(segments);
-    auto result_cpu = nested_log_softmax(nested_cpu, 0);
+    auto result_cpu = nested_log_softmax(nested_cpu, 1);
 
     if (device.type == Device::Type::CPU) {
         EXPECT_EQ(result_cpu.values().shape()[0], 4);
@@ -64,7 +65,7 @@ TEST_P(NestedLogSoftmaxParityTest, SingleSegmentRaggedDim) {
     }
 
     auto nested_gpu = nested_cpu.to(device);
-    auto result_gpu = nested_log_softmax(nested_gpu, 0);
+    auto result_gpu = nested_log_softmax(nested_gpu, 1);
     Tensor gpu_values = result_gpu.values().to(Device::cpu());
     Tensor cpu_values = result_cpu.values();
 
@@ -85,7 +86,7 @@ TEST_P(NestedLogSoftmaxParityTest, OutputValuesNonPositive) {
         nested = nested.to(device);
     }
 
-    auto result = nested_log_softmax(nested, 0);
+    auto result = nested_log_softmax(nested, 1);
     Tensor values = result.values().to(Device::cpu());
     const float* vp = values.template data<float>();
 

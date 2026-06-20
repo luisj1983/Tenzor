@@ -51,20 +51,51 @@ float readBF16CPrev(uint idx) {
     return (idx & 1u) == 0u ? pair.x : pair.y;
 }
 
+// Pack a single float to bfloat16 bits (round-to-nearest-even)
+uint floatToBF16Bits(float val) {
+    uint b = floatBitsToUint(val);
+    return (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+}
+
+// Two adjacent flat elements (idx, idx+1) share the same uint32 word
+// (word_idx = idx >> 1) and are written by sibling threads concurrently.
+// A plain read-modify-write would clobber the neighbouring half-word, so we
+// use an atomicCompSwap retry loop that masks in only the target 16-bit half
+// (mirrors writeBF16 in softmax_backward_bf16.comp).
 void writeBF16HOut(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = h_out[word_idx];
-    vec2 pair = unpackBF16x2(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    h_out[word_idx] = packBF16x2(pair);
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint bits = floatToBF16Bits(val);
+
+    uint old_val = h_out[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(h_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word.
 }
 
 void writeBF16COut(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = c_out[word_idx];
-    vec2 pair = unpackBF16x2(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    c_out[word_idx] = packBF16x2(pair);
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint bits = floatToBF16Bits(val);
+
+    uint old_val = c_out[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(c_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word.
 }
 
 float sigmoid(float x) {

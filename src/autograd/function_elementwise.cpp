@@ -407,14 +407,15 @@ auto AbsBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& input = saved_tensors_[0];
 
     if (input.is_complex()) {
-        // Wirtinger: d/d(conj(z)) |z| = z / (2 * |z|)
+        // Wirtinger (no-1/2 convention, matching LogBackward/ExpBackward and
+        // PyTorch's grad * self.sgn()): d/d(conj(z)) |z| = z / |z| = sgn(z).
         auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
         auto abs_input = tenzor::abs(input);
         double eps = 1e-7;
         auto eps_tensor = full(input_shape_vec, eps, abs_input.dtype(), input.device());
         auto safe_abs = tenzor::where(gt(abs_input, eps_tensor), abs_input, eps_tensor);
-        // grad * z / (2 * |z|)
-        auto scale = div(input, mul(safe_abs, full(input_shape_vec, 2.0f, input.dtype(), input.device())));
+        // grad * z / |z|
+        auto scale = div(input, safe_abs);
         return {mul(grad.to(input.dtype()), scale)};
     }
 

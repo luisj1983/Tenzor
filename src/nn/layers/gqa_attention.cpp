@@ -249,6 +249,30 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
         auto threshold = tenzor::full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
                                      static_cast<double>(half_window), DType::Float32, query.device());
         auto outside = tenzor::gt(dist, threshold);
+        // When combined with the causal mask, the causal path guarantees that
+        // column b_i = max(i + offset, 0) (offset = seq_k - seq_q) is allowed
+        // for every row, so softmax never sees an all -inf row. The window mask
+        // below adds true -inf for Float32 and would re-mask b_i whenever it
+        // lies outside the band (|i - b_i| > window/2), e.g. seq_k < seq_q with
+        // |offset| > window/2 or the clamped top rows. That undoes the causal
+        // path's NaN protection and yields an entirely -inf row -> NaN softmax.
+        // Keep the guaranteed diagonal key allowed in the window mask too: force
+        // `outside` to false at col == b_i so at least one column per row always
+        // survives the combined mask. Without is_causal_ there is no such
+        // boundary guarantee (and the symmetric band always contains the
+        // diagonal i==i), so this only applies when both masks are active.
+        if (is_causal_) {
+            const int64_t offset = seq_len_k - seq_len_q;
+            Tensor boundary = tenzor::clamp_min(
+                tenzor::add(row_idx.to(DType::Float32), static_cast<double>(offset)),
+                0.0);  // [seq_len_q, 1]
+            // diagonal_key: true where this column is the guaranteed boundary
+            // key b_i for its row; broadcasts [seq_len_q,1] vs [1,seq_len_k].
+            Tensor diagonal_key = tenzor::eq(col_idx.to(DType::Float32), boundary);
+            Tensor not_diagonal = tenzor::logical_not(diagonal_key);
+            // outside stays true only where it was outside AND not the diagonal.
+            outside = tenzor::logical_and(outside, not_diagonal);
+        }
         // The mask is built in compute_dtype (Float32 when Q/K/V were upcast),
         // matching the scores' dtype for the additive combine. -1e9 overflows
         // to -inf in Float16/BFloat16 mask tensors and a fully-masked row then

@@ -8,6 +8,14 @@ namespace tenzor {
 
 namespace {
 
+// Draw a full 64-bit nondeterministic seed. std::random_device yields 32-bit
+// values on most implementations, so combine two draws to cover the engine's
+// 64-bit seed space.
+auto random_seed_u64() -> uint64_t {
+    std::random_device rd;
+    return (static_cast<uint64_t>(rd()) << 32) | static_cast<uint64_t>(rd());
+}
+
 // Serialize an mt19937_64 engine to a vector of uint64. We use the standard
 // stream-based serialization so we don't depend on libstdc++ internals.
 auto serialize_engine_u64(const std::mt19937_64& eng) -> std::vector<uint64_t> {
@@ -39,10 +47,12 @@ auto deserialize_engine_u64(std::mt19937_64& eng,
 
 Generator::Generator(Device device)
     : device_(device)
-    , seed_(0)
-    , initial_seed_(0)
-    , engine_(std::random_device{}())
+    , seed_(random_seed_u64())
+    , initial_seed_(seed_)
+    , engine_(seed_)
 {
+    // seed_/initial_seed_ now match the engine's actual seed, so an unseeded
+    // generator reports a value that genuinely reproduces its stream.
 }
 
 auto Generator::manual_seed(uint64_t seed) -> Generator& {

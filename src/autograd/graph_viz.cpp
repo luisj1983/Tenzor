@@ -2,7 +2,6 @@
 #include "tenzor/autograd/function.hpp"
 #include <sstream>
 #include <fstream>
-#include <typeinfo>
 #include <unordered_set>
 #include <queue>
 
@@ -55,14 +54,12 @@ auto make_dot(const Variable& root,
         visited.insert(fn.get());
 
         uintptr_t fn_id = reinterpret_cast<uintptr_t>(fn.get());
-        std::string fn_name = typeid(*fn).name();
-
-        // Try to demangle common patterns
-        // Strip leading digits (mangled length prefix) and namespace prefixes
-        auto last_colon = fn_name.rfind(':');
-        if (last_colon != std::string::npos) {
-            fn_name = fn_name.substr(last_colon + 1);
-        }
+        // Reuse Function::name(), which demangles the Itanium-mangled
+        // typeid().name() via abi::__cxa_demangle and strips namespace
+        // prefixes. The previous typeid(*fn).name() + rfind(':') logic was a
+        // no-op on GCC/Clang because mangled names contain no ':' characters,
+        // leaving raw labels like "N6tenzor16SigmoidBackwardE".
+        std::string fn_name = fn->name();
 
         out << "  node_" << fn_id
             << " [label=\"" << fn_name << "\", fillcolor=\"#add8e6\"];\n";

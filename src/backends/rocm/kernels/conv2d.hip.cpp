@@ -842,6 +842,27 @@ auto conv2d_forward_kernel(
     if (groups == 0) {
         throw std::invalid_argument("Conv2d: groups cannot be zero");
     }
+    // The NHWC forward path feeds im2col_kernel_nhwc the per-group channel count
+    // as the row stride and writes each group's GEMM result back with a flat
+    // contiguous copy. Both are only correct when groups == 1; for groups > 1 the
+    // im2col row stride and the output scatter use the wrong (per-group) channel
+    // stride, silently corrupting the channel layout. The NCHW path handles
+    // groups correctly via conv_nhwc_to_nchw_kernel with the full channel stride.
+    // Reject grouped NHWC forward explicitly until a proper NHWC scatter is
+    // implemented, rather than producing wrong output.
+    if (layout == DataLayout::NHWC && groups > 1) {
+        // Route grouped NHWC through the correct, tested NCHW grouped path:
+        // permute input NHWC->NCHW, run the NCHW conv (which handles groups via
+        // the full channel stride), then permute the output NCHW->NHWC. The
+        // native NHWC group loop used per-group channel strides for im2col and
+        // the output scatter, corrupting the channel layout for groups>1.
+        Tensor input_nchw = input.permute({0, 3, 1, 2}).contiguous();
+        Tensor out_nchw = conv2d_forward_kernel(
+            input_nchw, weight, bias,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, stream, DataLayout::NCHW);
+        return out_nchw.permute({0, 2, 3, 1}).contiguous();
+    }
 
     // Calculate output dimensions (per-axis)
     int64_t out_h = calculate_output_size(height, kernel_h, stride_h, pad_h, dil_h);
@@ -1250,6 +1271,31 @@ auto conv2d_backward_kernel(
     }
     if (groups == 0) {
         throw std::invalid_argument("Conv2d backward: groups cannot be zero");
+    }
+    // The NHWC backward path passes per-group slices to rocBLAS / col2im using a
+    // per-group channel stride (out_channels_per_group / in_channels_per_group),
+    // which is only correct when groups == 1. For groups > 1 the GEMM would read
+    // interleaved channels from the wrong group and col2im would scatter with the
+    // wrong row stride, silently corrupting grad_input. The NCHW path handles
+    // groups correctly via conv_nchw_to_nhwc_kernel with the full channel stride.
+    // Reject grouped NHWC backward explicitly until a proper NHWC gather/scatter
+    // is implemented, rather than producing wrong gradients.
+    if (layout == DataLayout::NHWC && groups > 1) {
+        // Route grouped NHWC backward through the correct, tested NCHW path:
+        // permute grad_output/input NHWC->NCHW, run the NCHW backward (correct
+        // grouping via full channel stride), then permute grad_input back to
+        // NHWC. grad_weight (OIHW) and grad_bias (1-D) are layout-independent.
+        Tensor grad_output_nchw = grad_output.permute({0, 3, 1, 2}).contiguous();
+        Tensor input_nchw = input.permute({0, 3, 1, 2}).contiguous();
+        auto [gi_nchw, gw, gb] = conv2d_backward_kernel(
+            grad_output_nchw, input_nchw, weight,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, compute_grad_input, compute_grad_weight, compute_grad_bias,
+            stream, DataLayout::NCHW);
+        Tensor gi_nhwc = compute_grad_input
+            ? gi_nchw.permute({0, 2, 3, 1}).contiguous()
+            : gi_nchw;
+        return std::make_tuple(gi_nhwc, gw, gb);
     }
 
     // Initialize outputs

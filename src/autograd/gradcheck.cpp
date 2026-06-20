@@ -46,6 +46,13 @@ auto extract_scalar(const Tensor& tensor) -> double {
             return static_cast<double>(tensor.item<float>());
         } else if (tensor.dtype() == DType::Float64) {
             return tensor.item<double>();
+        } else if (tensor.dtype() == DType::Float16 || tensor.dtype() == DType::BFloat16) {
+            // Reduced-precision scalar outputs have no native item<T>() path
+            // here. Widen to Float32 first (widen-narrow pattern, mirroring the
+            // summation branch in numerical_gradient) so a function returning a
+            // single Float16/BFloat16 element produces a numerical gradient
+            // instead of throwing.
+            return static_cast<double>(tensor.to(DType::Float32).item<float>());
         } else if (tensor.dtype() == DType::Int32) {
             return static_cast<double>(tensor.item<int32_t>());
         } else if (tensor.dtype() == DType::Int64) {

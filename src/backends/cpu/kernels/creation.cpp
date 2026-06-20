@@ -288,7 +288,7 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     // previous per-thread mt19937 seeding made results depend on thread count.
     if (dtype == DType::Int32) {
         int32_t* data = result.data<int32_t>();
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             int64_t v = low + static_cast<int64_t>(philox::philox_uniform_f64(seed, i) * range);
             if (v >= high) v = high - 1;  // guard against u -> 1-eps rounding up
@@ -296,7 +296,7 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
         }
     } else {  // Int64
         int64_t* data = result.data<int64_t>();
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             int64_t v = low + static_cast<int64_t>(philox::philox_uniform_f64(seed, i) * range);
             if (v >= high) v = high - 1;
@@ -810,7 +810,7 @@ auto bernoulli_kernel(const Tensor& probs) -> Tensor {
     float* out_data = result_f32.data<float>();
 
     const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
     for (int64_t i = 0; i < n; ++i) {
         out_data[i] = (philox::philox_uniform_f32(seed, i) < p_data[i]) ? 1.0f : 0.0f;
     }
@@ -839,7 +839,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& std) -> Tensor {
     float* out_data = result_f32.data<float>();
 
     const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
     for (int64_t i = 0; i < n; ++i) {
         out_data[i] = m_data[i] + s_data[i] * philox::philox_normal_f32(seed, i);
     }
@@ -870,10 +870,19 @@ auto poisson_sample_kernel(const Tensor& rates) -> Tensor {
         z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
         return z ^ (z >> 31);
     };
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
     for (int64_t i = 0; i < n; ++i) {
+        // std::poisson_distribution requires mean > 0; a negative or NaN mean is
+        // undefined behavior and mean == 0 has no well-defined draw. Emit 0 for
+        // any non-positive / non-finite rate (the Poisson(0) limit), and only
+        // construct the distribution for valid means.
+        const double mean = static_cast<double>(r_data[i]);
+        if (!(mean > 0.0) || !std::isfinite(mean)) {
+            out_data[i] = 0;
+            continue;
+        }
         std::mt19937_64 local(mix64(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL)));
-        std::poisson_distribution<int64_t> dist(static_cast<double>(r_data[i]));
+        std::poisson_distribution<int64_t> dist(mean);
         out_data[i] = dist(local);
     }
 
@@ -890,12 +899,16 @@ auto exponential_sample_kernel(const Tensor& rate) -> Tensor {
     float* out_data = result.data<float>();
 
     const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
     for (int64_t i = 0; i < n; ++i) {
         // Inverse CDF: -ln(1-U) / rate. philox_uniform_f32 is in [0,1) so
         // (1-u) is in (0,1] and the log is finite.
+        // Clamp non-positive (or NaN) rate to the smallest positive normal so
+        // the divisor is always > 0, mirroring gamma_sample_kernel. A rate of
+        // 0 would otherwise yield +inf and a negative rate a negative sample.
+        float r = r_data[i] > 0.0f ? r_data[i] : std::numeric_limits<float>::min();
         float u = philox::philox_uniform_f32(seed, i);
-        out_data[i] = -std::log(1.0f - u) / r_data[i];
+        out_data[i] = -std::log(1.0f - u) / r;
     }
 
     return result;
@@ -929,7 +942,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate) -> Ten
         const float* a_data = concentration.data<float>();
         const float* b_data = rate.data<float>();
         float* out = result.data<float>();
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             // Per-element RNG so the draw is deterministic and parallel-safe.
             std::mt19937_64 gen(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL));
@@ -942,7 +955,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate) -> Ten
         const double* a_data = concentration.data<double>();
         const double* b_data = rate.data<double>();
         double* out = result.data<double>();
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             std::mt19937_64 gen(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL));
             double alpha = a_data[i] > 0.0 ? a_data[i] : std::numeric_limits<double>::min();

@@ -1161,9 +1161,25 @@ private:
 // `_rebuild_*` reduce results into a flat name → Tensor map.
 // =========================================================================
 
+// Maximum nesting depth for the flatten walk. .pth/.pt files are untrusted by
+// design (see file-level comments), and the Unpickler builds the PValue tree
+// iteratively, so a crafted pickle can encode an arbitrarily deep chain of
+// nested dicts. Recursing to that full depth here would overflow the native
+// stack (DoS). A few hundred levels is far beyond any legitimate state-dict
+// spine, so cap the recursion and fail loudly when exceeded.
+constexpr int kMaxFlattenDepth = 256;
+
 void flatten_state_dict(const PValuePtr& node,
                          const std::string& prefix,
-                         std::unordered_map<std::string, Tensor>& out) {
+                         std::unordered_map<std::string, Tensor>& out,
+                         int depth = 0) {
+    if (depth > kMaxFlattenDepth) {
+        throw std::runtime_error(
+            "torch_pickle: state-dict nesting exceeds maximum depth (" +
+            std::to_string(kMaxFlattenDepth) +
+            ") — refusing to recurse further (possible malicious or "
+            "malformed file)");
+    }
     switch (node->kind) {
         case PValue::Kind::Dict: {
             for (auto& [k, v] : node->dict_entries) {
@@ -1179,7 +1195,7 @@ void flatten_state_dict(const PValuePtr& node,
                 }
                 const std::string& name = k->s;
                 std::string sub = prefix.empty() ? name : prefix + "." + name;
-                flatten_state_dict(v, sub, out);
+                flatten_state_dict(v, sub, out, depth + 1);
             }
             break;
         }

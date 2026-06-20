@@ -24,11 +24,12 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     if (batch_idx >= batch) return;
 
-    uint mat_offset = batch_idx * m * n_cols;
+    uint r_off = batch_idx * m * n_cols;
+    uint q_off = batch_idx * m * m;
 
     for (uint row = 0; row < m; row++) {
         if (tid < n_cols) {
-            R[row][tid] = data_in[mat_offset + row * n_cols + tid];
+            R[row][tid] = data_in[r_off + row * n_cols + tid];
         }
         if (tid < m) {
             Q[row][tid] = (row == tid) ? 1.0lf : 0.0lf;
@@ -90,10 +91,10 @@ void main() {
 
     for (uint row = 0; row < m; row++) {
         if (tid < m) {
-            data_q[mat_offset + row * m + tid] = Q[row][tid];
+            data_q[q_off + row * m + tid] = Q[row][tid];
         }
         if (tid < n_cols) {
-            data_r[mat_offset + row * n_cols + tid] = R[row][tid];
+            data_r[r_off + row * n_cols + tid] = R[row][tid];
         }
     }
 }

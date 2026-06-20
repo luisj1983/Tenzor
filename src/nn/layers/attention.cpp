@@ -552,6 +552,11 @@ auto MultiheadAttention::forward(const Variable& query,
     int64_t batch_size = q_shape[0];
     int64_t seq_len_q = q_shape[1];
     int64_t seq_len_k = k_shape[1];
+    // Number of key/value rows appended by add_bias_kv / add_zero_attn. These
+    // extend seq_len_k beyond the user-supplied key length, so a user-provided
+    // key_padding_mask (which has the original column count) must be padded with
+    // this many "keep" columns before it can be reshaped against seq_len_k.
+    int64_t num_appended_keys = 0;
 
     // Ensure projection weights are on the same device as input
     auto weight_device = q_proj_->own_parameters()[0]->tensor().device();
@@ -593,6 +598,7 @@ auto MultiheadAttention::forward(const Variable& query,
         K = tenzor::cat({K, bk}, 1);  // [batch, seq_k+1, embed]
         V = tenzor::cat({V, bv}, 1);  // [batch, seq_k+1, embed]
         seq_len_k += 1;
+        num_appended_keys += 1;
     }
 
     // add_zero_attn: append zero row to key/value sequences
@@ -602,6 +608,7 @@ auto MultiheadAttention::forward(const Variable& query,
         K = tenzor::cat({K, zero_row}, 1);
         V = tenzor::cat({V, zero_row}, 1);
         seq_len_k += 1;
+        num_appended_keys += 1;
     }
 
     // Reshape for multi-head attention
@@ -659,8 +666,24 @@ auto MultiheadAttention::forward(const Variable& query,
         // along (num_heads, seq_q). Previously this code did an explicit
         // expand to [batch, num_heads, seq_q, seq_k] producing a stride-0
         // view that some backends mishandle (memory: feedback_stride_bugs).
+        // add_bias_kv / add_zero_attn appended num_appended_keys extra key rows,
+        // bumping seq_len_k past the user mask's column count. PyTorch pads the
+        // key_padding_mask with "keep" entries for those positions; mirror that
+        // here so the appended bias/zero keys are always attendable. The pad
+        // value 0 is correct under both conventions handled below: 0.0 is the
+        // additive-keep value for float masks, and 0/False means "not ignored"
+        // for bool/integer indicator masks.
+        Tensor source_mask = key_padding_mask;
+        if (num_appended_keys > 0) {
+            auto src_shape = source_mask.shape();
+            std::vector<int64_t> pad_shape(src_shape.begin(), src_shape.end());
+            pad_shape.back() = num_appended_keys;
+            Tensor keep_cols = zeros(pad_shape, source_mask.dtype(), source_mask.device());
+            source_mask = tenzor::cat(std::vector<Tensor>{source_mask, keep_cols}, 1);
+        }
+
         std::vector<int64_t> mask_shape = {batch_size, 1, 1, seq_len_k};
-        Tensor padding_mask = reshape(key_padding_mask, mask_shape);
+        Tensor padding_mask = reshape(source_mask, mask_shape);
 
         // V.28 / AA.1: branch on dtype to honour PyTorch's two distinct
         // key_padding_mask conventions:

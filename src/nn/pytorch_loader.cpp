@@ -960,9 +960,14 @@ auto load_pytorch_state_dict(const std::string& path)
         std::string data_name = data_prefix + desc.data_key;
 
         auto [raw_ptr, raw_size] = zip.get_raw_ptr(data_name);
+        // Fallback buffer must outlive the memcpy below, so it is declared at
+        // loop scope rather than inside the `if` block. get_raw_ptr returns
+        // null for not-found, compressed (DEFLATE), or bounds-escape entries;
+        // read_entry decompresses/validates and yields an owning buffer.
+        std::vector<uint8_t> data;
         if (!raw_ptr) {
             // Try reading as entry
-            auto data = zip.read_entry(data_name);
+            data = zip.read_entry(data_name);
             raw_ptr = data.data();
             raw_size = data.size();
         }

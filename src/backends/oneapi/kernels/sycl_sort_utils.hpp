@@ -1,9 +1,27 @@
 #pragma once
 #include <sycl/sycl.hpp>
 #include <cstdint>
+#include <limits>
 
 namespace tenzor {
 namespace oneapi {
+
+/**
+ * @brief Largest-possible sentinel value for type @p T.
+ *
+ * Used to pad a bitonic-sort buffer up to a power-of-two length so that the
+ * padding elements always sort to the high end (ascending order) and never
+ * displace a real element. For floating-point types we use +infinity so the
+ * sentinel still dominates any real value, including the finite maximum.
+ */
+template<typename T>
+constexpr T sycl_sort_max_sentinel() {
+    if constexpr (std::numeric_limits<T>::has_infinity) {
+        return std::numeric_limits<T>::infinity();
+    } else {
+        return std::numeric_limits<T>::max();
+    }
+}
 
 /**
  * @brief In-place bitonic sort on device memory.
@@ -11,7 +29,13 @@ namespace oneapi {
  * Operates on USM device pointers. Fixed number of rounds with
  * no data-dependent branching — well suited for SYCL.
  *
- * @tparam T Element type (must support operator<)
+ * For non-power-of-two @p n the routine sorts on an internally allocated
+ * power-of-two buffer whose tail is filled with a +max sentinel, then copies
+ * the first @p n (smallest) elements back. This avoids the incorrect ordering
+ * that results from merely skipping out-of-range comparators (skipping is only
+ * equivalent to a sentinel in ascending sub-stages, not descending ones).
+ *
+ * @tparam T Element type (must support operator< and operator>)
  * @param data Pointer to device memory
  * @param n Number of elements to sort
  * @param queue SYCL queue for kernel submission
@@ -24,37 +48,78 @@ void sycl_bitonic_sort(T* data, int64_t n, sycl::queue& queue) {
     int64_t padded = 1;
     while (padded < n) padded <<= 1;
 
-    // Bitonic sort network
+    // Fast path: already a power of two — sort fully in place.
+    if (padded == n) {
+        for (int64_t k = 2; k <= padded; k <<= 1) {
+            for (int64_t j = k >> 1; j > 0; j >>= 1) {
+                queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
+                    int64_t i = static_cast<int64_t>(idx[0]);
+                    int64_t ixj = i ^ j;
+                    // Only process pairs where i < ixj (avoid double-swap)
+                    if (ixj <= i) return;
+
+                    // Determine sort direction: ascending if (i & k) == 0
+                    bool ascending = ((i & k) == 0);
+
+                    if (ascending) {
+                        if (data[i] > data[ixj]) {
+                            T tmp = data[i];
+                            data[i] = data[ixj];
+                            data[ixj] = tmp;
+                        }
+                    } else {
+                        if (data[i] < data[ixj]) {
+                            T tmp = data[i];
+                            data[i] = data[ixj];
+                            data[ixj] = tmp;
+                        }
+                    }
+                });
+                queue.wait_and_throw();
+            }
+        }
+        return;
+    }
+
+    // Non-power-of-two: pad to `padded` with a +max sentinel so the network
+    // operates on a valid bitonic input and real elements occupy [0, n).
+    const T sentinel = sycl_sort_max_sentinel<T>();
+    T* buf = sycl::malloc_device<T>(padded, queue);
+    queue.memcpy(buf, data, n * sizeof(T)).wait();
+    queue.parallel_for(sycl::range<1>(padded - n), [=](sycl::id<1> idx) {
+        buf[n + static_cast<int64_t>(idx[0])] = sentinel;
+    }).wait();
+
     for (int64_t k = 2; k <= padded; k <<= 1) {
         for (int64_t j = k >> 1; j > 0; j >>= 1) {
             queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
                 int64_t i = static_cast<int64_t>(idx[0]);
                 int64_t ixj = i ^ j;
-                // Only process pairs where i < ixj (avoid double-swap)
                 if (ixj <= i) return;
-                // Both indices must be in bounds
-                if (i >= n || ixj >= n) return;
 
-                // Determine sort direction: ascending if (i & k) == 0
                 bool ascending = ((i & k) == 0);
 
                 if (ascending) {
-                    if (data[i] > data[ixj]) {
-                        T tmp = data[i];
-                        data[i] = data[ixj];
-                        data[ixj] = tmp;
+                    if (buf[i] > buf[ixj]) {
+                        T tmp = buf[i];
+                        buf[i] = buf[ixj];
+                        buf[ixj] = tmp;
                     }
                 } else {
-                    if (data[i] < data[ixj]) {
-                        T tmp = data[i];
-                        data[i] = data[ixj];
-                        data[ixj] = tmp;
+                    if (buf[i] < buf[ixj]) {
+                        T tmp = buf[i];
+                        buf[i] = buf[ixj];
+                        buf[ixj] = tmp;
                     }
                 }
             });
             queue.wait_and_throw();
         }
     }
+
+    // Copy back the n smallest (real) elements; sentinels stay in [n, padded).
+    queue.memcpy(data, buf, n * sizeof(T)).wait();
+    sycl::free(buf, queue);
 }
 
 /**
@@ -78,40 +143,95 @@ void sycl_bitonic_sort_by_key(T* data, int64_t* indices, int64_t n, sycl::queue&
     int64_t padded = 1;
     while (padded < n) padded <<= 1;
 
-    // Bitonic sort network — swap both value and index in lockstep
+    // Fast path: already a power of two — sort fully in place.
+    if (padded == n) {
+        for (int64_t k = 2; k <= padded; k <<= 1) {
+            for (int64_t j = k >> 1; j > 0; j >>= 1) {
+                queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
+                    int64_t i = static_cast<int64_t>(idx[0]);
+                    int64_t ixj = i ^ j;
+                    if (ixj <= i) return;
+
+                    bool ascending = ((i & k) == 0);
+
+                    if (ascending) {
+                        if (data[i] > data[ixj]) {
+                            T tmp = data[i];
+                            data[i] = data[ixj];
+                            data[ixj] = tmp;
+                            int64_t ti = indices[i];
+                            indices[i] = indices[ixj];
+                            indices[ixj] = ti;
+                        }
+                    } else {
+                        if (data[i] < data[ixj]) {
+                            T tmp = data[i];
+                            data[i] = data[ixj];
+                            data[ixj] = tmp;
+                            int64_t ti = indices[i];
+                            indices[i] = indices[ixj];
+                            indices[ixj] = ti;
+                        }
+                    }
+                });
+                queue.wait_and_throw();
+            }
+        }
+        return;
+    }
+
+    // Non-power-of-two: pad values with a +max sentinel (and indices with a -1
+    // sentinel index) so the comparator network operates on a valid bitonic
+    // input. Real elements settle into [0, n); sentinels go to the high end.
+    const T sentinel = sycl_sort_max_sentinel<T>();
+    T* vbuf = sycl::malloc_device<T>(padded, queue);
+    int64_t* ibuf = sycl::malloc_device<int64_t>(padded, queue);
+    queue.memcpy(vbuf, data, n * sizeof(T)).wait();
+    queue.memcpy(ibuf, indices, n * sizeof(int64_t)).wait();
+    queue.parallel_for(sycl::range<1>(padded - n), [=](sycl::id<1> idx) {
+        int64_t p = n + static_cast<int64_t>(idx[0]);
+        vbuf[p] = sentinel;
+        ibuf[p] = -1;
+    }).wait();
+
     for (int64_t k = 2; k <= padded; k <<= 1) {
         for (int64_t j = k >> 1; j > 0; j >>= 1) {
             queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
                 int64_t i = static_cast<int64_t>(idx[0]);
                 int64_t ixj = i ^ j;
                 if (ixj <= i) return;
-                if (i >= n || ixj >= n) return;
 
                 bool ascending = ((i & k) == 0);
 
                 if (ascending) {
-                    if (data[i] > data[ixj]) {
-                        T tmp = data[i];
-                        data[i] = data[ixj];
-                        data[ixj] = tmp;
-                        int64_t ti = indices[i];
-                        indices[i] = indices[ixj];
-                        indices[ixj] = ti;
+                    if (vbuf[i] > vbuf[ixj]) {
+                        T tmp = vbuf[i];
+                        vbuf[i] = vbuf[ixj];
+                        vbuf[ixj] = tmp;
+                        int64_t ti = ibuf[i];
+                        ibuf[i] = ibuf[ixj];
+                        ibuf[ixj] = ti;
                     }
                 } else {
-                    if (data[i] < data[ixj]) {
-                        T tmp = data[i];
-                        data[i] = data[ixj];
-                        data[ixj] = tmp;
-                        int64_t ti = indices[i];
-                        indices[i] = indices[ixj];
-                        indices[ixj] = ti;
+                    if (vbuf[i] < vbuf[ixj]) {
+                        T tmp = vbuf[i];
+                        vbuf[i] = vbuf[ixj];
+                        vbuf[ixj] = tmp;
+                        int64_t ti = ibuf[i];
+                        ibuf[i] = ibuf[ixj];
+                        ibuf[ixj] = ti;
                     }
                 }
             });
             queue.wait_and_throw();
         }
     }
+
+    // Copy back the n smallest (real) elements and their original indices.
+    queue.memcpy(data, vbuf, n * sizeof(T)).wait();
+    queue.memcpy(indices, ibuf, n * sizeof(int64_t)).wait();
+    sycl::free(vbuf, queue);
+    sycl::free(ibuf, queue);
 }
 
 }  // namespace oneapi

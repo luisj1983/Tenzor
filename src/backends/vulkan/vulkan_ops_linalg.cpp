@@ -720,9 +720,16 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
 
     runBlockedLU(A, pivots, n, batch_size, device_id, is_f64, is_f16);
 
-    // Determine nrhs from b shape
+    // Determine nrhs from b shape. Mirror the small-matrix path's
+    // disambiguation: a 2D-or-higher RHS is treated as a matrix (..., N, nrhs)
+    // only when its second-to-last dim equals N; otherwise it is a batched
+    // vector RHS (..., N) with nrhs == 1. Without this guard a batched vector
+    // RHS shaped (batch, N) with batch != N would wrongly yield nrhs == N and
+    // make the TRSM shader over-read the b buffer.
     int64_t b_ndim = static_cast<int64_t>(b_shape.size());
-    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nrhs = (b_ndim >= 2 && b_shape[b_ndim - 2] == n)
+                       ? b_shape[b_ndim - 1]
+                       : 1;
     int64_t ldb = nrhs;
 
     Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), a.dtype(), a.device());
@@ -948,13 +955,9 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
 
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
-    // Output: U (batch, m, k), S (batch, k), Vt (batch, n, n)
-    std::vector<int64_t> u_shape(shape.begin(), shape.end() - 2);
-    u_shape.push_back(m); u_shape.push_back(k);
+    // S shape is identical in both paths (batch, k).
     std::vector<int64_t> s_shape(shape.begin(), shape.end() - 2);
     s_shape.push_back(k);
-    std::vector<int64_t> vt_shape(shape.begin(), shape.end() - 2);
-    vt_shape.push_back(n); vt_shape.push_back(n);
 
     // For small matrices, all outputs match input dtype.
     // For large (tiled) matrices, S is always f32/f64 for numerical stability.
@@ -962,9 +965,16 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
                   ? input.dtype()
                   : (is_f64 ? DType::Float64 : DType::Float32);
 
-    Tensor U(u_shape, input.dtype(), input.device());
     Tensor S(s_shape, s_dtype, input.device());
-    Tensor Vt(vt_shape, input.dtype(), input.device());
+
+    // U / Vt shapes depend on full_matrices and on which path runs (the small
+    // single-workgroup shader honours full_matrices; the large global-memory
+    // shader currently only produces the reduced factors). Allocate them inside
+    // each branch so the host buffers match exactly what the dispatched shader
+    // writes — otherwise full mode (m > k) overflows a reduced U buffer and
+    // reduced mode leaves the trailing n - k rows of an n×n Vt uninitialised.
+    Tensor U;
+    Tensor Vt;
 
     size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
 
@@ -972,6 +982,19 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
         // ---- Small matrix path: single-workgroup Jacobi SVD ----
         std::string shader = is_f64 ? "linalg_svd_f64" : is_f16 ? "linalg_svd_f16" : "linalg_svd";
         auto* pipeline = getPipeline(shader, device_id);
+
+        // Match the fixed shader's output layout (LAPACK jobz 'A' vs 'S'):
+        //   full mode    -> U (m × m), Vt (n × n)
+        //   reduced mode -> U (m × k), Vt (k × n)
+        int64_t u_cols  = full_matrices ? m : k;
+        int64_t vt_rows = full_matrices ? n : k;
+
+        std::vector<int64_t> u_shape(shape.begin(), shape.end() - 2);
+        u_shape.push_back(m); u_shape.push_back(u_cols);
+        std::vector<int64_t> vt_shape(shape.begin(), shape.end() - 2);
+        vt_shape.push_back(vt_rows); vt_shape.push_back(n);
+        U  = Tensor(u_shape, input.dtype(), input.device());
+        Vt = Tensor(vt_shape, input.dtype(), input.device());
 
         struct PushConstants { uint32_t m; uint32_t n_cols; uint32_t batch; uint32_t full_matrices; } pc;
         pc.m = static_cast<uint32_t>(m);
@@ -981,9 +1004,9 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
 
         auto cont = input.contiguous();
         size_t in_numel = batch_size * m * n;
-        size_t u_numel = batch_size * m * k;
+        size_t u_numel = batch_size * m * u_cols;
         size_t s_numel = batch_size * k;
-        size_t vt_numel = batch_size * n * n;
+        size_t vt_numel = batch_size * vt_rows * n;
         size_t in_size = is_f16 ? f16_buf(in_numel) : in_numel * elem_size;
         size_t u_size = is_f16 ? f16_buf(u_numel) : u_numel * elem_size;
         size_t s_size = is_f16 ? f16_buf(s_numel) : s_numel * elem_size;
@@ -1017,13 +1040,26 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
         std::string shader = is_f64 ? "linalg_svd_global_f64" : "linalg_svd_global";
         auto* pipeline = getPipeline(shader, device_id);
 
-        struct PushConstants { uint32_t m; uint32_t n; uint32_t batch; } pc;
+        // The global shader honours full_matrices. With m >= n we have k == n,
+        // so V is already the full n × n basis (Vt = V^T is n × n in both
+        // modes). U is written m × u_cols where u_cols == m in full mode (the
+        // shader orthonormally completes the trailing m - n columns) or n in
+        // reduced mode (== m × k). Allocate U to match exactly what the shader
+        // writes so full mode does not overflow a reduced-sized buffer.
+        int64_t u_cols = full_matrices ? m : n;
+        std::vector<int64_t> u_shape(shape.begin(), shape.end() - 2);
+        u_shape.push_back(m); u_shape.push_back(u_cols);
+        U = Tensor(u_shape, input.dtype(), input.device());
+
+        struct PushConstants { uint32_t m; uint32_t n; uint32_t batch; uint32_t full_matrices; } pc;
         pc.m = static_cast<uint32_t>(m);
         pc.n = static_cast<uint32_t>(n);
         pc.batch = static_cast<uint32_t>(batch_size);
+        pc.full_matrices = full_matrices ? 1u : 0u;
 
         size_t esz = is_f64 ? 8u : 4u;
-        size_t mn_bytes = static_cast<size_t>(batch_size) * m * n * esz;
+        size_t in_bytes = static_cast<size_t>(batch_size) * m * n * esz;
+        size_t u_bytes  = static_cast<size_t>(batch_size) * m * u_cols * esz;
         size_t s_bytes  = static_cast<size_t>(batch_size) * n * esz;
         size_t v_bytes  = static_cast<size_t>(batch_size) * n * n * esz;
 
@@ -1035,7 +1071,7 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, cont.data_ptr()}, {1, U.data_ptr()}, {2, S.data_ptr()}, {3, Vmat.data_ptr()}
         };
-        std::vector<size_t> sizes = {mn_bytes, mn_bytes, s_bytes, v_bytes};
+        std::vector<size_t> sizes = {in_bytes, u_bytes, s_bytes, v_bytes};
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -1058,30 +1094,33 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     if (k > 1) {
         auto [sorted_S, sort_indices] = dispatchSort(S, /*dim=*/-1, /*descending=*/true);
 
-        // U: (..., m, k) — gather columns (last axis) according to sort_indices.
-        Tensor U_t = dispatchTranspose(U, ndim - 2, ndim - 1);  // (..., k, m)
-        Tensor sorted_U_t = dispatchIndexSelect(U_t.contiguous(), ndim - 2, sort_indices);
+        // Helper: extend a length-k permutation with the fixed identity tail
+        // [k, k+1, ..., axis_len-1] when an axis is wider than k (full_matrices
+        // mode). The first k singular vectors are permuted to match the sorted
+        // singular values; the trailing null-space vectors stay in place.
+        auto extend_indices = [&](int64_t axis_len) -> Tensor {
+            if (axis_len == k) return sort_indices;
+            auto tail_cpu = Tensor({axis_len - k}, DType::Int64, Device::cpu());
+            auto* tail_data = tail_cpu.data<int64_t>();
+            for (int64_t i = 0; i < axis_len - k; ++i) tail_data[i] = k + i;
+            Tensor tail = tail_cpu.to(input.device());
+            return dispatchCat({sort_indices, tail}, 0);
+        };
+
+        // U: (..., m, u_cols) where u_cols == m (full) or k (reduced). Gather
+        // columns (last axis) by the (extended) permutation so full-mode U
+        // keeps all m columns — its trailing m-k columns are the orthonormal
+        // completion the shader wrote and must survive the sort untouched.
+        Tensor U_t = dispatchTranspose(U, ndim - 2, ndim - 1);  // (..., u_cols, m)
+        Tensor u_idx = extend_indices(U.shape()[ndim - 1]);
+        Tensor sorted_U_t = dispatchIndexSelect(U_t.contiguous(), ndim - 2, u_idx);
         Tensor sorted_U = dispatchTranspose(sorted_U_t, ndim - 2, ndim - 1).contiguous();
 
-        // Vt: (..., n, n) when full_matrices, (..., k, n) otherwise. Either way
-        // the row axis (ndim - 2) of Vt corresponds to singular vectors; the
-        // first k rows are the non-trivial ones. For full_matrices=true we
-        // only permute the first k rows (trailing rows are null-space and
-        // stay in place); equivalently, we gather rows by an index vector
-        // that's [sort_indices, k, k+1, ..., n-1].
-        Tensor sorted_Vt;
-        if (Vt.shape()[ndim - 2] == k) {
-            sorted_Vt = dispatchIndexSelect(Vt.contiguous(), ndim - 2, sort_indices);
-        } else {
-            // Build extended indices [sort_indices ++ identity[k..n-1]] on device.
-            int64_t n_rows = Vt.shape()[ndim - 2];
-            auto tail_cpu = Tensor({n_rows - k}, DType::Int64, Device::cpu());
-            auto* tail_data = tail_cpu.data<int64_t>();
-            for (int64_t i = 0; i < n_rows - k; ++i) tail_data[i] = k + i;
-            Tensor tail = tail_cpu.to(input.device());
-            Tensor combined = dispatchCat({sort_indices, tail}, 0);
-            sorted_Vt = dispatchIndexSelect(Vt.contiguous(), ndim - 2, combined);
-        }
+        // Vt: (..., vt_rows, n) where vt_rows == n (full) or k (reduced). The
+        // row axis (ndim - 2) holds the right singular vectors; gather rows by
+        // the same (extended) permutation.
+        Tensor vt_idx = extend_indices(Vt.shape()[ndim - 2]);
+        Tensor sorted_Vt = dispatchIndexSelect(Vt.contiguous(), ndim - 2, vt_idx);
 
         return {sorted_U, sorted_S, sorted_Vt};
     }
@@ -1629,7 +1668,7 @@ auto VulkanBackend::dispatchGRUCellForward(const Tensor& input, const Tensor& hx
 // SearchSorted — native GPU binary search shader
 // ===========================================================================
 
-auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor {
+auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& values, bool right) -> Tensor {
     if (sorted.numel() == 0 || values.numel() == 0) {
         return Tensor(std::vector<int64_t>(values.shape().begin(), values.shape().end()),
                       DType::Int64, values.device());
@@ -1648,9 +1687,10 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
 
         auto* pipe = getPipeline(is_bf16_ss ? "searchsorted_bf16" : "searchsorted_f16", dev_id);
 
-        struct { uint32_t array_size; uint32_t num_queries; } pc;
+        struct { uint32_t array_size; uint32_t num_queries; uint32_t right; } pc;
         pc.array_size = static_cast<uint32_t>(sorted.numel());
         pc.num_queries = static_cast<uint32_t>(values.numel());
+        pc.right = right ? 1u : 0u;
 
         // F16 packed buffer sizes: round up to 4-byte boundaries
         size_t sorted_bsz = (static_cast<size_t>(sorted_cont.numel()) + 1) / 2 * 4;
@@ -1690,9 +1730,11 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
     struct {
         uint32_t array_size;
         uint32_t num_queries;
+        uint32_t right;
     } pc;
     pc.array_size = static_cast<uint32_t>(sorted.numel());
     pc.num_queries = static_cast<uint32_t>(values.numel());
+    pc.right = right ? 1u : 0u;
 
     size_t sorted_bytes = sorted_contig.numel() * sorted_contig.dtype_size();
     size_t values_bytes = values_contig.numel() * values_contig.dtype_size();
@@ -1813,6 +1855,25 @@ auto VulkanBackend::dispatchQuantizedConv2d(
     int64_t w_in = input_shape[3];
     int64_t out_channels = weight_shape[0];
     int64_t kernel_size = weight_shape[2];
+
+    // Validate convolution geometry before deriving output dims. Without this a
+    // kernel larger than the padded input gives a negative numerator and the
+    // integer division yields a non-positive h_out/w_out, which would reach the
+    // Tensor constructor below as a negative dimension (and an invalid dispatch).
+    if (stride <= 0) {
+        throw std::runtime_error("QuantizedConv2d: stride must be positive, got " +
+                                 std::to_string(stride));
+    }
+    if (padding < 0) {
+        throw std::runtime_error("QuantizedConv2d: padding must be non-negative, got " +
+                                 std::to_string(padding));
+    }
+    if (kernel_size > h_in + 2 * padding || kernel_size > w_in + 2 * padding) {
+        throw std::runtime_error(
+            "QuantizedConv2d: kernel_size (" + std::to_string(kernel_size) +
+            ") exceeds padded input (" + std::to_string(h_in + 2 * padding) + "x" +
+            std::to_string(w_in + 2 * padding) + ")");
+    }
 
     int64_t h_out = (h_in + 2 * padding - kernel_size) / stride + 1;
     int64_t w_out = (w_in + 2 * padding - kernel_size) / stride + 1;
@@ -2216,6 +2277,17 @@ auto VulkanBackend::dispatchFlashAttention(
 // Sparse tensor dispatch functions (CSR format via Vulkan compute shaders)
 // ---------------------------------------------------------------------------
 
+void VulkanBackend::checkSparseRowDispatch(int32_t device_id, const char* op_name, int64_t M) const {
+    uint32_t limit = devices_[device_id].maxComputeWorkGroupCount[0];
+    if (M < 0 || static_cast<uint64_t>(M) > static_cast<uint64_t>(limit)) {
+        throw std::runtime_error(
+            std::string("Vulkan ") + op_name + ": row count M=" + std::to_string(M) +
+            " exceeds device maxComputeWorkGroupCount[0]=" + std::to_string(limit) +
+            " (one workgroup is dispatched per row). This matrix is too large for the "
+            "current Vulkan sparse kernels on this device.");
+    }
+}
+
 auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor& col_indices,
                                         const Tensor& values, const Tensor& dense,
                                         int64_t M, int64_t K, int64_t N) -> Tensor {
@@ -2243,19 +2315,36 @@ auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor&
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
+    // The shader indexes the dense operand as flat row-major
+    // (B[col_indices[i]*n_cols + col]); a non-default-strided view (e.g. a
+    // transpose) with offset 0 passes the descriptor-write guard but would be
+    // read with the wrong layout. Materialize a contiguous copy, mirroring
+    // dispatchLinalgSolveTriangular.
+    Tensor dense_c = (dense.is_contiguous() && dense.offset() == 0) ? dense : dispatchContiguous(dense);
+
+    // The shader reads the CSR values buffer flat; a sliced/non-contiguous
+    // values view would be read with the wrong layout. Normalize for
+    // consistency with the dense/index operands.
+    Tensor values_c = (values.is_contiguous() && values.offset() == 0) ? values : dispatchContiguous(values);
+
+    // One workgroup per row: M can exceed the device X-dimension workgroup-count
+    // limit for large sparse matrices, which is an invalid dispatch (validation
+    // error / device-lost / silently truncated rows). Fail loudly instead.
+    checkSparseRowDispatch(device_id, "SpMM", M);
+
     // Output: C of shape [M, N]
     Tensor output = dispatchZeros({M, N}, values.dtype(), values.device());
 
     size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
-    size_t values_size = values.numel() * elem_size;
-    size_t dense_size = dense.numel() * elem_size;
+    size_t values_size = values_c.numel() * elem_size;
+    size_t dense_size = dense_c.numel() * elem_size;
     size_t output_size = output.numel() * elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
-        {3, dense.data_ptr()}, {4, output.data_ptr()},
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values_c.data_ptr()},
+        {3, dense_c.data_ptr()}, {4, output.data_ptr()},
     };
     std::vector<size_t> sizes = {crow_size, col_size, values_size, dense_size, output_size};
 
@@ -2305,19 +2394,30 @@ auto VulkanBackend::dispatchSparseSpMV(const Tensor& crow_indices, const Tensor&
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
+    // The shader indexes vec as flat (vec[col_indices[i]]); materialize a
+    // contiguous copy so a strided/offset view is read with the right layout
+    // (mirrors dispatchLinalgSolveTriangular and dispatchSparseSpMM).
+    Tensor vec_c = (vec.is_contiguous() && vec.offset() == 0) ? vec : dispatchContiguous(vec);
+
+    // Normalize the CSR values buffer too (read flat by the shader).
+    Tensor values_c = (values.is_contiguous() && values.offset() == 0) ? values : dispatchContiguous(values);
+
+    // One workgroup per row: guard M against the device limit (see SpMM).
+    checkSparseRowDispatch(device_id, "SpMV", M);
+
     // Output: y of shape [M]
     Tensor output = dispatchZeros({M}, values.dtype(), values.device());
 
     size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
-    size_t values_size = values.numel() * elem_size;
-    size_t vec_size = vec.numel() * elem_size;
+    size_t values_size = values_c.numel() * elem_size;
+    size_t vec_size = vec_c.numel() * elem_size;
     size_t output_size = output.numel() * elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
-        {3, vec.data_ptr()}, {4, output.data_ptr()},
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values_c.data_ptr()},
+        {3, vec_c.data_ptr()}, {4, output.data_ptr()},
     };
     std::vector<size_t> sizes = {crow_size, col_size, values_size, vec_size, output_size};
 
@@ -2355,6 +2455,9 @@ auto VulkanBackend::dispatchSparseToDense(const Tensor& crow_indices, const Tens
 
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // One workgroup per row: guard M against the device limit (see SpMM).
+    checkSparseRowDispatch(device_id, "SparseToDense", M);
 
     // Output: dense matrix of shape [M, K], zero-initialized
     Tensor output = dispatchZeros({M, K}, dtype, values.device());
@@ -2405,6 +2508,9 @@ auto VulkanBackend::dispatchSparseAdd(const Tensor& crow_indices, const Tensor& 
 
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // One workgroup per row: guard M against the device limit (see SpMM).
+    checkSparseRowDispatch(device_id, "SparseAdd", M);
 
     // Output must be pre-filled with dense values; clone dense into output
     Tensor output = dispatchClone(dense);
@@ -2458,6 +2564,9 @@ auto VulkanBackend::dispatchDenseToSparse(const Tensor& dense) -> std::vector<Te
     bool is_f64 = (dtype == DType::Float64);
     std::string shader_name = is_f64 ? "dense_to_sparse_f64" : "dense_to_sparse";
     auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Passes 1 and 3 dispatch one workgroup per row: guard M (see SpMM).
+    checkSparseRowDispatch(device_id, "DenseToSparse", M);
 
     // Pass 1: count nonzeros per row using the GPU shader
     Tensor row_counts = dispatchZeros({M}, DType::Int32, dense.device());
@@ -2831,11 +2940,20 @@ auto VulkanBackend::dispatchSparseSpGEMM(const Tensor& a_crow, const Tensor& a_c
     bool is_f64 = (a_vals.dtype() == DType::Float64);
     DType dtype = a_vals.dtype();
 
+    // The count (pass 1) and fill (pass 3) passes dispatch one workgroup per row
+    // of A: guard M against the device limit (see SpMM).
+    checkSparseRowDispatch(device_id, "SpGEMM", M);
+
     // Convert Int64 indices to Int32 for shader compatibility
     auto a_crow_i32 = (a_crow.dtype() == DType::Int32) ? a_crow : a_crow.to(DType::Int32);
     auto a_col_i32 = (a_col.dtype() == DType::Int32) ? a_col : a_col.to(DType::Int32);
     auto b_crow_i32 = (b_crow.dtype() == DType::Int32) ? b_crow : b_crow.to(DType::Int32);
     auto b_col_i32 = (b_col.dtype() == DType::Int32) ? b_col : b_col.to(DType::Int32);
+
+    // The fill shader reads the CSR values buffers flat; normalize any
+    // sliced/non-contiguous values view so it is read with the right layout.
+    Tensor a_vals_c = (a_vals.is_contiguous() && a_vals.offset() == 0) ? a_vals : dispatchContiguous(a_vals);
+    Tensor b_vals_c = (b_vals.is_contiguous() && b_vals.offset() == 0) ? b_vals : dispatchContiguous(b_vals);
 
     // --- Pass 1: Count nnz per row ---
     auto* count_pipeline = getPipeline("sparse_spgemm_count", device_id);
@@ -2923,17 +3041,17 @@ auto VulkanBackend::dispatchSparseSpGEMM(const Tensor& a_crow, const Tensor& a_c
         size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
         size_t a_crow_size = a_crow_i32.numel() * sizeof(int32_t);
         size_t a_col_size = a_col_i32.numel() * sizeof(int32_t);
-        size_t a_vals_size = a_vals.numel() * elem_size;
+        size_t a_vals_size = a_vals_c.numel() * elem_size;
         size_t b_crow_size = b_crow_i32.numel() * sizeof(int32_t);
         size_t b_col_size = b_col_i32.numel() * sizeof(int32_t);
-        size_t b_vals_size = b_vals.numel() * elem_size;
+        size_t b_vals_size = b_vals_c.numel() * elem_size;
         size_t c_crow_size = c_crow.numel() * sizeof(int32_t);
         size_t c_col_size = c_col_gpu.numel() * sizeof(int32_t);
         size_t c_vals_size = c_vals_gpu.numel() * elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, a_crow_i32.data_ptr()}, {1, a_col_i32.data_ptr()}, {2, a_vals.data_ptr()},
-            {3, b_crow_i32.data_ptr()}, {4, b_col_i32.data_ptr()}, {5, b_vals.data_ptr()},
+            {0, a_crow_i32.data_ptr()}, {1, a_col_i32.data_ptr()}, {2, a_vals_c.data_ptr()},
+            {3, b_crow_i32.data_ptr()}, {4, b_col_i32.data_ptr()}, {5, b_vals_c.data_ptr()},
             {6, c_crow.data_ptr()}, {7, c_col_gpu.data_ptr()}, {8, c_vals_gpu.data_ptr()},
         };
         std::vector<size_t> sizes = {
@@ -2984,6 +3102,12 @@ auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor&
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
+    // The shader reads the CSR values and the RHS b flat (b[row]); a
+    // sliced/non-contiguous/offset view would be read with the wrong layout.
+    // Materialize contiguous copies, mirroring SpMV.
+    Tensor values_c = (values.is_contiguous() && values.offset() == 0) ? values : dispatchContiguous(values);
+    Tensor b_c = (b.is_contiguous() && b.offset() == 0) ? b : dispatchContiguous(b);
+
     // Output: x of shape [N]
     Tensor output = dispatchZeros({N}, values.dtype(), values.device());
 
@@ -2993,14 +3117,14 @@ auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor&
     size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
-    size_t values_size = values.numel() * elem_size;
-    size_t b_size = b.numel() * elem_size;
+    size_t values_size = values_c.numel() * elem_size;
+    size_t b_size = b_c.numel() * elem_size;
     size_t output_size = output.numel() * elem_size;
     size_t solved_size = solved.numel() * sizeof(int32_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
-        {3, b.data_ptr()}, {4, output.data_ptr()}, {5, solved.data_ptr()},
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values_c.data_ptr()},
+        {3, b_c.data_ptr()}, {4, output.data_ptr()}, {5, solved.data_ptr()},
     };
     std::vector<size_t> sizes = {crow_size, col_size, values_size, b_size, output_size, solved_size};
 
@@ -3046,6 +3170,12 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
+    // The shader reads the CSR values and the RHS B flat (row-major); a
+    // sliced/non-contiguous/offset view would be read with the wrong layout.
+    // Materialize contiguous copies, mirroring SpMV / SparseTrsv.
+    Tensor values_c = (values.is_contiguous() && values.offset() == 0) ? values : dispatchContiguous(values);
+    Tensor B_c = (B.is_contiguous() && B.offset() == 0) ? B : dispatchContiguous(B);
+
     // Output: X of shape [N, K_rhs]
     Tensor output = dispatchZeros({N, K_rhs}, values.dtype(), values.device());
 
@@ -3055,14 +3185,14 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
     size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
-    size_t values_size = values.numel() * elem_size;
-    size_t B_size = B.numel() * elem_size;
+    size_t values_size = values_c.numel() * elem_size;
+    size_t B_size = B_c.numel() * elem_size;
     size_t output_size = output.numel() * elem_size;
     size_t solved_size = solved.numel() * sizeof(int32_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
-        {3, B.data_ptr()}, {4, output.data_ptr()}, {5, solved.data_ptr()},
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values_c.data_ptr()},
+        {3, B_c.data_ptr()}, {4, output.data_ptr()}, {5, solved.data_ptr()},
     };
     std::vector<size_t> sizes = {crow_size, col_size, values_size, B_size, output_size, solved_size};
 

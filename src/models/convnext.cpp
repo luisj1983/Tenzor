@@ -6,6 +6,7 @@
 #include "../../include/tenzor/models/convnext.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/models/hub.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -26,11 +27,14 @@ LayerScale::LayerScale(int64_t dim, double init_value) {
 }
 
 auto LayerScale::forward_impl(const Variable& input) -> Variable {
-    // Multiply input by learnable scale factor
-    // Convert gamma to match input dtype for multi-dtype support
-    auto gamma_tensor_matched = gamma_.tensor().to(input.dtype());
-    auto gamma_matched = Variable(gamma_tensor_matched, gamma_.requires_grad());
-    return input * gamma_matched;
+    // Multiply input by the registered learnable scale. Cast/move gamma via
+    // autograd-aware helpers so the gradient flows back to the registered leaf
+    // parameter; rewrapping gamma_.tensor() into a fresh Variable would sever
+    // the grad chain and gamma_ would never train.
+    Variable g = gamma_;
+    if (g.device() != input.device()) g = tenzor::to_device(g, input.device());
+    if (g.dtype() != input.dtype()) g = nn::variable_cast(g, input.dtype());
+    return input * g;
 }
 
 // ============================================================================

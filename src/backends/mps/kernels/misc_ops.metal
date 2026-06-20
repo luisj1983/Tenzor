@@ -983,12 +983,21 @@ kernel void fused_softmax_cross_entropy_kernel(
     }
     float inv_sum = 1.0f / sum;
     int target = targets[row];
+    // Guard against out-of-range labels: an invalid target would otherwise
+    // index logits/grad out of bounds (unchecked device-memory read). Treat any
+    // label outside [0, num_classes) as "no target": emit the plain softmax
+    // gradient (no one-hot subtraction) and a zero loss contribution for the row.
+    bool valid_target = (target >= 0) && (target < int(num_classes));
     for (uint j = 0; j < num_classes; ++j) {
         float p = grad[base + j] * inv_sum;
-        grad[base + j] = p - (int(j) == target ? 1.0f : 0.0f);
+        grad[base + j] = p - ((valid_target && int(j) == target) ? 1.0f : 0.0f);
     }
-    float log_prob = logits[base + target] - max_val - log(sum);
-    loss[row] = -log_prob;
+    if (valid_target) {
+        float log_prob = logits[base + target] - max_val - log(sum);
+        loss[row] = -log_prob;
+    } else {
+        loss[row] = 0.0f;
+    }
 }
 
 // ============================================================================

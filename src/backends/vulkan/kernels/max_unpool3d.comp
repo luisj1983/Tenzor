@@ -20,5 +20,8 @@ void main() {
     uint channel_idx = idx / params.in_spatial;
     uint base_out = channel_idx * params.out_spatial;
     int unpool_idx = indices_data[idx];
-    output_data[base_out + uint(unpool_idx)] = input_data[idx];
+    // Guard against an out-of-range index (prevents an out-of-bounds device write).
+    if (unpool_idx >= 0 && uint(unpool_idx) < params.out_spatial) {
+        output_data[base_out + uint(unpool_idx)] = input_data[idx];
+    }
 }

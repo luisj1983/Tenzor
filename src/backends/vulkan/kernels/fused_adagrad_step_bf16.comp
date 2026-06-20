@@ -21,16 +21,17 @@ float readBF16(uint packed, uint offset) {
     return uintBitsToFloat(bits << 16);
 }
 
-float adagradStep(uint idx) {
-    float g = readBF16(idx, 0);
-    float p = readBF16(idx, 1);
-
+// Perform the Adagrad update for a single element.
+//   elem : element index (used to index the Float32 sum_sq[] buffer)
+//   g    : gradient value (already unpacked from the packed BF16 grad buffer)
+//   p    : parameter value (already unpacked from the packed BF16 param buffer)
+float adagradStep(uint elem, float g, float p) {
     if (params.weight_decay > 0.0) {
         g += params.weight_decay * p;
     }
 
-    sum_sq[idx] += g * g;
-    p -= params.lr * g / (sqrt(sum_sq[idx]) + params.eps);
+    sum_sq[elem] += g * g;
+    p -= params.lr * g / (sqrt(sum_sq[elem]) + params.eps);
     return p;
 }
 
@@ -42,13 +43,22 @@ void main() {
     uint elem0 = word_idx * 2;
     uint elem1 = word_idx * 2 + 1;
 
+    // Each packed word holds two consecutive BF16 elements:
+    // offset 0 -> elem0, offset 1 -> elem1.
+    uint gword = grad_data[word_idx];
+    uint pword = param_data[word_idx];
+
     float p0 = 0.0, p1 = 0.0;
 
     if (elem0 < params.numel) {
-        p0 = adagradStep(elem0);
+        float g0 = readBF16(gword, 0);
+        float pv0 = readBF16(pword, 0);
+        p0 = adagradStep(elem0, g0, pv0);
     }
     if (elem1 < params.numel) {
-        p1 = adagradStep(elem1);
+        float g1 = readBF16(gword, 1);
+        float pv1 = readBF16(pword, 1);
+        p1 = adagradStep(elem1, g1, pv1);
     }
 
     uint bits0 = ((floatBitsToUint(p0) + 0x7FFFu + ((floatBitsToUint(p0) >> 16) & 1u)) >> 16);

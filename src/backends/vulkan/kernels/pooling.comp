@@ -25,10 +25,14 @@ layout(push_constant) uniform PushConstants {
 void main() {
     uint out_x = gl_GlobalInvocationID.x;
     uint out_y = gl_GlobalInvocationID.y;
-    uint c = gl_GlobalInvocationID.z;
+    // z encodes the flattened (batch, channel) index: bc = n * channels + c.
+    // Decode it so pooling is correct for batch > 1.
+    uint bc = gl_GlobalInvocationID.z;
+    uint c = bc % params.channels;
+    uint n = bc / params.channels;
 
     if (out_x >= params.out_width || out_y >= params.out_height ||
-        c >= params.channels) {
+        n >= params.batch) {
         return;
     }
 
@@ -50,7 +54,8 @@ void main() {
 
             if (in_y >= 0 && in_y < int(params.in_height) &&
                 in_x >= 0 && in_x < int(params.in_width)) {
-                uint input_idx = c * params.in_height * params.in_width +
+                uint input_idx = (n * params.channels + c) *
+                                    params.in_height * params.in_width +
                                 uint(in_y) * params.in_width + uint(in_x);
                 float value = input_data[input_idx];
 
@@ -71,7 +76,8 @@ void main() {
     }
 
     // Write output
-    uint output_idx = c * params.out_height * params.out_width +
+    uint output_idx = (n * params.channels + c) *
+                        params.out_height * params.out_width +
                      out_y * params.out_width + out_x;
     output_data[output_idx] = result;
 }

@@ -48,11 +48,16 @@ auto pack_padded_sequence(const Tensor& input, const Tensor& lengths,
         }
     }
 
-    // Create sort indices (descending by length)
+    // Create sort indices (descending by length). Use stable_sort so that
+    // sequences with tied lengths keep their original relative order. This
+    // matters for the enforce_sorted identity check below: a validly
+    // non-increasing input with tied lengths (e.g. [5,3,3,1]) must yield the
+    // identity permutation rather than being spuriously reordered by an
+    // unstable sort, which would otherwise reject a legitimate batch.
     std::vector<int64_t> sorted_idx(batch_size);
     std::iota(sorted_idx.begin(), sorted_idx.end(), 0);
-    std::sort(sorted_idx.begin(), sorted_idx.end(),
-              [&](int64_t a, int64_t b) { return len_vec[a] > len_vec[b]; });
+    std::stable_sort(sorted_idx.begin(), sorted_idx.end(),
+                     [&](int64_t a, int64_t b) { return len_vec[a] > len_vec[b]; });
 
     if (enforce_sorted) {
         // Verify already sorted

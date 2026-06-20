@@ -225,6 +225,14 @@ auto from_dlpack(DLManagedTensor* managed) -> Tensor {
     if (dl.ndim < 0) {
         throw std::runtime_error("from_dlpack: negative ndim");
     }
+    // Harden against malformed/malicious capsules: a producer-supplied
+    // DLManagedTensor with ndim > 0 must provide a non-null shape pointer.
+    // Building a vector from a null iterator range of nonzero length is UB
+    // (OOB read / crash). Conforming producers always populate shape.
+    if (dl.ndim > 0 && dl.shape == nullptr) {
+        throw std::runtime_error(
+            "from_dlpack: null shape pointer with positive ndim");
+    }
     std::vector<int64_t> shape(dl.shape, dl.shape + dl.ndim);
 
     // Multi-lane (packed vector) elements: a lanes>1 element is `lanes` contiguous

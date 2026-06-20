@@ -124,6 +124,17 @@ auto VulkanBackend::dispatchSTFT(const Tensor& input, int64_t n_fft,
     // Frame+window kernel
     Tensor framed({batch_size, num_frames, n_fft}, DType::Float32, input.device());
     int64_t total = batch_size * num_frames * n_fft;
+    // The frame+window shader indexes with int32 (gl_GlobalInvocationID.x -> int
+    // idx, and the i/f/b decomposition is int32). Element counts above INT32_MAX
+    // would silently truncate the int32 push-constant `total` and the dispatch,
+    // so the shader's `gid >= total` guard would agree on the wrong (truncated)
+    // count and under-process. Reject explicitly rather than producing partial
+    // output.
+    if (total > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error(
+            "Vulkan STFT: framed element count (" + std::to_string(total) +
+            ") exceeds INT32_MAX; tensor too large for the int32-indexed shader");
+    }
     if (total > 0) {
         auto* pipeline = getPipeline("stft_frame_window", device_id);
         STFTFrameWindowPC pc{
@@ -152,7 +163,7 @@ auto VulkanBackend::dispatchSTFT(const Tensor& input, int64_t n_fft,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(STFTFrameWindowPC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint32_t>(total),
+        uint32_t workgroups = div_wg(static_cast<uint64_t>(total),
                                       devices_[device_id].workgroupSize);
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
@@ -285,6 +296,22 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
     Tensor output_buf({batch_size, expected_length}, DType::Float32, input.device());
     Tensor wsum_buf({batch_size, expected_length}, DType::Float32, input.device());
 
+    // The overlap-add / normalize shaders index with int32 (gl_GlobalInvocationID.x
+    // -> int idx, p/b decomposition is int32, and the frames buffer is addressed
+    // with int32 arithmetic). Element counts above INT32_MAX would silently
+    // truncate the int32 push-constant `total` and the dispatch, so the shader's
+    // `gid >= total` guard would agree on the wrong (truncated) count and
+    // under-process. Reject explicitly rather than producing partial output.
+    int64_t overlap_total = batch_size * expected_length;
+    int64_t frames_total = time_frames.numel();
+    if (overlap_total > std::numeric_limits<int32_t>::max() ||
+        frames_total > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error(
+            "Vulkan ISTFT: element count (output=" + std::to_string(overlap_total) +
+            ", frames=" + std::to_string(frames_total) +
+            ") exceeds INT32_MAX; tensor too large for the int32-indexed shader");
+    }
+
     // Overlap-add (output-centric, no atomics)
     {
         auto* pipeline = getPipeline("istft_overlap_add", device_id);
@@ -294,7 +321,7 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
             static_cast<int32_t>(n_fft),
             static_cast<int32_t>(hop_length),
             static_cast<int32_t>(expected_length),
-            static_cast<int32_t>(batch_size * expected_length),
+            static_cast<int32_t>(overlap_total),
         };
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, time_frames.data_ptr()},
@@ -315,7 +342,7 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(ISTFTOverlapAddPC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint32_t>(pc.total),
+        uint32_t workgroups = div_wg(static_cast<uint64_t>(overlap_total),
                                       devices_[device_id].workgroupSize);
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
@@ -326,7 +353,7 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
     // Normalize
     {
         auto* pipeline = getPipeline("istft_normalize", device_id);
-        ISTFTNormalizePC pc{static_cast<int32_t>(batch_size * expected_length)};
+        ISTFTNormalizePC pc{static_cast<int32_t>(overlap_total)};
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, output_buf.data_ptr()},
             {1, wsum_buf.data_ptr()},
@@ -342,7 +369,7 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(ISTFTNormalizePC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint32_t>(pc.total),
+        uint32_t workgroups = div_wg(static_cast<uint64_t>(overlap_total),
                                       devices_[device_id].workgroupSize);
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);

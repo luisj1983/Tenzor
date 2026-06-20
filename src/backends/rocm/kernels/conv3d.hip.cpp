@@ -175,7 +175,9 @@ __global__ void col3im_kernel_nchw(
         int64_t c  = tmp % channels; tmp /= channels;
         int64_t b  = tmp;
 
-        T sum = T(0);
+        // Float accumulator for half precision; native otherwise (double stays double).
+        using Acc = std::conditional_t<std::is_same_v<T, __half>, float, T>;
+        Acc sum = Acc(0);
 
         for (int64_t kd = 0; kd < kD; ++kd) {
             for (int64_t kh = 0; kh < kH; ++kh) {
@@ -192,14 +194,23 @@ __global__ void col3im_kernel_nchw(
                         if (od >= 0 && od < out_d && oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
                             int64_t col_row = b * out_d * out_h * out_w + od * out_h * out_w + oh * out_w + ow;
                             int64_t col_col = c * kD * kH * kW + kd * kH * kW + kh * kW + kw_iter;
-                            sum += col[col_row * col_cols + col_col];
+                            T cv = col[col_row * col_cols + col_col];
+                            if constexpr (std::is_same_v<T, __half>) {
+                                sum += tenzor::rocm::safe_h2f(cv);
+                            } else {
+                                sum += cv;
+                            }
                         }
                     }
                 }
             }
         }
 
-        output[output_idx] = sum;
+        if constexpr (std::is_same_v<T, __half>) {
+            output[output_idx] = tenzor::rocm::safe_f2h(sum);
+        } else {
+            output[output_idx] = static_cast<T>(sum);
+        }
     }
 }
 
@@ -1096,7 +1107,14 @@ __global__ void conv_transpose3d_forward_kernel(
         int64_t g = oc / out_cpg;          // group of this output channel
         int64_t oc_in_g = oc % out_cpg;    // its index within the group
 
-        T sum = bias ? bias[oc] : T(0);
+        // Float accumulator for half precision; native otherwise (double stays double).
+        using Acc = std::conditional_t<std::is_same_v<T, __half>, float, T>;
+        Acc sum;
+        if constexpr (std::is_same_v<T, __half>) {
+            sum = bias ? tenzor::rocm::safe_h2f(bias[oc]) : Acc(0);
+        } else {
+            sum = bias ? bias[oc] : Acc(0);
+        }
 
         for (int64_t ic_local = 0; ic_local < in_cpg; ++ic_local) {
             int64_t ic = g * in_cpg + ic_local;
@@ -1121,14 +1139,23 @@ __global__ void conv_transpose3d_forward_kernel(
                             // Weight: [in_channels, out_channels/groups, kD, kH, kW]
                             int64_t weight_idx = ic * (out_cpg * kD * kH * kW) +
                                                 oc_in_g * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw;
-                            sum += input[input_idx] * weight[weight_idx];
+                            if constexpr (std::is_same_v<T, __half>) {
+                                sum += tenzor::rocm::safe_h2f(input[input_idx]) *
+                                       tenzor::rocm::safe_h2f(weight[weight_idx]);
+                            } else {
+                                sum += input[input_idx] * weight[weight_idx];
+                            }
                         }
                     }
                 }
             }
         }
 
-        output[idx] = sum;
+        if constexpr (std::is_same_v<T, __half>) {
+            output[idx] = tenzor::rocm::safe_f2h(sum);
+        } else {
+            output[idx] = static_cast<T>(sum);
+        }
     }
 }
 

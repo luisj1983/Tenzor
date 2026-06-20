@@ -45,12 +45,28 @@ float readF16HPrev(uint idx) {
     return (idx & 1u) == 0u ? pair.x : pair.y;
 }
 
+// Atomically replace one packed F16 half-word in h_out. Consecutive threads
+// (idx, idx+1) target the same uint32 word (word_idx = idx>>1), so a plain
+// read-modify-write would race and lose one half-word update. Mask only the
+// target half and retry via atomicCompSwap (same pattern as the *_f16.comp
+// backward shaders).
 void writeF16HOut(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = h_out[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    h_out[word_idx] = packHalf2x16(pair);
+    uint half_idx = idx & 1u;
+    uint mask = 0xFFFFu << (half_idx * 16u);
+    uint new_bits = packHalf2x16(vec2(val, 0.0)).x & 0xFFFFu;
+
+    uint old_val = h_out[word_idx];
+    uint expected, new_val;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (new_bits << (half_idx * 16u));
+        old_val = atomicCompSwap(h_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word.
 }
 
 // exp()-based activations avoid the NVIDIA GLSL tanh intrinsic (MUFU.TANH),

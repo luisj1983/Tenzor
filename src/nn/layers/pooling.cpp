@@ -236,216 +236,31 @@ public:
         auto grad_shape = grad_output.shape();
         int64_t N = grad_shape[0];
         int64_t C = grad_shape[1];
-        int64_t H_out = grad_shape[2];
-        int64_t W_out = grad_shape[3];
 
-        // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
-        if (grad_output.device().type != Device::Type::CPU) {
-            // cuDNN path needs [grad_output, input]; non-cuDNN needs InputShape attr
-            // Save input in saved_tensors_[0] for this purpose
-            std::vector<Tensor> inputs = {grad_output, saved_tensors_[0]};
-            OpAttributes bwd_attrs;
-            bwd_attrs.set(AttrKey::InputShape, std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in_) + "," + std::to_string(W_in_));
-            bwd_attrs.set(AttrKey::KernelSize, kernel_h_);
-            bwd_attrs.set(AttrKey::KernelSizeH, kernel_h_);
-            bwd_attrs.set(AttrKey::KernelSizeW, kernel_w_);
-            bwd_attrs.set(AttrKey::Stride, stride_h_);
-            bwd_attrs.set(AttrKey::StrideH, stride_h_);
-            bwd_attrs.set(AttrKey::StrideW, stride_w_);
-            bwd_attrs.set(AttrKey::Padding, padding_h_);
-            bwd_attrs.set(AttrKey::PaddingH, padding_h_);
-            bwd_attrs.set(AttrKey::PaddingW, padding_w_);
-            bwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
-            auto result = dispatch_to_device(OpId::AvgPool2dBackward, grad_output.device().type,
-                inputs, bwd_attrs);
-            return {result[0]};
-        }
-
-        // CPU path - Initialize gradient w.r.t input with zeros on same device
-        auto grad_input = zeros({N, C, H_in_, W_in_}, grad_output.dtype(), grad_output.device());
-
-        auto dtype = grad_output.dtype();
-        if (dtype == DType::Float32) {
-            float* grad_input_data = grad_input.data<float>();
-            const float* grad_output_data = grad_output.data<float>();
-
-            // Distribute gradients evenly across pooling windows
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_h_ - padding_h_;
-                            int64_t w_start = w_out * stride_w_ - padding_w_;
-                            int64_t h_end = h_start + kernel_h_;
-                            int64_t w_end = w_start + kernel_w_;
-
-                            int64_t valid_count = 0;
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        valid_count++;
-                                    }
-                                }
-                            }
-                            int64_t divisor = count_include_pad_
-                                ? (kernel_h_ * kernel_w_)
-                                : valid_count;
-                            if (divisor <= 0) continue;
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            float grad_val = grad_output_data[out_idx] / static_cast<float>(divisor);
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
-                                        grad_input_data[input_idx] += grad_val;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            double* grad_input_data = grad_input.data<double>();
-            const double* grad_output_data = grad_output.data<double>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_h_ - padding_h_;
-                            int64_t w_start = w_out * stride_w_ - padding_w_;
-                            int64_t h_end = h_start + kernel_h_;
-                            int64_t w_end = w_start + kernel_w_;
-
-                            int64_t valid_count = 0;
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        valid_count++;
-                                    }
-                                }
-                            }
-                            int64_t divisor = count_include_pad_
-                                ? (kernel_h_ * kernel_w_)
-                                : valid_count;
-                            if (divisor <= 0) continue;
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            double grad_val = grad_output_data[out_idx] / static_cast<double>(divisor);
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
-                                        grad_input_data[input_idx] += grad_val;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float16) {
-            Float16* grad_input_data = grad_input.data<Float16>();
-            const Float16* grad_output_data = grad_output.data<Float16>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_h_ - padding_h_;
-                            int64_t w_start = w_out * stride_w_ - padding_w_;
-                            int64_t h_end = h_start + kernel_h_;
-                            int64_t w_end = w_start + kernel_w_;
-
-                            int64_t valid_count = 0;
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        valid_count++;
-                                    }
-                                }
-                            }
-                            int64_t divisor = count_include_pad_
-                                ? (kernel_h_ * kernel_w_)
-                                : valid_count;
-                            if (divisor <= 0) continue;
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            float grad_val = static_cast<float>(grad_output_data[out_idx]) / static_cast<float>(divisor);
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
-                                        grad_input_data[input_idx] = Float16(static_cast<float>(grad_input_data[input_idx]) + grad_val);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::BFloat16) {
-            // BFloat16 widen/compute(F32)/narrow: the forward CPU kernel handles
-            // BFloat16, but without this branch the backward fell through and
-            // returned the all-zero `grad_input`, silently killing training.
-            // Accumulate in Float32 against an F32 grad_output view, then cast
-            // the result back to BFloat16.
-            Tensor grad_out_f32 = grad_output.to(DType::Float32);
-            Tensor grad_in_f32 = zeros({N, C, H_in_, W_in_}, DType::Float32,
-                                       grad_output.device());
-            float* grad_input_data = grad_in_f32.data<float>();
-            const float* grad_output_data = grad_out_f32.data<float>();
-
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_start = h_out * stride_h_ - padding_h_;
-                            int64_t w_start = w_out * stride_w_ - padding_w_;
-                            int64_t h_end = h_start + kernel_h_;
-                            int64_t w_end = w_start + kernel_w_;
-
-                            int64_t valid_count = 0;
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        valid_count++;
-                                    }
-                                }
-                            }
-                            int64_t divisor = count_include_pad_
-                                ? (kernel_h_ * kernel_w_)
-                                : valid_count;
-                            if (divisor <= 0) continue;
-
-                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            float grad_val = grad_output_data[out_idx] / static_cast<float>(divisor);
-
-                            for (int64_t h = h_start; h < h_end; ++h) {
-                                for (int64_t w = w_start; w < w_end; ++w) {
-                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
-                                        grad_input_data[input_idx] += grad_val;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            grad_input = grad_in_f32.to(DType::BFloat16);
-        } else {
-            throw std::runtime_error(
-                "AvgPool2dBackward (CPU): unsupported gradient dtype");
-        }
-
-        return {grad_input};
+        // Dispatch to the registered AvgPool2dBackward kernel for every device
+        // (CPU, CUDA, Vulkan, ...). The CPU kernel
+        // (src/backends/cpu/kernels/pooling.cpp:avgpool2d_backward_kernel) already
+        // handles all supported dtypes (Float32/Float64/Float16/BFloat16) and
+        // enforces contiguity on grad_output, so an inline CPU path is redundant
+        // and only invited drift (and a non-contiguous grad_output gradient bug).
+        // cuDNN path needs [grad_output, input]; non-cuDNN needs InputShape attr.
+        // Save input in saved_tensors_[0] for this purpose.
+        std::vector<Tensor> inputs = {grad_output, saved_tensors_[0]};
+        OpAttributes bwd_attrs;
+        bwd_attrs.set(AttrKey::InputShape, std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in_) + "," + std::to_string(W_in_));
+        bwd_attrs.set(AttrKey::KernelSize, kernel_h_);
+        bwd_attrs.set(AttrKey::KernelSizeH, kernel_h_);
+        bwd_attrs.set(AttrKey::KernelSizeW, kernel_w_);
+        bwd_attrs.set(AttrKey::Stride, stride_h_);
+        bwd_attrs.set(AttrKey::StrideH, stride_h_);
+        bwd_attrs.set(AttrKey::StrideW, stride_w_);
+        bwd_attrs.set(AttrKey::Padding, padding_h_);
+        bwd_attrs.set(AttrKey::PaddingH, padding_h_);
+        bwd_attrs.set(AttrKey::PaddingW, padding_w_);
+        bwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
+        auto result = dispatch_to_device(OpId::AvgPool2dBackward, grad_output.device().type,
+            inputs, bwd_attrs);
+        return {result[0]};
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
@@ -1631,9 +1446,8 @@ LPPool2d::LPPool2d(int64_t norm_type,
                    std::pair<int64_t, int64_t> kernel_size,
                    std::pair<int64_t, int64_t> stride)
     : norm_type_(norm_type), kernel_size_(kernel_size),
-      stride_(stride.first == -1
-              ? kernel_size
-              : stride) {
+      stride_{stride.first  == -1 ? kernel_size.first  : stride.first,
+              stride.second == -1 ? kernel_size.second : stride.second} {
     if (norm_type < 1) throw std::runtime_error("LPPool2d: norm_type must be >= 1");
     if (kernel_size.first <= 0 || kernel_size.second <= 0)
         throw std::runtime_error("LPPool2d: kernel_size must be positive");

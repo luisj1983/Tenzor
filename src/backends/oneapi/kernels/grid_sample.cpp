@@ -95,7 +95,7 @@ template <typename T> struct GSNearestBwdK {};
 template <typename T> struct GSBilinearBwdK {};
 template <typename T> struct GSBicubicBwdK {};
 struct AffineGridKernel {};
-struct AffineGridBackwardKernel {};
+template <typename T> struct AffineGridBackwardKernel {};
 
 template <typename T>
 sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
@@ -507,6 +507,46 @@ auto grid_sample_backward_kernel(const Tensor& grad_output,
     return {gi_f32.to(in_dt), gg_f32.to(gr_dt)};
 }
 
+// affine_grid backward for a single scalar type. grad_theta is accumulated
+// natively in T (double atomics for Float64), matching CUDA/CPU references so
+// the Float64 gradcheck path keeps full precision.
+template <typename T>
+void run_affine_grid_backward(sycl::queue& queue, const T* gg_ptr, T* gt_ptr,
+                              int N, int H, int W, bool align_corners) {
+    int total = N * H * W;
+    if (total == 0) return;
+
+    queue.parallel_for<AffineGridBackwardKernel<T>>(sycl::range<1>(total),
+        [=](sycl::id<1> idx_) {
+            int idx = static_cast<int>(idx_);
+            int w = idx % W;
+            int h = (idx / W) % H;
+            int n = idx / (H * W);
+
+            T x_norm, y_norm;
+            if (align_corners) {
+                x_norm = (W > 1) ? (T(2) * static_cast<T>(w) / static_cast<T>(W - 1) - T(1)) : T(0);
+                y_norm = (H > 1) ? (T(2) * static_cast<T>(h) / static_cast<T>(H - 1) - T(1)) : T(0);
+            } else {
+                x_norm = (T(2) * static_cast<T>(w) + T(1)) / static_cast<T>(W) - T(1);
+                y_norm = (T(2) * static_cast<T>(h) + T(1)) / static_cast<T>(H) - T(1);
+            }
+            int gg_idx = ((n * H + h) * W + w) * 2;
+            T dg_x = gg_ptr[gg_idx];
+            T dg_y = gg_ptr[gg_idx + 1];
+
+            T* t = gt_ptr + n * 6;
+            auto add = [&](int i, T v) { make_atomic<T>(t[i]).fetch_add(v); };
+            add(0, dg_x * x_norm);
+            add(1, dg_x * y_norm);
+            add(2, dg_x);
+            add(3, dg_y * x_norm);
+            add(4, dg_y * y_norm);
+            add(5, dg_y);
+        });
+    queue.wait_and_throw();
+}
+
 auto affine_grid_backward_kernel(const Tensor& grad_grid,
                                  const std::vector<int64_t>& size,
                                  bool align_corners, sycl::queue& queue) -> Tensor
@@ -516,47 +556,24 @@ auto affine_grid_backward_kernel(const Tensor& grad_grid,
     int W = static_cast<int>(size[3]);
 
     DType gr_dt = grad_grid.dtype();
-    Tensor gg_f32 = grad_grid.to(DType::Float32);
-    Tensor gt_f32(std::vector<int64_t>{N, 2, 3}, DType::Float32, grad_grid.device());
+    // Native FP64 compute when grad_grid is Float64 (matches CUDA/CPU), so the
+    // double-precision gradcheck path is preserved; otherwise compute in float.
+    DType compute = (gr_dt == DType::Float64) ? DType::Float64 : DType::Float32;
 
-    queue.memset(gt_f32.data_ptr(), 0, gt_f32.numel() * sizeof(float)).wait();
+    Tensor gg_c = grad_grid.to(compute).contiguous();
+    Tensor gt_c(std::vector<int64_t>{N, 2, 3}, compute, grad_grid.device());
+    queue.memset(gt_c.data_ptr(), 0, gt_c.numel() * dtype_size(compute)).wait();
 
-    int total = N * H * W;
-    if (total == 0) return gt_f32.to(gr_dt);
-
-    const float* gg_ptr = get_data_ptr<const float>(gg_f32);
-    float* gt_ptr       = get_data_ptr<float>(gt_f32);
-
-    queue.parallel_for<AffineGridBackwardKernel>(sycl::range<1>(total),
-        [=](sycl::id<1> idx_) {
-            int idx = static_cast<int>(idx_);
-            int w = idx % W;
-            int h = (idx / W) % H;
-            int n = idx / (H * W);
-
-            float x_norm, y_norm;
-            if (align_corners) {
-                x_norm = (W > 1) ? (2.0f * static_cast<float>(w) / static_cast<float>(W - 1) - 1.0f) : 0.0f;
-                y_norm = (H > 1) ? (2.0f * static_cast<float>(h) / static_cast<float>(H - 1) - 1.0f) : 0.0f;
-            } else {
-                x_norm = (2.0f * static_cast<float>(w) + 1.0f) / static_cast<float>(W) - 1.0f;
-                y_norm = (2.0f * static_cast<float>(h) + 1.0f) / static_cast<float>(H) - 1.0f;
-            }
-            int gg_idx = ((n * H + h) * W + w) * 2;
-            float dg_x = gg_ptr[gg_idx];
-            float dg_y = gg_ptr[gg_idx + 1];
-
-            float* t = gt_ptr + n * 6;
-            auto add = [&](int i, float v) { make_atomic<float>(t[i]).fetch_add(v); };
-            add(0, dg_x * x_norm);
-            add(1, dg_x * y_norm);
-            add(2, dg_x);
-            add(3, dg_y * x_norm);
-            add(4, dg_y * y_norm);
-            add(5, dg_y);
-        });
-    queue.wait_and_throw();
-    return gt_f32.to(gr_dt);
+    if (compute == DType::Float64) {
+        run_affine_grid_backward<double>(queue,
+            get_data_ptr<const double>(gg_c), get_data_ptr<double>(gt_c),
+            N, H, W, align_corners);
+    } else {
+        run_affine_grid_backward<float>(queue,
+            get_data_ptr<const float>(gg_c), get_data_ptr<float>(gt_c),
+            N, H, W, align_corners);
+    }
+    return gt_c.to(gr_dt);
 }
 
 auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,

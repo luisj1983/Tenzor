@@ -180,8 +180,16 @@ public:
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
-        auto range = high_ - low_;
-        return tenzor::log(range) * (-1.0f); // -log(high - low)
+        // Density is 1/(high-low) on the support [low, high) and 0 (log_prob
+        // -inf) outside it, matching torch.distributions.Uniform.
+        auto shape = std::vector<int64_t>(value.shape().begin(), value.shape().end());
+        auto lp = tenzor::neg(tenzor::log(high_ - low_)); // -log(high - low)
+        auto lp_b = lp + zeros(shape, value.dtype(), value.device()); // broadcast to value shape
+        auto neg_inf = full(shape, -std::numeric_limits<float>::infinity(),
+                            value.dtype(), value.device());
+        auto ge_low = value >= low_;
+        auto lt_high = value < high_;
+        return where(ge_low, where(lt_high, lp_b, neg_inf), neg_inf);
     }
 
     auto entropy() -> Tensor override {
@@ -226,10 +234,51 @@ public:
     }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        // PyTorch Categorical semantics: sample(sample_shape) returns a tensor
+        // of shape sample_shape + batch_shape, where batch_shape = probs[:-1].
+        // multinomial draws num_samples = prod(sample_shape) indices per row:
+        //   1D probs (K,)   -> (num_samples,)         ; batch_shape = ()
+        //   2D probs (B, K) -> (B, num_samples)       ; batch_shape = (B,)
+        // We then permute the sample axis to the front and reshape to the
+        // requested sample_shape + batch_shape layout.
         int64_t num_samples = 1;
-        for (auto s : sample_shape) num_samples *= s;
+        for (auto s : sample_shape) {
+            if (s < 0) {
+                throw std::runtime_error("Categorical: sample_shape dims must be non-negative");
+            }
+            num_samples *= s;
+        }
         if (num_samples < 1) num_samples = 1;
-        return multinomial(probs_, num_samples, /*replacement=*/true);
+
+        auto flat = multinomial(probs_, num_samples, /*replacement=*/true);
+
+        // batch_shape = probs_.shape[:-1]
+        auto pshape = probs_.shape();
+        std::vector<int64_t> batch_shape(pshape.begin(),
+                                         pshape.end() > pshape.begin()
+                                             ? pshape.end() - 1
+                                             : pshape.end());
+
+        // Bring the sample axis to the front so reshape produces
+        // sample_shape + batch_shape (sample dims vary slowest).
+        Tensor samples_first;
+        if (batch_shape.empty()) {
+            // 1D probs: multinomial result is already (num_samples,).
+            samples_first = flat;
+        } else {
+            // 2D probs: result is (B, num_samples) -> transpose to
+            // (num_samples, B) so the sample dim leads.
+            samples_first = tenzor::transpose(flat, 0, 1).contiguous();
+        }
+
+        std::vector<int64_t> out_shape(sample_shape.begin(), sample_shape.end());
+        out_shape.insert(out_shape.end(), batch_shape.begin(), batch_shape.end());
+        if (out_shape.empty()) {
+            // sample_shape == {} and scalar batch: a single draw. Keep the
+            // 1-element vector shape produced by multinomial(num_samples=1).
+            return samples_first;
+        }
+        return samples_first.reshape(out_shape);
     }
 
     auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
@@ -240,12 +289,16 @@ public:
 
     auto log_prob(const Tensor& value) -> Tensor override {
         auto log_probs = tenzor::log(probs_);
-        return gather(log_probs, -1, value.to(DType::Int64));
+        // value (class indices) has one fewer dim than log_probs (..., K).
+        // gather requires equal rank, so add the category dim, gather, drop it.
+        auto idx = tenzor::unsqueeze(value.to(DType::Int64), -1);
+        return tenzor::squeeze(gather(log_probs, -1, idx), -1);
     }
 
     auto entropy() -> Tensor override {
         auto log_probs = tenzor::log(probs_);
-        return tenzor::neg(tenzor::sum(probs_ * log_probs));
+        // Reduce only over the category axis so batched probs (B, K) yield (B,).
+        return tenzor::neg(tenzor::sum(probs_ * log_probs, /*dim=*/-1, /*keepdim=*/false));
     }
 
     /**
@@ -578,6 +631,44 @@ inline auto sample_poisson_scalar(double lambda, std::mt19937_64& rng) -> int64_
     }
 }
 
+/// Draw a single Binomial(n, p) variate via the geometric (waiting-time)
+/// inversion method. Successive inter-success gaps G ~ Geometric(p) are drawn
+/// and counted until they exceed n trials. Expected iterations are
+/// n·min(p, 1-p) (using the p>0.5 symmetry flip), so this is far cheaper than
+/// the n full-tensor Bernoulli sums it replaces while remaining exact for all
+/// parameter values.
+inline auto sample_binomial_scalar(int64_t n, double p, std::mt19937_64& rng) -> int64_t {
+    if (n <= 0) return 0;
+    if (p <= 0.0) return 0;
+    if (p >= 1.0) return n;
+
+    // Symmetry: sampling successes with prob p is the same as n minus the
+    // number of "failures" with prob 1-p. Always iterate over the rarer event
+    // so the expected loop count is n·min(p, 1-p).
+    const bool flip = (p > 0.5);
+    const double q = flip ? (1.0 - p) : p;
+
+    std::uniform_real_distribution<double> uniform(0.0, 1.0);
+    const double log_one_minus_q = std::log(1.0 - q);
+
+    int64_t count = 0;
+    int64_t trial = 0;  // index of the next trial to consider (0-based)
+    while (true) {
+        // Geometric gap: number of failures before the next success.
+        double u = uniform(rng);
+        // Guard against u == 0 producing -inf; log(1) == 0 advances by 0.
+        double gap = std::floor(std::log(1.0 - u) / log_one_minus_q);
+        if (gap < 0.0) gap = 0.0;
+        trial += static_cast<int64_t>(gap);
+        if (trial >= n) break;
+        ++count;        // a success lands on trial `trial`
+        ++trial;        // move past it
+        if (trial >= n) break;
+    }
+
+    return flip ? (n - count) : count;
+}
+
 /// Broadcast-compatible element-wise CPU fill for Gamma sampling.
 /// concentration and rate are broadcast to the output shape.
 inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
@@ -597,31 +688,34 @@ inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
     auto out = zeros(shape, concentration.dtype(), Device::cpu());
     int64_t n = out.numel();
 
-    // Materialize concentration/rate on CPU; for simplicity require that
-    // they are either scalars or match `shape` exactly. Full broadcasting
-    // is out of scope for the P1 distributions pass.
-    auto conc_cpu = concentration.to(Device::cpu()).contiguous();
-    auto rate_cpu = rate.to(Device::cpu()).contiguous();
-    const int64_t conc_n = conc_cpu.numel();
-    const int64_t rate_n = rate_cpu.numel();
+    // Materialize concentration/rate on CPU and broadcast each to the output
+    // shape so that element i of the output is paired with the geometrically
+    // correct parameter element. Scalar params (numel==1) and params whose
+    // shape already equals `shape` are the trivial cases; numpy-style
+    // right-aligned broadcasting (e.g. sample_shape prepending leading dims,
+    // or differing non-scalar concentration/rate shapes) is handled by
+    // broadcast_to, which throws a clear error for genuinely incompatible
+    // shapes instead of silently wrapping with a modulo.
+    auto conc_cpu = ::tenzor::broadcast_to(
+                        concentration.to(Device::cpu()), shape)
+                        .contiguous();
+    auto rate_cpu = ::tenzor::broadcast_to(
+                        rate.to(Device::cpu()), shape)
+                        .contiguous();
 
     if (out.dtype() == DType::Float32) {
         float* op = out.data<float>();
         const float* cp = conc_cpu.data<float>();
         const float* rp = rate_cpu.data<float>();
         for (int64_t i = 0; i < n; ++i) {
-            float conc = (conc_n == 1) ? cp[0] : cp[i % conc_n];
-            float rate_v = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-            op[i] = sample_gamma_scalar<float>(conc, rate_v, rng);
+            op[i] = sample_gamma_scalar<float>(cp[i], rp[i], rng);
         }
     } else if (out.dtype() == DType::Float64) {
         double* op = out.data<double>();
         const double* cp = conc_cpu.data<double>();
         const double* rp = rate_cpu.data<double>();
         for (int64_t i = 0; i < n; ++i) {
-            double conc = (conc_n == 1) ? cp[0] : cp[i % conc_n];
-            double rate_v = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-            op[i] = sample_gamma_scalar<double>(conc, rate_v, rng);
+            op[i] = sample_gamma_scalar<double>(cp[i], rp[i], rng);
         }
     } else {
         throw std::runtime_error("Gamma: only Float32 and Float64 supported");
@@ -1482,12 +1576,50 @@ public:
             ? std::vector<int64_t>(probs_.shape().begin(), probs_.shape().end())
             : sample_shape;
 
-        // Sum of total_count independent Bernoulli(probs) trials
-        auto result = zeros(shape, probs_.dtype(), probs_.device());
-        for (int64_t i = 0; i < total_count_; ++i) {
-            result = result + bernoulli(probs_);
+        // Draw each Binomial(total_count, p) count directly with an exact
+        // per-element scalar sampler (geometric-gap inversion). This replaces
+        // the previous O(total_count) loop of full-tensor Bernoulli sums —
+        // which allocated two tensors per trial — with a single output buffer
+        // and O(total_count·min(p,1-p)) expected scalar work per element.
+        auto orig_dtype = probs_.dtype();
+        auto orig_device = probs_.device();
+        const bool widen_for_f16 = (orig_dtype == DType::Float16 ||
+                                    orig_dtype == DType::BFloat16);
+        auto work_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+
+        // Broadcast probs to the requested output shape on CPU so each output
+        // element is paired with the correct probability.
+        auto probs_cpu = ::tenzor::broadcast_to(
+                             probs_.to(Device::cpu()), shape)
+                             .to(work_dtype)
+                             .contiguous();
+
+        auto out = zeros(shape, work_dtype, Device::cpu());
+        const int64_t n = out.numel();
+        auto& rng = detail::rng_for(generator_);
+
+        if (work_dtype == DType::Float32) {
+            float* op = out.data<float>();
+            const float* pp = probs_cpu.data<float>();
+            for (int64_t i = 0; i < n; ++i) {
+                op[i] = static_cast<float>(detail::sample_binomial_scalar(
+                    total_count_, static_cast<double>(pp[i]), rng));
+            }
+        } else if (work_dtype == DType::Float64) {
+            double* op = out.data<double>();
+            const double* pp = probs_cpu.data<double>();
+            for (int64_t i = 0; i < n; ++i) {
+                op[i] = static_cast<double>(detail::sample_binomial_scalar(
+                    total_count_, pp[i], rng));
+            }
+        } else {
+            throw std::runtime_error("Binomial: only Float32 and Float64 supported");
         }
-        return result;
+
+        if (widen_for_f16) {
+            out = out.to(orig_dtype);
+        }
+        return out.to(orig_device);
     }
 
     auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
@@ -2132,9 +2264,16 @@ public:
             ? std::vector<int64_t>(df1_.shape().begin(), df1_.shape().end())
             : sample_shape;
         auto one = full({1}, 1.0f, df1_.dtype(), Device::cpu());
-        auto x1 = detail::fill_gamma_cpu(df1_.to(Device::cpu()) * 0.5f, one, shape, detail::rng_for(generator_));
-        auto x2 = detail::fill_gamma_cpu(df2_.to(Device::cpu()) * 0.5f, one, shape, detail::rng_for(generator_));
-        auto result = (x1 / df1_.to(Device::cpu())) / (x2 / df2_.to(Device::cpu()));
+        // Broadcast the degrees-of-freedom tensors to the full output shape so
+        // that both the chi-square gamma draws and the subsequent divisions
+        // pair each sampled element with the correct df value. Without this,
+        // a sample_shape that differs from the df shape mispairs elements or
+        // raises a broadcast error in the divisions below.
+        auto df1_cpu = ::tenzor::broadcast_to(df1_.to(Device::cpu()), shape);
+        auto df2_cpu = ::tenzor::broadcast_to(df2_.to(Device::cpu()), shape);
+        auto x1 = detail::fill_gamma_cpu(df1_cpu * 0.5f, one, shape, detail::rng_for(generator_));
+        auto x2 = detail::fill_gamma_cpu(df2_cpu * 0.5f, one, shape, detail::rng_for(generator_));
+        auto result = (x1 / df1_cpu) / (x2 / df2_cpu);
         return result.to(df1_.device());
     }
 
@@ -2579,6 +2718,15 @@ public:
                            const auto* vp) {
             using T = std::remove_cv_t<std::remove_pointer_t<decltype(op)>>;
             constexpr int kMaxTerms = 50;
+            const int M = kMaxTerms + 20;
+            // Hoist the Miller-recurrence scratch buffer out of the per-element
+            // loop; it is overwritten each iteration so a single allocation is
+            // reused across all n elements instead of churning the heap.
+            std::vector<double> r(M + 1, 0.0);
+            // Cache the I_k/I_0 ratios keyed on κ: consecutive elements often
+            // share the same concentration (kn == 1 is the common case), so we
+            // skip recomputing the full recurrence when κ is unchanged.
+            double cached_kappa = std::numeric_limits<double>::quiet_NaN();
             for (int64_t i = 0; i < n; ++i) {
                 double mu    = static_cast<double>(lp[i % ln]);
                 double kappa = static_cast<double>(kp[i % kn]);
@@ -2597,18 +2745,26 @@ public:
                 // We compute r_k = I_k(κ) / I_0(κ) by Miller's algorithm:
                 //   start at high index with r_M = 0, r_{M-1} = 1 (unnormalised),
                 //   recurse down, then normalise against the resulting r_0.
-                const int M = kMaxTerms + 20;
-                std::vector<double> r(M + 1, 0.0);
-                r[M] = 0.0;
-                r[M - 1] = 1.0;
-                for (int k = M - 1; k > 0; --k) {
-                    r[k - 1] = r[k + 1] + 2.0 * k / kappa * r[k];
+                // The ratios depend only on κ, so we recompute (into the reused
+                // buffer) only when κ changes.
+                if (kappa != cached_kappa) {
+                    // The recurrence below writes every index 0..M (r[M] and
+                    // r[M-1] explicitly, then r[k-1] for k = M-1..1), so no
+                    // pre-zeroing of the reused buffer is required.
+                    r[M] = 0.0;
+                    r[M - 1] = 1.0;
+                    for (int k = M - 1; k > 0; --k) {
+                        r[k - 1] = r[k + 1] + 2.0 * k / kappa * r[k];
+                    }
+                    const double norm = r[0];
+                    for (int k = 1; k <= kMaxTerms; ++k) {
+                        r[k] /= norm;                 // store I_k(κ) / I_0(κ)
+                    }
+                    cached_kappa = kappa;
                 }
-                const double norm = r[0];
                 double series = 0.0;
                 for (int k = 1; k <= kMaxTerms; ++k) {
-                    double rk = r[k] / norm;          // I_k(κ) / I_0(κ)
-                    series += rk * std::sin(k * dx) / static_cast<double>(k);
+                    series += r[k] * std::sin(k * dx) / static_cast<double>(k);
                 }
                 double F = base + series / M_PI;
                 F = std::clamp(F, 0.0, 1.0);
@@ -2670,42 +2826,62 @@ public:
         auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
         auto out = zeros({n}, out_dtype, Device::cpu());
 
-        // Scalar Marsaglia CDF used inside the bisection — same series as in
-        // cdf() above, refactored to a local lambda for reuse.
-        auto scalar_cdf = [](double x, double mu, double kappa) -> double {
+        constexpr int kMaxTerms = 50;
+        const int kMillerM = kMaxTerms + 20;
+
+        // Scalar Marsaglia CDF used inside the bisection. The I_k/I_0 ratios
+        // depend only on κ (not on x), so the caller precomputes them once per
+        // element via fill_bessel_ratios() and passes the ratio buffer here.
+        // This collapses the 60 bisection steps from O(M) recurrence work each
+        // to a single O(kMaxTerms) sin-series, with zero per-call allocation.
+        auto scalar_cdf = [&](double x, double mu, double kappa,
+                              const std::vector<double>& ratios) -> double {
             double dx = std::remainder(x - mu, 2.0 * M_PI);
             double base = (dx + M_PI) / (2.0 * M_PI);
             if (kappa < 1e-6) return std::clamp(base, 0.0, 1.0);
-            constexpr int kMaxTerms = 50;
-            const int M = kMaxTerms + 20;
-            std::vector<double> r(M + 1, 0.0);
-            r[M - 1] = 1.0;
-            for (int k = M - 1; k > 0; --k) {
-                r[k - 1] = r[k + 1] + 2.0 * k / kappa * r[k];
-            }
-            const double norm = r[0];
             double series = 0.0;
             for (int k = 1; k <= kMaxTerms; ++k) {
-                double rk = r[k] / norm;
-                series += rk * std::sin(k * dx) / static_cast<double>(k);
+                series += ratios[k] * std::sin(k * dx) / static_cast<double>(k);
             }
             double F = base + series / M_PI;
             return std::clamp(F, 0.0, 1.0);
         };
 
+        // Fill `ratios[k] = I_k(κ)/I_0(κ)` for k = 1..kMaxTerms into the reused
+        // buffer using the downward Miller recurrence.
+        auto fill_bessel_ratios = [&](double kappa, std::vector<double>& r) {
+            r[kMillerM] = 0.0;
+            r[kMillerM - 1] = 1.0;
+            for (int k = kMillerM - 1; k > 0; --k) {
+                r[k - 1] = r[k + 1] + 2.0 * k / kappa * r[k];
+            }
+            const double norm = r[0];
+            for (int k = 1; k <= kMaxTerms; ++k) {
+                r[k] /= norm;
+            }
+        };
+
         auto compute = [&](auto* op, const auto* lp, const auto* kp,
                            const auto* qp) {
             using T = std::remove_cv_t<std::remove_pointer_t<decltype(op)>>;
+            // Reused buffers/cache across elements; the Bessel ratios are
+            // recomputed only when κ changes (kn == 1 is the common case).
+            std::vector<double> ratios(kMillerM + 1, 0.0);
+            double cached_kappa = std::numeric_limits<double>::quiet_NaN();
             for (int64_t i = 0; i < n; ++i) {
                 double mu    = static_cast<double>(lp[i % ln]);
                 double kappa = static_cast<double>(kp[i % kn]);
                 double qval  = static_cast<double>(qp[i % qn]);
                 qval = std::clamp(qval, 0.0, 1.0);
+                if (kappa >= 1e-6 && kappa != cached_kappa) {
+                    fill_bessel_ratios(kappa, ratios);
+                    cached_kappa = kappa;
+                }
                 double lo = mu - M_PI;
                 double hi = mu + M_PI;
                 for (int it = 0; it < 60; ++it) {
                     double mid = 0.5 * (lo + hi);
-                    double F = scalar_cdf(mid, mu, kappa);
+                    double F = scalar_cdf(mid, mu, kappa, ratios);
                     if (F < qval) lo = mid; else hi = mid;
                 }
                 double result = 0.5 * (lo + hi);
@@ -2988,7 +3164,7 @@ public:
         p_ = s[s.size() - 1];
     }
 
-    auto sample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         // Bartlett decomposition on CPU.
         // Widen Float16/BFloat16 to Float32 for the gamma + matmul chain;
         // narrow back at the end. Float16 lacks the dynamic range for
@@ -3014,33 +3190,54 @@ public:
             ? scale_tril_.to(DType::Float32)
             : scale_tril_;
 
-        // Build lower-triangular Bartlett factor L on CPU
-        auto L = zeros({p_, p_}, dtype, Device::cpu());
+        // sample_shape gives the leading batch dimensions; the returned tensor
+        // has shape sample_shape + [p_, p_]. An empty sample_shape yields a
+        // single (p_, p_) matrix. Compute how many independent Bartlett
+        // factors we need to draw.
+        int64_t batch_count = 1;
+        for (auto d : sample_shape) {
+            if (d < 0) {
+                throw std::runtime_error("Wishart: sample_shape dims must be non-negative");
+            }
+            batch_count *= d;
+        }
+
+        // Build a batch of lower-triangular Bartlett factors L on CPU with
+        // shape [batch_count, p_, p_]. Each [p_, p_] slice is an independent
+        // draw so that batched Wishart sampling produces distinct matrices.
+        auto L = zeros({batch_count, p_, p_}, dtype, Device::cpu());
 
         auto& rng = detail::rng_for(generator_);
         std::normal_distribution<double> normal(0.0, 1.0);
 
+        const int64_t mat_stride = p_ * p_;
         if (dtype == DType::Float32) {
             float* lp = L.data<float>();
-            for (int64_t i = 0; i < p_; ++i) {
-                // Diagonal: sqrt(Chi2(df - i)) = sqrt(Gamma((df-i)/2, 0.5) * 2)
-                // Equivalently, sample Chi2(df - i) via Gamma((df-i)/2, 0.5)
-                double chi2_val = detail::sample_gamma_scalar<double>(
-                    (df_val - static_cast<double>(i)) / 2.0, 0.5, rng);
-                lp[i * p_ + i] = static_cast<float>(std::sqrt(chi2_val));
-                // Below diagonal: standard normal
-                for (int64_t j = 0; j < i; ++j) {
-                    lp[i * p_ + j] = static_cast<float>(normal(rng));
+            for (int64_t b = 0; b < batch_count; ++b) {
+                float* mp = lp + b * mat_stride;
+                for (int64_t i = 0; i < p_; ++i) {
+                    // Diagonal: sqrt(Chi2(df - i)) = sqrt(Gamma((df-i)/2, 0.5) * 2)
+                    // Equivalently, sample Chi2(df - i) via Gamma((df-i)/2, 0.5)
+                    double chi2_val = detail::sample_gamma_scalar<double>(
+                        (df_val - static_cast<double>(i)) / 2.0, 0.5, rng);
+                    mp[i * p_ + i] = static_cast<float>(std::sqrt(chi2_val));
+                    // Below diagonal: standard normal
+                    for (int64_t j = 0; j < i; ++j) {
+                        mp[i * p_ + j] = static_cast<float>(normal(rng));
+                    }
                 }
             }
         } else if (dtype == DType::Float64) {
             double* lp = L.data<double>();
-            for (int64_t i = 0; i < p_; ++i) {
-                double chi2_val = detail::sample_gamma_scalar<double>(
-                    (df_val - static_cast<double>(i)) / 2.0, 0.5, rng);
-                lp[i * p_ + i] = std::sqrt(chi2_val);
-                for (int64_t j = 0; j < i; ++j) {
-                    lp[i * p_ + j] = normal(rng);
+            for (int64_t b = 0; b < batch_count; ++b) {
+                double* mp = lp + b * mat_stride;
+                for (int64_t i = 0; i < p_; ++i) {
+                    double chi2_val = detail::sample_gamma_scalar<double>(
+                        (df_val - static_cast<double>(i)) / 2.0, 0.5, rng);
+                    mp[i * p_ + i] = std::sqrt(chi2_val);
+                    for (int64_t j = 0; j < i; ++j) {
+                        mp[i * p_ + j] = normal(rng);
+                    }
                 }
             }
         } else {
@@ -3048,14 +3245,25 @@ public:
         }
 
         L = L.to(device);
+
         // A = scale_tril @ L (use the widened scale_tril if we upcast).
-        auto A = matmul(scale_tril_widened, L);
-        // W = A @ A^T
+        // Broadcast scale_tril [p_, p_] across the batch so each Bartlett
+        // factor is transformed by the same Cholesky factor.
+        auto scale_b = ::tenzor::broadcast_to(
+            scale_tril_widened.reshape({1, p_, p_}), {batch_count, p_, p_});
+        auto A = matmul(scale_b, L);
+        // W = A @ A^T  (batched over the leading dimension)
         auto W = matmul(A, transpose(A, -2, -1));
         if (widen_for_f16) {
             W = W.to(orig_dtype);
         }
-        return W;
+
+        // Reshape from [batch_count, p_, p_] to sample_shape + [p_, p_]. With
+        // an empty sample_shape this collapses to the single (p_, p_) matrix.
+        std::vector<int64_t> out_shape(sample_shape.begin(), sample_shape.end());
+        out_shape.push_back(p_);
+        out_shape.push_back(p_);
+        return W.reshape(out_shape);
     }
 
     auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
@@ -4046,7 +4254,8 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
             auto p_probs = tenzor::clamp(pc->probs(), eps, 1.0f);
             auto q_probs = tenzor::clamp(qc->probs(), eps, 1.0f);
             auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
-            return tenzor::sum(t);
+            // Reduce only over the category axis -> per-batch KL of shape (B,).
+            return tenzor::sum(t, /*dim=*/-1);
         }
     }
     // --- Categorical || OneHotCategorical (audit E.6) ---
@@ -4059,7 +4268,8 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
             auto p_probs = tenzor::clamp(pc->probs(), eps, 1.0f);
             auto q_probs = tenzor::clamp(qoh->probs(), eps, 1.0f);
             auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
-            return tenzor::sum(t);
+            // Reduce only over the category axis -> per-batch KL of shape (B,).
+            return tenzor::sum(t, /*dim=*/-1);
         }
     }
     // --- OneHotCategorical || Categorical (symmetric helper) ---
@@ -4069,7 +4279,8 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
             auto p_probs = tenzor::clamp(poh->probs(), eps, 1.0f);
             auto q_probs = tenzor::clamp(qc->probs(), eps, 1.0f);
             auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
-            return tenzor::sum(t);
+            // Reduce only over the category axis -> per-batch KL of shape (B,).
+            return tenzor::sum(t, /*dim=*/-1);
         }
     }
     // --- OneHotCategorical || OneHotCategorical (audit E.6) ---
@@ -4079,7 +4290,8 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
             auto p_probs = tenzor::clamp(poh->probs(), eps, 1.0f);
             auto q_probs = tenzor::clamp(qoh->probs(), eps, 1.0f);
             auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
-            return tenzor::sum(t);
+            // Reduce only over the category axis -> per-batch KL of shape (B,).
+            return tenzor::sum(t, /*dim=*/-1);
         }
     }
     // --- Dirichlet || Dirichlet ---
@@ -4089,11 +4301,15 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
             //      + Σ(α1-α2)(ψ(α1) - ψ(Σα1))
             auto a1 = pd->concentration();
             auto a2 = qd->concentration();
-            auto sum_a1 = tenzor::sum(a1);
-            auto sum_a2 = tenzor::sum(a2);
+            // Reduce only over the last (event/simplex) axis so batched
+            // concentration (B, K) yields per-batch KL of shape (B, 1).
+            auto sum_a1 = tenzor::sum(a1, -1, /*keepdim=*/true);
+            auto sum_a2 = tenzor::sum(a2, -1, /*keepdim=*/true);
             return tenzor::lgamma(sum_a1) - tenzor::lgamma(sum_a2)
-                 - tenzor::sum(tenzor::lgamma(a1)) + tenzor::sum(tenzor::lgamma(a2))
-                 + tenzor::sum((a1 - a2) * (tenzor::digamma(a1) - tenzor::digamma(sum_a1)));
+                 - tenzor::sum(tenzor::lgamma(a1), -1, /*keepdim=*/true)
+                 + tenzor::sum(tenzor::lgamma(a2), -1, /*keepdim=*/true)
+                 + tenzor::sum((a1 - a2) * (tenzor::digamma(a1) - tenzor::digamma(sum_a1)),
+                               -1, /*keepdim=*/true);
         }
     }
     // --- Poisson || Poisson ---

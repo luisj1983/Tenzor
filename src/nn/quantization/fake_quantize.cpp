@@ -505,10 +505,18 @@ auto fold_bn(Module& model) -> void {
         auto weight_shape = fp_weight.shape();
         int64_t out_channels = weight_shape[0];
 
+        // Preserve the conv's original dtype. The host-side folding math runs in
+        // Float32, but the folded weight/bias must be cast back so a Float16 /
+        // BFloat16 conv keeps its dtype (Tensor::data<float>() throws on non-F32,
+        // so every parameter is widened to Float32 on CPU before raw access).
+        DType conv_dtype = fp_weight.dtype();
+
         // Fold BN scale into conv weights: w_new[c] = bn_scale[c] * w_old[c]
-        Tensor folded_weight = fp_weight.clone();
-        auto fw_cpu = (folded_weight.device() == Device::cpu()) ? folded_weight : folded_weight.to(Device::cpu());
+        auto fw_cpu = (fp_weight.device() == Device::cpu()) ? fp_weight.clone()
+                                                            : fp_weight.to(Device::cpu());
+        if (fw_cpu.dtype() != DType::Float32) fw_cpu = fw_cpu.to(DType::Float32);
         auto bs_cpu = (bn_scale.device() == Device::cpu()) ? bn_scale : bn_scale.to(Device::cpu());
+        if (bs_cpu.dtype() != DType::Float32) bs_cpu = bs_cpu.to(DType::Float32);
 
         float* w_data = fw_cpu.data<float>();
         const float* s_data = bs_cpu.data<const float>();
@@ -531,7 +539,9 @@ auto fold_bn(Module& model) -> void {
         float* fb_data = folded_bias.data<float>();
 
         auto rm_cpu = (running_mean.device() == Device::cpu()) ? running_mean : running_mean.to(Device::cpu());
+        if (rm_cpu.dtype() != DType::Float32) rm_cpu = rm_cpu.to(DType::Float32);
         auto bt_cpu = (beta.device() == Device::cpu()) ? beta : beta.to(Device::cpu());
+        if (bt_cpu.dtype() != DType::Float32) bt_cpu = bt_cpu.to(DType::Float32);
         const float* mean_data = rm_cpu.data<const float>();
         const float* beta_data = bt_cpu.data<const float>();
 
@@ -540,10 +550,18 @@ auto fold_bn(Module& model) -> void {
             if (conv_bias.has_value()) {
                 auto cb_cpu = (*conv_bias);
                 if (cb_cpu.device() != Device::cpu()) cb_cpu = cb_cpu.to(Device::cpu());
+                if (cb_cpu.dtype() != DType::Float32) cb_cpu = cb_cpu.to(DType::Float32);
                 b_old = cb_cpu.data<const float>()[c];
             }
             fb_data[c] = s_data[c] * (b_old - mean_data[c]) + beta_data[c];
         }
+
+        // Cast the folded parameters back to the conv's original dtype so a
+        // non-Float32 conv keeps its dtype after folding.
+        Tensor folded_weight_out =
+            (conv_dtype == DType::Float32) ? fw_cpu : fw_cpu.to(conv_dtype);
+        Tensor folded_bias_out =
+            (conv_dtype == DType::Float32) ? folded_bias : folded_bias.to(conv_dtype);
 
         // Folding BN always produces a bias term. If the source conv was built
         // with bias=false it has no "bias" parameter registered, so a strict
@@ -551,13 +569,13 @@ auto fold_bn(Module& model) -> void {
         // bias parameter first so the folded conv can carry it.
         if (conv_state.find("bias") == conv_state.end()) {
             conv->register_parameter_shared(
-                "bias", std::make_shared<Variable>(folded_bias, /*requires_grad=*/true));
+                "bias", std::make_shared<Variable>(folded_bias_out, /*requires_grad=*/true));
         }
 
         // Update conv with folded parameters via state_dict
         std::unordered_map<std::string, Tensor> new_state;
-        new_state["weight"] = fw_cpu;
-        new_state["bias"] = folded_bias;
+        new_state["weight"] = folded_weight_out;
+        new_state["bias"] = folded_bias_out;
         conv->load_state_dict(new_state);
 
         // Mark BN module for skipping in rebuild

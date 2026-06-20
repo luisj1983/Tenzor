@@ -249,6 +249,14 @@ auto OffloadEngine::prefetch_to_gpu(const std::vector<Tensor*>& tensors) -> void
 
     // Add tensors to prefetch queue
     for (Tensor* tensor : tensors) {
+        // Re-check the depth bound per iteration: the guard above is evaluated once,
+        // so a single multi-tensor call could otherwise overshoot prefetch_depth by
+        // up to (batch size - 1). Stop pushing once the queue reaches the configured
+        // depth so backpressure is honored exactly.
+        if (prefetch_queue_.size() >= static_cast<size_t>(config_.prefetch_depth)) {
+            break;  // Queue full; drop the remaining hints (prefetch is best-effort)
+        }
+
         if (tensor == nullptr) {
             continue;  // Skip null pointers
         }
@@ -579,10 +587,22 @@ auto OffloadEngine::prefetch_worker() -> void {
                 break;
             }
 
+            // COPY (do not pop) the queued requests into the local batch. We must
+            // keep them in prefetch_queue_ until *after* the resulting handles are
+            // published to in_flight_prefetches_ below, otherwise a thread in
+            // wait_for_prefetch() Phase 1 could observe prefetch_queue_.empty()
+            // (its drained predicate) in the window between this drain and the
+            // publish, swap an empty in_flight_prefetches_, and return without
+            // committing the prefetched tensors back to the user's targets — i.e.
+            // synchronize() would report completion while *f.target silently stays
+            // on CPU. Holding the entries in the queue until the publish completes
+            // ties "queue drained" and "handles published" into a single
+            // transition the waiter can observe atomically under prefetch_mutex_.
             batch.reserve(prefetch_queue_.size());
-            while (!prefetch_queue_.empty()) {
-                batch.push_back(prefetch_queue_.front());
-                prefetch_queue_.pop();
+            std::queue<PrefetchRequest> scan = prefetch_queue_;  // copy to walk w/o popping
+            while (!scan.empty()) {
+                batch.push_back(scan.front());
+                scan.pop();
             }
         }
 
@@ -609,6 +629,10 @@ auto OffloadEngine::prefetch_worker() -> void {
             }
         }
 
+        // Publish the issued handles BEFORE removing the drained requests from
+        // prefetch_queue_. The publish must be globally ordered ahead of the queue
+        // pop so that any waiter observing the queue drained (under prefetch_mutex_)
+        // is guaranteed to also see the handles in in_flight_prefetches_.
         if (!issued.empty()) {
             std::lock_guard<std::mutex> ifl_lock(in_flight_mutex_);
             for (auto& p : issued) {
@@ -616,10 +640,21 @@ auto OffloadEngine::prefetch_worker() -> void {
             }
         }
 
-        // Phase C (C5): notify wait_for_prefetch that the queue is now empty (we just
-        // drained the entire batch above). Cheap notify_all even if no waiter is
-        // present; CV-side spurious wakes are filtered by the predicate.
-        prefetch_drained_cv_.notify_all();
+        // Now pop exactly the entries we drained into `batch` (handles for them are
+        // already published above). Entries pushed by prefetch_to_gpu() while we were
+        // issuing are left in place and processed on the next iteration. Removing the
+        // entries and notifying under prefetch_mutex_ makes "queue drained" become
+        // observable to wait_for_prefetch() Phase 1 only after the publish completed.
+        {
+            std::lock_guard<std::mutex> lock(prefetch_mutex_);
+            for (size_t i = 0; i < batch.size() && !prefetch_queue_.empty(); ++i) {
+                prefetch_queue_.pop();
+            }
+            // Phase C (C5): notify wait_for_prefetch that the queue is now drained
+            // (and the corresponding handles are published). Cheap notify_all even if
+            // no waiter is present; CV-side spurious wakes are filtered by the predicate.
+            prefetch_drained_cv_.notify_all();
+        }
     }
 }
 

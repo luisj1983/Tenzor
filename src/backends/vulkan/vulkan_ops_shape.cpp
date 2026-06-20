@@ -19,9 +19,69 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
                                                         int64_t num_positions, int64_t num_heads) -> Tensor {
     int32_t device_id = table.device().index;
 
+    // BFloat16 has no dedicated, correct shader (the *_bf16.comp variant is
+    // dead and declares 32-bit `float` buffers, so it cannot read/write packed
+    // 2-byte bf16 storage). Routing BFloat16 through the base float32 shader
+    // would also misread the 2-byte buffer. Use the established widen→compute→
+    // narrow pattern (see dispatchTranspose): cast the table to Float32, run
+    // the op, then cast the gathered output back to BFloat16. This matches the
+    // dedicated BFloat16 path the CPU/OneAPI backends provide for this op.
+    if (table.dtype() == DType::BFloat16) {
+        Tensor table_f32 = table.to(DType::Float32);
+        Tensor out_f32 = dispatchGatherRelativePositionBias(table_f32, indices,
+                                                            num_positions, num_heads);
+        return out_f32.to(DType::BFloat16);
+    }
+
+    // Materialize read operands to packed, offset-0 buffers before binding.
+    // The shader indexes table/indices linearly, so a strided or non-zero
+    // offset view would bind the parent storage region and read logically
+    // wrong elements (matches every sibling indexing op in
+    // vulkan_ops_indexing.cpp: dispatchEmbedding/Gather/Scatter/IndexSelect).
+    const Tensor table_c = dispatchContiguous(table);
+    const Tensor indices_c = dispatchContiguous(indices);
+
+    // Validate indices host-side so a malformed/hostile index table raises the
+    // same std::out_of_range as the CPU reference
+    // (src/backends/cpu/kernels/vision.cpp gather_relative_position_bias)
+    // instead of the shader performing a logically-wrong (out-of-table) read.
+    // In the Vulkan table layout the shader computes
+    //   table_data[uint(table_idx) * num_heads + h]
+    // so each table_idx must lie in [0, table_rows) where
+    //   table_rows = table.numel() / num_heads.
+    // Like the CPU reference, negative indices are NOT normalized here.
+    {
+        int64_t table_rows = num_heads > 0 ? (table.numel() / num_heads) : 0;
+        Tensor idx_host = indices_c.to(Device::cpu());
+        int64_t num_index = idx_host.numel();
+        if (indices_c.dtype() == DType::Int64) {
+            const int64_t* p = idx_host.data<int64_t>();
+            for (int64_t i = 0; i < num_index; ++i) {
+                int64_t v = p[i];
+                if (v < 0 || v >= table_rows) {
+                    throw std::out_of_range(
+                        "gather_relative_position_bias: rel_pos_index value " +
+                        std::to_string(v) + " out of range [0, " +
+                        std::to_string(table_rows) + ")");
+                }
+            }
+        } else {
+            const int32_t* p = idx_host.data<int32_t>();
+            for (int64_t i = 0; i < num_index; ++i) {
+                int64_t v = static_cast<int64_t>(p[i]);
+                if (v < 0 || v >= table_rows) {
+                    throw std::out_of_range(
+                        "gather_relative_position_bias: rel_pos_index value " +
+                        std::to_string(v) + " out of range [0, " +
+                        std::to_string(table_rows) + ")");
+                }
+            }
+        }
+    }
+
     // Select shader based on dtype
     std::string shader_name;
-    switch (table.dtype()) {
+    switch (table_c.dtype()) {
         case DType::Float64:
             shader_name = "gather_relative_position_bias_f64";
             break;
@@ -37,7 +97,7 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
 
     // Output shape: [num_positions, num_positions, num_heads]
     std::vector<int64_t> out_shape = {num_positions, num_positions, num_heads};
-    Tensor output(out_shape, table.dtype(), table.device());
+    Tensor output(out_shape, table_c.dtype(), table_c.device());
 
     uint32_t total_elements = static_cast<uint32_t>(num_positions * num_positions * num_heads);
 
@@ -53,13 +113,13 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
     push_constants.total_elements = total_elements;
 
     // Get VkBuffer handles
-    const void* buffer_table = table.data_ptr();
-    const void* buffer_indices = indices.data_ptr();
+    const void* buffer_table = table_c.data_ptr();
+    const void* buffer_indices = indices_c.data_ptr();
     const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
-    size_t table_size = table.numel() * table.dtype_size();
-    size_t indices_size = indices.numel() * indices.dtype_size();
+    size_t table_size = table_c.numel() * table_c.dtype_size();
+    size_t indices_size = indices_c.numel() * indices_c.dtype_size();
     size_t output_size = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set

@@ -1277,6 +1277,30 @@ Tensor mps_log_softmax_kernel(const Tensor& input, int64_t dim) {
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim)
         throw std::invalid_argument("mps_log_softmax: dim out of range");
+
+    // log_softmax_kernel treats `cols` as the contiguous last axis
+    // (input[row*cols+j]). For a non-contiguous input or a log_softmax over any
+    // non-last dim, materialize/permute the dim to last on-device, run the 2D
+    // log_softmax, then inverse-permute back — mirroring mps_cumsum/cumprod.
+    if (!input.is_contiguous()) {
+        return mps_log_softmax_kernel(input.contiguous(), dim);
+    }
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm;
+        perm.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) if (i != dim) perm.push_back(i);
+        perm.push_back(dim);
+        OpAttributes pattrs;
+        pattrs.set(AttrKey::Dims, perm);
+        auto transposed = dispatch(OpId::Permute, {input}, pattrs)[0].contiguous();
+        auto out_perm = mps_log_softmax_kernel(transposed, ndim - 1);
+        std::vector<int64_t> inv(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv[perm[i]] = i;
+        OpAttributes ipattrs;
+        ipattrs.set(AttrKey::Dims, inv);
+        return dispatch(OpId::Permute, {out_perm}, ipattrs)[0].contiguous();
+    }
+
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
 
@@ -1348,8 +1372,104 @@ Tensor mps_ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device de
         [cmd waitUntilCompleted];
         ::tenzor::mps::mps_cmd_check(cmd, __func__);
     } else {
-        int32_t* ptr = static_cast<int32_t*>(const_cast<void*>(output.data_ptr()));
-        for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+        // All remaining dtypes: write the correct element type/size directly into
+        // the shared (zero-copy) MTLBuffer. Mirrors cpu::ones_kernel for parity.
+        void* raw = const_cast<void*>(output.data_ptr());
+        switch (dtype) {
+            case DType::BFloat16: {
+                BFloat16* ptr = static_cast<BFloat16*>(raw);
+                BFloat16 one(1.0f);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = one;
+                break;
+            }
+            case DType::Float64: {
+                double* ptr = static_cast<double*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1.0;
+                break;
+            }
+            case DType::Int8: {
+                int8_t* ptr = static_cast<int8_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::Int16: {
+                int16_t* ptr = static_cast<int16_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::Int32: {
+                int32_t* ptr = static_cast<int32_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::Int64: {
+                int64_t* ptr = static_cast<int64_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::UInt8: {
+                uint8_t* ptr = static_cast<uint8_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::UInt16: {
+                uint16_t* ptr = static_cast<uint16_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::UInt32: {
+                uint32_t* ptr = static_cast<uint32_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::UInt64: {
+                uint64_t* ptr = static_cast<uint64_t*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = 1;
+                break;
+            }
+            case DType::Bool: {
+                bool* ptr = static_cast<bool*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = true;
+                break;
+            }
+            case DType::Complex64: {
+                std::complex<float>* ptr = static_cast<std::complex<float>*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = std::complex<float>(1.0f, 0.0f);
+                break;
+            }
+            case DType::Complex128: {
+                std::complex<double>* ptr = static_cast<std::complex<double>*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = std::complex<double>(1.0, 0.0);
+                break;
+            }
+            case DType::FP8_E4M3: {
+                FP8_E4M3* ptr = static_cast<FP8_E4M3*>(raw);
+                FP8_E4M3 one(1.0f);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = one;
+                break;
+            }
+            case DType::FP8_E5M2: {
+                FP8_E5M2* ptr = static_cast<FP8_E5M2*>(raw);
+                FP8_E5M2 one(1.0f);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = one;
+                break;
+            }
+            case DType::FP8_E4M3FNUZ: {
+                FP8_E4M3FNUZ* ptr = static_cast<FP8_E4M3FNUZ*>(raw);
+                FP8_E4M3FNUZ one(1.0f);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = one;
+                break;
+            }
+            case DType::FP8_E5M2FNUZ: {
+                FP8_E5M2FNUZ* ptr = static_cast<FP8_E5M2FNUZ*>(raw);
+                FP8_E5M2FNUZ one(1.0f);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = one;
+                break;
+            }
+            default:
+                throw std::runtime_error("mps ones operation: unsupported dtype " +
+                    std::to_string(static_cast<int>(dtype)));
+        }
     }
     return output;
 }
@@ -1360,16 +1480,18 @@ Tensor mps_full_kernel(const std::vector<int64_t>& shape, float value, DType dty
     if (dtype == DType::Float32) {
         float* ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
         for (size_t i = 0; i < numel; ++i) ptr[i] = value;
-    } else {
-        // Use fill shader
+    } else if (dtype == DType::Float16) {
+        // Use the half-precision fill shader (the float32 fill_kernel would write
+        // 4 bytes/elem and overflow a 2-byte/elem Float16 buffer).
         ensure_initialized();
-        auto pipeline = get_pipeline("fill_kernel");
+        auto pipeline = get_pipeline("fill_kernel_f16");
         id<MTLBuffer> buf_out = get_buffer(output);
+        uint16_t value_f16 = Float16(value).bits;
         id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
         [encoder setComputePipelineState:pipeline];
         [encoder setBuffer:buf_out offset:0 atIndex:0];
-        [encoder setBytes:&value length:sizeof(float) atIndex:1];
+        [encoder setBytes:&value_f16 length:sizeof(value_f16) atIndex:1];
         MTLSize grid = MTLSizeMake(numel, 1, 1);
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
                                  static_cast<NSUInteger>(numel));
@@ -1378,6 +1500,117 @@ Tensor mps_full_kernel(const std::vector<int64_t>& shape, float value, DType dty
         [cmd commit];
         [cmd waitUntilCompleted];
         ::tenzor::mps::mps_cmd_check(cmd, __func__);
+    } else {
+        // All remaining dtypes: write the correct element type/size directly into
+        // the shared (zero-copy) MTLBuffer. Mirrors cpu::full_kernel for parity.
+        void* raw = const_cast<void*>(output.data_ptr());
+        const double dv = static_cast<double>(value);
+        switch (dtype) {
+            case DType::BFloat16: {
+                BFloat16* ptr = static_cast<BFloat16*>(raw);
+                BFloat16 v(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::Float64: {
+                double* ptr = static_cast<double*>(raw);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = dv;
+                break;
+            }
+            case DType::Int8: {
+                int8_t* ptr = static_cast<int8_t*>(raw);
+                int8_t v = static_cast<int8_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::Int16: {
+                int16_t* ptr = static_cast<int16_t*>(raw);
+                int16_t v = static_cast<int16_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::Int32: {
+                int32_t* ptr = static_cast<int32_t*>(raw);
+                int32_t v = static_cast<int32_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::Int64: {
+                int64_t* ptr = static_cast<int64_t*>(raw);
+                int64_t v = static_cast<int64_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::UInt8: {
+                uint8_t* ptr = static_cast<uint8_t*>(raw);
+                uint8_t v = static_cast<uint8_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::UInt16: {
+                uint16_t* ptr = static_cast<uint16_t*>(raw);
+                uint16_t v = static_cast<uint16_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::UInt32: {
+                uint32_t* ptr = static_cast<uint32_t*>(raw);
+                uint32_t v = static_cast<uint32_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::UInt64: {
+                uint64_t* ptr = static_cast<uint64_t*>(raw);
+                uint64_t v = static_cast<uint64_t>(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::Bool: {
+                bool* ptr = static_cast<bool*>(raw);
+                bool v = (value != 0.0f);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::Complex64: {
+                std::complex<float>* ptr = static_cast<std::complex<float>*>(raw);
+                std::complex<float> v(value, 0.0f);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::Complex128: {
+                std::complex<double>* ptr = static_cast<std::complex<double>*>(raw);
+                std::complex<double> v(dv, 0.0);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::FP8_E4M3: {
+                FP8_E4M3* ptr = static_cast<FP8_E4M3*>(raw);
+                FP8_E4M3 v(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::FP8_E5M2: {
+                FP8_E5M2* ptr = static_cast<FP8_E5M2*>(raw);
+                FP8_E5M2 v(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::FP8_E4M3FNUZ: {
+                FP8_E4M3FNUZ* ptr = static_cast<FP8_E4M3FNUZ*>(raw);
+                FP8_E4M3FNUZ v(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            case DType::FP8_E5M2FNUZ: {
+                FP8_E5M2FNUZ* ptr = static_cast<FP8_E5M2FNUZ*>(raw);
+                FP8_E5M2FNUZ v(value);
+                for (size_t i = 0; i < numel; ++i) ptr[i] = v;
+                break;
+            }
+            default:
+                throw std::runtime_error("mps full operation: unsupported dtype " +
+                    std::to_string(static_cast<int>(dtype)));
+        }
     }
     return output;
 }
@@ -1466,53 +1699,121 @@ Tensor mps_linspace_kernel(float start, float end, int64_t steps, DType dtype, D
 
 // Random number generation — generate on CPU (shared memory = zero copy on Apple Silicon)
 Tensor mps_rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device) {
+    // Float16/BFloat16: no <random> distribution accepts half types directly, so
+    // widen to Float32, generate, then narrow — matching cpu::rand_kernel.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        Tensor tmp = mps_rand_kernel(shape, DType::Float32, device);
+        return tmp.to(dtype);
+    }
     Tensor output(shape, dtype, device);
     size_t numel = output.numel();
     std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    float* ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
-    for (size_t i = 0; i < numel; ++i) ptr[i] = dist(gen);
+    if (dtype == DType::Float32) {
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        float* ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+        for (size_t i = 0; i < numel; ++i) ptr[i] = dist(gen);
+    } else if (dtype == DType::Float64) {
+        std::uniform_real_distribution<double> dist(0.0, 1.0);
+        double* ptr = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+        for (size_t i = 0; i < numel; ++i) ptr[i] = dist(gen);
+    } else {
+        throw std::runtime_error("mps rand operation supports Float32/Float64/Float16/BFloat16");
+    }
     return output;
 }
 
 Tensor mps_randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device) {
+    // Float16/BFloat16: widen to Float32, generate, then narrow — matching
+    // cpu::randn_kernel.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        Tensor tmp = mps_randn_kernel(shape, DType::Float32, device);
+        return tmp.to(dtype);
+    }
     Tensor output(shape, dtype, device);
     size_t numel = output.numel();
     std::mt19937 gen(std::random_device{}());
-    std::normal_distribution<float> dist(0.0f, 1.0f);
-    float* ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
-    for (size_t i = 0; i < numel; ++i) ptr[i] = dist(gen);
+    if (dtype == DType::Float32) {
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+        float* ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+        for (size_t i = 0; i < numel; ++i) ptr[i] = dist(gen);
+    } else if (dtype == DType::Float64) {
+        std::normal_distribution<double> dist(0.0, 1.0);
+        double* ptr = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+        for (size_t i = 0; i < numel; ++i) ptr[i] = dist(gen);
+    } else {
+        throw std::runtime_error("mps randn operation supports Float32/Float64/Float16/BFloat16");
+    }
     return output;
 }
 
 Tensor mps_randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape, DType dtype, Device device) {
+    // Smaller integer dtypes: widen to Int32, generate, then narrow — but first
+    // validate the requested range fits, so `.to(dtype)` cannot silently wrap.
+    // Matches cpu::randint_kernel.
+    if (dtype == DType::Int8 || dtype == DType::UInt8 ||
+        dtype == DType::Int16 || dtype == DType::UInt16) {
+        int64_t type_min = 0, type_max = 0;
+        switch (dtype) {
+            case DType::Int8:   type_min = INT8_MIN;  type_max = INT8_MAX;  break;
+            case DType::UInt8:  type_min = 0;         type_max = UINT8_MAX; break;
+            case DType::Int16:  type_min = INT16_MIN; type_max = INT16_MAX; break;
+            case DType::UInt16: type_min = 0;         type_max = UINT16_MAX; break;
+            default: break;  // unreachable
+        }
+        if (high <= low || low < type_min || (high - 1) > type_max) {
+            throw std::runtime_error(
+                "mps randint: range [" + std::to_string(low) + ", " + std::to_string(high) +
+                ") does not fit the requested dtype's representable range [" +
+                std::to_string(type_min) + ", " + std::to_string(type_max) + "]");
+        }
+        Tensor tmp = mps_randint_kernel(low, high, shape, DType::Int32, device);
+        return tmp.to(dtype);
+    }
+    if (dtype != DType::Int32 && dtype != DType::Int64) {
+        throw std::runtime_error(
+            "mps randint operation supports Int8/UInt8/Int16/UInt16/Int32/Int64 dtypes");
+    }
+
     Tensor output(shape, dtype, device);
     size_t numel = output.numel();
     std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<int64_t> dist(low, high - 1);
-    if (dtype == DType::Float32) {
-        float* ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
-        for (size_t i = 0; i < numel; ++i) ptr[i] = static_cast<float>(dist(gen));
-    } else {
+    if (dtype == DType::Int32) {
         int32_t* ptr = static_cast<int32_t*>(const_cast<void*>(output.data_ptr()));
         for (size_t i = 0; i < numel; ++i) ptr[i] = static_cast<int32_t>(dist(gen));
+    } else {  // Int64
+        int64_t* ptr = static_cast<int64_t*>(const_cast<void*>(output.data_ptr()));
+        for (size_t i = 0; i < numel; ++i) ptr[i] = dist(gen);
     }
     return output;
 }
 
 Tensor mps_bernoulli_kernel(const Tensor& probs) {
+    // Output keeps probs' dtype. Sampling runs at Float32 (the {0,1} results are
+    // exactly representable in every supported float dtype), so probs is widened
+    // to Float32 for the comparison and the result is cast back. Mirrors
+    // cpu::bernoulli_kernel — avoids reinterpreting half data as float and
+    // overflowing a narrow output buffer.
+    const DType out_dtype = probs.dtype();
     auto shape = probs.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    Tensor output(shape_vec, probs.dtype(), probs.device());
-    size_t numel = probs.numel();
+
+    Tensor probs_f32 = (out_dtype != DType::Float32) ? probs.to(DType::Float32) : probs;
+    Tensor out_f32(shape_vec, DType::Float32, probs.device());
+    size_t numel = probs_f32.numel();
+
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    const float* p = static_cast<const float*>(probs.data_ptr());
-    float* out = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+    const float* p = static_cast<const float*>(probs_f32.data_ptr());
+    float* out = static_cast<float*>(const_cast<void*>(out_f32.data_ptr()));
     for (size_t i = 0; i < numel; ++i) {
         out[i] = (dist(gen) < p[i]) ? 1.0f : 0.0f;
     }
-    return output;
+
+    if (out_dtype == DType::Float32) {
+        return out_f32;
+    }
+    return out_f32.to(out_dtype);
 }
 
 Tensor mps_one_hot_kernel(const Tensor& indices, int64_t num_classes) {

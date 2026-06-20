@@ -69,7 +69,9 @@ void writeBF16(uint element_idx, float val) {
         if (observed == prev) return;
         prev = observed;
     }
-    output_data[word_idx] = desired;
+    // CAS cap exhausted: do NOT fall back to a non-atomic whole-word store,
+    // which would clobber the neighbouring packed BF16 half-word written by a
+    // concurrent invocation. Drop the write instead (matches softmax_bf16.comp).
 }
 
 void main() {

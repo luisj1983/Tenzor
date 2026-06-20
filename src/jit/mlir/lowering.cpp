@@ -288,8 +288,20 @@ auto extract_scalar_value(const ::tenzor::Tensor& t) -> double {
     switch (cpu.dtype()) {
         case DType::Float32:    return static_cast<double>(cpu.item<float>());
         case DType::Float64:    return cpu.item<double>();
+        case DType::Float16:
+            return static_cast<double>(
+                static_cast<float>(cpu.item<::tenzor::Float16>()));
+        case DType::BFloat16:
+            return static_cast<double>(
+                static_cast<float>(cpu.item<::tenzor::BFloat16>()));
+        case DType::Int8:       return static_cast<double>(cpu.item<int8_t>());
+        case DType::Int16:      return static_cast<double>(cpu.item<int16_t>());
         case DType::Int32:      return static_cast<double>(cpu.item<int32_t>());
         case DType::Int64:      return static_cast<double>(cpu.item<int64_t>());
+        case DType::UInt8:      return static_cast<double>(cpu.item<uint8_t>());
+        case DType::UInt16:     return static_cast<double>(cpu.item<uint16_t>());
+        case DType::UInt32:     return static_cast<double>(cpu.item<uint32_t>());
+        case DType::UInt64:     return static_cast<double>(cpu.item<uint64_t>());
         case DType::Bool:       return cpu.item<bool>() ? 1.0 : 0.0;
         default:
             throw std::runtime_error(
@@ -330,6 +342,13 @@ auto render_one(std::ostream& os, T v) -> void {
             return;
         }
         os << std::scientific << std::setprecision(9) << d;
+    } else if constexpr (std::is_unsigned_v<T>) {
+        // Unsigned integer payloads: print as unsigned so the full range
+        // (including UInt64 values with the high bit set) renders as a
+        // non-negative literal, which MLIR requires for unsigned element
+        // types. A signed cast would emit a negative literal and fail
+        // iree-compile verification.
+        os << static_cast<unsigned long long>(v);
     } else {
         os << static_cast<long long>(v);
     }
@@ -384,11 +403,41 @@ auto emit_tensor_constant(std::ostream& body, LoweringContext& ctx,
                     case DType::Float64:
                         render_one(payload, cpu.data<double>()[flat_idx++]);
                         break;
+                    case DType::Float16:
+                        // Widen the half to float; render_one emits a decimal
+                        // float literal which MLIR accepts for an f16 element
+                        // type (precision is bounded by scalar_literal's
+                        // round-trip rationale for half types).
+                        render_one(payload, static_cast<float>(
+                            cpu.data<::tenzor::Float16>()[flat_idx++]));
+                        break;
+                    case DType::BFloat16:
+                        render_one(payload, static_cast<float>(
+                            cpu.data<::tenzor::BFloat16>()[flat_idx++]));
+                        break;
+                    case DType::Int8:
+                        render_one(payload, cpu.data<int8_t>()[flat_idx++]);
+                        break;
+                    case DType::Int16:
+                        render_one(payload, cpu.data<int16_t>()[flat_idx++]);
+                        break;
                     case DType::Int32:
                         render_one(payload, cpu.data<int32_t>()[flat_idx++]);
                         break;
                     case DType::Int64:
                         render_one(payload, cpu.data<int64_t>()[flat_idx++]);
+                        break;
+                    case DType::UInt8:
+                        render_one(payload, cpu.data<uint8_t>()[flat_idx++]);
+                        break;
+                    case DType::UInt16:
+                        render_one(payload, cpu.data<uint16_t>()[flat_idx++]);
+                        break;
+                    case DType::UInt32:
+                        render_one(payload, cpu.data<uint32_t>()[flat_idx++]);
+                        break;
+                    case DType::UInt64:
+                        render_one(payload, cpu.data<uint64_t>()[flat_idx++]);
                         break;
                     case DType::Bool: {
                         // MLIR `dense<>` Bool payloads use 'true'/'false'
@@ -1280,6 +1329,20 @@ auto handle_slice(LoweringContext& ctx,
     const auto out_shape = out_val->shape();
     const int64_t rank = static_cast<int64_t>(in_shape.size());
 
+    // Normalize a Python/torch-style index (which may be negative or refer
+    // past the end) against the dimension extent, matching Tensor::slice in
+    // src/core/tensor.cpp: a negative index is offset by `extent`, then the
+    // result is clamped to [0, extent]. stablehlo.slice requires
+    // non-negative, in-bounds start/limit indices, so the raw negative
+    // values recorded in the trace (e.g. x[..., :-1] → end=-1) must be
+    // resolved here before emission.
+    auto normalize_index = [](int64_t idx, int64_t extent) -> int64_t {
+        if (idx < 0) idx += extent;
+        if (idx < 0) idx = 0;
+        if (idx > extent) idx = extent;
+        return idx;
+    };
+
     std::vector<int64_t> starts(rank, 0), limits = in_shape, strides(rank, 1);
     if (node.has_attr("starts") && node.has_attr("ends")) {
         auto sv = node.get_vec_attr("starts");
@@ -1290,14 +1353,16 @@ auto handle_slice(LoweringContext& ctx,
                 "GraphToMLIR: Slice starts/ends must have rank entries");
         }
         for (int64_t i = 0; i < rank; ++i) {
-            starts[i]  = sv[i];
-            limits[i]  = ev[i];
+            starts[i]  = normalize_index(sv[i], in_shape[i]);
+            limits[i]  = normalize_index(ev[i], in_shape[i]);
         }
     } else if (node.has_attr("dim")) {
         // Per-dim slice form: dim + start + end (+ optional step).
         const int64_t dim = normalize_dim(node.get_int_attr("dim"), rank);
-        starts[dim] = get_attr_int(node, {"start"}, 0);
-        limits[dim] = get_attr_int(node, {"end"},   in_shape[dim]);
+        starts[dim] = normalize_index(get_attr_int(node, {"start"}, 0),
+                                      in_shape[dim]);
+        limits[dim] = normalize_index(get_attr_int(node, {"end"}, in_shape[dim]),
+                                      in_shape[dim]);
         strides[dim] = get_attr_int(node, {"step"}, 1);
     } else {
         // Fall back to inferring from output shape — start=0, stride=1.

@@ -346,6 +346,13 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
         // snapshots, state_dict checks) continue to see the user-set
         // dtype.
         this->to(DType::Float32);
+        // Restore the user-set dtype on ANY exit path (including if
+        // forward_impl throws); otherwise the module is left stuck in Float32.
+        struct DtypeRestore {
+            YOLOv3* self;
+            DType dt;
+            ~DtypeRestore() { self->to(dt); }
+        } restore_guard{this, in_dtype};
         // Use autograd-aware casts so the Float32 forward stays attached
         // to the input Variable and the Float16 output stays attached to
         // the Float32 forward's grad_fn chain. A raw `Variable(t.to(...))`
@@ -354,7 +361,6 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
         // reporting 0 / N parameters with gradients).
         Variable f32_input = nn::variable_cast(input, DType::Float32);
         auto result = forward_impl(f32_input);   // recurse with Float32 input
-        this->to(in_dtype);
         return nn::variable_cast(result, in_dtype);
     }
 
@@ -505,13 +511,24 @@ auto YOLOv3::decode_predictions(const std::vector<Variable>& predictions, int64_
         const auto& anchors = (i == 0) ? anchors_large_ :
                              (i == 1) ? anchors_medium_ : anchors_small_;
 
-        // Create output tensor for decoded boxes: [N, grid_h * grid_w * num_anchors, 4]
+        // Recover the input image height/width for this scale from the grid
+        // dimensions and stride. Using separate width/height is required so
+        // that x coordinates are clamped to the image width and y coordinates
+        // to the image height for non-square inputs (W != H). The scalar
+        // img_size argument (= input height) is retained for API
+        // compatibility but cannot distinguish the two axes on its own.
+        (void)img_size;
+        float img_w = static_cast<float>(grid_w * stride);
+        float img_h = static_cast<float>(grid_h * stride);
+
+        // Create output tensor for decoded boxes directly on CPU; the data is
+        // produced on the host below and only moved to pred.device() once at
+        // the end, so a device-side allocation here would be unused.
         int64_t num_boxes = grid_h * grid_w * num_anchors;
-        Tensor boxes = Tensor({N, num_boxes, 4}, DType::Float32, pred.device());
+        Tensor boxes_cpu = Tensor({N, num_boxes, 4}, DType::Float32, Device::cpu());
 
         // Convert prediction to Float32 on CPU for data extraction
         auto pred_cpu = pred.to(Device::cpu()).to(DType::Float32);
-        auto boxes_cpu = boxes.to(Device::cpu());
 
         // Get raw prediction data
         const float* pred_data = pred_cpu.data<float>();
@@ -557,11 +574,11 @@ auto YOLOv3::decode_predictions(const std::vector<Variable>& predictions, int64_
                         float x2 = bx + bw / 2.0f;
                         float y2 = by + bh / 2.0f;
 
-                        // Clamp to image boundaries
-                        x1 = std::max(0.0f, std::min(x1, static_cast<float>(img_size)));
-                        y1 = std::max(0.0f, std::min(y1, static_cast<float>(img_size)));
-                        x2 = std::max(0.0f, std::min(x2, static_cast<float>(img_size)));
-                        y2 = std::max(0.0f, std::min(y2, static_cast<float>(img_size)));
+                        // Clamp to image boundaries: x to width, y to height
+                        x1 = std::max(0.0f, std::min(x1, img_w));
+                        y1 = std::max(0.0f, std::min(y1, img_h));
+                        x2 = std::max(0.0f, std::min(x2, img_w));
+                        y2 = std::max(0.0f, std::min(y2, img_h));
 
                         // Write to output
                         int64_t out_offset = (b * num_boxes + box_idx) * 4;
@@ -1206,13 +1223,24 @@ auto YOLOv5::decode_predictions(const std::vector<Variable>& predictions, int64_
         const auto& anchors = (i == 0) ? anchors_p3_ :
                               (i == 1) ? anchors_p4_ : anchors_p5_;
 
-        // Create output tensor for decoded boxes: [N, grid_h * grid_w * num_anchors, 4]
+        // Recover the input image height/width for this scale from the grid
+        // dimensions and stride. Using separate width/height is required so
+        // that x coordinates are clamped to the image width and y coordinates
+        // to the image height for non-square inputs (W != H). The scalar
+        // img_size argument (= input height) is retained for API
+        // compatibility but cannot distinguish the two axes on its own.
+        (void)img_size;
+        float img_w = static_cast<float>(grid_w * stride);
+        float img_h = static_cast<float>(grid_h * stride);
+
+        // Create output tensor for decoded boxes directly on CPU; the data is
+        // produced on the host below and only moved to pred.device() once at
+        // the end, so a device-side allocation here would be unused.
         int64_t num_boxes = grid_h * grid_w * num_anchors;
-        Tensor boxes = Tensor({N, num_boxes, 4}, DType::Float32, pred.device());
+        Tensor boxes_cpu = Tensor({N, num_boxes, 4}, DType::Float32, Device::cpu());
 
         // Convert prediction to Float32 on CPU for data extraction
         auto pred_cpu = pred.to(Device::cpu()).to(DType::Float32);
-        auto boxes_cpu = boxes.to(Device::cpu());
 
         // Get raw prediction data
         const float* pred_data = pred_cpu.data<float>();
@@ -1257,11 +1285,11 @@ auto YOLOv5::decode_predictions(const std::vector<Variable>& predictions, int64_
                         float x2 = bx + bw / 2.0f;
                         float y2 = by + bh / 2.0f;
 
-                        // Clamp to image boundaries
-                        x1 = std::max(0.0f, std::min(x1, static_cast<float>(img_size)));
-                        y1 = std::max(0.0f, std::min(y1, static_cast<float>(img_size)));
-                        x2 = std::max(0.0f, std::min(x2, static_cast<float>(img_size)));
-                        y2 = std::max(0.0f, std::min(y2, static_cast<float>(img_size)));
+                        // Clamp to image boundaries: x to width, y to height
+                        x1 = std::max(0.0f, std::min(x1, img_w));
+                        y1 = std::max(0.0f, std::min(y1, img_h));
+                        x2 = std::max(0.0f, std::min(x2, img_w));
+                        y2 = std::max(0.0f, std::min(y2, img_h));
 
                         // Write to output
                         int64_t out_offset = (b * num_boxes + box_idx) * 4;

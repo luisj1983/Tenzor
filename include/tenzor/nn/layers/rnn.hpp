@@ -56,10 +56,18 @@ public:
      * @param hidden_size Size of hidden state
      * @param nonlinearity Activation function ("tanh" or "relu", default: "tanh")
      * @param bias If true, add learnable bias (default: true)
+     * @param activation_alpha Alpha parameter for parameterized activations
+     *        (currently ScaledTanh: alpha*tanh(beta*x)). Defaults to the LeCun
+     *        scaled-tanh preset. The ONNX importer passes the node's
+     *        activation_alpha so imported graphs match the exporter.
+     * @param activation_beta Beta parameter for parameterized activations
+     *        (see activation_alpha).
      */
     RNNCell(int64_t input_size, int64_t hidden_size,
             const std::string& nonlinearity = "tanh",
-            bool bias = true);
+            bool bias = true,
+            double activation_alpha = 1.7159,
+            double activation_beta = 2.0 / 3.0);
 
     /**
      * @brief Forward pass through RNN cell.
@@ -100,6 +108,8 @@ private:
     int64_t input_size_;
     int64_t hidden_size_;
     std::string nonlinearity_;
+    double activation_alpha_;  ///< Alpha for parameterized activations (ScaledTanh)
+    double activation_beta_;   ///< Beta for parameterized activations (ScaledTanh)
     std::shared_ptr<Linear> input_layer_;   ///< W_ih and b_ih
     std::shared_ptr<Linear> hidden_layer_;  ///< W_hh and b_hh
 };
@@ -145,6 +155,13 @@ public:
      * @param batch_first If true, input is (batch, seq_len, features) (default: false)
      * @param dropout Dropout probability between layers (default: 0.0)
      * @param bidirectional If true, process sequence in both directions (default: false)
+     * @param activation_alpha Alpha for the forward-direction parameterized
+     *        activation (ScaledTanh). Defaults to the LeCun preset.
+     * @param activation_beta Beta for the forward-direction parameterized
+     *        activation (ScaledTanh).
+     * @param activation_alpha_bwd Alpha for the backward-direction activation
+     *        (bidirectional only). Used when nonlinearity_bwd is specified.
+     * @param activation_beta_bwd Beta for the backward-direction activation.
      */
     RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers = 1,
         const std::string& nonlinearity = "tanh",
@@ -153,7 +170,11 @@ public:
         // Optional separate activation for backward-direction cells when
         // bidirectional. Empty string → reuse `nonlinearity`. ONNX RNN
         // exports may specify a different activation per direction.
-        const std::string& nonlinearity_bwd = "");
+        const std::string& nonlinearity_bwd = "",
+        double activation_alpha = 1.7159,
+        double activation_beta = 2.0 / 3.0,
+        double activation_alpha_bwd = 1.7159,
+        double activation_beta_bwd = 2.0 / 3.0);
 
     /**
      * @brief Forward pass through RNN.

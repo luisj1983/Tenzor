@@ -157,12 +157,21 @@ public:
      * here (rather than having it capture a shared_ptr back to this state)
      * avoids a self-referential ownership cycle.
      *
+     * @note Execution context: if the state is NOT yet ready the callback runs
+     * later on whichever thread satisfies the promise (the producer thread). If
+     * the state is ALREADY ready when add_continuation()/then() is called, the
+     * callback runs synchronously and inline on the registering (calling)
+     * thread. Callers must therefore not hold locks that the continuation might
+     * also acquire, to avoid reentrant deadlock. This library has no general
+     * executor/thread-pool to defer onto, so inline execution is intentional.
+     *
      * @param callback Function to call when ready
      */
     void add_continuation(std::function<void(SharedState*)> callback) {
         std::unique_lock lock(mutex_);
         if (ready_) {
-            // Already ready, execute immediately
+            // Already ready: execute immediately on the calling thread (see the
+            // execution-context note above).
             lock.unlock();
             callback(this);
         } else {
@@ -176,8 +185,30 @@ private:
         auto callbacks = std::move(continuations_);
         lock.unlock();
 
+        // Each callback must be invoked under its own try/catch(...). This
+        // serves two purposes:
+        //  1. execute_continuations() is reachable from break_if_pending(),
+        //     which runs from ~SharedState()/~Promise(). Destructors are
+        //     implicitly noexcept, so an exception escaping a continuation
+        //     here would call std::terminate. A then()-generated continuation
+        //     can throw: its own catch handler calls set_exception() on the
+        //     downstream state, and set_exception()/set_value() throw if that
+        //     state is already satisfied (diamond/fan-out chains or racing
+        //     destruction).
+        //  2. continuations_ has already been moved out, so a throw that
+        //     escaped the loop would permanently drop callbacks N+1..end,
+        //     leaving their downstream states unsatisfied and any get()/wait()
+        //     waiters blocked forever. Swallowing here keeps the documented
+        //     fan-out guarantee that every continuation runs exactly once.
         for (auto& callback : callbacks) {
-            callback(this);
+            try {
+                callback(this);
+            } catch (...) {
+                // A continuation already routes user-callback exceptions into
+                // its own downstream promise; anything reaching here is a
+                // secondary failure (e.g. an already-satisfied downstream).
+                // It must not escape or abort the remaining continuations.
+            }
         }
     }
 
@@ -361,8 +392,16 @@ public:
                     promise->set_value(std::move(result));
                 }
             } catch (...) {
-                // Propagate exception to next future
-                promise->set_exception(std::current_exception());
+                // Propagate exception to next future. Guard against the
+                // downstream state already being satisfied (e.g. diamond/
+                // fan-out chains or racing destruction): set_exception() throws
+                // in that case, and this catch block sits outside the try, so
+                // an unguarded throw here would escape execute_continuations().
+                try {
+                    promise->set_exception(std::current_exception());
+                } catch (...) {
+                    // Downstream already satisfied/broken; nothing more to do.
+                }
             }
         });
 
@@ -479,9 +518,16 @@ public:
         return ready_.load();
     }
 
+    /**
+     * @note Execution context matches SharedState<T>::add_continuation: a
+     * callback registered on an already-ready state runs synchronously on the
+     * calling thread; otherwise it runs on the thread that satisfies the
+     * promise. Callers must not hold locks the continuation may also acquire.
+     */
     void add_continuation(std::function<void(SharedState*)> callback) {
         std::unique_lock lock(mutex_);
         if (ready_) {
+            // Already ready: execute immediately on the calling thread.
             lock.unlock();
             callback(this);
         } else {
@@ -495,8 +541,17 @@ private:
         auto callbacks = std::move(continuations_);
         lock.unlock();
 
+        // See the SharedState<T> overload for the full rationale: each callback
+        // is guarded so a throwing continuation can neither escape a noexcept
+        // destructor (-> std::terminate) nor abort the loop and leave later
+        // chained futures permanently unsatisfied.
         for (auto& callback : callbacks) {
-            callback(this);
+            try {
+                callback(this);
+            } catch (...) {
+                // Secondary failure (e.g. an already-satisfied downstream).
+                // Must not escape or abort the remaining continuations.
+            }
         }
     }
 
@@ -577,7 +632,14 @@ public:
                     promise->set_value(std::move(result));
                 }
             } catch (...) {
-                promise->set_exception(std::current_exception());
+                // Guard against an already-satisfied downstream (see the
+                // SharedState<T>::then overload): set_exception() can throw and
+                // this catch is outside the try, so it must not escape.
+                try {
+                    promise->set_exception(std::current_exception());
+                } catch (...) {
+                    // Downstream already satisfied/broken; nothing more to do.
+                }
             }
         });
 

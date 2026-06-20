@@ -972,6 +972,16 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
 
     int64_t ndim = shape.size();
+
+    // Defensive: normalize negative dim and range-check. The public op in
+    // src/ops/transform.cpp also normalizes, but the kernel is reachable
+    // directly via dispatch<OpId::RepeatInterleave>(...) and a direct caller
+    // must not cause OOB reads on shape (mirrors slice_kernel).
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("repeat_interleave_scalar_kernel: dim out of range");
+    }
+
     int64_t dim_size = shape[dim];
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
@@ -1015,11 +1025,32 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
 
     int64_t ndim = shape.size();
+
+    // Defensive: normalize negative dim and range-check. The public op in
+    // src/ops/transform.cpp also normalizes, but the kernel is reachable
+    // directly via dispatch<OpId::RepeatInterleave>(...) and a direct caller
+    // must not cause OOB reads on shape (mirrors slice_kernel).
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("repeat_interleave_tensor_kernel: dim out of range");
+    }
+
     int64_t dim_size = shape[dim];
 
     // Compute total output size along dim from repeats tensor
     // repeats must be on CPU and Int64 or Int32
     auto repeats_cont = repeats_tensor.is_contiguous() ? repeats_tensor : repeats_tensor.contiguous();
+
+    // Defensive: the loops below read repeats_cont entries for i in [0, dim_size).
+    // The public op validates repeats.shape()[0] == dim_size, but a direct
+    // dispatch with a shorter repeats tensor would cause an OOB heap read.
+    if (repeats_cont.numel() < dim_size) {
+        throw std::runtime_error(
+            "repeat_interleave_tensor_kernel: repeats tensor length (" +
+            std::to_string(repeats_cont.numel()) +
+            ") is smaller than input dimension size (" +
+            std::to_string(dim_size) + ")");
+    }
 
     // Read repeats into a vector and compute prefix sums
     std::vector<int64_t> reps(dim_size);

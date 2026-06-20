@@ -19,6 +19,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace tenzor {
@@ -215,6 +216,12 @@ auto nchw_to_nhwc(const Tensor& input, cudaStream_t stream) -> Tensor {
             input.data<double>(), output.data<double>(),
             batch, channels, height, width
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<BFloat16>, total);
+        nchw_to_nhwc_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
+            input.data<BFloat16>(), output.data<BFloat16>(),
+            batch, channels, height, width
+        );
     } else {
         throw std::runtime_error("nchw_to_nhwc: unsupported dtype");
     }
@@ -311,6 +318,12 @@ auto filter_nchw_to_nhwc(const Tensor& weight, cudaStream_t stream) -> Tensor {
         auto [grid_size, block_size] = optimal_launch_config(filter_nchw_to_nhwc_kernel<double>, total);
         filter_nchw_to_nhwc_kernel<double><<<grid_size, block_size, 0, stream>>>(
             weight.data<double>(), output.data<double>(),
+            out_channels, in_channels, kernel_h, kernel_w
+        );
+    } else if (weight.dtype() == DType::BFloat16) {
+        auto [grid_size, block_size] = optimal_launch_config(filter_nchw_to_nhwc_kernel<BFloat16>, total);
+        filter_nchw_to_nhwc_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
+            weight.data<BFloat16>(), output.data<BFloat16>(),
             out_channels, in_channels, kernel_h, kernel_w
         );
     } else {
@@ -1294,6 +1307,15 @@ auto cudnn_conv2d_backward(
                                 !::tenzor::cuda::matmul::allow_tf32()
     };
 
+    // Same precise-FP32 source of truth as the forward path and Conv3d backward:
+    // an FP32 input with TF32 disabled wants Winograd excluded from the bwd-data
+    // and bwd-filter algorithm selection so the backward accumulator order matches
+    // the implicit-GEMM order the other backends use and stays inside the tight
+    // Float32 parity tolerance.
+    const bool prefer_precise_f32 =
+        (cudnn_dtype == CUDNN_DATA_FLOAT) &&
+        !::tenzor::cuda::matmul::allow_tf32();
+
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
@@ -1332,6 +1354,13 @@ auto cudnn_conv2d_backward(
             for (int i = 0; i < returned_algo_count; ++i) {
                 if (perf_results[i].status == CUDNN_STATUS_SUCCESS &&
                     perf_results[i].memory <= kMaxWorkspaceSize) {
+                    if (prefer_precise_f32) {
+                        cudnnConvolutionBwdDataAlgo_t candidate = perf_results[i].algo;
+                        if (candidate == CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD ||
+                            candidate == CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED) {
+                            continue;
+                        }
+                    }
                     size_t ws_size = 0;
                     cudnnStatus_t ws_status = cudnnGetConvolutionBackwardDataWorkspaceSize(
                         handle,
@@ -1353,7 +1382,11 @@ auto cudnn_conv2d_backward(
             }
 
             if (best_time == std::numeric_limits<float>::max()) {
-                algo = perf_results[0].algo;
+                // Nothing viable survived. For precise FP32, fall back to the
+                // deterministic ALGO_1 (implicit-GEMM-style, non-Winograd) rather
+                // than perf_results[0], which could be a Winograd variant.
+                algo = prefer_precise_f32 ? CUDNN_CONVOLUTION_BWD_DATA_ALGO_1
+                                          : perf_results[0].algo;
                 CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
                     handle, filter_desc.get(), grad_output_desc.get(),
                     conv_desc.get(), input_desc.get(), algo, &workspace_size
@@ -1471,6 +1504,13 @@ auto cudnn_conv2d_backward(
             for (int i = 0; i < returned_algo_count; ++i) {
                 if (perf_results[i].status == CUDNN_STATUS_SUCCESS &&
                     perf_results[i].memory <= kMaxWorkspaceSize) {
+                    if (prefer_precise_f32) {
+                        cudnnConvolutionBwdFilterAlgo_t candidate = perf_results[i].algo;
+                        if (candidate == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD ||
+                            candidate == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD_NONFUSED) {
+                            continue;
+                        }
+                    }
                     size_t ws_size = 0;
                     cudnnStatus_t ws_status = cudnnGetConvolutionBackwardFilterWorkspaceSize(
                         handle,
@@ -1492,7 +1532,11 @@ auto cudnn_conv2d_backward(
             }
 
             if (best_time == std::numeric_limits<float>::max()) {
-                algo = perf_results[0].algo;
+                // Nothing viable survived. For precise FP32, fall back to the
+                // deterministic ALGO_1 (implicit-GEMM-style, non-Winograd) rather
+                // than perf_results[0], which could be a Winograd variant.
+                algo = prefer_precise_f32 ? CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1
+                                          : perf_results[0].algo;
                 CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
                     handle, input_desc.get(), grad_output_desc.get(),
                     conv_desc.get(), filter_desc.get(), algo, &workspace_size
@@ -2405,6 +2449,114 @@ auto cudnn_conv2d_backward_nhwc(
 
 
 // ============================================================================
+// cuDNN MaxPool2d argmax index kernel
+// ============================================================================
+//
+// cudnnPoolingForward produces only the pooled values, not the argmax indices
+// that return_indices=True / MaxUnpool2d require. This kernel recomputes the
+// flattened H*W argmax for each output element using the SAME deterministic
+// first-occurrence tie-break and index convention (max_idx = h * W + w) as the
+// native cuda::maxpool2d_forward_impl and the CPU reference, so the returned
+// indices are valid and cross-backend consistent. cuDNN MaxPool here uses
+// dilation = 1 (no dilation is set on the pooling descriptor).
+template<typename T>
+__global__ void cudnn_maxpool2d_argmax_kernel(
+    const T* __restrict__ input,
+    int64_t* __restrict__ indices,
+    int64_t N, int64_t C, int64_t H, int64_t W,
+    int64_t H_out, int64_t W_out,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w
+) {
+    const int64_t total = N * C * H_out * W_out;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+
+        int64_t ow = idx % W_out;
+        int64_t oh = (idx / W_out) % H_out;
+        int64_t c  = (idx / (W_out * H_out)) % C;
+        int64_t n  = idx / (W_out * H_out * C);
+
+        int64_t h_start = oh * stride_h - pad_h;
+        int64_t w_start = ow * stride_w - pad_w;
+
+        float max_val = -std::numeric_limits<float>::infinity();
+        int64_t max_idx = 0;
+
+        for (int64_t kh = 0; kh < kernel_h; ++kh) {
+            for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                int64_t h = h_start + kh;
+                int64_t w = w_start + kw;
+                if (h >= 0 && h < H && w >= 0 && w < W) {
+                    int64_t in_idx = ((n * C + c) * H + h) * W + w;
+                    float val;
+                    if constexpr (std::is_same_v<T, __half>) {
+                        val = __half2float(input[in_idx]);
+                    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                        val = __bfloat162float(input[in_idx]);
+                    } else {
+                        val = static_cast<float>(input[in_idx]);
+                    }
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = h * W + w;
+                    }
+                }
+            }
+        }
+        indices[idx] = max_idx;
+    }
+}
+
+// Float64 variant keeps double comparison precision.
+__global__ void cudnn_maxpool2d_argmax_kernel_f64(
+    const double* __restrict__ input,
+    int64_t* __restrict__ indices,
+    int64_t N, int64_t C, int64_t H, int64_t W,
+    int64_t H_out, int64_t W_out,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w
+) {
+    const int64_t total = N * C * H_out * W_out;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+
+        int64_t ow = idx % W_out;
+        int64_t oh = (idx / W_out) % H_out;
+        int64_t c  = (idx / (W_out * H_out)) % C;
+        int64_t n  = idx / (W_out * H_out * C);
+
+        int64_t h_start = oh * stride_h - pad_h;
+        int64_t w_start = ow * stride_w - pad_w;
+
+        double max_val = -std::numeric_limits<double>::infinity();
+        int64_t max_idx = 0;
+
+        for (int64_t kh = 0; kh < kernel_h; ++kh) {
+            for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                int64_t h = h_start + kh;
+                int64_t w = w_start + kw;
+                if (h >= 0 && h < H && w >= 0 && w < W) {
+                    int64_t in_idx = ((n * C + c) * H + h) * W + w;
+                    double val = input[in_idx];
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = h * W + w;
+                    }
+                }
+            }
+        }
+        indices[idx] = max_idx;
+    }
+}
+
+// ============================================================================
 // cuDNN MaxPool2d Forward Implementation
 // ============================================================================
 
@@ -2492,6 +2644,51 @@ auto cudnn_maxpool2d_forward(
             output_desc.get(),
             output.data_ptr()
         ));
+    }
+
+    // cudnnPoolingForward does not emit argmax indices. Recompute them so that
+    // return_indices=True / MaxUnpool2d on the cuDNN CUDA path get valid,
+    // cross-backend-consistent flattened H*W indices (same convention and
+    // first-occurrence tie-break as the native cuda::maxpool2d_forward_impl).
+    {
+        const int64_t total = batch * channels * out_h * out_w;
+        switch (input.dtype()) {
+            case DType::Float32: {
+                auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel<float>, total);
+                cudnn_maxpool2d_argmax_kernel<float><<<grid, block, 0, stream>>>(
+                    input.data<float>(), indices.data<int64_t>(),
+                    batch, channels, height, width, out_h, out_w,
+                    kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
+                break;
+            }
+            case DType::Float64: {
+                auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel_f64, total);
+                cudnn_maxpool2d_argmax_kernel_f64<<<grid, block, 0, stream>>>(
+                    input.data<double>(), indices.data<int64_t>(),
+                    batch, channels, height, width, out_h, out_w,
+                    kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
+                break;
+            }
+            case DType::Float16: {
+                auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel<__half>, total);
+                cudnn_maxpool2d_argmax_kernel<__half><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data<Float16>()), indices.data<int64_t>(),
+                    batch, channels, height, width, out_h, out_w,
+                    kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
+                break;
+            }
+            case DType::BFloat16: {
+                auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel<__nv_bfloat16>, total);
+                cudnn_maxpool2d_argmax_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()), indices.data<int64_t>(),
+                    batch, channels, height, width, out_h, out_w,
+                    kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
+                break;
+            }
+            default:
+                throw std::runtime_error("cuDNN MaxPool2d argmax: unsupported dtype");
+        }
+        CUDA_CHECK(cudaGetLastError());
     }
 
     return {output, indices};
@@ -4588,6 +4785,17 @@ auto cudnn_conv3d_backward(
 
     const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
 
+    // Same precise-FP32 source of truth as the math-type block above and as
+    // cudnn_conv3d_forward: an FP32 input with TF32 disabled wants Winograd
+    // excluded from the bwd-data and bwd-filter algorithm selection too.
+    // CUDNN_FMA_MATH (set above) only suppresses TF32 conversion, not the
+    // algorithmic transform, so without this exclusion cuDNN could still pick
+    // a Winograd backward algorithm whose accumulator order diverges past the
+    // tight Float32 parity tolerance even though the forward stays inside it.
+    const bool prefer_precise_f32 =
+        (cudnn_dtype == CUDNN_DATA_FLOAT) &&
+        !::tenzor::cuda::matmul::allow_tf32();
+
     // Gradient w.r.t. input
     if (compute_grad_input) {
         constexpr int kMaxAlgos = 8;
@@ -4604,6 +4812,15 @@ auto cudnn_conv3d_backward(
 
         for (int i = 0; i < returned_algo_count; ++i) {
             if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+
+            if (prefer_precise_f32) {
+                cudnnConvolutionBwdDataAlgo_t candidate = perf_results[i].algo;
+                if (candidate == CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD ||
+                    candidate == CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED) {
+                    continue;
+                }
+            }
+
             size_t ws_size = 0;
             cudnnStatus_t ws_status = cudnnGetConvolutionBackwardDataWorkspaceSize(
                 handle, filter_desc.desc, grad_output_desc.desc, conv_desc.handle(),
@@ -4617,6 +4834,13 @@ auto cudnn_conv3d_backward(
             }
         }
         if (best_time == std::numeric_limits<float>::max()) {
+            // Nothing viable survived. For precise FP32, fall back to the
+            // deterministic ALGO_1 (implicit-GEMM-style, non-Winograd) rather
+            // than whatever heuristic ordering left in perf_results[0], which
+            // could be a Winograd variant. Mirrors the forward fallback.
+            if (prefer_precise_f32) {
+                algo = CUDNN_CONVOLUTION_BWD_DATA_ALGO_1;
+            }
             CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
                 handle, filter_desc.desc, grad_output_desc.desc, conv_desc.handle(),
                 input_desc.desc, algo, &workspace_size));
@@ -4645,6 +4869,15 @@ auto cudnn_conv3d_backward(
 
         for (int i = 0; i < returned_algo_count; ++i) {
             if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+
+            if (prefer_precise_f32) {
+                cudnnConvolutionBwdFilterAlgo_t candidate = perf_results[i].algo;
+                if (candidate == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD ||
+                    candidate == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD_NONFUSED) {
+                    continue;
+                }
+            }
+
             size_t ws_size = 0;
             cudnnStatus_t ws_status = cudnnGetConvolutionBackwardFilterWorkspaceSize(
                 handle, input_desc.desc, grad_output_desc.desc, conv_desc.handle(),
@@ -4658,6 +4891,13 @@ auto cudnn_conv3d_backward(
             }
         }
         if (best_time == std::numeric_limits<float>::max()) {
+            // Nothing viable survived. For precise FP32, fall back to the
+            // deterministic ALGO_1 (implicit-GEMM-style, non-Winograd) rather
+            // than whatever heuristic ordering left in perf_results[0], which
+            // could be a Winograd variant. Mirrors the forward fallback.
+            if (prefer_precise_f32) {
+                algo = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1;
+            }
             CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
                 handle, input_desc.desc, grad_output_desc.desc, conv_desc.handle(),
                 filter_desc.desc, algo, &workspace_size));

@@ -630,9 +630,13 @@ __global__ void maxpool2d_backward_kernel(
 ) {
     HIP_KERNEL_LOOP(idx, total_elements) {
         // indices store the plane-local argmax (h*W + w); reconstruct the global
-        // input offset by adding the per-(n,c) plane base.
+        // input offset by adding the per-(n,c) plane base. An all-padding window
+        // leaves the argmax at the -1 sentinel (no valid input element); skip it
+        // to avoid an out-of-bounds scatter.
+        int64_t plane_idx = indices[idx];
+        if (plane_idx < 0 || plane_idx >= in_plane) continue;
         int64_t nc = idx / out_plane;
-        int64_t input_idx = nc * in_plane + indices[idx];
+        int64_t input_idx = nc * in_plane + plane_idx;
         atomicAdd(&grad_input[input_idx], grad_output[idx]);
     }
 }
@@ -648,8 +652,11 @@ __global__ void maxpool2d_backward_kernel_fp16(
 ) {
     HIP_KERNEL_LOOP(idx, total_elements) {
         // Plane-local index -> global offset (see maxpool2d_backward_kernel).
+        // Skip the -1 sentinel left by an all-padding window (OOB guard).
+        int64_t plane_idx = indices[idx];
+        if (plane_idx < 0 || plane_idx >= in_plane) continue;
         int64_t nc = idx / out_plane;
-        int64_t input_idx = nc * in_plane + indices[idx];
+        int64_t input_idx = nc * in_plane + plane_idx;
         atomicAdd(&grad_input_f32[input_idx], tenzor::rocm::safe_h2f(grad_output[idx]));
     }
 }
@@ -1183,7 +1190,7 @@ __global__ void adaptive_avgpool2d_kernel(
             }
         }
 
-        output[idx] = sum / static_cast<T>(count);
+        output[idx] = count > 0 ? sum / static_cast<T>(count) : T(0);
     }
 }
 
@@ -1221,7 +1228,7 @@ __global__ void adaptive_avgpool2d_kernel_fp16(
             }
         }
 
-        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(count));
+        output[idx] = tenzor::rocm::safe_f2h(count > 0 ? sum / static_cast<float>(count) : 0.0f);
     }
 }
 
@@ -2385,7 +2392,8 @@ __global__ void adaptive_avgpool1d_forward_kernel(
             sum += input[(n * C + c) * L_in + l];
         }
 
-        output[idx] = sum / static_cast<T>(l_end - l_start);
+        int64_t cnt = l_end - l_start;
+        output[idx] = cnt > 0 ? sum / static_cast<T>(cnt) : T(0);
     }
 }
 
@@ -2409,7 +2417,8 @@ __global__ void adaptive_avgpool1d_forward_kernel_fp16(
             sum += tenzor::rocm::safe_h2f(input[(n * C + c) * L_in + l]);
         }
 
-        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(l_end - l_start));
+        int64_t cnt = l_end - l_start;
+        output[idx] = tenzor::rocm::safe_f2h(cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f);
     }
 }
 

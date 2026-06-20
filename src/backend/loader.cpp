@@ -178,7 +178,23 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
     }
 
     if (cached_result != 0) {
-        // No cache — run fork probe
+        // No cache — run fork probe.
+        //
+        // fork() in a multithreaded process is an async-signal-safety hazard:
+        // only the calling thread survives in the child, and any mutex another
+        // thread held at the fork instant (notably the libc/TBB allocator lock)
+        // remains locked forever in the child. The child then calls factory(),
+        // which allocates/locks, and would deadlock — the parent would SIGKILL
+        // it after probe_timeout and mis-cache a healthy backend as "hung".
+        //
+        // Serialize all probing through a process-wide mutex so that no *other*
+        // tenzor thread is executing the probe path (and thus mid-allocation
+        // under an internal lock) while this thread forks. This directly
+        // addresses the documented concern of many test binaries / threads
+        // initializing backends concurrently.
+        static std::mutex probe_fork_mutex;
+        std::lock_guard<std::mutex> probe_lock(probe_fork_mutex);
+
         pid_t pid = fork();
         if (pid == 0) {
             // Child: try calling the factory. Exit 0 on success, 1 on failure.
@@ -215,8 +231,34 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
 
             if (!child_exited) {
                 kill(pid, SIGKILL);
-                usleep(100000);
-                waitpid(pid, &status, WNOHANG);
+                // Reap the killed child with a bounded polling loop instead of a
+                // single non-blocking waitpid. A child stuck in uninterruptible
+                // (D-state) kernel sleep — the exact scenario this probe targets,
+                // e.g. a wedged hipGetDeviceCount / sycl::platform::get_platforms —
+                // cannot process SIGKILL until it leaves D state, so one WNOHANG
+                // after 100ms returns 0 and leaks the child as a future zombie.
+                // Poll for up to ~2s so the common case (child leaves D state
+                // shortly after the wedged driver call returns) is reaped here.
+                bool reaped = false;
+                for (int i = 0; i < 40; ++i) {        // 40 * 50ms = 2s budget
+                    pid_t r = waitpid(pid, &status, WNOHANG);
+                    if (r == pid) {
+                        reaped = true;
+                        break;
+                    }
+                    if (r < 0) {
+                        // ECHILD: already reaped (e.g. by a SIGCHLD handler).
+                        reaped = true;
+                        break;
+                    }
+                    usleep(50000);  // 50ms
+                }
+                // If still not reaped, the child is in unkillable D state and is
+                // intentionally abandoned: blocking here would defeat the whole
+                // purpose of fork-isolating an unkillable hang. It will become an
+                // unreaped zombie only if/when the kernel eventually releases it,
+                // which is an unavoidable consequence of an unkillable driver call.
+                (void)reaped;
                 write_cache('2');  // hung
                 unload_library(handle);
                 return std::unexpected(

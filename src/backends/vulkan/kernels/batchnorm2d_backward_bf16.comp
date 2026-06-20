@@ -1,6 +1,25 @@
 #version 450
 #extension GL_EXT_shader_atomic_float : enable
 
+// Batch Normalization 2D Backward — Pass 1 for BFloat16.
+//   grad_gamma[c] = sum over (n,h,w) of grad_out * (x - mean)/sqrt(var+eps)
+//   grad_beta[c]  = sum over (n,h,w) of grad_out
+// Pass 2 (batchnorm2d_backward_grad_input_bf16.comp) consumes these per-channel
+// sums to compute grad_input with the correct training-mode batch-norm formula:
+//   grad_in = gamma * invstd * (grad_out - sum_grad/N - normalized*sum_grad_norm/N)
+// with N = batch * spatial_size.
+//
+// The previous single-pass BF16 shader returned only `grad_out * gamma * invstd`,
+// which is the *inference-mode* backward — it dropped the two mean-correction
+// terms required during training. It also accumulated grad_gamma/grad_beta into a
+// 256-wide shared array hashed by channel index, silently dropping every channel
+// >= 256 (e.g. ResNet 512/1024/2048). This pass-1 shader accumulates directly
+// into the per-channel global buffers via atomicAdd, mirroring the corrected F32
+// pass-1 shader (batchnorm2d_backward.comp).
+//
+// Input/grad tensors are packed BF16 (2 elements per 32-bit word).
+// Statistics and parameter gradients are Float32.
+
 // BF16 utility: unpack two bfloat16 values from a uint32 word
 vec2 unpackBF16x2(uint packed) {
     float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
@@ -8,21 +27,6 @@ vec2 unpackBF16x2(uint packed) {
     return vec2(lo, hi);
 }
 
-// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
-uint packBF16x2(vec2 v) {
-    uint b0 = floatBitsToUint(v.x);
-    uint b1 = floatBitsToUint(v.y);
-    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
-    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
-    return bf0 | (bf1 << 16);
-}
-
-// Batch Normalization 2D Backward Pass for BFloat16
-// Input/grad tensors are packed BF16 (2 elements per 32-bit word)
-// Statistics and parameter gradients are Float32
-//
-// Each thread processes a pair of BF16 elements (one 32-bit word) to avoid
-// race conditions when writing packed data.
 layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
@@ -30,8 +34,8 @@ layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed BF16 
 layout(binding = 1) buffer Input { uint input_data[]; };          // Packed BF16 (N, C, H, W)
 layout(binding = 2) buffer Mean { float mean_data[]; };           // (C) Float32
 layout(binding = 3) buffer InvStd { float invstd_data[]; };        // (C) Float32 - pre-computed 1/sqrt(var+eps)
-layout(binding = 4) buffer Gamma { float gamma_data[]; };         // (C) Float32
-layout(binding = 5) buffer GradInput { uint grad_input[]; };      // Packed BF16 (N, C, H, W)
+layout(binding = 4) buffer Gamma { float gamma_data[]; };         // (C) Float32 - unused in pass 1
+layout(binding = 5) buffer GradInput { uint grad_input[]; };      // written in pass 2
 layout(binding = 6) buffer GradGamma { float grad_gamma[]; };     // (C) Float32 - accumulated atomically
 layout(binding = 7) buffer GradBeta { float grad_beta[]; };       // (C) Float32 - accumulated atomically
 
@@ -44,123 +48,45 @@ layout(push_constant) uniform PushConstants {
     uint has_gamma;
 } params;
 
-// Unpack a 32-bit word containing two BF16 values
-vec2 unpackBF16Pair(uint packed) {
-    float lo = unpackBF16x2(packed).x;
-    float hi = unpackBF16x2(packed >> 16).x;
-    return vec2(lo, hi);
-}
-
-// Helper to pack two bfloat16 values (round-to-nearest-even)
-uint packBF16Pair(float v0, float v1) {
-    uint b0 = floatBitsToUint(v0);
-    uint b1 = floatBitsToUint(v1);
-    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
-    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
-    return bf0 | (bf1 << 16);
-}
-
-shared float s_grad_gamma[WORKGROUP_SIZE];
-shared float s_grad_beta[WORKGROUP_SIZE];
-
-// Process a single element and return (grad_input, grad_gamma_contrib, grad_beta_contrib)
-vec3 processElement(uint flat_idx, uint word_idx, uint half_idx) {
+// Accumulate one element's grad_gamma/grad_beta contribution into the global
+// per-channel buffers. half_idx selects which BF16 lane of the packed word.
+void accumulateElement(uint flat_idx, uint word_idx, uint half_idx) {
     // Decode to get channel
     uint temp = flat_idx;
-    uint w = temp % params.spatial_size;
     temp /= params.spatial_size;
     uint c = temp % params.channels;
 
-    // Read input and grad_output
+    // Read input and grad_output (packed BF16)
     uint packed_x = input_data[word_idx];
     uint packed_grad = grad_output[word_idx];
-    float x = (half_idx == 0) ? unpackBF16x2(packed_x).x : unpackBF16x2(packed_x >> 16).x;
-    float grad_out = (half_idx == 0) ? unpackBF16x2(packed_grad).x : unpackBF16x2(packed_grad >> 16).x;
+    float x = (half_idx == 0u) ? unpackBF16x2(packed_x).x : unpackBF16x2(packed_x >> 16).x;
+    float grad_out = (half_idx == 0u) ? unpackBF16x2(packed_grad).x : unpackBF16x2(packed_grad >> 16).x;
 
     float mean = mean_data[c];
     float inv_std = invstd_data[c];
+    float normalized = (x - mean) * inv_std;
 
-    float x_normalized = (x - mean) * inv_std;
-    float grad_x_normalized = grad_out;
-    if (params.has_gamma != 0) {
-        grad_x_normalized = grad_out * gamma_data[c];
-    }
-
-    float grad_in = grad_x_normalized * inv_std;
-    float grad_gamma_contrib = grad_out * x_normalized;
-    float grad_beta_contrib = grad_out;
-
-    return vec3(grad_in, grad_gamma_contrib, grad_beta_contrib);
+    // Accumulate directly into the per-channel global buffers. Collisions are
+    // resolved by atomicAdd; this trades throughput for correctness vs the old
+    // shared-memory path that bounded c < 256 and dropped writes for higher
+    // channels.
+    atomicAdd(grad_gamma[c], grad_out * normalized);
+    atomicAdd(grad_beta[c],  grad_out);
 }
 
 void main() {
-    uint local_id = gl_LocalInvocationID.x;
-
-    // Initialize shared memory
-    if (local_id < params.channels && local_id < 256) {
-        s_grad_gamma[local_id] = 0.0;
-        s_grad_beta[local_id] = 0.0;
-    }
-    barrier();
-
-    // Each thread processes one 32-bit word (2 BF16 elements)
+    // Each thread processes one 32-bit word (2 BF16 elements).
     uint word_idx = gl_GlobalInvocationID.x;
-    uint num_words = (params.n_elements + 1) / 2;
+    uint num_words = (params.n_elements + 1u) / 2u;
+    if (word_idx >= num_words) return;
 
-    float result0 = 0.0;
-    float result1 = 0.0;
+    uint elem0 = word_idx * 2u;
+    uint elem1 = word_idx * 2u + 1u;
 
-    if (word_idx < num_words) {
-        uint elem0 = word_idx * 2;
-        uint elem1 = word_idx * 2 + 1;
-
-        // Process first element
-        if (elem0 < params.n_elements) {
-            vec3 res = processElement(elem0, word_idx, 0);
-            result0 = res.x;
-
-            // Get channel for atomic accumulation
-            uint temp = elem0;
-            uint w = temp % params.spatial_size;
-            temp /= params.spatial_size;
-            uint c = temp % params.channels;
-            if (c < 256) {
-                atomicAdd(s_grad_gamma[c], res.y);
-                atomicAdd(s_grad_beta[c], res.z);
-            }
-        }
-
-        // Process second element
-        if (elem1 < params.n_elements) {
-            vec3 res = processElement(elem1, word_idx, 1);
-            result1 = res.x;
-
-            // Get channel for atomic accumulation
-            uint temp = elem1;
-            uint w = temp % params.spatial_size;
-            temp /= params.spatial_size;
-            uint c = temp % params.channels;
-            if (c < 256) {
-                atomicAdd(s_grad_gamma[c], res.y);
-                atomicAdd(s_grad_beta[c], res.z);
-            }
-        }
-
-        // Write both elements as a single word - no race condition
-        grad_input[word_idx] = packBF16Pair(result0, result1);
+    if (elem0 < params.n_elements) {
+        accumulateElement(elem0, word_idx, 0u);
     }
-
-    barrier();
-
-    // Accumulate shared memory to global memory
-    if (local_id == 0) {
-        for (uint i = 0; i < params.channels && i < 256; i++) {
-            if (s_grad_gamma[i] != 0.0) {
-                atomicAdd(grad_gamma[i], s_grad_gamma[i]);
-            }
-            if (s_grad_beta[i] != 0.0) {
-                atomicAdd(grad_beta[i], s_grad_beta[i]);
-            }
-        }
+    if (elem1 < params.n_elements) {
+        accumulateElement(elem1, word_idx, 1u);
     }
 }

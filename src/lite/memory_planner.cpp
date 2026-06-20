@@ -8,6 +8,7 @@
 #include "tenzor/core/dtype.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <unordered_set>
 
@@ -21,15 +22,27 @@ inline auto round_up(uint64_t n, uint64_t align) -> uint64_t {
 }
 
 // Per-tensor byte size from its declared shape × dtype size. Returns 0 for
-// scalar/unset tensors (those don't need a pool slot).
+// scalar/unset tensors (those don't need a pool slot). Returns UINT64_MAX as a
+// saturating sentinel when the element count or byte size overflows uint64, so
+// an overflowing tensor is never assigned a bogus small slot (mirrors the
+// overflow-checked sizing in runtime.cpp's MMPL load validator).
 auto bytes_of(const TensorValue& tv) -> uint64_t {
     if (tv.shape.empty()) return 0;
     uint64_t n = 1;
     for (int64_t d : tv.shape) {
         if (d <= 0) return 0;  // dynamic dim — defer to runtime alloc
-        n *= static_cast<uint64_t>(d);
+        uint64_t prod = 0;
+        if (__builtin_mul_overflow(n, static_cast<uint64_t>(d), &prod)) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        n = prod;
     }
-    return n * static_cast<uint64_t>(dtype_size(tv.dtype));
+    uint64_t bytes = 0;
+    if (__builtin_mul_overflow(n, static_cast<uint64_t>(dtype_size(tv.dtype)),
+                               &bytes)) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return bytes;
 }
 
 // A working record for the planner.

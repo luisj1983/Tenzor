@@ -1,0 +1,55 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Quantile (Float64) — interpolated quantile along a dimension
+// Each invocation handles one slice. Sorts the slice in a scratch buffer,
+// then performs linear interpolation. Float64 variant preserves precision and
+// tie ordering relative to the CPU Float64 reference (vs. promoting to F32).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { float64_t input_data[]; };
+layout(binding = 1) writeonly buffer Output { float64_t output_data[]; };
+// Binding 2: scratch buffer for sorting (dim_size doubles per slice)
+layout(binding = 2)          buffer Scratch { float64_t scratch_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_slices;
+    uint dim_size;
+    uint inner_size;
+    float q;             // quantile value in [0, 1]
+} params;
+
+void main() {
+    uint slice_idx = gl_GlobalInvocationID.x;
+    if (slice_idx >= params.total_slices) return;
+
+    uint outer_idx = slice_idx / params.inner_size;
+    uint inner_idx = slice_idx % params.inner_size;
+    uint base = outer_idx * params.dim_size * params.inner_size + inner_idx;
+
+    // Copy slice into scratch buffer
+    uint scratch_base = slice_idx * params.dim_size;
+    for (uint i = 0; i < params.dim_size; i++) {
+        scratch_data[scratch_base + i] = input_data[base + i * params.inner_size];
+    }
+
+    // Simple insertion sort (works well for moderate dim_size)
+    for (uint i = 1; i < params.dim_size; i++) {
+        float64_t key = scratch_data[scratch_base + i];
+        int j = int(i) - 1;
+        while (j >= 0 && scratch_data[scratch_base + uint(j)] > key) {
+            scratch_data[scratch_base + uint(j) + 1] = scratch_data[scratch_base + uint(j)];
+            j--;
+        }
+        scratch_data[scratch_base + uint(j) + 1] = key;
+    }
+
+    // Linear interpolation (interpolation position computed in double)
+    float64_t pos = float64_t(params.q) * float64_t(params.dim_size - 1);
+    uint lo = uint(pos);
+    uint hi = min(lo + 1, params.dim_size - 1);
+    float64_t frac = pos - float64_t(lo);
+
+    output_data[slice_idx] = scratch_data[scratch_base + lo] * (1.0LF - frac)
+                           + scratch_data[scratch_base + hi] * frac;
+}

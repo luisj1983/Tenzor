@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <cstdint>
+#include <limits>
 #include <vector>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -137,7 +138,7 @@ public:
         // this returns a buffer allocated on the device the cuDNN op runs on.
         int device = 0;
         cudaGetDevice(&device);
-        static thread_local CuDNNWorkspace instance;
+        CuDNNWorkspace& instance = self();
         if (device != instance.device_ || required_size > instance.size_) {
             instance.resize(required_size, device);
         }
@@ -145,8 +146,11 @@ public:
     }
 
     static size_t current_size() {
-        static thread_local CuDNNWorkspace instance;
-        return instance.size_;
+        // Route through the same single thread_local instance as get() so the
+        // reported size reflects the buffer get() actually allocated. Declaring
+        // a separate function-local static here would observe a distinct object
+        // whose size_ is always 0.
+        return self().size_;
     }
 
     // Get maximum workspace size for algorithm search
@@ -177,6 +181,15 @@ public:
 
 private:
     CuDNNWorkspace() : buffer_(nullptr), size_(0), device_(-1) {}
+
+    // Single per-thread workspace instance shared by every static accessor
+    // (get()/current_size()). Routing through one accessor guarantees they all
+    // observe the same thread_local object; declaring separate function-local
+    // statics would create distinct objects and report stale/zero state.
+    static CuDNNWorkspace& self() {
+        static thread_local CuDNNWorkspace instance;
+        return instance;
+    }
 
     ~CuDNNWorkspace() {
         if (buffer_) {
@@ -449,28 +462,35 @@ public:
 
     cudnnTensorDescriptor_t get() const { return desc_; }
 
-    // Set tensor descriptor in NCHW format (default)
-    void set(cudnnDataType_t dtype, int n, int c, int h, int w) {
+    // Set tensor descriptor in NCHW format (default).
+    // Dimensions are taken as int64_t (tensor shapes are int64_t) and
+    // range-checked before the narrowing required by cuDNN's 4D descriptor API,
+    // which only accepts `int`. A dimension that does not fit in `int` cannot be
+    // represented by the 4D path at all, so we throw rather than silently
+    // truncate to a wrong/negative descriptor.
+    void set(cudnnDataType_t dtype, int64_t n, int64_t c, int64_t h, int64_t w) {
         CUDNN_CHECK(cudnnSetTensor4dDescriptor(
             desc_,
             CUDNN_TENSOR_NCHW,
             dtype,
-            n, c, h, w
+            checked_dim(n, "n"), checked_dim(c, "c"),
+            checked_dim(h, "h"), checked_dim(w, "w")
         ));
     }
 
     // Set tensor descriptor in NHWC format (optimized for Tensor Cores)
-    void set_nhwc(cudnnDataType_t dtype, int n, int c, int h, int w) {
+    void set_nhwc(cudnnDataType_t dtype, int64_t n, int64_t c, int64_t h, int64_t w) {
         CUDNN_CHECK(cudnnSetTensor4dDescriptor(
             desc_,
             CUDNN_TENSOR_NHWC,
             dtype,
-            n, c, h, w
+            checked_dim(n, "n"), checked_dim(c, "c"),
+            checked_dim(h, "h"), checked_dim(w, "w")
         ));
     }
 
     // Set tensor descriptor with explicit format
-    void set_format(cudnnDataType_t dtype, int n, int c, int h, int w, TensorFormat format) {
+    void set_format(cudnnDataType_t dtype, int64_t n, int64_t c, int64_t h, int64_t w, TensorFormat format) {
         cudnnTensorFormat_t cudnn_format = (format == TensorFormat::NHWC)
             ? CUDNN_TENSOR_NHWC
             : CUDNN_TENSOR_NCHW;
@@ -478,7 +498,8 @@ public:
             desc_,
             cudnn_format,
             dtype,
-            n, c, h, w
+            checked_dim(n, "n"), checked_dim(c, "c"),
+            checked_dim(h, "h"), checked_dim(w, "w")
         ));
     }
 
@@ -509,6 +530,20 @@ public:
     }
 
 private:
+    // Range-check a tensor dimension before narrowing int64_t -> int for the
+    // cuDNN 4D descriptor API. Throws instead of silently truncating a value
+    // that does not fit in `int` (which would yield a wrong/negative descriptor).
+    static int checked_dim(int64_t v, const char* name) {
+        if (v < 0 ||
+            v > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+            throw std::overflow_error(
+                std::string("TensorDescriptor: dimension '") + name +
+                "' = " + std::to_string(v) +
+                " does not fit in int (cuDNN 4D descriptor limit)");
+        }
+        return static_cast<int>(v);
+    }
+
     cudnnTensorDescriptor_t desc_ = nullptr;
 };
 

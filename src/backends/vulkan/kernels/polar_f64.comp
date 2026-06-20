@@ -12,12 +12,59 @@ layout(push_constant) uniform PushConstants {
     uint num_complex;  // Number of complex numbers
 } params;
 
+// Double-precision sin/cos via range reduction + polynomial.
+// Core GLSL has no f64 cos/sin builtin; the prior `float(cos(float(angle)))`
+// shortcut dropped the phase trig to Float32 (~7-digit) precision, so the
+// dedicated _f64 polar path diverged from CPU std::polar (full double) by
+// ~1e-7 and surfaced as Complex128 backend-parity/gradcheck failures. This
+// matches the established double trig used by the Float64 FFT radix kernels.
+const float64_t TWO_OVER_PI_F = 0.6366197723675814lf;
+const float64_t PI_OVER_2_HI = 1.5707963267948966lf;
+const float64_t PI_OVER_2_LO = 6.123233995736766e-17lf;
+
+void trig_reduce_f(float64_t x, out float64_t r, out int q) {
+    float64_t j = floor(x * TWO_OVER_PI_F + 0.5lf);
+    q = int(j) & 3;
+    r = x - j * PI_OVER_2_HI;
+    r = r - j * PI_OVER_2_LO;
+}
+float64_t sin_poly_f(float64_t x) {
+    float64_t x2 = x * x;
+    return x * (1.0lf - x2 * (1.0lf/6.0lf - x2 * (1.0lf/120.0lf - x2 * (1.0lf/5040.0lf - x2 / 362880.0lf))));
+}
+float64_t cos_poly_f(float64_t x) {
+    float64_t x2 = x * x;
+    return 1.0lf - x2 * (0.5lf - x2 * (1.0lf/24.0lf - x2 * (1.0lf/720.0lf - x2 / 40320.0lf)));
+}
+float64_t sin_df(float64_t x) {
+    float64_t r; int q;
+    trig_reduce_f(x, r, q);
+    switch (q) {
+        case 0: return sin_poly_f(r);
+        case 1: return cos_poly_f(r);
+        case 2: return -sin_poly_f(r);
+        case 3: return -cos_poly_f(r);
+    }
+    return 0.0lf;
+}
+float64_t cos_df(float64_t x) {
+    float64_t r; int q;
+    trig_reduce_f(x, r, q);
+    switch (q) {
+        case 0: return cos_poly_f(r);
+        case 1: return -sin_poly_f(r);
+        case 2: return -cos_poly_f(r);
+        case 3: return sin_poly_f(r);
+    }
+    return 0.0lf;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.num_complex) return;
 
     float64_t r = abs_data[idx];
-    float theta_f32 = float(angle_data[idx]);
-    out_data[2u * idx]      = r * float64_t(cos(theta_f32));
-    out_data[2u * idx + 1u] = r * float64_t(sin(theta_f32));
+    float64_t theta = angle_data[idx];
+    out_data[2u * idx]      = r * cos_df(theta);
+    out_data[2u * idx + 1u] = r * sin_df(theta);
 }

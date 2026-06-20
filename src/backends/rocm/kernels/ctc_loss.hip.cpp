@@ -303,6 +303,51 @@ auto ctc_loss_forward_kernel(
         return {loss_out, grad_out};
     }
 
+    // Validate the blank label and every active target label up front, mirroring
+    // the CPU reference (src/backends/cpu/kernels/ctc.cpp). ext_label(s) (== blank
+    // or a target label) is used directly as a channel index into log_probs /
+    // post_n; an out-of-range value would cause an OOB device read of log_probs
+    // or an OOB write into post_n. Targets/lengths live on-device, so copy them
+    // to host for validation (same std::invalid_argument exceptions as CPU).
+    if (blank < 0 || blank >= C) {
+        throw std::invalid_argument(
+            "ctc_loss_forward (ROCm): blank index " + std::to_string(blank) +
+            " out of range [0, " + std::to_string(C) + ")");
+    }
+    {
+        std::vector<int32_t> il_host(static_cast<size_t>(N));
+        std::vector<int32_t> tl_host(static_cast<size_t>(N));
+        HIP_CHECK(hipMemcpy(il_host.data(), input_lengths.data<int32_t>(),
+                            static_cast<size_t>(N) * sizeof(int32_t), hipMemcpyDeviceToHost));
+        HIP_CHECK(hipMemcpy(tl_host.data(), target_lengths.data<int32_t>(),
+                            static_cast<size_t>(N) * sizeof(int32_t), hipMemcpyDeviceToHost));
+
+        std::vector<int32_t> tgt_host(static_cast<size_t>(N * S_max));
+        if (N * S_max > 0) {
+            HIP_CHECK(hipMemcpy(tgt_host.data(), targets.data<int32_t>(),
+                                static_cast<size_t>(N * S_max) * sizeof(int32_t),
+                                hipMemcpyDeviceToHost));
+        }
+
+        for (int64_t n = 0; n < N; ++n) {
+            int64_t T_n = il_host[static_cast<size_t>(n)];
+            int64_t S_n = tl_host[static_cast<size_t>(n)];
+            if (T_n <= 0 || S_n <= 0 || T_n > T_max || S_n > S_max) {
+                continue;  // inactive sample; skipped by the compute loops too
+            }
+            const int32_t* tgt_n = tgt_host.data() + n * S_max;
+            for (int64_t s = 0; s < S_n; ++s) {
+                const int64_t label = static_cast<int64_t>(tgt_n[s]);
+                if (label < 0 || label >= C) {
+                    throw std::invalid_argument(
+                        "ctc_loss_forward (ROCm): target label " +
+                        std::to_string(label) + " out of range [0, " +
+                        std::to_string(C) + ")");
+                }
+            }
+        }
+    }
+
     dim3 grid(static_cast<unsigned>(N));
     dim3 block(CTC_THREADS_PER_BLOCK);
 

@@ -107,6 +107,10 @@ __global__ void roi_align_forward_kernel(
 
     T roi_width = roi_x2 - roi_x1;
     T roi_height = roi_y2 - roi_y1;
+    if (!aligned) {
+        roi_width = max(roi_width, T(1));
+        roi_height = max(roi_height, T(1));
+    }
 
     T bin_size_h = roi_height / T(output_h);
     T bin_size_w = roi_width / T(output_w);
@@ -115,6 +119,8 @@ __global__ void roi_align_forward_kernel(
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(double(bin_size_h)));
     int64_t roi_bin_grid_w =
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(double(bin_size_w)));
+    roi_bin_grid_h = max(roi_bin_grid_h, int64_t(1));
+    roi_bin_grid_w = max(roi_bin_grid_w, int64_t(1));
 
     const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
 
@@ -177,6 +183,10 @@ __global__ void roi_align_backward_kernel(
 
     T roi_width = roi_x2 - roi_x1;
     T roi_height = roi_y2 - roi_y1;
+    if (!aligned) {
+        roi_width = max(roi_width, T(1));
+        roi_height = max(roi_height, T(1));
+    }
 
     T bin_size_h = roi_height / T(output_h);
     T bin_size_w = roi_width / T(output_w);
@@ -185,6 +195,8 @@ __global__ void roi_align_backward_kernel(
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(double(bin_size_h)));
     int64_t roi_bin_grid_w =
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(double(bin_size_w)));
+    roi_bin_grid_h = max(roi_bin_grid_h, int64_t(1));
+    roi_bin_grid_w = max(roi_bin_grid_w, int64_t(1));
 
     const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
 
@@ -297,6 +309,10 @@ __global__ void roi_align_forward_fp16_kernel(
 
     float roi_width = roi_x2 - roi_x1;
     float roi_height = roi_y2 - roi_y1;
+    if (!aligned) {
+        roi_width = fmaxf(roi_width, 1.0f);
+        roi_height = fmaxf(roi_height, 1.0f);
+    }
 
     float bin_size_h = roi_height / static_cast<float>(output_h);
     float bin_size_w = roi_width / static_cast<float>(output_w);
@@ -305,6 +321,8 @@ __global__ void roi_align_forward_fp16_kernel(
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceilf(bin_size_h));
     int64_t roi_bin_grid_w =
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceilf(bin_size_w));
+    roi_bin_grid_h = max(roi_bin_grid_h, int64_t(1));
+    roi_bin_grid_w = max(roi_bin_grid_w, int64_t(1));
 
     const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
 
@@ -362,6 +380,10 @@ __global__ void roi_align_backward_fp16_kernel(
 
     float roi_width = roi_x2 - roi_x1;
     float roi_height = roi_y2 - roi_y1;
+    if (!aligned) {
+        roi_width = fmaxf(roi_width, 1.0f);
+        roi_height = fmaxf(roi_height, 1.0f);
+    }
 
     float bin_size_h = roi_height / static_cast<float>(output_h);
     float bin_size_w = roi_width / static_cast<float>(output_w);
@@ -370,6 +392,8 @@ __global__ void roi_align_backward_fp16_kernel(
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceilf(bin_size_h));
     int64_t roi_bin_grid_w =
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceilf(bin_size_w));
+    roi_bin_grid_h = max(roi_bin_grid_h, int64_t(1));
+    roi_bin_grid_w = max(roi_bin_grid_w, int64_t(1));
 
     const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
 
@@ -430,7 +454,7 @@ __global__ void f32_grad_to_fp16_kernel(const float* src, __half* dst, int64_t n
 auto roi_align_forward(const Tensor& features, const Tensor& rois,
                        int64_t output_h, int64_t output_w,
                        float spatial_scale, int64_t sampling_ratio,
-                       bool aligned) -> Tensor {
+                       bool aligned, cudaStream_t stream) -> Tensor {
     auto shape = features.shape();
     int64_t batch_size = shape[0];
     int64_t channels = shape[1];
@@ -460,7 +484,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            roi_align_forward_kernel<float>, 0, 0);
         const int blocks = (total_outputs + block_size - 1) / block_size;
-        roi_align_forward_kernel<float><<<blocks, block_size>>>(
+        roi_align_forward_kernel<float><<<blocks, block_size, 0, stream>>>(
             features.data<float>(), rois_ptr, output.data<float>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, spatial_scale, sampling_ratio, aligned);
@@ -468,7 +492,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            roi_align_forward_kernel<double>, 0, 0);
         const int blocks = (total_outputs + block_size - 1) / block_size;
-        roi_align_forward_kernel<double><<<blocks, block_size>>>(
+        roi_align_forward_kernel<double><<<blocks, block_size, 0, stream>>>(
             features.data<double>(), rois_ptr, output.data<double>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, static_cast<double>(spatial_scale),
@@ -477,7 +501,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            roi_align_forward_fp16_kernel, 0, 0);
         const int blocks = (total_outputs + block_size - 1) / block_size;
-        roi_align_forward_fp16_kernel<<<blocks, block_size>>>(
+        roi_align_forward_fp16_kernel<<<blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(features.data_ptr()),
             rois_ptr,
             reinterpret_cast<__half*>(output.data_ptr()),

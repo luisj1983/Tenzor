@@ -12,6 +12,7 @@ layout(binding = 2) buffer OutputIndices { int output_indices[]; };
 layout(push_constant) uniform PushConstants {
     uint array_size;    // Length of the sorted array
     uint num_queries;   // Number of query values
+    uint right;         // 0 = leftmost (lower_bound), 1 = rightmost (upper_bound)
 } params;
 
 void main() {
@@ -20,13 +21,15 @@ void main() {
 
     float query = query_data[idx];
 
-    // Standard binary search: find leftmost insertion point
+    // Binary search: right=0 -> leftmost insertion (lower_bound, sorted[mid] < query),
+    // right=1 -> rightmost insertion (upper_bound, sorted[mid] <= query).
     uint lo = 0;
     uint hi = params.array_size;
 
     while (lo < hi) {
         uint mid = lo + (hi - lo) / 2;
-        if (sorted_data[mid] < query) {
+        bool go_right = (params.right != 0u) ? (sorted_data[mid] <= query) : (sorted_data[mid] < query);
+        if (go_right) {
             lo = mid + 1;
         } else {
             hi = mid;

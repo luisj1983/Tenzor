@@ -171,7 +171,7 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
     // an arbitrary stack axis.
     uint32_t outer_size = 1;
     for (int64_t d = 0; d < dim; ++d) outer_size *= static_cast<uint32_t>(first_shape[d]);
-    uint32_t inner_size = static_cast<uint32_t>(elements_per_tensor) / outer_size;
+    uint32_t inner_size = static_cast<uint32_t>(elements_per_tensor) / std::max<uint32_t>(outer_size, 1u);
 
     struct {
         uint32_t num_tensors;
@@ -214,10 +214,19 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
     return output;
 }
 
-auto VulkanBackend::dispatchTake(const Tensor& input, const Tensor& indices) -> Tensor {
+auto VulkanBackend::dispatchTake(const Tensor& input_in, const Tensor& indices) -> Tensor {
     if (indices.numel() == 0) {
-        return Tensor({0}, input.dtype(), input.device());
+        return Tensor({0}, input_in.dtype(), input_in.device());
     }
+
+    // The take shaders treat the source buffer as a flat contiguous array
+    // (push-constant `numel`, flat index lookup) and carry no offset push
+    // constant, so a non-contiguous / non-zero-offset input would index into
+    // wrong/garbage memory. Materialize a contiguous, zero-offset copy first,
+    // matching the stack/tile pattern in this file.
+    const Tensor input = (input_in.is_contiguous() && input_in.offset() == 0)
+        ? input_in
+        : dispatchContiguous(input_in);
 
     // All take shaders read `int indices[]` (32-bit). If we get Int64 on the
     // wire the 4-byte stride would misalign every other element, so cast
@@ -1205,9 +1214,17 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
                                     static_cast<uint32_t>(batch_size),
                                     static_cast<uint32_t>(signal_len));
     } else {
-        // Non-power-of-2: use Bluestein's algorithm per batch element
+        // Non-power-of-2: use Bluestein's algorithm per batch element.
+        // `result` may alias the caller's input here: when n == signal_len the
+        // working_input is the original input and contiguous() returns *this
+        // (shared storage) for already-contiguous inputs. Writing the Bluestein
+        // output back into `result` would then mutate the caller's tensor
+        // in place. Allocate a dedicated, freshly-owned output buffer instead.
         size_t elem_size = (input.dtype() == DType::Complex128) ? 16 : 8;
         int32_t device_id = input.device().index;
+
+        std::vector<int64_t> out_shape(result.shape().begin(), result.shape().end());
+        Tensor bluestein_out(out_shape, input.dtype(), input.device());
 
         for (int64_t b = 0; b < batch_size; ++b) {
             // Extract batch slice as 1D tensor
@@ -1229,10 +1246,10 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
 
             Tensor bluestein_result = dispatchFFTBluestein(batch_slice, signal_len, 0);
 
-            // Write result back to correct batch position
+            // Write result into the dedicated output buffer (never the input)
             {
                 auto [src_buf, src_off] = getVulkanBufferAndOffset(bluestein_result.data_ptr());
-                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(result.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(bluestein_out.data_ptr());
 
                 VkBufferCopy region{};
                 region.srcOffset = static_cast<VkDeviceSize>(src_off);
@@ -1245,6 +1262,8 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
                 endSingleTimeCommands(cmd, device_id);
             }
         }
+
+        result = bluestein_out;
     }
 
     // Apply normalization
@@ -1309,9 +1328,16 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
                                     static_cast<uint32_t>(batch_size),
                                     static_cast<uint32_t>(signal_len));
     } else {
-        // Non-factorable: use Bluestein's algorithm per batch element
+        // Non-factorable: use Bluestein's algorithm per batch element.
+        // `result` may alias the caller's input (contiguous() returns *this
+        // when n == signal_len and the input is already contiguous). Writing
+        // the Bluestein output back into `result` would mutate the caller's
+        // tensor in place, so allocate a dedicated, freshly-owned output.
         size_t elem_size = (input.dtype() == DType::Complex128) ? 16 : 8;
         int32_t device_id = input.device().index;
+
+        std::vector<int64_t> out_shape(result.shape().begin(), result.shape().end());
+        Tensor bluestein_out(out_shape, input.dtype(), input.device());
 
         for (int64_t b = 0; b < batch_size; ++b) {
             Tensor batch_slice({signal_len}, input.dtype(), input.device());
@@ -1334,7 +1360,7 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
 
             {
                 auto [src_buf, src_off] = getVulkanBufferAndOffset(bluestein_result.data_ptr());
-                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(result.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(bluestein_out.data_ptr());
 
                 VkBufferCopy region{};
                 region.srcOffset = static_cast<VkDeviceSize>(src_off);
@@ -1347,6 +1373,8 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
                 endSingleTimeCommands(cmd, device_id);
             }
         }
+
+        result = bluestein_out;
     }
 
     // IFFT normalization: default "backward" norm divides by N
@@ -1658,7 +1686,12 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t freq_bins = shape[dim];  // N/2+1
     int64_t output_len = n;
     bool is_f64 = (input_c.dtype() == DType::Complex128);
-    bool is_f16 = (input_c.dtype() == DType::Float16);
+    // Note: Float16/BFloat16 inputs are promoted to Complex64 above, so the
+    // entire downstream pipeline operates on Complex64/Complex128 buffers. The
+    // irfft_pack_f16 / irfft_unpack_f16 shaders expect a packed-half real
+    // buffer layout that this complex pipeline never produces, so they are
+    // intentionally not selected here (selecting them would mismatch the
+    // complex buffer sizes used below).
 
     if (is_f64) {
         vulkan::ensure_fp64_supported(input.device().index, "IRFFT");
@@ -1856,7 +1889,7 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     Tensor packed(packed_shape, complex_dtype, input.device());
 
     {
-        std::string shader = is_f16 ? "irfft_pack_f16" : is_f64 ? "irfft_pack_f64" : "irfft_pack";
+        std::string shader = is_f64 ? "irfft_pack_f64" : "irfft_pack";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants {
@@ -1914,7 +1947,7 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
 
     // Step 3: Unpack N/2 complex values to N real values — batched
     {
-        std::string shader = is_f16 ? "irfft_unpack_f16" : is_f64 ? "irfft_unpack_f64" : "irfft_unpack";
+        std::string shader = is_f64 ? "irfft_unpack_f64" : "irfft_unpack";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants {

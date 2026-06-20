@@ -21,8 +21,8 @@ void main() {
         return;
     }
 
-    // 1.0 in bfloat16 is 0x3C00
-    uint one_bf16 = 0x3C00u;
+    // 1.0 in bfloat16 (upper 16 bits of float32 1.0 = 0x3F800000) is 0x3F80
+    uint one_bf16 = 0x3F80u;
 
     // Pack two bfloat16 values into one uint32
     uint packed_value;

@@ -51,18 +51,29 @@ float readBF16(uint flat_idx) {
     return (half_idx == 0) ? unpackBF16x2(packed).x : unpackBF16x2(packed >> 16).x;
 }
 
-// Write a single BF16 element to packed buffer (read-modify-write)
+// Write a single BF16 element to the packed buffer.
+// A boundary word can be shared by two adjacent groups dispatched on
+// different workgroups, so a plain read-modify-write would race and
+// clobber the neighbouring group's half-word. atomicCompSwap makes the
+// half-word update safe regardless of group_start parity.
 void writeBF16(uint flat_idx, float val) {
     uint word_idx = flat_idx / 2;
     uint half_idx = flat_idx % 2;
-    uint packed = output_data[word_idx];
     uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
-    if (half_idx == 0) {
-        packed = (packed & 0xFFFF0000u) | bits;
-    } else {
-        packed = (packed & 0x0000FFFFu) | (bits << 16);
+    uint shift = half_idx * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
     }
-    output_data[word_idx] = packed;
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring group's packed half-word at a shared boundary word.
 }
 
 void main() {
@@ -126,37 +137,22 @@ void main() {
         inv_std_out[stats_idx] = inv_std;
     }
 
-    // Step 3: Normalize and apply affine — process pairs for safe packed writes
-    uint num_words = (group_size + 1) / 2;
-    for (uint w = tid; w < num_words; w += WORKGROUP_SIZE) {
-        uint elem0 = w * 2;
-        uint elem1 = w * 2 + 1;
-
-        float r0 = 0.0, r1 = 0.0;
-
-        if (elem0 < group_size) {
-            float normalized = (readBF16(group_start + elem0) - mean) * inv_std;
-            if (params.affine > 0) {
-                uint local_channel = (elem0 / spatial_size);
-                uint global_channel = group_idx * channels_per_group + local_channel;
-                normalized = normalized * gamma_data[global_channel] + beta_data[global_channel];
-            }
-            r0 = normalized;
+    // Step 3: Normalize and apply affine.
+    // Each invocation handles one element and stores it via the atomic
+    // writeBF16 helper. This is correct for any group_start parity: the
+    // half-word at the actual flat index (group_start + i) is updated
+    // without disturbing the other half of the word, which may belong to
+    // an adjacent group processed by a different workgroup. The previous
+    // whole-word fast path assumed group_start was even and corrupted the
+    // neighbouring group's boundary element when it was odd (e.g. a single
+    // channel per group with odd spatial size).
+    for (uint i = tid; i < group_size; i += WORKGROUP_SIZE) {
+        float normalized = (readBF16(group_start + i) - mean) * inv_std;
+        if (params.affine > 0) {
+            uint local_channel = (i / spatial_size);
+            uint global_channel = group_idx * channels_per_group + local_channel;
+            normalized = normalized * gamma_data[global_channel] + beta_data[global_channel];
         }
-
-        if (elem1 < group_size) {
-            float normalized = (readBF16(group_start + elem1) - mean) * inv_std;
-            if (params.affine > 0) {
-                uint local_channel = (elem1 / spatial_size);
-                uint global_channel = group_idx * channels_per_group + local_channel;
-                normalized = normalized * gamma_data[global_channel] + beta_data[global_channel];
-            }
-            r1 = normalized;
-        }
-
-        uint out_word_idx = (group_start + elem0) / 2;
-        uint bits0 = ((floatBitsToUint(r0) + 0x7FFFu + ((floatBitsToUint(r0) >> 16) & 1u)) >> 16);
-        uint bits1 = ((floatBitsToUint(r1) + 0x7FFFu + ((floatBitsToUint(r1) >> 16) & 1u)) >> 16);
-        output_data[out_word_idx] = bits0 | (bits1 << 16);
+        writeBF16(group_start + i, normalized);
     }
 }

@@ -13,8 +13,9 @@
  *   // Uniform float in [0, 1)
  *   float v = philox_uniform_f32(seed, element_index);
  *
- *   // Standard normal via Box-Muller (consume pairs of element indices)
- *   float v = philox_normal_f32(seed, element_index);  // use even indices; odd consumed internally
+ *   // Standard normal: one value is produced per element index from a single
+ *   // Philox invocation (no Box-Muller pairing or index striding required).
+ *   float v = philox_normal_f32(seed, element_index);
  */
 
 #pragma once

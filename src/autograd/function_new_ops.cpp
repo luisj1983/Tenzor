@@ -1415,9 +1415,16 @@ auto LinalgVectorNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
     auto norm_expanded = norm_val;
     auto grad_expanded = grad;
     if (!keepdim_) {
-        // Need to unsqueeze along reduced dimensions
+        // Re-insert the reduced size-1 axes. Must process in ASCENDING order
+        // so each unsqueeze index stays valid against the growing rank; the
+        // user-supplied dim_ order is arbitrary (the forward sorts it).
+        std::vector<int64_t> norm_dims;
+        norm_dims.reserve(dim_.size());
         for (auto d : dim_) {
-            int64_t dd = d < 0 ? d + static_cast<int64_t>(input.ndim()) : d;
+            norm_dims.push_back(d < 0 ? d + static_cast<int64_t>(input.ndim()) : d);
+        }
+        std::sort(norm_dims.begin(), norm_dims.end());
+        for (auto dd : norm_dims) {
             norm_expanded = unsqueeze(norm_expanded, dd);
             grad_expanded = unsqueeze(grad_expanded, dd);
         }
@@ -1537,8 +1544,15 @@ auto LinalgVectorNormBackward::backward_with_variables(std::vector<Variable> gra
     // unsqueeze + expand so `grad_fn` flows through `grad_outputs[0]`.
     Variable grad_expanded = grad_outputs[0];
     if (!keepdim_) {
+        // Ascending order so each unsqueeze index is valid against the
+        // growing rank (matches the Tensor-level backward above).
+        std::vector<int64_t> norm_dims;
+        norm_dims.reserve(dim_.size());
         for (auto d : dim_) {
-            int64_t dd = d < 0 ? d + static_cast<int64_t>(input.ndim()) : d;
+            norm_dims.push_back(d < 0 ? d + static_cast<int64_t>(input.ndim()) : d);
+        }
+        std::sort(norm_dims.begin(), norm_dims.end());
+        for (auto dd : norm_dims) {
             grad_expanded = unsqueeze(grad_expanded, dd);
         }
     }
@@ -4301,26 +4315,51 @@ auto IndexReduceBackward::backward(std::vector<Tensor> grad_outputs)
 
 // --- EmbeddingBag (diff in weight) ---------------------------------------
 //
-// Forward saved [indices, offsets, num_embeddings] in the wrapper. The
-// backward kernel takes [grad_output, indices, offsets] + (Mode,
-// PaddingIdx, NumEmbeddings) attrs and returns grad_weight.
+// Forward saved [indices, offsets, max_indices] in the wrapper (max_indices
+// is only valid/non-empty for mode=="max"). The backward kernel takes
+// [grad_output, indices, offsets, max_indices] + (Mode, PaddingIdx,
+// NumEmbeddings, EmbeddingDim, IncludeLastOffset) attrs and returns
+// grad_weight.
+//
+// For mode=="max" the per-(bag,feature) GLOBAL argmax element index saved by
+// EmbeddingBagForward (max_indices) MUST be threaded through as the 4th input:
+// the CPU reference (embedding_bag_backward_kernel) routes the gradient only to
+// the winning element's row and throws if max_indices is missing, and the
+// Vulkan path reads it from an explicit argmax binding. Without it, max-mode
+// would silently produce a sum-style gradient or read an unbound buffer.
 auto EmbeddingBagBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error(
         "EmbeddingBagBackward::forward should not be called directly");
 }
 auto EmbeddingBagBackward::backward(std::vector<Tensor> grad_outputs)
     -> std::vector<Tensor> {
-    require_saved_tensors(2);
+    // max mode also needs the saved per-(bag,feature) argmax indices.
+    require_saved_tensors(mode_ == "max" ? 3 : 2);
     const auto& indices = saved_tensors_[0];
     const auto& offsets = saved_tensors_[1];
     const auto& grad_out = grad_outputs[0];
+
+    // grad_output is [num_bags, embedding_dim]; the backward kernels read
+    // EmbeddingDim from attrs to size the per-feature scatter.
+    int64_t embedding_dim =
+        grad_out.shape().empty() ? 0 : grad_out.shape().back();
 
     OpAttributes attrs;
     attrs.set(AttrKey::Mode, mode_);
     attrs.set(AttrKey::PaddingIdx, padding_idx_);
     attrs.set(AttrKey::NumEmbeddings, num_embeddings_);
+    attrs.set(AttrKey::EmbeddingDim, embedding_dim);
+    // This typed graph-hygiene stub is wired without offset semantics; offsets
+    // are passed verbatim (no trailing length sentinel), matching the kernels'
+    // default IncludeLastOffset=false attr read.
+    attrs.set(AttrKey::IncludeLastOffset, false);
 
     std::vector<Tensor> inputs = {grad_out, indices, offsets};
+    if (mode_ == "max") {
+        // Append max_indices (4th input) so the kernel routes the gradient to
+        // the argmax row instead of distributing it to all bag elements.
+        inputs.push_back(saved_tensors_[2]);
+    }
     auto result = dispatch_to_device(OpId::EmbeddingBagBackward,
         grad_out.device().type, inputs, attrs);
     // EmbeddingBag has inputs (weight, indices, offsets[, per_sample_weights]);

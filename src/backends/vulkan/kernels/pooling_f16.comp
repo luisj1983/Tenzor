@@ -42,12 +42,18 @@ void writeF16Element(uint idx, float val) {
 void main() {
     uint out_x = gl_GlobalInvocationID.x;
     uint out_y = gl_GlobalInvocationID.y;
-    uint c = gl_GlobalInvocationID.z;
+    // z packs (batch, channel) — matches pooling_forward_with_indices_*.comp.
+    uint bc = gl_GlobalInvocationID.z;
+    uint c = bc % params.channels;
+    uint b = bc / params.channels;
 
     if (out_x >= params.out_width || out_y >= params.out_height ||
-        c >= params.channels) {
+        c >= params.channels || b >= params.batch) {
         return;
     }
+
+    uint input_batch_base  = b * params.channels * params.in_height  * params.in_width;
+    uint output_batch_base = b * params.channels * params.out_height * params.out_width;
 
     float result;
     if (params.pool_type == 0) {
@@ -67,7 +73,8 @@ void main() {
 
             if (in_y >= 0 && in_y < int(params.in_height) &&
                 in_x >= 0 && in_x < int(params.in_width)) {
-                uint input_idx = c * params.in_height * params.in_width +
+                uint input_idx = input_batch_base +
+                                c * params.in_height * params.in_width +
                                 uint(in_y) * params.in_width + uint(in_x);
                 float value = readF16Element(input_idx);
 
@@ -88,7 +95,8 @@ void main() {
     }
 
     // Write output
-    uint output_idx = c * params.out_height * params.out_width +
+    uint output_idx = output_batch_base +
+                     c * params.out_height * params.out_width +
                      out_y * params.out_width + out_x;
     writeF16Element(output_idx, result);
 }

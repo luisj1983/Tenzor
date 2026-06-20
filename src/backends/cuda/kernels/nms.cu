@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <vector>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -190,6 +191,17 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     if (num_boxes == 0) {
         *num_keep = 0;
         return;
+    }
+
+    // CUB DeviceRadixSort takes the item count as a 32-bit int below. Guard the
+    // narrowing of the externally-provided box count instead of silently
+    // truncating it (which would sort/process only part of the array and yield
+    // incorrect NMS results for very large inputs).
+    if (num_boxes > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "nms_cuda: num_boxes (" + std::to_string(num_boxes) +
+            ") exceeds the maximum supported by the CUDA NMS sort (" +
+            std::to_string(std::numeric_limits<int>::max()) + ")");
     }
 
     // Acquire a stream from the pool instead of creating/destroying per call

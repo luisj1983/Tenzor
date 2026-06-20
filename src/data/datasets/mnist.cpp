@@ -35,7 +35,12 @@ auto read_idx_images(const std::string& path) -> std::pair<std::vector<uint8_t>,
         throw std::runtime_error("MNIST: truncated header in " + path);
     }
 
-    size_t total = static_cast<size_t>(num_images) * rows * cols;
+    size_t total;
+    if (__builtin_mul_overflow(static_cast<size_t>(num_images),
+                               static_cast<size_t>(rows), &total) ||
+        __builtin_mul_overflow(total, static_cast<size_t>(cols), &total)) {
+        throw std::runtime_error("MNIST: image dimensions overflow in " + path);
+    }
 
     // Sanity-bound the declared element count against the bytes actually
     // remaining in the file before allocating, so a crafted header cannot

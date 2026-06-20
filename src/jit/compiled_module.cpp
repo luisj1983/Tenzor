@@ -186,6 +186,29 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
         graph_->bind_symbolic_shapes(env);
     }
 
+    // Device/dtype mismatch retrace: mirror the single-input forward() so a
+    // multi-input CompiledModule traced on one backend/precision retraces when
+    // called with mismatched tensors instead of replaying the wrong-device
+    // graph and hitting a device-mismatch error at dispatch. Keyed off
+    // inputs[0] (the example_input used for tracing); cached by shape-key
+    // (which encodes device+dtype).
+    if (source_module_ && !inputs.empty() &&
+        (inputs[0].tensor().device().type != traced_device_.type ||
+         inputs[0].tensor().dtype()       != traced_dtype_)) {
+        auto key = compute_shape_key(inputs);
+        auto it = shape_cache_.find(key);
+        if (it != shape_cache_.end()) {
+            graph_ = it->second;
+        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+            auto retraced = CompiledModule::trace(source_module_, inputs[0]);
+            retraced->optimize_for_inference();
+            shape_cache_[key] = retraced->graph_;
+            graph_ = retraced->graph_;
+        }
+        traced_device_ = inputs[0].tensor().device();
+        traced_dtype_  = inputs[0].tensor().dtype();
+    }
+
     auto results = graph_->forward(inputs);
 
     // Check if a ShapeGuard triggered a retrace request

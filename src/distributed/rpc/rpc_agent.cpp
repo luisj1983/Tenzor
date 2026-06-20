@@ -74,6 +74,10 @@ bool write_exact(int fd, const void* buf, size_t n) {
             if (errno == EINTR) continue;
             return false;
         }
+        // send() returning 0 with n>0 makes no progress; treat it as a
+        // closed/failed connection rather than spinning forever (symmetric
+        // with read_exact's r==0 == EOF handling).
+        if (w == 0) return false;
         p += w;
         n -= w;
     }
@@ -207,15 +211,35 @@ std::optional<Message> deserialize_message(int fd) {
         // with a garbage enum, which then hits UB in downstream dispatch.
         size_t elem_size = dtype_size(static_cast<DType>(dtype));
         if (elem_size == 0) return std::nullopt;
-        uint64_t expected = static_cast<uint64_t>(numel) *
-                            static_cast<uint64_t>(elem_size);
+        // Checked multiply: numel is bounded only by int64 overflow above
+        // (~9.2e18), so numel * elem_size (elem_size up to 16 for Complex128)
+        // can wrap past UINT64_MAX to a small value that would spuriously match
+        // a crafted small nbytes and bypass the size check below. Use a
+        // checked multiply so an oversized shape is rejected here, before the
+        // Tensor allocation, rather than silently desyncing nbytes/expected.
+        uint64_t expected;
+        if (__builtin_mul_overflow(static_cast<uint64_t>(numel),
+                                   static_cast<uint64_t>(elem_size), &expected)) {
+            return std::nullopt;
+        }
         if (nbytes != expected) return std::nullopt;
-        Tensor t(shape, static_cast<DType>(dtype), Device::cpu());
+        // The TensorImpl ctor throws (overflow_error / runtime_error) for a
+        // shape whose allocation is too large; catch it here so a hostile or
+        // corrupt frame is dropped (std::nullopt) instead of letting the
+        // exception escape the receive/accept thread callable and call
+        // std::terminate() (remote DoS). Any allocation/ctor failure means the
+        // frame is unusable, so treat it like a malformed message.
+        std::optional<Tensor> t;
+        try {
+            t.emplace(shape, static_cast<DType>(dtype), Device::cpu());
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
         if (nbytes > 0) {
-            std::memcpy(t.data_ptr(), buf.data() + off, nbytes);
+            std::memcpy(t->data_ptr(), buf.data() + off, nbytes);
             off += nbytes;
         }
-        m.payload.tensors.push_back(std::move(t));
+        m.payload.tensors.push_back(std::move(*t));
     }
     return m;
 }
@@ -529,6 +553,18 @@ auto TcpRpcAgent::dispatch_message(Message msg, int inbound_fd) -> void {
         return;
     }
 
+    // A request frame must be addressed to this worker. Connections are
+    // point-to-point and a worker only reads on its own sockets, so a frame
+    // carrying a foreign dst_worker indicates a buggy or malicious sender;
+    // execute nothing and drop it rather than running the handler and
+    // generating a response for an id that is not ours.
+    if (msg.dst_worker != self_.id) {
+        TENZOR_LOG_WARN(
+            "TcpRpcAgent: dropping message addressed to worker {} (self is {})",
+            msg.dst_worker, self_.id);
+        return;
+    }
+
     std::function<Message(const Message&)> handler;
     {
         std::lock_guard<std::mutex> lock(handler_mutex_);
@@ -537,7 +573,28 @@ auto TcpRpcAgent::dispatch_message(Message msg, int inbound_fd) -> void {
     }
     if (!handler) return;
 
-    auto response = handler(msg);
+    // Run the handler with a catch-all guard. handle_rpc_call already converts
+    // exceptions to RPC_ERROR, but other registered handlers (or future ones)
+    // may throw; an escaping exception here would unwind into the receive
+    // thread callable and call std::terminate(). On a non-std::exception we
+    // still send back an RPC_ERROR so the caller's send() unblocks instead of
+    // timing out.
+    Message response;
+    try {
+        response = handler(msg);
+    } catch (const std::exception& e) {
+        response.type = MessageType::RPC_ERROR;
+        response.src_worker = self_.id;
+        response.dst_worker = msg.src_worker;
+        response.payload.request_id = msg.payload.request_id;
+        response.payload.function_name = e.what();
+    } catch (...) {
+        response.type = MessageType::RPC_ERROR;
+        response.src_worker = self_.id;
+        response.dst_worker = msg.src_worker;
+        response.payload.request_id = msg.payload.request_id;
+        response.payload.function_name = "RPC handler threw a non-standard exception";
+    }
 
     // For self-loopback (no remote peer), the response correlates with a
     // local pending request; deliver directly.
@@ -597,6 +654,15 @@ auto TcpRpcAgent::handle_rpc_call(const Message& msg) -> Message {
     } catch (const std::exception& e) {
         response.type = MessageType::RPC_ERROR;
         response.payload.function_name = e.what();
+    } catch (...) {
+        // A registered RpcFunction may throw something not derived from
+        // std::exception (int, string literal, custom type). Without this
+        // catch-all the exception would escape handle_rpc_call -> the handler
+        // lambda -> dispatch_message -> the receive thread callable and call
+        // std::terminate(), taking down the whole agent. Convert it to an
+        // RPC_ERROR so only the offending call fails.
+        response.type = MessageType::RPC_ERROR;
+        response.payload.function_name = "RPC function threw a non-standard exception";
     }
     return response;
 }
@@ -734,7 +800,20 @@ void TcpRpcAgent::accept_loop() {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(self_.port));
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    // Bind the RPC listener to loopback by default. The RPC protocol is
+    // unauthenticated and handle_rpc_call() executes any registered function
+    // with attacker-supplied tensors, so binding INADDR_ANY would expose
+    // arbitrary remote invocation to every reachable host. init_rpc wires
+    // worker addresses to 127.0.0.1, so loopback is sufficient for the
+    // intra-host topology this transport targets; if self_.address names a
+    // concrete local interface, honor it so multi-host deployments that have
+    // arranged their own network isolation/auth can still bind that NIC.
+    in_addr bind_addr{};
+    if (self_.address.empty() ||
+        ::inet_pton(AF_INET, self_.address.c_str(), &bind_addr) != 1) {
+        bind_addr.s_addr = htonl(INADDR_LOOPBACK);
+    }
+    addr.sin_addr = bind_addr;
     if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         ::close(listen_fd_); listen_fd_ = -1;
         try { listen_ready_.set_value(false); } catch (...) {}

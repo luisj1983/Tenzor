@@ -64,6 +64,8 @@ void main() {
             int64_t base = meta[META_IDX_OFFSET + i];
             int64_t idx_val = idx_data[uint(base + bc)];
             if (idx_val < 0) idx_val += meta[META_SRC_SHAPE + i];
+            // Bounds check to prevent out-of-bounds device reads (matches gather.comp).
+            if (idx_val < 0 || idx_val >= meta[META_SRC_SHAPE + i]) return;
             src_offset += idx_val * meta[META_SRC_STRIDES + i];
         }
     }

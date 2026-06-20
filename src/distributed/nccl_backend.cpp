@@ -86,6 +86,17 @@ auto NCCLBackend::initialize(
         throw std::runtime_error("NCCLBackend: already initialized");
     }
 
+    // Validate the port before it reaches htons() in create_socket_connection;
+    // an out-of-range value would otherwise be silently truncated to 16 bits,
+    // routing the rendezvous socket to an unintended/colliding port (matching
+    // the guards in GlooProcessGroup / NCCLProcessGroup::bootstrap_unique_id).
+    if (master_port < 1 || master_port > 65535) {
+        throw std::invalid_argument(
+            "NCCLBackend: master_port " + std::to_string(master_port) +
+            " out of range [1, 65535]"
+        );
+    }
+
     rank_ = rank;
     world_size_ = world_size;
     master_addr_ = master_addr;
@@ -111,10 +122,15 @@ auto NCCLBackend::broadcast(Tensor& tensor, int src_rank) -> void {
 
     ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
 
+    // Stage a contiguous buffer (see all_reduce): a non-contiguous receive
+    // buffer would otherwise be written as if contiguous and corrupted.
+    const bool staged = !tensor.is_contiguous();
+    Tensor work = staged ? tensor.contiguous() : tensor;
+
     NCCL_CHECK(ncclBroadcast(
-        tensor.data_ptr(),
-        tensor.data_ptr(),
-        tensor.numel(),
+        work.data_ptr(),
+        work.data_ptr(),
+        work.numel(),
         nccl_dtype,
         src_rank,
         comm,
@@ -123,6 +139,16 @@ auto NCCLBackend::broadcast(Tensor& tensor, int src_rank) -> void {
 
     // Synchronize to ensure completion
     GPU_CHECK(cudaDeviceSynchronize());
+
+    if (staged) {
+        // Write the result back THROUGH the caller's existing storage rather
+        // than rebinding the reference (`tensor = work`), which would detach
+        // any Variable/view/external buffer aliasing the original
+        // non-contiguous storage. Tensor exposes no copy_, so use the
+        // established in-place primitive pair (zero_() + operator+=).
+        tensor.zero_();
+        tensor += work;
+    }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
@@ -137,10 +163,16 @@ auto NCCLBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
     ncclRedOp_t nccl_op = to_nccl_reduce_op(op);
 
+    // NCCL treats data_ptr() as a flat contiguous buffer; a non-contiguous
+    // input would be read/written as if contiguous and corrupt the result.
+    // Stage a contiguous copy and propagate the reduced values back.
+    const bool staged = !tensor.is_contiguous();
+    Tensor work = staged ? tensor.contiguous() : tensor;
+
     NCCL_CHECK(ncclAllReduce(
-        tensor.data_ptr(),
-        tensor.data_ptr(),
-        tensor.numel(),
+        work.data_ptr(),
+        work.data_ptr(),
+        work.numel(),
         nccl_dtype,
         nccl_op,
         comm,
@@ -152,7 +184,19 @@ auto NCCLBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 
     // If AVG operation, divide by world size
     if (op == ReduceOp::AVG) {
-        tensor = tensor / static_cast<float>(world_size_);
+        // In-place, dtype/device-matched divide so the result keeps the
+        // tensor's dtype (a scalar-float rebind would not).
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   work.dtype(), work.device());
+        work /= scalar;
+    }
+
+    if (staged) {
+        // Write back THROUGH the caller's storage (see broadcast): rebinding
+        // `tensor = work` would detach aliased Variables/views/external buffers
+        // sharing the original non-contiguous storage.
+        tensor.zero_();
+        tensor += work;
     }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
@@ -219,7 +263,9 @@ auto NCCLBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
     // destination rank holds the reduced result, so divide there to get the
     // mean. Non-root ranks keep their unchanged local tensor.
     if (op == ReduceOp::AVG && rank_ == dst_rank) {
-        tensor = tensor / static_cast<float>(world_size_);
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   tensor.dtype(), tensor.device());
+        tensor /= scalar;
     }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
@@ -250,10 +296,14 @@ auto NCCLBackend::all_gather(const Tensor& tensor, std::vector<Tensor>& output) 
         tensor.device()
     );
 
+    // Stage a contiguous source buffer (read-only input): NCCL reads numel
+    // elements as a flat contiguous block.
+    Tensor in = tensor.is_contiguous() ? tensor : tensor.contiguous();
+
     NCCL_CHECK(ncclAllGather(
-        tensor.data_ptr(),
+        in.data_ptr(),
         gathered.data_ptr(),
-        tensor.numel(),
+        in.numel(),
         nccl_dtype,
         comm,
         nullptr
@@ -300,12 +350,15 @@ auto NCCLBackend::gather(const Tensor& tensor, std::vector<Tensor>& output, int 
                     output[src].dtype() != tensor.dtype()) {
                     throw std::invalid_argument("gather: output tensor mismatch");
                 }
-                NCCL_CHECK(ncclRecv(
+                // Copy own data with a local device-to-device memcpy. A
+                // self ncclRecv has NO matching self ncclSend (this rank never
+                // sends to itself), so posting it inside the group deadlocks
+                // the whole collective. Mirrors all_to_all_single's self path.
+                GPU_CHECK(cudaMemcpyAsync(
                     output[src].data_ptr(),
-                    tensor.numel(),
-                    to_nccl_datatype(tensor.dtype()),
-                    rank_,  // Receive from self
-                    comm,
+                    tensor.data_ptr(),
+                    static_cast<size_t>(tensor.numel()) * tensor.dtype_size(),
+                    cudaMemcpyDeviceToDevice,
                     nullptr  // Use default stream
                 ));
             } else {
@@ -438,6 +491,29 @@ auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
     std::vector<Tensor> concat_list(tensors.begin(), tensors.end());
     Tensor concatenated = cat(concat_list, 0);
 
+    // ncclReduceScatter reads recvcount*nranks elements from the send buffer.
+    // Validate the concatenated input matches output.numel()*world_size_ (and
+    // dtype/device) so a caller contract violation raises a clear error instead
+    // of a silent device-side out-of-bounds read.
+    if (concatenated.numel() != output.numel() * world_size_) {
+        throw std::invalid_argument(
+            "reduce_scatter: concatenated input numel (" +
+            std::to_string(concatenated.numel()) +
+            ") must equal output.numel() (" + std::to_string(output.numel()) +
+            ") * world_size (" + std::to_string(world_size_) + ")"
+        );
+    }
+    if (output.dtype() != concatenated.dtype()) {
+        throw std::invalid_argument(
+            "reduce_scatter: output dtype must match input dtype"
+        );
+    }
+    if (output.device() != concatenated.device()) {
+        throw std::invalid_argument(
+            "reduce_scatter: output device must match input device"
+        );
+    }
+
     NCCL_CHECK(ncclReduceScatter(
         concatenated.data_ptr(),
         output.data_ptr(),
@@ -453,7 +529,9 @@ auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
     // NCCL has no native AVG reduce op (ReduceOp::AVG maps to ncclSum); divide by
     // world size afterwards, mirroring NCCLBackend::all_reduce.
     if (op == ReduceOp::AVG) {
-        output = output / static_cast<float>(world_size_);
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                   output.dtype(), output.device());
+        output /= scalar;
     }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
@@ -565,9 +643,13 @@ auto NCCLBackend::send(const Tensor& tensor, int dst_rank) -> void {
 
     ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
 
+    // Stage a contiguous source buffer; NCCL reads numel elements as a flat
+    // contiguous block, so a non-contiguous view would send the wrong bytes.
+    Tensor in = tensor.is_contiguous() ? tensor : tensor.contiguous();
+
     NCCL_CHECK(ncclSend(
-        tensor.data_ptr(),
-        tensor.numel(),
+        in.data_ptr(),
+        in.numel(),
         nccl_dtype,
         dst_rank,
         comm,
@@ -748,6 +830,26 @@ auto NCCLBackend::get_unique_id() -> ncclUniqueId {
 
 auto NCCLBackend::init_communicator(int device_id) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    // A single ncclUniqueId identifies exactly one communicator clique and is
+    // consumed by the first ncclCommInitRank that uses it. unique_id_ was
+    // exchanged once in exchange_unique_id(), so this backend instance can only
+    // build one communicator. Creating a second communicator for a different
+    // device from the already-consumed unique_id (with the same rank) is invalid
+    // NCCL usage and would hang/error. Enforce one device per backend instance
+    // rather than silently constructing a broken multi-device setup. Multi-GPU
+    // per process must use one NCCLBackend instance (and one unique_id) per
+    // device.
+    if (!communicators_.empty() &&
+        communicators_.find(device_id) == communicators_.end()) {
+        throw std::runtime_error(
+            "NCCLBackend: a single backend instance supports only one device "
+            "(unique_id is exchanged once and consumed by the first "
+            "communicator). Requested device " + std::to_string(device_id) +
+            " but a communicator for a different device already exists. Use one "
+            "NCCLBackend instance per device for multi-GPU-per-process."
+        );
+    }
+
     GPU_CHECK(cudaSetDevice(device_id));
 
     ncclComm_t comm;

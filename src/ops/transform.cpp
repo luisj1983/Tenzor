@@ -383,25 +383,49 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
     const char* in_base = static_cast<const char*>(input_cont.data_ptr());
     char* out_base = static_cast<char*>(output.data_ptr());
 
+    // out_coords is decomposed per element; allocate it per-thread (or once for
+    // the serial path) rather than once per output element to avoid millions of
+    // heap allocations on large tensors. TILE semantics (torch.Tensor.repeat /
+    // numpy.tile): the whole input block is tiled `repeats[i]` times along axis
+    // i, so the source coordinate wraps with modulo. (`/ repeats[i]` would be
+    // interleave, which is repeat_interleave's semantics, not repeat's.)
+#ifdef _OPENMP
+    #pragma omp parallel if (total_out > 65536)
+    {
+        std::vector<int64_t> out_coords(ndim);
+        #pragma omp for
+        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+            int64_t temp = out_idx;
+            for (int64_t i = ndim - 1; i >= 0; --i) {
+                out_coords[i] = temp % out_shape[i];
+                temp /= out_shape[i];
+            }
+            int64_t in_idx = 0;
+            for (int64_t i = 0; i < ndim; ++i) {
+                int64_t in_coord = out_coords[i] % shape[i];
+                in_idx += in_coord * in_strides[i];
+            }
+            std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                        in_base + static_cast<size_t>(in_idx) * esz, esz);
+        }
+    }
+#else
+    std::vector<int64_t> out_coords(ndim);
     for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
         int64_t temp = out_idx;
-        std::vector<int64_t> out_coords(ndim);
         for (int64_t i = ndim - 1; i >= 0; --i) {
             out_coords[i] = temp % out_shape[i];
             temp /= out_shape[i];
         }
         int64_t in_idx = 0;
         for (int64_t i = 0; i < ndim; ++i) {
-            // TILE semantics (torch.Tensor.repeat / numpy.tile): the whole input
-            // block is tiled `repeats[i]` times along axis i, so the source
-            // coordinate wraps with modulo. (`/ repeats[i]` would be interleave,
-            // which is repeat_interleave's semantics, not repeat's.)
             int64_t in_coord = out_coords[i] % shape[i];
             in_idx += in_coord * in_strides[i];
         }
         std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
                     in_base + static_cast<size_t>(in_idx) * esz, esz);
     }
+#endif
 
     return output;
 }
@@ -477,10 +501,34 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
     const char* in_base = static_cast<const char*>(input_cont.data_ptr());
     char* out_base = static_cast<char*>(output.data_ptr());
 
+    // out_coords is allocated per-thread (or once for the serial path) instead
+    // of once per output element, avoiding per-element heap churn on large
+    // tensors (mirrors repeat() above).
+#ifdef _OPENMP
+    #pragma omp parallel if (total_out > 65536)
+    {
+        std::vector<int64_t> out_coords(out_ndim);
+        #pragma omp for
+        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+            int64_t temp = out_idx;
+            for (int64_t i = out_ndim - 1; i >= 0; --i) {
+                out_coords[i] = temp % out_shape[i];
+                temp /= out_shape[i];
+            }
+            int64_t in_idx = 0;
+            for (int64_t i = 0; i < out_ndim; ++i) {
+                int64_t in_coord = out_coords[i] % padded_shape[i];
+                in_idx += in_coord * in_strides[i];
+            }
+            std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                        in_base + static_cast<size_t>(in_idx) * esz, esz);
+        }
+    }
+#else
+    std::vector<int64_t> out_coords(out_ndim);
     for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
         // Calculate output coordinates
         int64_t temp = out_idx;
-        std::vector<int64_t> out_coords(out_ndim);
         for (int64_t i = out_ndim - 1; i >= 0; --i) {
             out_coords[i] = temp % out_shape[i];
             temp /= out_shape[i];
@@ -496,6 +544,7 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
         std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
                     in_base + static_cast<size_t>(in_idx) * esz, esz);
     }
+#endif
 
     return output;
 }
@@ -786,13 +835,17 @@ auto diag(const Tensor& input, int64_t diagonal) -> Tensor {
         int64_t n = input.shape()[0];
         int64_t abs_diag = std::abs(diagonal);
         int64_t size = n + abs_diag;
-        auto result = zeros({size, size}, input.dtype(), input.device());
 
         if (input.device().type != Device::Type::CPU) {
             OpAttributes attrs;
             attrs.set(AttrKey::Diagonal, diagonal);
             return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
         }
+
+        // Allocate the size x size result only on the CPU path that fills it; the
+        // non-CPU dispatch above produces its own output, so allocating here
+        // would waste an O(n^2) zero-filled tensor on GPU devices.
+        auto result = zeros({size, size}, input.dtype(), input.device());
 
         auto cont = input.is_contiguous() ? input : input.contiguous();
         auto elem_size = dtype_size(input.dtype());
@@ -843,8 +896,14 @@ auto diag(const Tensor& input, int64_t diagonal) -> Tensor {
 }
 
 auto trace(const Tensor& input) -> Tensor {
-    if (input.ndim() < 2) {
-        throw std::runtime_error("trace requires at least 2D tensor");
+    // torch.trace semantics: the operand must be a 2D matrix. Anything else
+    // (including batched ndim>2 inputs) is rejected here with a clear message
+    // rather than letting a >2D tensor slip past and die inside diag() with the
+    // misleading "input must be 1D or 2D" error, and rather than diverging
+    // between the CPU and dispatched-backend paths.
+    if (input.ndim() != 2) {
+        throw std::runtime_error("trace: expected a 2D tensor, got " +
+                                 std::to_string(input.ndim()) + "D");
     }
 
     if (input.device().type != Device::Type::CPU) {
@@ -873,20 +932,80 @@ auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
         return dispatch(OpId::Flip, std::span<const Tensor>(&input, 1), attrs)[0];
     }
 
-    // Flip by reversing slices along each dimension
-    auto result = input;
-    for (auto dim : dims) {
-        int64_t dim_size = result.shape()[dim];
-        if (dim_size <= 1) continue;
+    // Flip is a pure reverse-stride remap: one element-wise copy pass into a
+    // single preallocated buffer. For each output linear index we decompose into
+    // coordinates, reverse the coordinate along every flipped axis
+    // (in_coord = dim_size-1 - out_coord), then memcpy by element size. This is
+    // dtype-agnostic (like repeat()/tile()) and avoids the previous
+    // O(dim_size) slice-objects + full cat() copy per flipped dimension.
+    auto shape = input.shape();
+    auto input_cont = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty(std::vector<int64_t>(shape.begin(), shape.end()),
+                        input.dtype(), Device::cpu());
 
-        std::vector<Tensor> slices;
-        slices.reserve(dim_size);
-        for (int64_t i = dim_size - 1; i >= 0; --i) {
-            slices.push_back(result.slice(dim, i, i + 1));
-        }
-        result = cat(slices, dim);
+    int64_t total = input_cont.numel();
+    if (total == 0) {
+        return output;
     }
-    return result;
+
+    // Contiguous strides for the (now contiguous) input / output.
+    std::vector<int64_t> strides(ndim);
+    int64_t s = 1;
+    for (int64_t i = ndim - 1; i >= 0; --i) {
+        strides[i] = s;
+        s *= shape[i];
+    }
+
+    // Mark which dimensions are flipped (a dim may appear multiple times; the
+    // effect is idempotent, so a boolean mask is correct).
+    std::vector<char> flipped(ndim, 0);
+    for (auto dim : dims) {
+        flipped[dim] = 1;
+    }
+
+    const size_t esz = dtype_size(input.dtype());
+    const char* in_base = static_cast<const char*>(input_cont.data_ptr());
+    char* out_base = static_cast<char*>(output.data_ptr());
+
+#ifdef _OPENMP
+    #pragma omp parallel if (total > 65536)
+    {
+        std::vector<int64_t> coords(ndim);
+        #pragma omp for
+        for (int64_t out_idx = 0; out_idx < total; ++out_idx) {
+            int64_t temp = out_idx;
+            for (int64_t i = ndim - 1; i >= 0; --i) {
+                coords[i] = temp % shape[i];
+                temp /= shape[i];
+            }
+            int64_t in_idx = 0;
+            for (int64_t i = 0; i < ndim; ++i) {
+                int64_t c = flipped[i] ? (shape[i] - 1 - coords[i]) : coords[i];
+                in_idx += c * strides[i];
+            }
+            std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                        in_base + static_cast<size_t>(in_idx) * esz, esz);
+        }
+    }
+#else
+    std::vector<int64_t> coords(ndim);
+    for (int64_t out_idx = 0; out_idx < total; ++out_idx) {
+        int64_t temp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            coords[i] = temp % shape[i];
+            temp /= shape[i];
+        }
+        int64_t in_idx = 0;
+        for (int64_t i = 0; i < ndim; ++i) {
+            int64_t c = flipped[i] ? (shape[i] - 1 - coords[i]) : coords[i];
+            in_idx += c * strides[i];
+        }
+        std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                    in_base + static_cast<size_t>(in_idx) * esz, esz);
+    }
+#endif
+
+    return output;
 }
 
 auto movedim(const Tensor& input, std::vector<int64_t> source, std::vector<int64_t> destination) -> Tensor {
@@ -1322,6 +1441,55 @@ auto as_strided(const Tensor& self, std::span<const int64_t> size,
         throw std::invalid_argument(
             "as_strided: size and stride must have the same length (got " +
             std::to_string(size.size()) + " vs " + std::to_string(stride.size()) + ")");
+    }
+
+    const int64_t offset = storage_offset.value_or(self.offset());
+    if (offset < 0) {
+        throw std::out_of_range(
+            "as_strided: storage_offset must be non-negative (got " +
+            std::to_string(offset) + ")");
+    }
+
+    // Validate that every element addressable by (size, stride, offset) lies
+    // within the underlying storage. Without this guard the resulting view is a
+    // raw out-of-bounds read/write primitive (reachable directly from the Python
+    // bindings). Sizes must be non-negative; strides may be negative (a valid
+    // reverse view), so we accumulate the lowest and highest reachable element
+    // indices independently across all dimensions.
+    int64_t min_index = offset;
+    int64_t max_index = offset;
+    bool empty = false;
+    for (size_t d = 0; d < size.size(); ++d) {
+        if (size[d] < 0) {
+            throw std::out_of_range(
+                "as_strided: sizes must be non-negative (got " +
+                std::to_string(size[d]) + " at dim " + std::to_string(d) + ")");
+        }
+        if (size[d] == 0) {
+            empty = true;  // a zero-length dim makes the view empty (no access)
+            continue;
+        }
+        // Furthest element along this dim is (size[d]-1) steps of stride[d].
+        const int64_t extent = (size[d] - 1) * stride[d];
+        if (extent >= 0) {
+            max_index += extent;
+        } else {
+            min_index += extent;
+        }
+    }
+
+    if (!empty) {
+        const size_t esz = dtype_size(self.dtype());
+        const size_t storage_elems =
+            self.storage() ? (self.storage()->size_bytes() / esz) : 0;
+        if (min_index < 0 ||
+            static_cast<size_t>(max_index) >= storage_elems) {
+            throw std::out_of_range(
+                "as_strided: requested view spans elements [" +
+                std::to_string(min_index) + ", " + std::to_string(max_index) +
+                "] which is outside storage of " +
+                std::to_string(storage_elems) + " elements");
+        }
     }
 
     // Zero-copy view: allocate a NEW TensorImpl that shares `self`'s storage

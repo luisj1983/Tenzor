@@ -73,8 +73,10 @@ namespace tenzor::distributed {
 // FSDPUnit Implementation
 // ============================================================================
 
-FSDPUnit::FSDPUnit(nn::Module& module, ProcessGroup& pg, const FSDPConfig& config)
-    : module_(module), pg_(&pg), config_(config) {
+FSDPUnit::FSDPUnit(nn::Module& module, ProcessGroup& pg, const FSDPConfig& config,
+                   std::vector<std::shared_ptr<Variable>> explicit_params)
+    : module_(module), pg_(&pg), config_(config),
+      explicit_params_(std::move(explicit_params)) {
 
     use_gpu_comm_ = pg_->supports_async_stream();
 
@@ -97,9 +99,13 @@ FSDPUnit::~FSDPUnit() {
 // ============================================================================
 
 auto FSDPUnit::flatten_params() -> void {
-    // Collect all parameters from the module (own parameters only, not submodules
-    // that may be wrapped by their own FSDP unit)
-    original_params_ = module_.own_parameters();
+    // The recursive auto-wrap policy assigns each unit an explicit, disjoint set
+    // of parameters covering its slice of the module tree (the module's own
+    // parameters plus any descendant parameters not claimed by a deeper unit).
+    // When no explicit set was provided, fall back to this module's own (direct)
+    // parameters.
+    original_params_ = explicit_params_.empty() ? module_.own_parameters()
+                                                : explicit_params_;
 
     if (original_params_.empty()) {
         return;
@@ -296,6 +302,55 @@ auto FSDPUnit::scatter_grads_to_params() -> void {
     // of the averaged gradient. Write it back to the corresponding parameters.
     auto dtype = original_params_[0]->tensor().dtype();
 
+    // Determine which parameters actually produced a gradient. collect_grads()
+    // zero-fills the flat buffer and only writes a real gradient where
+    // param->has_grad() was true, so a parameter never used in the forward
+    // (e.g. an inactive MoE expert or a conditional branch) contributes only
+    // zeros to the reduce-scatter. PyTorch leaves such parameters with
+    // grad=None so the optimizer skips them (no weight-decay / momentum
+    // update). If we unconditionally set_grad() below, we would hand those
+    // parameters an explicit zero gradient and change optimizer dynamics.
+    //
+    // Because reduce-scatter sums across ranks, a parameter may be unused on
+    // this rank yet have a real gradient on another rank; in that case the
+    // reduced shard genuinely contains its contribution and we MUST set its
+    // grad here. We therefore reconcile the per-parameter "has a real grad"
+    // mask across ranks with an all-reduce MAX so the decision is globally
+    // consistent: a parameter is materialized iff at least one rank produced a
+    // gradient for it. At this point param->has_grad() still reflects the
+    // original (pre-scatter) local gradients, since only flat_grad_ has been
+    // modified so far.
+    const size_t num_params = original_params_.size();
+    std::vector<int64_t> local_has_grad(num_params, 0);
+    for (size_t i = 0; i < num_params; ++i) {
+        const auto& param = original_params_[i];
+        if (param && param->has_grad()) {
+            local_has_grad[i] = 1;
+        }
+    }
+
+    std::vector<int64_t> global_has_grad = local_has_grad;
+    if (pg_->world_size() > 1 && num_params > 0) {
+        Tensor mask = zeros({static_cast<int64_t>(num_params)}, DType::Float32,
+                            flat_grad_.device());
+        {
+            Tensor mask_cpu = zeros({static_cast<int64_t>(num_params)},
+                                    DType::Float32, Device::cpu());
+            float* mptr = mask_cpu.data<float>();
+            for (size_t i = 0; i < num_params; ++i) {
+                mptr[i] = static_cast<float>(local_has_grad[i]);
+            }
+            mask = mask_cpu.to(flat_grad_.device());
+        }
+        // A parameter has a grad globally iff any rank produced one.
+        pg_->all_reduce(mask, ReduceOp::MAX);
+        Tensor mask_cpu = mask.to(Device::cpu());
+        const float* mptr = mask_cpu.data<float>();
+        for (size_t i = 0; i < num_params; ++i) {
+            global_has_grad[i] = (mptr[i] > 0.5f) ? 1 : 0;
+        }
+    }
+
     // The gradient shard corresponds to flat buffer offset [shard_offset_, shard_offset_ + shard_numel_)
     // We need to figure out which parameters overlap with this range and write partial grads
     size_t shard_start = shard_offset_;
@@ -314,7 +369,10 @@ auto FSDPUnit::scatter_grads_to_params() -> void {
         size_t overlap_start = std::max(param_start, shard_start);
         size_t overlap_end = std::min(param_end, shard_end);
 
-        if (overlap_start < overlap_end) {
+        // Leave never-used parameters with grad=None (PyTorch parity): if no
+        // rank produced a gradient for this parameter, the reduced shard holds
+        // only zeros and we must not synthesize a spurious zero gradient.
+        if (overlap_start < overlap_end && global_has_grad[i]) {
             size_t overlap_numel = overlap_end - overlap_start;
             size_t grad_buf_offset = overlap_start - shard_start;
             size_t param_sub_offset = overlap_start - param_start;
@@ -465,20 +523,43 @@ auto FSDPUnit::reduce_scatter_grads() -> void {
     auto dtype = flat_grad_.dtype();
     auto device = flat_grad_.device();
 
+    // Mixed precision: compress gradients to config_.comm_dtype before the
+    // reduce-scatter, symmetric with the forward all_gather_params() path so
+    // the backward collective enjoys the same bandwidth savings. Use the
+    // identical gate ("comm_dtype strictly narrower than the grad dtype") so we
+    // never up-cast or reinterpret across same-size dtype families. The
+    // diagnostic warnings for the no-op / same-size cases are already emitted
+    // (once) by all_gather_params(), which runs earlier in the same step for
+    // the same config, so we intentionally do not duplicate them here.
+    const bool comm_narrower = ::tenzor::dtype_size(config_.comm_dtype) <
+                               ::tenzor::dtype_size(dtype);
+    const bool use_mixed_precision = config_.mixed_precision &&
+                                     config_.comm_dtype != dtype &&
+                                     comm_narrower;
+    DType comm_dtype = use_mixed_precision ? config_.comm_dtype : dtype;
+
+    Tensor comm_grad = use_mixed_precision ? flat_grad_.to(comm_dtype) : flat_grad_;
+
     // Split flat gradient into world_size chunks for reduce-scatter input
     std::vector<Tensor> grad_chunks(ws);
     for (int i = 0; i < ws; ++i) {
         int64_t off = static_cast<int64_t>(i) * static_cast<int64_t>(shard_numel_);
-        grad_chunks[i] = slice(flat_grad_, /*dim=*/0, off,
+        grad_chunks[i] = slice(comm_grad, /*dim=*/0, off,
                                off + static_cast<int64_t>(shard_numel_))
                              .contiguous();
     }
 
-    // Output: this rank's reduced gradient shard
-    Tensor grad_shard = empty({static_cast<int64_t>(shard_numel_)}, dtype, device);
+    // Output: this rank's reduced gradient shard (in the comm dtype)
+    Tensor grad_shard = empty({static_cast<int64_t>(shard_numel_)}, comm_dtype, device);
 
     // Reduce-scatter: sum across ranks, each rank gets its shard
     pg_->reduce_scatter(grad_chunks, grad_shard, ReduceOp::SUM);
+
+    // Cast the reduced shard back to the full gradient dtype before averaging
+    // so the division (and everything downstream) runs in full precision.
+    if (use_mixed_precision) {
+        grad_shard = grad_shard.to(dtype);
+    }
 
     // Divide by world_size to compute average
     if (ws > 1) {
@@ -589,25 +670,53 @@ FullyShardedDataParallel::FullyShardedDataParallel(
 FullyShardedDataParallel::~FullyShardedDataParallel() = default;
 
 auto FullyShardedDataParallel::apply_auto_wrap() -> void {
-    // Walk the module tree and wrap submodules that exceed the parameter threshold
-    auto submodules = module_.get_submodules();
+    // Recursively partition the whole module tree so that every parameter is
+    // sharded by exactly one unit. collect_units() creates a unit for each
+    // qualifying subtree and returns the parameters left over at the root.
+    auto root_remaining = collect_units(module_);
 
-    bool wrapped_any = false;
-    for (auto& [name, submodule] : submodules) {
+    // Always wrap the leftover root parameters (the root module's own parameters
+    // and any small descendants that did not reach the threshold). Without this,
+    // those parameters would never be sharded.
+    if (!root_remaining.empty()) {
+        units_.push_back(std::make_unique<FSDPUnit>(
+            module_, *pg_, config_, std::move(root_remaining)));
+    }
+}
+
+auto FullyShardedDataParallel::collect_units(nn::Module& module)
+    -> std::vector<std::shared_ptr<Variable>> {
+    // Start with this module's own (direct) parameters.
+    std::vector<std::shared_ptr<Variable>> remaining = module.own_parameters();
+
+    for (auto& [name, submodule] : module.get_submodules()) {
         if (!submodule) continue;
 
-        size_t param_count = count_params(*submodule);
-        if (param_count >= config_.auto_wrap_min_params) {
-            wrap_module(*submodule);
-            wrapped_any = true;
+        // Bottom-up: first carve out any deeper units within this child.
+        auto child_remaining = collect_units(*submodule);
+
+        // Count trainable parameters left in the child subtree.
+        size_t grad_numel = 0;
+        for (const auto& p : child_remaining) {
+            if (p && p->requires_grad()) {
+                grad_numel += p->tensor().numel();
+            }
+        }
+
+        if (!child_remaining.empty() &&
+            grad_numel >= config_.auto_wrap_min_params) {
+            // Child subtree is large enough to be its own unit.
+            units_.push_back(std::make_unique<FSDPUnit>(
+                *submodule, *pg_, config_, std::move(child_remaining)));
+        } else {
+            // Too small: bubble its parameters up to be wrapped by an ancestor.
+            for (auto& p : child_remaining) {
+                remaining.push_back(std::move(p));
+            }
         }
     }
 
-    // If no submodules were wrapped (small model or no submodules),
-    // wrap the root module itself as a single FSDP unit
-    if (!wrapped_any) {
-        wrap_module(module_);
-    }
+    return remaining;
 }
 
 auto FullyShardedDataParallel::wrap_module(nn::Module& module) -> void {

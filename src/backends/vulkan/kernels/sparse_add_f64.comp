@@ -23,7 +23,7 @@ void main() {
     uint row_start = uint(row_offsets[row]);
     uint row_end = uint(row_offsets[row + 1]);
 
-    for (uint i = row_start + tid; i < row_end; i += 256) {
+    for (uint i = row_start + tid; i < row_end; i += gl_WorkGroupSize.x) {
         uint col = uint(col_indices[i]);
         output_data[row * n_cols + col] += values[i];
     }

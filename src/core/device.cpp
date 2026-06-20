@@ -2,21 +2,27 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/utils/error.hpp"
+#include <charconv>
 #include <stdexcept>
+#include <system_error>
 
 namespace tenzor {
 
 // Parse device index from string suffix and validate it's non-negative
 static auto parse_device_index(std::string_view str, size_t prefix_len) -> int {
-    auto suffix = std::string(str.substr(prefix_len));
-    int idx;
-    try {
-        idx = std::stoi(suffix);
-    } catch (const std::invalid_argument&) {
+    auto suffix = str.substr(prefix_len);
+    int idx = 0;
+    const char* begin = suffix.data();
+    const char* end = suffix.data() + suffix.size();
+    auto [ptr, ec] = std::from_chars(begin, end, idx);
+    if (ec == std::errc::result_out_of_range) {
+        throw DeviceException("Device index out of range in '" + std::string(str) + "'");
+    }
+    if (ec != std::errc{} || ptr != end) {
+        // ec != std::errc{} covers an empty/non-numeric suffix; ptr != end
+        // covers trailing garbage like "cuda:3xyz" or a trailing space.
         throw DeviceException("Invalid device index in '" + std::string(str) +
                               "' — expected integer after ':'");
-    } catch (const std::out_of_range&) {
-        throw DeviceException("Device index out of range in '" + std::string(str) + "'");
     }
     if (idx < 0) {
         throw DeviceException("Device index must be non-negative, got: " + std::to_string(idx));

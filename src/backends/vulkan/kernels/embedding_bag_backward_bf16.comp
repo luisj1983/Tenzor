@@ -1,10 +1,16 @@
 #version 450
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // EmbeddingBag Backward Pass (BFloat16)
 // Scatter-add gradients back to embedding table. grad_output is bfloat16,
 // computation and accumulation in float32 for precision.
 // grad_weight is stored as float32; the dispatch method handles conversion back to bfloat16.
+//
+// Max mode: binding=4 carries the per-(bag,feature) global argmax element index
+// produced by the forward pass; the gradient routes only to that winning
+// element's vocabulary row (mirrors embedding_bag_backward.comp and the CPU
+// reference embedding_bag_backward_kernel).
 
 layout(local_size_x_id = 0) in;
 
@@ -12,6 +18,7 @@ layout(binding = 0) buffer GradOutput { float grad_output_data[]; };
 layout(binding = 1) buffer Indices { int indices_data[]; };
 layout(binding = 2) buffer Offsets { int offset_data[]; };
 layout(binding = 3) buffer GradWeight { float grad_weight_data[]; };  // Accumulate in f32
+layout(binding = 4) buffer MaxIndices { int64_t max_idx_data[]; };    // (num_bags, embedding_dim) argmax element idx (max mode)
 
 layout(push_constant) uniform PushConstants {
     uint num_bags;
@@ -44,6 +51,19 @@ void main() {
 
     // Read bfloat16 gradient and promote to float32 for accumulation
     float grad_val = float(grad_output_data[bag * params.embedding_dim + j]);
+
+    // Max mode: route the full gradient only to the embedding row that won the
+    // per-feature argmax in the forward pass.
+    if (params.mode == 2) {
+        int64_t elem = max_idx_data[bag * params.embedding_dim + j];
+        if (elem < 0) return;  // empty bag — no contribution
+        if (elem >= int64_t(params.total_indices)) return;  // guard against stale/out-of-range
+        int idx = indices_data[uint(elem)];
+        if (idx >= 0 && idx < int(params.num_embeddings)) {
+            atomicAdd(grad_weight_data[uint(idx) * params.embedding_dim + j], grad_val);
+        }
+        return;
+    }
 
     if (params.mode == 1) {
         grad_val /= float(bag_size);

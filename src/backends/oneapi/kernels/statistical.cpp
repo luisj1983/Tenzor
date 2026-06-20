@@ -65,6 +65,14 @@ class NormDimKernelFloat64;
  * @return Tensor Standard deviation tensor
  */
 auto std_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // Float16/BFloat16 aren't handled by the native kernels below; widen to
+    // Float32, compute, and narrow back (std is fine in fp32). .to() also
+    // returns a contiguous tensor, so the widen path is layout-safe. Matches
+    // the widen-narrow guard used by var/prod/norm in this file.
+    if (input_raw.dtype() == DType::Float16 || input_raw.dtype() == DType::BFloat16) {
+        const DType orig = input_raw.dtype();
+        return std_kernel(input_raw.to(DType::Float32), attrs, queue).to(orig);
+    }
     // INT64_MIN is the project-wide "all dims" sentinel. Treat any other
     // negative dim as a back-from-end axis (e.g. -1 = last dim).
     int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
@@ -185,37 +193,71 @@ auto std_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue&
                 ? static_cast<double>(divisor)
                 : std::numeric_limits<double>::quiet_NaN();
 
+            // Two-phase work-group reduction with double accumulation, matching
+            // the Float32 path and prod/norm. A single relaxed global
+            // atomic_ref<double> over every element is order-non-deterministic
+            // (fp addition is non-associative), breaking run-to-run
+            // reproducibility; the two-phase reduction is deterministic.
+            constexpr int64_t WG_SIZE = 256;
+            const int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+
             double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
-            queue.fill(mean_device, 0.0, 1);
+            auto sum_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard sum_partials_guard(sum_partials, queue);
 
-            queue.parallel_for<class MeanAllKernelFloat64>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_mean(mean_device[0]);
-                    atomic_mean += in_ptr[idx];
-            });
+            // Phase 1: each work-group reduces its slice of the sum into a partial.
+            queue.parallel_for<class StdSumPhase1Float64>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double val = (gid < total_size) ? in_ptr[gid] : 0.0;
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) sum_partials[item.get_group(0)] = s;
+                });
+            // Phase 2: single work-group grid-strides over ALL partials.
+            queue.parallel_for<class StdSumPhase2Float64>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += sum_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) mean_device[0] = s / d_total;
+                });
 
-            double* var_device = sycl::malloc_device<double>(1, queue);
-            SyclDeviceGuard var_guard(var_device, queue);
-            queue.fill(var_device, 0.0, 1);
+            auto var_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard var_partials_guard(var_partials, queue);
 
-            // Read mean from device memory directly — avoids D-to-H round-trip
-            queue.parallel_for<class VarAllKernelFloat64>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    double mean_val = mean_device[0] / d_total;
-                    double diff = in_ptr[idx] - mean_val;
-                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_var(var_device[0]);
-                    atomic_var += diff * diff;
-            });
+            // Phase 1: per-work-group sum of squared deviations from the mean.
+            queue.parallel_for<class StdVarPhase1Float64>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double diff = 0.0;
+                    if (gid < total_size) diff = in_ptr[gid] - mean_device[0];
+                    double sq = diff * diff;
+                    double s = sycl::reduce_over_group(item.get_group(), sq, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) var_partials[item.get_group(0)] = s;
+                });
 
-            // Compute final std on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             double* out_ptr = get_data_ptr<double>(output);
-            queue.single_task<class StdFinalizeFloat64>([=]() {
-                out_ptr[0] = sycl::sqrt(var_device[0] / d_divisor);
-            }).wait();
+            // Phase 2: combine all partials and finalize std = sqrt(var/divisor).
+            queue.parallel_for<class StdVarPhase2Float64>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += var_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) out_ptr[0] = sycl::sqrt(s / d_divisor);
+                });
+            queue.wait_and_throw();
             return output;
         }
         else {
@@ -265,23 +307,30 @@ auto std_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue&
                     int64_t outer = idx / inner_size;
                     int64_t inner = idx % inner_size;
 
-                    // Compute mean along dim
-                    float sum = 0.0f;
+                    // Accumulate the mean sum and variance sum-of-squares in
+                    // double, mirroring the Float32 full-reduction path (which
+                    // accumulates in double) and the Float64 dim path. A float
+                    // accumulator over a large reduction dim loses precision the
+                    // full-reduction path deliberately avoids, diverging from
+                    // std over the whole tensor and from the CPU backend.
+                    double sum = 0.0;
                     for (int64_t d = 0; d < dim_size; ++d) {
-                        sum += in_ptr[outer * dim_size * inner_size + d * inner_size + inner];
+                        sum += static_cast<double>(
+                            in_ptr[outer * dim_size * inner_size + d * inner_size + inner]);
                     }
-                    float mean = sum / static_cast<float>(dim_size);
+                    double mean = sum / static_cast<double>(dim_size);
 
                     // Compute variance along dim
-                    float var_sum = 0.0f;
+                    double var_sum = 0.0;
                     for (int64_t d = 0; d < dim_size; ++d) {
-                        float diff = in_ptr[outer * dim_size * inner_size + d * inner_size + inner] - mean;
+                        double diff = static_cast<double>(
+                            in_ptr[outer * dim_size * inner_size + d * inner_size + inner]) - mean;
                         var_sum += diff * diff;
                     }
                     int64_t divisor = dim_size - corr;
                     // NaN when dim_size <= correction (undefined), matching CPU.
                     out_ptr[idx] = (divisor > 0)
-                        ? sycl::sqrt(var_sum / static_cast<float>(divisor))
+                        ? static_cast<float>(sycl::sqrt(var_sum / static_cast<double>(divisor)))
                         : std::numeric_limits<float>::quiet_NaN();
                 }
             );
@@ -467,37 +516,67 @@ auto var_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue&
                 ? static_cast<double>(divisor)
                 : std::numeric_limits<double>::quiet_NaN();
 
+            // Two-phase work-group reduction with double accumulation, matching
+            // the Float32 path and prod/norm. A single relaxed global
+            // atomic_ref<double> over every element is order-non-deterministic
+            // (fp addition is non-associative), breaking run-to-run
+            // reproducibility; the two-phase reduction is deterministic.
+            constexpr int64_t WG_SIZE = 256;
+            const int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+
             double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
-            queue.fill(mean_device, 0.0, 1);
+            auto sum_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard sum_partials_guard(sum_partials, queue);
 
-            queue.parallel_for<class MeanVarKernelFloat64>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_mean(mean_device[0]);
-                    atomic_mean += in_ptr[idx];
-            });
+            queue.parallel_for<class VarSumPhase1Float64>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double val = (gid < total_size) ? in_ptr[gid] : 0.0;
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) sum_partials[item.get_group(0)] = s;
+                });
+            queue.parallel_for<class VarSumPhase2Float64>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += sum_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) mean_device[0] = s / d_total;
+                });
 
-            double* var_device = sycl::malloc_device<double>(1, queue);
-            SyclDeviceGuard var_guard(var_device, queue);
-            queue.fill(var_device, 0.0, 1);
+            auto var_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard var_partials_guard(var_partials, queue);
 
-            // Read mean from device memory directly — avoids D-to-H round-trip
-            queue.parallel_for<class VarKernelFloat64>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    double mean_val = mean_device[0] / d_total;
-                    double diff = in_ptr[idx] - mean_val;
-                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_var(var_device[0]);
-                    atomic_var += diff * diff;
-            });
+            queue.parallel_for<class VarVarPhase1Float64>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double diff = 0.0;
+                    if (gid < total_size) diff = in_ptr[gid] - mean_device[0];
+                    double sq = diff * diff;
+                    double s = sycl::reduce_over_group(item.get_group(), sq, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) var_partials[item.get_group(0)] = s;
+                });
 
-            // Compute final variance on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             double* out_ptr = get_data_ptr<double>(output);
-            queue.single_task<class VarFinalizeFloat64>([=]() {
-                out_ptr[0] = var_device[0] / d_divisor;
-            }).wait();
+            queue.parallel_for<class VarVarPhase2Float64>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += var_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) out_ptr[0] = s / d_divisor;
+                });
+            queue.wait_and_throw();
             return output;
         }
         else {
@@ -542,23 +621,30 @@ auto var_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue&
                     int64_t outer = idx / inner_size;
                     int64_t inner = idx % inner_size;
 
-                    // Compute mean along dim
-                    float sum = 0.0f;
+                    // Accumulate the mean sum and variance sum-of-squares in
+                    // double, mirroring the Float32 full-reduction path (which
+                    // accumulates in double) and the Float64 dim path. A float
+                    // accumulator over a large reduction dim loses precision the
+                    // full-reduction path deliberately avoids, diverging from
+                    // var over the whole tensor and from the CPU backend.
+                    double sum = 0.0;
                     for (int64_t d = 0; d < dim_size; ++d) {
-                        sum += in_ptr[outer * dim_size * inner_size + d * inner_size + inner];
+                        sum += static_cast<double>(
+                            in_ptr[outer * dim_size * inner_size + d * inner_size + inner]);
                     }
-                    float mean = sum / static_cast<float>(dim_size);
+                    double mean = sum / static_cast<double>(dim_size);
 
                     // Compute variance along dim
-                    float var_sum = 0.0f;
+                    double var_sum = 0.0;
                     for (int64_t d = 0; d < dim_size; ++d) {
-                        float diff = in_ptr[outer * dim_size * inner_size + d * inner_size + inner] - mean;
+                        double diff = static_cast<double>(
+                            in_ptr[outer * dim_size * inner_size + d * inner_size + inner]) - mean;
                         var_sum += diff * diff;
                     }
                     int64_t divisor = dim_size - corr;
                     // NaN when dim_size <= correction (undefined), matching CPU.
                     out_ptr[idx] = (divisor > 0)
-                        ? (var_sum / static_cast<float>(divisor))
+                        ? static_cast<float>(var_sum / static_cast<double>(divisor))
                         : std::numeric_limits<float>::quiet_NaN();
                 }
             );

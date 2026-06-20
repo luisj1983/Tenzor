@@ -1,8 +1,16 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Complex128 log. Magnitude done in double for precision, angle in float
-// since GLSL atan only accepts float.
+// Complex128 log: log(z) = log(|z|) + i*arg(z).
+//
+// Real part (log of the magnitude) is computed fully in double precision via
+// log_double() below (IEEE-754 bit extraction + fdlibm-style minimax atanh
+// series, identical to the implementation in math_f64.comp). This preserves
+// the double-precision, scale-free magnitude computed at lines 19-31 instead
+// of narrowing it through float() before the transcendental.
+//
+// Imaginary part is arg(z) = atan2(b, a). GLSL provides no fp64 atan, so this
+// component is necessarily evaluated in float precision (~Float32 accuracy).
 
 layout(local_size_x_id = 0) in;
 
@@ -12,6 +20,73 @@ layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
 layout(push_constant) uniform PushConstants {
     uint num_elements;
 };
+
+// Double-precision log using IEEE 754 bit extraction and minimax polynomial.
+// log(x) = log(2^exp * mantissa) = exp * ln(2) + log(mantissa)
+double log_double(double x) {
+    // Handle NaN
+    if (x != x) return x;
+
+    // x <= 0: return NaN for negative, -inf for zero (matches std::log(|z|)).
+    if (x < 0.0LF) return 0.0LF / 0.0LF;   // NaN
+    if (x == 0.0LF) return -1.0LF / 0.0LF; // -inf
+
+    // +inf returns +inf
+    if (x > 1.7976931348623157e308LF) return x;
+
+    // x == 1 exact
+    if (x == 1.0LF) return 0.0LF;
+
+    // Extract IEEE 754 bits via unpackDouble2x32.
+    // Double layout: [63] sign | [62:52] exponent (11 bits) | [51:0] mantissa.
+    // unpackDouble2x32 returns uvec2(low32, high32).
+    uvec2 bits = unpackDouble2x32(x);
+    uint hi = bits.y;
+    uint lo = bits.x;
+
+    // Extract biased exponent (bits 62:52 = bits 30:20 of the high word).
+    int biased_exp = int((hi >> 20u) & 0x7FFu);
+    int exp_val = biased_exp - 1023;
+
+    // Reconstruct normalized mantissa in [1, 2) by setting exponent to bias.
+    uint hi_normalized = (hi & 0x000FFFFFu) | 0x3FF00000u;
+    double m = packDouble2x32(uvec2(lo, hi_normalized));
+
+    // Reduce to [sqrt(2)/2, sqrt(2)) for better polynomial convergence.
+    if (m > 1.4142135623730950488LF) {
+        m *= 0.5LF;
+        exp_val += 1;
+    }
+
+    // log(1+f) = 2*atanh(s), s = f/(2+f), converges fast since |s| < |f|/2.
+    double f = m - 1.0LF;
+    double s = f / (2.0LF + f);
+    double s2 = s * s;
+
+    // Cephes / Sun fdlibm minimax coefficients for atanh(s)/s.
+    double c1 = 0.6666666666666735130LF;   // 2/3
+    double c2 = 0.3999999999940941908LF;   // 2/5
+    double c3 = 0.2857142874366239149LF;   // 2/7
+    double c4 = 0.2222219843214978396LF;   // ~2/9
+    double c5 = 0.1818357216161805012LF;   // ~2/11
+    double c6 = 0.1531383769920937332LF;   // ~2/13
+    double c7 = 0.1479819860511658591LF;   // ~2/15 adjusted
+
+    double s4 = s2 * s2;
+    double t1 = c1 + c2 * s2 + c3 * s4;
+    double s6 = s4 * s2;
+    double t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
+    double R = t1 + t2 * s6;
+
+    double log_m = 2.0LF * s + s * s2 * R;
+
+    // ln(2) split into high and low parts for precision.
+    double ln2_hi = 0.69314718055994530942LF;
+    double ln2_lo = 2.3190468138462995584e-17LF;
+
+    double exp_dbl = double(exp_val);
+    return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -29,6 +104,8 @@ void main() {
         double i = ai / m;
         mag = m * sqrt(r * r + i * i);
     }
-    data_out[idx * 2u]      = double(log(float(mag)));
+    // Real part: log of the double-precision magnitude, kept in fp64.
+    data_out[idx * 2u]      = log_double(mag);
+    // Imaginary part: arg(z) = atan2(b, a). No fp64 atan in GLSL, so float.
     data_out[idx * 2u + 1u] = double(atan(float(b), float(a)));
 }

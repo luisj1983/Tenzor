@@ -306,9 +306,13 @@ private:
 };
 
 namespace {
-inline int current_sm_arch() {
-    int device = 0;
-    cudaGetDevice(&device);
+// Compute capability (major*10 + minor) of a SPECIFIC device. The architecture
+// gate below must reflect the GPU the tensors actually live on (Q.device().index),
+// NOT the calling thread's current device — on a heterogeneous multi-GPU host
+// (mixed Blackwell + non-Blackwell) the two can differ, which would mis-evaluate
+// the gate (either spurious BMM fallback or reintroducing the Blackwell FP32
+// illegal-memory-access). Callers must pass the tensor's device explicitly.
+inline int sm_arch_of_device(int device) {
     cudaDeviceProp props{};
     cudaGetDeviceProperties(&props, device);
     return props.major * 10 + props.minor;
@@ -509,7 +513,9 @@ auto cudnn_sdpa_forward(
         case DType::Float16:  io_dtype = fe::DataType_t::HALF; break;
         case DType::BFloat16: io_dtype = fe::DataType_t::BFLOAT16; break;
         case DType::Float32:
-            if (current_sm_arch() >= 100) {
+            // Gate on the compute capability of the tensor's own device, not the
+            // calling thread's current device (see sm_arch_of_device above).
+            if (sm_arch_of_device(Q.device().index) >= 100) {
                 // cuDNN FP32 SDPA is broken on Blackwell (sm_120): enabling it
                 // triggers an illegal memory access (verified). Throw so MHA
                 // falls back to the materialized BMM path, which is correct and

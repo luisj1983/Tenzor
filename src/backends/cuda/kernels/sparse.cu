@@ -257,6 +257,26 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream =
         int64_t ncols = sp_shape[1];
         int64_t nnz = sp.nnz();
 
+        // cusparseXcoo2csr's API takes int (32-bit) for nnz and the row count,
+        // and the row-index buffer it consumes is int32. nnz, nrows, and every
+        // row index (each < nrows) must therefore fit in int32; otherwise the
+        // static_cast<int>(...) / cast_i64_to_i32 below would silently truncate
+        // and produce a corrupted CSR row-pointer array with no diagnostic.
+        // Reject oversized inputs up front rather than corrupt results.
+        constexpr int64_t kInt32Max = static_cast<int64_t>(INT32_MAX);
+        if (nnz > kInt32Max) {
+            throw std::runtime_error(
+                "cuda_sparse: nnz=" + std::to_string(nnz) +
+                " exceeds int32 limit (" + std::to_string(kInt32Max) +
+                ") required by cusparseXcoo2csr");
+        }
+        if (nrows > kInt32Max) {
+            throw std::runtime_error(
+                "cuda_sparse: row count=" + std::to_string(nrows) +
+                " exceeds int32 limit (" + std::to_string(kInt32Max) +
+                ") required by cusparseXcoo2csr");
+        }
+
         // COO indices: [2, nnz] — row 0 = row indices, row 1 = col indices
         Tensor indices = sp.indices().contiguous();
         Tensor values = sp.values().contiguous();

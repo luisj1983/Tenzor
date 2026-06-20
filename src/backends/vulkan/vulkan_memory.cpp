@@ -309,12 +309,16 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             insertTransferToComputeBarrier(cmdBuffer);
             endSingleTimeCommands(cmdBuffer, device_id);
 
-            // With batching enabled, force submit now to ensure staging buffer
-            // content is copied to device before staging buffer can be reused.
+            // Force submit now to ensure staging buffer content is copied to the
+            // device before the staging buffer can be reused. The wait must be
+            // unconditional: when batching is disabled, endSingleTimeCommands has
+            // already submitted asynchronously, and the StagingGuard destructor
+            // would otherwise free the slot while the GPU is still reading it,
+            // racing a subsequent HostToDevice transfer that re-acquires the slot.
             if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
                 submitBatchIfNeeded(device_id, true);  // Force submit
-                ensurePendingWorkComplete(device_id);   // Wait for copy to complete
             }
+            ensurePendingWorkComplete(device_id);   // Wait for copy to complete
 
             // staging slot released by StagingGuard on scope exit.
             break;

@@ -616,10 +616,18 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         batch_mean = mean_var_results[0];
         batch_var = mean_var_results[1];
 
-        // Update running statistics using backend kernel
-        if (track_running_stats_) {
+        // Update running statistics using backend kernel.
+        // The Bessel correction below divides by (batch_size - 1); when
+        // batch_size == 1 this is 0 and 1/0 = +inf would poison running_var
+        // permanently. The unbiased variance is undefined for a single
+        // sample, so skip the running-stats update in that degenerate case
+        // (running stats stay unchanged), matching the guard PyTorch applies.
+        // The current forward output is unaffected because it uses the biased
+        // batch_var.
+        int64_t running_stats_batch_size = N * spatial_size;
+        if (track_running_stats_ && running_stats_batch_size >= 2) {
             // Use unbiased variance estimate for running statistics
-            int64_t batch_size = N * spatial_size;
+            int64_t batch_size = running_stats_batch_size;
             auto unbiased_var = batch_var * (static_cast<float>(batch_size) /
                                             static_cast<float>(batch_size - 1));
 
@@ -1144,8 +1152,14 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         auto centered = (reshaped_input - mean_broadcast).contiguous();
         batch_var = mean(centered * centered, 0, false);
 
-        // Update running statistics
-        if (track_running_stats_) {
+        // Update running statistics. The Bessel correction divides by
+        // (batch_size - 1); when batch_size == 1 this is 0 and 1/0 = +inf
+        // would poison running_var permanently. The unbiased variance is
+        // undefined for a single sample, so skip the running-stats update in
+        // that degenerate case (running stats stay unchanged), matching the
+        // guard PyTorch applies. The current forward output is unaffected
+        // because it uses the biased batch_var below.
+        if (track_running_stats_ && batch_size >= 2) {
             auto unbiased_var = batch_var * (static_cast<float>(batch_size) /
                                             static_cast<float>(batch_size - 1));
 
@@ -1172,6 +1186,26 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         if (track_running_stats_) {
             batch_mean = buffers_["running_mean"]->tensor();
             batch_var = buffers_["running_var"]->tensor();
+            // Reconcile device/dtype with the input (mirrors BN2d eval branch).
+            // Running stats are stored as Float32 on the buffer's home device;
+            // normalization below mixes them directly with input_work, so they
+            // must match input_work's device and dtype. Without this, a CUDA
+            // input with CPU-stored stats yields a mixed-device subtraction,
+            // and a Float64 input (which is not upcast) mismatches the Float32
+            // stats.
+            if (batch_mean.device() != original_device) {
+                batch_mean = batch_mean.to(original_device);
+            }
+            if (batch_var.device() != original_device) {
+                batch_var = batch_var.to(original_device);
+            }
+            const DType input_dtype = input_work.dtype();
+            if (batch_mean.dtype() != input_dtype) {
+                batch_mean = batch_mean.to(input_dtype);
+            }
+            if (batch_var.dtype() != input_dtype) {
+                batch_var = batch_var.to(input_dtype);
+            }
         } else {
             throw std::runtime_error("BatchNorm1d in eval mode requires track_running_stats=true");
         }

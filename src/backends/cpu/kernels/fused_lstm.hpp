@@ -27,6 +27,8 @@
 #include <limits>
 #include <atomic>
 #include <optional>
+#include <stdexcept>
+#include <string>
 
 #include "buffer_pool.hpp"
 #include "tenzor/utils/log.hpp"
@@ -67,6 +69,10 @@ using gemm_int = MKL_INT;
 #include <dnnl.hpp>
 #include "onednn_cache.hpp"
 #define TENZOR_LSTM_USE_ONEDNN_GEMM 1
+// oneDNN takes int64_t dimensions natively, so there is no truncation risk on
+// this path. Define gemm_int = int64_t so the shared check_gemm_dims guard
+// compiles and behaves uniformly across all GEMM backends.
+using gemm_int = int64_t;
 
 // Use shared per-thread oneDNN engine/stream from onednn_cache.hpp
 // (eliminates a duplicate engine per thread).
@@ -173,27 +179,78 @@ using gemm_int = int;
 #endif
 #endif
 
-// LSTM GEMM macro - selects best available implementation
+// GEMM dimension guard.
+//
+// In the default MKL LP64 build, gemm_int == MKL_INT == 32-bit. The fused
+// LSTM/GRU input-projection GEMM passes M = seq_len * batch, which is computed
+// in int64_t. For pathological-but-reachable shapes (seq_len * batch, or any of
+// M/N/K/lda/ldb/ldc) exceeding the range of gemm_int, the static_cast<gemm_int>
+// in LSTM_SGEMM_NT would silently truncate the row/col/stride count while the
+// underlying buffers are sized in size_t/int64 — producing a partial/wrong GEMM
+// with no diagnostic. Validate every dimension fits in gemm_int and hard-error
+// otherwise (the only correct option: a 32-bit BLAS cannot express the op, and
+// silently computing the wrong thing is worse than failing loudly).
+namespace tenzor {
+namespace cpu {
+namespace lstm {
+namespace detail {
+
+inline void check_gemm_dims(int64_t M, int64_t N, int64_t K,
+                            int64_t lda, int64_t ldb, int64_t ldc) {
+    constexpr int64_t kMax = static_cast<int64_t>(std::numeric_limits<gemm_int>::max());
+    const bool ok =
+        M >= 0 && M <= kMax &&
+        N >= 0 && N <= kMax &&
+        K >= 0 && K <= kMax &&
+        lda >= 0 && lda <= kMax &&
+        ldb >= 0 && ldb <= kMax &&
+        ldc >= 0 && ldc <= kMax;
+    if (!ok) {
+        throw std::runtime_error(
+            std::string("[LSTM] GEMM dimension exceeds BLAS integer range (") +
+            "max=" + std::to_string(kMax) + "): " +
+            "M=" + std::to_string(M) +
+            " N=" + std::to_string(N) +
+            " K=" + std::to_string(K) +
+            " lda=" + std::to_string(lda) +
+            " ldb=" + std::to_string(ldb) +
+            " ldc=" + std::to_string(ldc) +
+            ". Rebuild against an ILP64 (64-bit integer) BLAS for shapes this large.");
+    }
+}
+
+} // namespace detail
+} // namespace lstm
+} // namespace cpu
+} // namespace tenzor
+
+// LSTM GEMM macro - selects best available implementation.
+// Every variant first validates that all dimensions fit in gemm_int (see
+// detail::check_gemm_dims) so the static_cast below cannot silently truncate.
 #ifdef TENZOR_LSTM_USE_MKL_GEMM
 // MKL: Best performance
 #define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, \
+    (::tenzor::cpu::lstm::detail::check_gemm_dims((M), (N), (K), (lda), (ldb), (ldc)), \
+     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, \
                 static_cast<gemm_int>(M), static_cast<gemm_int>(N), static_cast<gemm_int>(K), \
                 alpha, A, static_cast<gemm_int>(lda), \
                 B, static_cast<gemm_int>(ldb), \
-                beta, C, static_cast<gemm_int>(ldc))
+                beta, C, static_cast<gemm_int>(ldc)))
 #elif defined(TENZOR_LSTM_USE_ONEDNN_GEMM)
-// oneDNN fallback
+// oneDNN fallback (uses int64_t throughout; check is a cheap, harmless guard
+// that also documents the contract and keeps behaviour uniform across builds).
 #define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
-    onednn_sgemm_nt(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc)
+    (::tenzor::cpu::lstm::detail::check_gemm_dims((M), (N), (K), (lda), (ldb), (ldc)), \
+     onednn_sgemm_nt(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc))
 #else
 // Generic CBLAS fallback
 #define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, \
+    (::tenzor::cpu::lstm::detail::check_gemm_dims((M), (N), (K), (lda), (ldb), (ldc)), \
+     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, \
                 static_cast<gemm_int>(M), static_cast<gemm_int>(N), static_cast<gemm_int>(K), \
                 alpha, A, static_cast<gemm_int>(lda), \
                 B, static_cast<gemm_int>(ldb), \
-                beta, C, static_cast<gemm_int>(ldc))
+                beta, C, static_cast<gemm_int>(ldc)))
 #endif
 
 namespace tenzor {

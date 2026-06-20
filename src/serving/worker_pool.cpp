@@ -10,6 +10,9 @@
 
 #include <tenzor/serving/worker_pool.hpp>
 #include <tenzor/core/device_guard.hpp>
+#include <tenzor/utils/log.hpp>
+
+#include <exception>
 
 namespace tenzor::serving {
 
@@ -38,7 +41,20 @@ WorkerPool::WorkerPool(int num_workers, Device device) : device_(device) {
                     task = std::move(task_queue_.front());
                     task_queue_.pop();
                 }
-                if (task) task();
+                // Isolate task failures: an exception escaping the thread
+                // entry function calls std::terminate() and aborts the whole
+                // process. A general-purpose pool must survive a throwing task.
+                if (task) {
+                    try {
+                        task();
+                    } catch (const std::exception& e) {
+                        TENZOR_LOG_ERROR("WorkerPool task threw exception: {}",
+                                         e.what());
+                    } catch (...) {
+                        TENZOR_LOG_ERROR("WorkerPool task threw unknown "
+                                         "(non-std::exception) exception");
+                    }
+                }
             }
         });
     }

@@ -1,14 +1,22 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
-#extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
 
 // ROI Align Backward Pass (Float64)
+// Distributes gradients from output back to feature map using bilinear weights.
+// Each invocation owns one output bin (roi, c, ph, pw) and scatters into the four
+// neighbouring input feature pixels. Overlapping bins/ROIs alias the same input
+// pixel from concurrent invocations, so the scatter MUST be atomic to avoid lost
+// updates. Vulkan has no native f64 atomicAdd, so grad_features is bound as a
+// uint64 SSBO and accumulated via a bit-cast atomicCompSwap loop (the same pattern
+// used by max_pool2d_backward_f64 and the other f64 scatter-backward shaders).
 
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float64_t grad_output_data[]; };
 layout(binding = 1) buffer ROIs { float64_t rois_data[]; };
-layout(binding = 2) buffer GradFeatures { float64_t grad_features_data[]; };
+layout(binding = 2) buffer GradFeatures { uint64_t grad_features_data[]; }; // uint64 for CAS atomics
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -23,6 +31,30 @@ layout(push_constant) uniform PushConstants {
     uint aligned;
     uint batch_size;
 } params;
+
+// Bit-cast helpers between float64 and its uint64 representation.
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+// Race-free f64 accumulation via CAS loop on the uint64 representation.
+void atomicAddF64(uint idx, float64_t val) {
+    uint64_t old_bits = grad_features_data[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(grad_features_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    grad_features_data[idx] = new_bits;
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -41,7 +73,7 @@ void main() {
 
     uint roi_base = roi_idx * 5;
     // Validate ROI batch index before scattering grad into features (unguarded
-    // atomicAdd at an out-of-range batch_idx is an out-of-bounds device write).
+    // atomic write at an out-of-range batch_idx is an out-of-bounds device write).
     int batch_idx_signed = int(rois_data[roi_base]);
     if (batch_idx_signed < 0 || uint(batch_idx_signed) >= params.batch_size) {
         return;
@@ -75,9 +107,8 @@ void main() {
         : uint(ceil(bin_size_w));
 
     uint count = roi_bin_grid_h * roi_bin_grid_w;
-    // Use float32 for the grad scale since atomicAdd for f64 may not be available
-    // We accumulate in float32 intermediate
-    float grad_val_f32 = float(grad_output_data[idx]) / float(count);
+    // Accumulate in full f64 precision (the CAS atomic add operates on f64).
+    float64_t grad_val = grad_output_data[idx] / float64_t(count);
 
     uint base_offset = batch_idx * params.channels * params.feat_height * params.feat_width
                      + c * params.feat_height * params.feat_width;
@@ -104,26 +135,21 @@ void main() {
             int y_high = min(y_low + 1, height - 1);
             int x_high = min(x_low + 1, width - 1);
 
-            float ly = float(y) - float(y_low);
-            float lx = float(x) - float(x_low);
-            float hy = 1.0 - ly;
-            float hx = 1.0 - lx;
+            float64_t ly = y - float64_t(y_low);
+            float64_t lx = x - float64_t(x_low);
+            float64_t hy = 1.0lf - ly;
+            float64_t hx = 1.0lf - lx;
 
-            // Use a manual CAS loop for f64 atomicAdd since GL_EXT_shader_atomic_float
-            // may only support float32 atomicAdd on some devices.
-            // For simplicity and broad compatibility, compute bilinear weights in f32
-            // and write the f64 result non-atomically (acceptable for single-batch or
-            // when ROIs don't overlap heavily).
-            // Production code would use a separate accumulation buffer.
-            uint off1 = base_offset + y_low * width + x_low;
-            uint off2 = base_offset + y_low * width + x_high;
-            uint off3 = base_offset + y_high * width + x_low;
-            uint off4 = base_offset + y_high * width + x_high;
+            // Race-free scatter into the four neighbouring input pixels.
+            uint off1 = base_offset + uint(y_low) * uint(width) + uint(x_low);
+            uint off2 = base_offset + uint(y_low) * uint(width) + uint(x_high);
+            uint off3 = base_offset + uint(y_high) * uint(width) + uint(x_low);
+            uint off4 = base_offset + uint(y_high) * uint(width) + uint(x_high);
 
-            grad_features_data[off1] += float64_t(grad_val_f32 * hy * hx);
-            grad_features_data[off2] += float64_t(grad_val_f32 * hy * lx);
-            grad_features_data[off3] += float64_t(grad_val_f32 * ly * hx);
-            grad_features_data[off4] += float64_t(grad_val_f32 * ly * lx);
+            atomicAddF64(off1, grad_val * hy * hx);
+            atomicAddF64(off2, grad_val * hy * lx);
+            atomicAddF64(off3, grad_val * ly * hx);
+            atomicAddF64(off4, grad_val * ly * lx);
         }
     }
 }

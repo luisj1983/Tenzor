@@ -273,48 +273,6 @@ private:
         DeviceAllocator() = default;
     };
 
-    /// Pending async free for stream-ordered memory management
-    struct PendingFree {
-        void* ptr;
-        size_t size;
-        void* event;  ///< Backend-specific event handle (e.g., cudaEvent_t)
-        int device;
-    };
-
-    /// Pending frees awaiting stream completion
-    std::vector<PendingFree> pending_frees_;
-
-    /// CUDA graph capture mode
-    bool capture_mode_{false};
-    std::vector<std::pair<size_t, void*>> captured_allocations_;
-
-public:
-    /// Set NUMA preference for a device allocator
-    auto set_preferred_numa_node(int device, int numa_node) -> void;
-
-    /// Get NUMA preference for a device
-    auto get_preferred_numa_node(int device) const -> int;
-
-    /// Record an async free (deferred until event completes)
-    auto free_async(void* ptr, size_t size, void* event, int device = 0) -> void;
-
-    /// Process completed pending frees
-    auto process_pending_frees() -> void;
-
-    /// Enter CUDA graph capture mode (allocations are recorded, not executed)
-    auto begin_capture_mode() -> void { capture_mode_ = true; captured_allocations_.clear(); }
-
-    /// Exit capture mode and return the recorded allocations
-    auto end_capture_mode() -> std::vector<std::pair<size_t, void*>> {
-        capture_mode_ = false;
-        return std::move(captured_allocations_);
-    }
-
-    /// Check if in capture mode
-    auto in_capture_mode() const -> bool { return capture_mode_; }
-
-private:
-
     // Mutex for protecting device_allocators_ map structure
     mutable std::mutex map_mutex_;
 

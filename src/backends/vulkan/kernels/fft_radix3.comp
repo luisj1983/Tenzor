@@ -16,9 +16,34 @@ layout(push_constant) uniform PushConstants {
 };
 
 const float PI = 3.14159265358979323846;
+const float HALF_PI = 1.57079632679489661923;
 // W3 = exp(-2*pi*i/3): cos(2pi/3) = -0.5, sin(2pi/3) = sqrt(3)/2
 const float COS_2PI_3 = -0.5;
 const float SIN_2PI_3 = 0.86602540378443864676;
+
+// Compute cos(2*PI*frac) and sin(2*PI*frac) for frac in [0, 1) (one full turn).
+// GLSL cos/sin only guarantee ~2^-11 absolute accuracy outside [-PI/2, PI/2],
+// so reduce the angle into the first quadrant [0, PI/2] and rebuild cos/sin by
+// quadrant (matching the radix-2 kernel fft.comp). The radix-3 twiddle angles
+// reach up to ~4*PI/3, well past PI/2, so this reduction is required for parity.
+void cos_sin_turn(float frac, out float c, out float s) {
+    // Wrap into [0, 1) defensively, then into one of four quadrants.
+    frac = frac - floor(frac);          // [0, 1)
+    float q = frac * 4.0;               // [0, 4)
+    uint quadrant = uint(q);            // 0,1,2,3
+    float r = (q - float(quadrant)) * HALF_PI; // angle within quadrant, [0, PI/2)
+    float cr = cos(r);
+    float sr = sin(r);
+    if (quadrant == 0u) {        // [0, PI/2)
+        c =  cr; s =  sr;
+    } else if (quadrant == 1u) { // [PI/2, PI)
+        c = -sr; s =  cr;
+    } else if (quadrant == 2u) { // [PI, 3PI/2)
+        c = -cr; s = -sr;
+    } else {                     // [3PI/2, 2PI)
+        c =  sr; s = -cr;
+    }
+}
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
@@ -54,13 +79,19 @@ void main() {
     float a1_re = data_in[b1_in], a1_im = data_in[b1_in + 1];
     float a2_re = data_in[b2_in], a2_im = data_in[b2_in + 1];
 
-    // Twiddle factors for positions 1 and 2
-    float angle1 = -2.0 * PI * float(pos) / float(stage_stride * 3);
-    float angle2 = 2.0 * angle1;
-    if (direction == 1) { angle1 = -angle1; angle2 = -angle2; }
-
-    float w1_re = cos(angle1), w1_im = sin(angle1);
-    float w2_re = cos(angle2), w2_im = sin(angle2);
+    // Twiddle factors for positions 1 and 2.
+    // angle1 = -2*PI*pos/(stage_stride*3) for forward (negated for inverse),
+    // angle2 = 2*angle1. Build cos/sin via quadrant reduction (cos even, sin odd)
+    // so the trig argument stays in [0, PI/2] and matches radix-2 precision.
+    float frac1 = float(pos) / float(stage_stride * 3); // [0, 1/3)
+    float frac2 = 2.0 * frac1;                           // [0, 2/3)
+    float c1, s1, c2, s2;
+    cos_sin_turn(frac1, c1, s1); // cos(2*PI*frac1), sin(2*PI*frac1)
+    cos_sin_turn(frac2, c2, s2);
+    // Forward angle is -2*PI*frac (sin negated); inverse flips the sin sign back.
+    float sin_sign = (direction == 1) ? 1.0 : -1.0;
+    float w1_re = c1, w1_im = sin_sign * s1;
+    float w2_re = c2, w2_im = sin_sign * s2;
 
     // Apply twiddle
     float t1_re = a1_re * w1_re - a1_im * w1_im;

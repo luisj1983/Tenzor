@@ -1449,6 +1449,9 @@ auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t
     }
 
     int64_t signal_length = in_shape[ndim - 1];
+    if (signal_length < 1) {
+        throw std::runtime_error("stft: signal length (last dimension) must be >= 1");
+    }
     int64_t batch_size = 1;
     for (int64_t d = 0; d < ndim - 1; ++d) {
         batch_size *= in_shape[d];
@@ -1491,7 +1494,17 @@ auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t
         src_data = input_f32.data<float>();
     }
 
-    // Number of frames
+    // Number of frames.
+    // Guard explicitly against padded_length < n_fft: there,
+    // (padded_length - n_fft) is negative and integer division truncates
+    // toward zero, so the naive `(padded_length - n_fft) / hop_length + 1`
+    // can evaluate to 1 (when n_fft - hop_length < padded_length < n_fft)
+    // and slip past a `num_frames <= 0` check, then read n_fft elements
+    // from a buffer that only holds padded_length floats (OOB heap read).
+    if (padded_length < n_fft) {
+        throw std::runtime_error("stft: signal too short for given n_fft "
+                                 "(padded signal length is less than n_fft)");
+    }
     int64_t num_frames = (padded_length - n_fft) / hop_length + 1;
     if (num_frames <= 0) {
         throw std::runtime_error("stft: signal too short for given n_fft and hop_length");
@@ -1527,33 +1540,41 @@ auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t
     Tensor result(out_shape, DType::Complex64, input.device());
     auto* out_ptr = reinterpret_cast<std::complex<float>*>(result.data_ptr());
 
-    // Process each batch and frame
+    // Process each batch. All frames of a batch are packed into a single
+    // (num_frames, n_fft) tensor and transformed with ONE batched FFT call
+    // (along dim=1). The fft/rfft kernels treat the leading dimension as the
+    // batch axis (outer_size), so this issues a single MKL DFTI descriptor /
+    // FFT plan per batch instead of one per frame, eliminating the
+    // per-frame Tensor allocation and plan-construction churn.
+    const std::string_view stft_norm = normalized ? "ortho" : "backward";
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* sig = src_data + b * padded_length;
 
+        // Build the windowed frames matrix: row f = windowed frame at offset
+        // f * hop_length. Bounds are guaranteed: frame_start[n_fft-1] indexes
+        // sig[(num_frames-1)*hop_length + n_fft - 1] <= padded_length - 1.
+        Tensor frames({num_frames, n_fft}, DType::Float32, input.device());
+        float* frames_data = frames.data<float>();
         for (int64_t f = 0; f < num_frames; ++f) {
-            // Extract windowed frame
             const float* frame_start = sig + f * hop_length;
-
-            // Create a 1D tensor for the windowed frame
-            Tensor frame_tensor({n_fft}, DType::Float32, input.device());
-            float* frame_data = frame_tensor.data<float>();
+            float* row = frames_data + f * n_fft;
             for (int64_t i = 0; i < n_fft; ++i) {
-                frame_data[i] = frame_start[i] * win_data[static_cast<size_t>(i)];
+                row[i] = frame_start[i] * win_data[static_cast<size_t>(i)];
             }
+        }
 
-            // Apply FFT
-            Tensor fft_result;
-            if (onesided) {
-                fft_result = rfft_kernel(frame_tensor, 0, n_fft, normalized ? "ortho" : "backward");
-            } else {
-                fft_result = fft_kernel(frame_tensor, 0, n_fft, normalized ? "ortho" : "backward");
-            }
+        // One batched FFT over dim=1 → shape (num_frames, freq_bins).
+        Tensor fft_result = onesided
+            ? rfft_kernel(frames, 1, n_fft, stft_norm)
+            : fft_kernel(frames, 1, n_fft, stft_norm);
 
-            // Copy FFT result into output
-            auto* fft_ptr = reinterpret_cast<const std::complex<float>*>(fft_result.data_ptr());
+        // Scatter into output, which is laid out as (..., freq_bins, num_frames).
+        const auto* fft_ptr = reinterpret_cast<const std::complex<float>*>(fft_result.data_ptr());
+        std::complex<float>* out_base = out_ptr + b * freq_bins * num_frames;
+        for (int64_t f = 0; f < num_frames; ++f) {
+            const std::complex<float>* frow = fft_ptr + f * freq_bins;
             for (int64_t k = 0; k < freq_bins; ++k) {
-                out_ptr[b * freq_bins * num_frames + k * num_frames + f] = fft_ptr[k];
+                out_base[k * num_frames + f] = frow[k];
             }
         }
     }
@@ -1632,32 +1653,40 @@ auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_
     std::vector<float> output_data(static_cast<size_t>(batch_size * expected_length), 0.0f);
     std::vector<float> window_sum(static_cast<size_t>(batch_size * expected_length), 0.0f);
 
+    const std::string_view istft_norm = normalized ? "ortho" : "backward";
     for (int64_t b = 0; b < batch_size; ++b) {
         float* out = output_data.data() + b * expected_length;
         float* wsum = window_sum.data() + b * expected_length;
 
+        // Gather all frequency columns for this batch into a single
+        // (num_frames, freq_bins) tensor, then run ONE batched inverse FFT
+        // along dim=1. The ifft/irfft kernels batch over the leading
+        // dimension (outer_size), so this issues a single MKL DFTI
+        // descriptor / FFT plan per batch rather than one per frame.
+        Tensor frame_freq({num_frames, freq_bins}, DType::Complex64, input.device());
+        auto* freq_data = reinterpret_cast<std::complex<float>*>(frame_freq.data_ptr());
+        const std::complex<float>* in_base = in_ptr + b * freq_bins * num_frames;
         for (int64_t f = 0; f < num_frames; ++f) {
-            // Extract frequency column for this frame
-            Tensor frame_freq({freq_bins}, DType::Complex64, input.device());
-            auto* freq_data = reinterpret_cast<std::complex<float>*>(frame_freq.data_ptr());
+            std::complex<float>* frow = freq_data + f * freq_bins;
             for (int64_t k = 0; k < freq_bins; ++k) {
-                freq_data[k] = in_ptr[b * freq_bins * num_frames + k * num_frames + f];
+                frow[k] = in_base[k * num_frames + f];
             }
+        }
 
-            // Apply inverse FFT
-            Tensor time_frame;
-            if (onesided) {
-                time_frame = irfft_kernel(frame_freq, 0, n_fft, normalized ? "ortho" : "backward");
-            } else {
-                time_frame = ifft_kernel(frame_freq, 0, n_fft, normalized ? "ortho" : "backward");
-            }
+        // One batched inverse FFT over dim=1 → shape (num_frames, n_fft).
+        Tensor time_frame = onesided
+            ? irfft_kernel(frame_freq, 1, n_fft, istft_norm)
+            : ifft_kernel(frame_freq, 1, n_fft, istft_norm);
 
-            // Get real part of time-domain frame
-            Tensor real_frame = (time_frame.dtype() == DType::Complex64 || time_frame.dtype() == DType::Complex128)
-                ? time_frame.to(DType::Float32)
-                : time_frame;
-            const float* frame_data = real_frame.data<float>();
+        // Get real part of the time-domain frames (irfft is already real).
+        Tensor real_frames = (time_frame.dtype() == DType::Complex64 ||
+                              time_frame.dtype() == DType::Complex128)
+            ? time_frame.to(DType::Float32)
+            : time_frame;
+        const float* frames_data = real_frames.data<float>();
 
+        for (int64_t f = 0; f < num_frames; ++f) {
+            const float* frame_data = frames_data + f * n_fft;
             // Overlap-add with window
             int64_t frame_offset = f * hop_length;
             for (int64_t i = 0; i < n_fft; ++i) {

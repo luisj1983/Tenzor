@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <vector>
 #include <cstring>
+#include <limits>
 #include "../rocm_error.hpp"
 #include "tenzor/ops/creation.hpp"
 
@@ -36,6 +37,40 @@ namespace rocm {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < (n); \
          i += blockDim.x * gridDim.x)
+
+// Host-side index bounds validation for gather/index_select/scatter.
+// The on-device kernels silently skip out-of-range indices, which diverges
+// from the CPU reference that throws std::out_of_range. Indices live on-device,
+// so copy them to host and validate against [-dim_size, dim_size) (negative
+// indices are normalized exactly like the kernels do), throwing on the first
+// out-of-range value to match CPU/PyTorch semantics. `op_name` is used to build
+// a message that mirrors the corresponding CPU error string.
+inline void validate_index_bounds(const Tensor& indices, int64_t dim_size,
+                                   const char* op_name) {
+    // Indices are read as int64_t both here and on-device. Reinterpreting a
+    // narrower (e.g. Int32) buffer as int64 would read half as many elements
+    // with garbage values, so reject non-Int64 indices cleanly (matches the CPU
+    // reference, which throws for any non-Int64 gather/scatter/select index).
+    if (indices.dtype() != DType::Int64) {
+        throw std::invalid_argument(
+            std::string(op_name) + ": index tensor must have dtype Int64");
+    }
+    int64_t n = indices.numel();
+    if (n == 0) return;
+    std::vector<int64_t> host(static_cast<size_t>(n));
+    HIP_CHECK(hipMemcpy(host.data(), indices.data<int64_t>(),
+                        static_cast<size_t>(n) * sizeof(int64_t),
+                        hipMemcpyDeviceToHost));
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t v = host[static_cast<size_t>(i)];
+        if (v < 0) v += dim_size;  // mirror kernel negative-index normalization
+        if (v < 0 || v >= dim_size) {
+            throw std::out_of_range(
+                std::string(op_name) + ": index " + std::to_string(host[static_cast<size_t>(i)]) +
+                " out of range for dimension of size " + std::to_string(dim_size));
+        }
+    }
+}
 
 // Helper for atomic operations - template to use built-in atomicAdd where available
 template<typename T>
@@ -94,6 +129,27 @@ __device__ __forceinline__ hip_bfloat16 atomicAddHelper<hip_bfloat16>(hip_bfloat
 }
 
 // ==============================================================================
+// Gather / Scatter shared per-dimension metadata
+// ==============================================================================
+
+// Maximum rank supported by the per-dimension gather/scatter decode below.
+namespace {
+constexpr int MAX_GATHER_SCATTER_DIMS = 16;
+}
+
+// Per-dimension metadata for gather/scatter. The flat index ranges over the
+// INDEX tensor (== output for gather), so decode each coordinate against the
+// index's own contiguous strides, then re-linearise against the input/output's
+// contiguous strides. The collapsed outer/inner formula is only correct when
+// index and input share extents on every non-dim axis; PyTorch/CPU allow the
+// index extent to be smaller than the input on a non-dim axis, which requires
+// this per-dim decode (mirrors gather_impl / scatter_impl in CPU indexing.cpp).
+struct GatherScatterMeta {
+    int64_t idx_strides[MAX_GATHER_SCATTER_DIMS];   // contiguous strides of index shape
+    int64_t self_strides[MAX_GATHER_SCATTER_DIMS];  // contiguous strides of input/output shape
+};
+
+// ==============================================================================
 // Gather Operation
 // ==============================================================================
 
@@ -104,39 +160,56 @@ __global__ void gather_kernel(
     const T* input,
     const int64_t* indices,
     T* output,
-    int64_t /*input_size*/,
-    int64_t /*indices_numel_unused*/,
-    int64_t inner_size,
+    int ndim,
+    int dim,
     int64_t dim_size,
-    int64_t index_dim_size,
-    int64_t total_output
+    int64_t total_output,
+    GatherScatterMeta meta
 ) {
     HIP_KERNEL_LOOP(idx, total_output) {
-        int64_t inner_idx = idx % inner_size;
-        int64_t temp = idx / inner_size;
-        int64_t index_pos = temp % index_dim_size;
-        int64_t outer_idx = temp / index_dim_size;
-
-        int64_t index_offset = outer_idx * index_dim_size * inner_size +
-                               index_pos * inner_size + inner_idx;
-        int64_t gather_idx = indices[index_offset];
+        // Decode the flat output position (== index position) per-dimension from
+        // the index strides, then re-linearise against the input's contiguous
+        // strides, substituting the gathered coordinate on the `dim` axis.
+        int64_t rem = idx;
+        int64_t input_offset = 0;
+        int64_t gather_idx = indices[idx];
         if (gather_idx < 0) gather_idx += dim_size;
         if (gather_idx < 0 || gather_idx >= dim_size) continue;
-
-        int64_t input_offset = outer_idx * dim_size * inner_size +
-                               gather_idx * inner_size + inner_idx;
+        for (int d = 0; d < ndim; ++d) {
+            int64_t coord = rem / meta.idx_strides[d];
+            rem %= meta.idx_strides[d];
+            if (d == dim) {
+                input_offset += gather_idx * meta.self_strides[d];
+            } else {
+                input_offset += coord * meta.self_strides[d];
+            }
+        }
         output[idx] = input[input_offset];
     }
 }
 
 auto gather_hip(
-    const Tensor& input,
+    const Tensor& input_arg,
     int64_t dim,
-    const Tensor& indices
+    const Tensor& indices_arg
 ) -> Tensor {
+
+    // The kernel addresses the input/index with contiguous strides, so a
+    // non-contiguous (transposed/sliced/permuted) view would read the wrong
+    // storage elements. Materialise contiguous copies (matches the CPU
+    // reference, which does the same in gather_kernel).
+    Tensor input = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
+    Tensor indices = indices_arg.is_contiguous() ? indices_arg : indices_arg.contiguous();
 
     auto input_shape = input.shape();
     auto indices_shape = indices.shape();
+
+    // Indices must be Int64 — the kernel reads them as int64_t. The CPU
+    // reference throws cleanly on any other dtype; do the same here rather than
+    // reinterpreting a narrower buffer as int64 (silent garbage/OOB).
+    if (indices.dtype() != DType::Int64) {
+        throw std::invalid_argument("gather: index tensor must have dtype Int64");
+    }
 
     // Normalize negative dim (PyTorch semantics: dim=-1 → last)
     if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
@@ -144,34 +217,55 @@ auto gather_hip(
         throw std::out_of_range("gather_hip: dim out of range");
     }
 
-    // Compute output shape
-    std::vector<int64_t> output_shape;
-    for (size_t i = 0; i < input_shape.size(); ++i) {
-        if (static_cast<int64_t>(i) == dim) {
-            output_shape.push_back(indices_shape[i]);
-        } else {
-            output_shape.push_back(input_shape[i]);
+    // PyTorch/CPU gather: index must have the same rank as input, and along every
+    // non-dim axis its extent must not exceed the input's (it may select a
+    // sub-block there). The output shape is exactly the index shape.
+    if (indices_shape.size() != input_shape.size()) {
+        throw std::invalid_argument("gather: index must have same rank as input");
+    }
+    int ndim = static_cast<int>(input_shape.size());
+    if (ndim > MAX_GATHER_SCATTER_DIMS) {
+        throw std::runtime_error("gather_hip: ndim exceeds MAX_GATHER_SCATTER_DIMS");
+    }
+    for (int d = 0; d < ndim; ++d) {
+        if (d == dim) continue;
+        if (indices_shape[d] > input_shape[d]) {
+            throw std::out_of_range(
+                "gather: index.size(" + std::to_string(d) + ") exceeds self.size(" +
+                std::to_string(d) + ") (index extent must be <= input extent on "
+                "non-gather dims)");
         }
     }
 
+    // Output shape is exactly the index shape (PyTorch semantics).
+    std::vector<int64_t> output_shape(indices_shape.begin(), indices_shape.end());
+
     Tensor output = Tensor(output_shape, input.dtype(), input.device());
 
-    // Calculate dimensions
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= input_shape[i];
-    }
-
     int64_t dim_size = input_shape[dim];
+    int64_t total_output = output.numel();
 
-    int64_t inner_size = 1;
-    for (size_t i = dim + 1; i < input_shape.size(); ++i) {
-        inner_size *= input_shape[i];
+    // Per-dim metadata: index strides (to decode each output coordinate) and the
+    // INPUT's contiguous strides (to re-linearise every non-dim coordinate and
+    // the substituted gathered index on the `dim` axis).
+    GatherScatterMeta meta{};
+    {
+        int64_t is = 1, ss = 1;
+        for (int d = ndim - 1; d >= 0; --d) {
+            meta.idx_strides[d] = is;
+            meta.self_strides[d] = ss;
+            is *= indices_shape[d];
+            ss *= input_shape[d];
+        }
     }
 
-    int64_t indices_size = indices.numel();
-    int64_t index_dim_size = indices_shape[dim];
-    int64_t total_output = output.numel();
+    // Match CPU semantics: throw on any out-of-range index instead of silently
+    // skipping (kernel uses `continue`, leaving output uninitialized).
+    validate_index_bounds(indices, dim_size, "gather");
+
+    if (total_output == 0) {
+        return output;
+    }
 
     int threads = 256;
     int blocks = static_cast<int>((total_output + threads - 1) / threads);
@@ -182,8 +276,7 @@ auto gather_hip(
             input.data<float>(),
             indices.data<int64_t>(),
             output.data<float>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_kernel<double>,
@@ -191,8 +284,7 @@ auto gather_hip(
             input.data<double>(),
             indices.data<int64_t>(),
             output.data<double>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(gather_kernel<int32_t>,
@@ -200,8 +292,7 @@ auto gather_hip(
             input.data<int32_t>(),
             indices.data<int64_t>(),
             output.data<int32_t>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(gather_kernel<int64_t>,
@@ -209,8 +300,7 @@ auto gather_hip(
             input.data<int64_t>(),
             indices.data<int64_t>(),
             output.data<int64_t>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_kernel<__half>,
@@ -218,8 +308,7 @@ auto gather_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
@@ -227,32 +316,31 @@ auto gather_hip(
             reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             indices.data<int64_t>(),
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
         hipLaunchKernelGGL(gather_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<const uint16_t*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<uint16_t*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::UInt32) {
         hipLaunchKernelGGL(gather_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<const uint32_t*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<uint32_t*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
         hipLaunchKernelGGL(gather_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<const uint64_t*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<uint64_t*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Complex128) {
         hipLaunchKernelGGL(gather_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<const Bytes16*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<Bytes16*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
@@ -285,35 +373,37 @@ __global__ void scatter_kernel(
     T* output,
     const int64_t* indices,
     const T* src,
-    int64_t outer_size,
+    int ndim,
+    int dim,
     int64_t dim_size,
-    int64_t inner_size,
-    int64_t index_dim_size,
     int64_t total_scatter,
+    GatherScatterMeta meta,
     bool reduce_add
 ) {
     HIP_KERNEL_LOOP(idx, total_scatter) {
-        int64_t inner_idx = idx % inner_size;
-        int64_t temp = idx / inner_size;
-        int64_t index_pos = temp % index_dim_size;
-        int64_t outer_idx = temp / index_dim_size;
-
-        // Get the index value at this position
-        int64_t index_offset = outer_idx * index_dim_size * inner_size +
-                               index_pos * inner_size + inner_idx;
-        int64_t scatter_idx = indices[index_offset];
-
-        // Handle negative indices
+        // The flat index ranges over the INDEX/SRC tensor. Decode each coordinate
+        // against the index strides; the index value at this flat position is
+        // simply indices[idx] (index is contiguous). Re-linearise against the
+        // output's contiguous strides, substituting the scatter coordinate on the
+        // `dim` axis. Mirrors CPU scatter_impl.
+        int64_t scatter_idx = indices[idx];
         if (scatter_idx < 0) {
             scatter_idx += dim_size;
         }
 
         // Bounds checking
         if (scatter_idx >= 0 && scatter_idx < dim_size) {
-            // Compute output offset
-            int64_t output_offset = outer_idx * dim_size * inner_size +
-                                    scatter_idx * inner_size +
-                                    inner_idx;
+            int64_t rem = idx;
+            int64_t output_offset = 0;
+            for (int d = 0; d < ndim; ++d) {
+                int64_t coord = rem / meta.idx_strides[d];
+                rem %= meta.idx_strides[d];
+                if (d == dim) {
+                    output_offset += scatter_idx * meta.self_strides[d];
+                } else {
+                    output_offset += coord * meta.self_strides[d];
+                }
+            }
 
             if (reduce_add) {
                 // atomicAdd only exists for the arithmetic types below. For
@@ -344,28 +434,29 @@ __global__ void scatter_complex_add_kernel(
     RealT* output,
     const int64_t* indices,
     const RealT* src,
-    int64_t outer_size,
+    int ndim,
+    int dim,
     int64_t dim_size,
-    int64_t inner_size,
-    int64_t index_dim_size,
-    int64_t total_scatter
+    int64_t total_scatter,
+    GatherScatterMeta meta
 ) {
     HIP_KERNEL_LOOP(idx, total_scatter) {
-        int64_t inner_idx = idx % inner_size;
-        int64_t temp = idx / inner_size;
-        int64_t index_pos = temp % index_dim_size;
-        int64_t outer_idx = temp / index_dim_size;
-
-        int64_t index_offset = outer_idx * index_dim_size * inner_size +
-                               index_pos * inner_size + inner_idx;
-        int64_t scatter_idx = indices[index_offset];
+        int64_t scatter_idx = indices[idx];
         if (scatter_idx < 0) {
             scatter_idx += dim_size;
         }
         if (scatter_idx >= 0 && scatter_idx < dim_size) {
-            int64_t output_offset = outer_idx * dim_size * inner_size +
-                                    scatter_idx * inner_size +
-                                    inner_idx;
+            int64_t rem = idx;
+            int64_t output_offset = 0;
+            for (int d = 0; d < ndim; ++d) {
+                int64_t coord = rem / meta.idx_strides[d];
+                rem %= meta.idx_strides[d];
+                if (d == dim) {
+                    output_offset += scatter_idx * meta.self_strides[d];
+                } else {
+                    output_offset += coord * meta.self_strides[d];
+                }
+            }
             atomicAddHelper(&output[2 * output_offset + 0], src[2 * idx + 0]);
             atomicAddHelper(&output[2 * output_offset + 1], src[2 * idx + 1]);
         }
@@ -375,13 +466,23 @@ __global__ void scatter_complex_add_kernel(
 auto scatter_hip(
     Tensor& output,
     int64_t dim,
-    const Tensor& indices,
-    const Tensor& src,
+    const Tensor& indices_arg,
+    const Tensor& src_arg,
     const std::string& reduce
 ) -> Tensor {
 
     auto output_shape = output.shape();
+
+    // The kernel decodes index/src positions linearly, so both must be
+    // contiguous. Output is the in-place destination (caller-owned, contiguous).
+    Tensor indices = indices_arg.is_contiguous() ? indices_arg : indices_arg.contiguous();
+    Tensor src = src_arg.is_contiguous() ? src_arg : src_arg.contiguous();
     auto indices_shape = indices.shape();
+
+    // Indices must be Int64 — the kernel reads them as int64_t (matches CPU).
+    if (indices.dtype() != DType::Int64) {
+        throw std::invalid_argument("scatter: index tensor must have dtype Int64");
+    }
 
     // Normalize dimension
     int64_t ndim = output.ndim();
@@ -390,23 +491,51 @@ auto scatter_hip(
         throw std::out_of_range("scatter_hip: dim out of range");
     }
 
-    // Calculate dimensions
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= output_shape[i];
+    // PyTorch/CPU scatter: index must have the same rank as output, and along
+    // every non-scatter axis its extent must not exceed the output's.
+    if (static_cast<int64_t>(indices_shape.size()) != ndim) {
+        throw std::invalid_argument("scatter: index must have same rank as self");
+    }
+    int ndim_i = static_cast<int>(ndim);
+    if (ndim_i > MAX_GATHER_SCATTER_DIMS) {
+        throw std::runtime_error("scatter_hip: ndim exceeds MAX_GATHER_SCATTER_DIMS");
+    }
+    for (int d = 0; d < ndim_i; ++d) {
+        if (d == dim) continue;
+        if (indices_shape[d] > output_shape[d]) {
+            throw std::out_of_range(
+                "scatter: index.size(" + std::to_string(d) + ") exceeds self.size(" +
+                std::to_string(d) + ") (index extent must be <= self extent on "
+                "non-scatter dims)");
+        }
     }
 
     int64_t dim_size = output_shape[dim];
-    int64_t index_dim_size = indices_shape[dim];
-
-    int64_t inner_size = 1;
-    for (size_t i = dim + 1; i < output_shape.size(); ++i) {
-        inner_size *= output_shape[i];
-    }
-
     int64_t total_scatter = indices.numel();
 
+    // Per-dim metadata: index strides (to decode each flat index/src position)
+    // and the OUTPUT's contiguous strides (to re-linearise each non-dim
+    // coordinate and the substituted scatter index on the `dim` axis).
+    GatherScatterMeta meta{};
+    {
+        int64_t is = 1, ss = 1;
+        for (int d = ndim_i - 1; d >= 0; --d) {
+            meta.idx_strides[d] = is;
+            meta.self_strides[d] = ss;
+            is *= indices_shape[d];
+            ss *= output_shape[d];
+        }
+    }
+
     bool reduce_add = (reduce == "add");
+
+    // Match CPU semantics: throw on any out-of-range index instead of silently
+    // dropping the write.
+    validate_index_bounds(indices, dim_size, "scatter");
+
+    if (total_scatter == 0) {
+        return output;
+    }
 
     int threads = 256;
     int blocks = (total_scatter + threads - 1) / threads;
@@ -417,11 +546,11 @@ auto scatter_hip(
             output.data<float>(),
             indices.data<int64_t>(),
             src.data<float>(),
-            outer_size,
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             reduce_add
         );
         HIP_POST_LAUNCH_CHECK();
@@ -431,11 +560,11 @@ auto scatter_hip(
             output.data<double>(),
             indices.data<int64_t>(),
             src.data<double>(),
-            outer_size,
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             reduce_add
         );
         HIP_POST_LAUNCH_CHECK();
@@ -445,11 +574,11 @@ auto scatter_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<const __half*>(src.data<Float16>()),
-            outer_size,
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             reduce_add
         );
         HIP_POST_LAUNCH_CHECK();
@@ -459,11 +588,11 @@ auto scatter_hip(
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             indices.data<int64_t>(),
             reinterpret_cast<const hip_bfloat16*>(src.data<BFloat16>()),
-            outer_size,
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             reduce_add
         );
         HIP_POST_LAUNCH_CHECK();
@@ -473,11 +602,11 @@ auto scatter_hip(
             output.data<int32_t>(),
             indices.data<int64_t>(),
             src.data<int32_t>(),
-            outer_size,
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             reduce_add
         );
         HIP_POST_LAUNCH_CHECK();
@@ -487,11 +616,11 @@ auto scatter_hip(
             output.data<int64_t>(),
             indices.data<int64_t>(),
             src.data<int64_t>(),
-            outer_size,
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             reduce_add
         );
         HIP_POST_LAUNCH_CHECK();
@@ -499,7 +628,7 @@ auto scatter_hip(
         hipLaunchKernelGGL(scatter_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<uint32_t*>(output.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<const uint32_t*>(src.data_ptr()),
-            outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+            ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta, reduce_add);
         HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Complex64) {
         if (reduce_add) {
@@ -508,31 +637,31 @@ auto scatter_hip(
             hipLaunchKernelGGL(scatter_complex_add_kernel<float>, dim3(blocks), dim3(threads), 0, 0,
                 reinterpret_cast<float*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const float*>(src.data_ptr()),
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+                ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta);
         } else {
             hipLaunchKernelGGL(scatter_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
                 reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const uint64_t*>(src.data_ptr()),
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+                ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta, reduce_add);
         }
         HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::UInt64) {
         hipLaunchKernelGGL(scatter_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<const uint64_t*>(src.data_ptr()),
-            outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+            ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta, reduce_add);
         HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Complex128) {
         if (reduce_add) {
             hipLaunchKernelGGL(scatter_complex_add_kernel<double>, dim3(blocks), dim3(threads), 0, 0,
                 reinterpret_cast<double*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const double*>(src.data_ptr()),
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+                ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta);
         } else {
             hipLaunchKernelGGL(scatter_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, 0,
                 reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const Bytes16*>(src.data_ptr()),
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+                ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta, reduce_add);
         }
         HIP_POST_LAUNCH_CHECK();
     } else {
@@ -615,6 +744,10 @@ auto index_select_hip(
 
     int64_t num_indices = indices.numel();
     int64_t total_elements = outer_size * num_indices * inner_size;
+
+    // Match CPU semantics: throw on any out-of-range index instead of silently
+    // skipping (kernel writes nothing for OOB, leaving output uninitialized).
+    validate_index_bounds(indices, dim_size, "index_select");
 
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
@@ -1158,7 +1291,6 @@ auto slice_hip(
 template<typename T>
 __global__ void cat_kernel(
     const T* const* inputs,
-    const int64_t* input_offsets,
     T* output,
     int64_t num_inputs,
     int64_t outer_size,
@@ -1259,11 +1391,9 @@ auto cat_hip(
 
     void** d_input_ptrs;
     int64_t* d_dim_sizes;
-    int64_t* d_input_offsets;
 
     HIP_CHECK(hipMalloc(&d_input_ptrs, cont_tensors.size() * sizeof(void*)));
     HIP_CHECK(hipMalloc(&d_dim_sizes, cont_tensors.size() * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_input_offsets, cont_tensors.size() * sizeof(int64_t)));
 
     HIP_CHECK(hipMemcpy(d_input_ptrs, h_input_ptrs.data(), cont_tensors.size() * sizeof(void*), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_dim_sizes, dim_sizes.data(), cont_tensors.size() * sizeof(int64_t), hipMemcpyHostToDevice));
@@ -1276,7 +1406,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<float>,
             dim3(blocks), dim3(threads), 0, stream,
             (const float* const*)d_input_ptrs,
-            d_input_offsets,
             output.data<float>(),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size,
@@ -1289,7 +1418,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
             (const double* const*)d_input_ptrs,
-            d_input_offsets,
             output.data<double>(),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size,
@@ -1302,7 +1430,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
             (const int32_t* const*)d_input_ptrs,
-            d_input_offsets,
             output.data<int32_t>(),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size,
@@ -1315,7 +1442,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
             (const int64_t* const*)d_input_ptrs,
-            d_input_offsets,
             output.data<int64_t>(),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size,
@@ -1328,7 +1454,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
             (const __half* const*)d_input_ptrs,
-            d_input_offsets,
             reinterpret_cast<__half*>(output.data<Float16>()),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size,
@@ -1341,7 +1466,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
             (const hip_bfloat16* const*)d_input_ptrs,
-            d_input_offsets,
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size,
@@ -1355,7 +1479,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<uint64_t>,
             dim3(blocks), dim3(threads), 0, stream,
             (const uint64_t* const*)d_input_ptrs,
-            d_input_offsets,
             reinterpret_cast<uint64_t*>(output.data_ptr()),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size, total_dim_size, inner_size, d_dim_sizes);
@@ -1364,7 +1487,6 @@ auto cat_hip(
         hipLaunchKernelGGL(cat_kernel<Bytes16>,
             dim3(blocks), dim3(threads), 0, stream,
             (const Bytes16* const*)d_input_ptrs,
-            d_input_offsets,
             reinterpret_cast<Bytes16*>(output.data_ptr()),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size, total_dim_size, inner_size, d_dim_sizes);
@@ -1372,14 +1494,12 @@ auto cat_hip(
     } else {
         HIP_CHECK(hipFree(d_input_ptrs));
         HIP_CHECK(hipFree(d_dim_sizes));
-        HIP_CHECK(hipFree(d_input_offsets));
         throw std::runtime_error("cat_hip: Unsupported dtype");
     }
 
     HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_input_ptrs));
     HIP_CHECK(hipFree(d_dim_sizes));
-    HIP_CHECK(hipFree(d_input_offsets));
     HIP_POST_LAUNCH_CHECK();
 
     return output;
@@ -1388,6 +1508,19 @@ auto cat_hip(
 // ==============================================================================
 // Put Operation
 // ==============================================================================
+
+// Types for which atomicAddHelper (and thus put-with-accumulate) is valid.
+// Movement-only element types (Bytes16 for Complex128, uint16_t, etc.) are not
+// listed; put_kernel gates the atomic branch on this via `if constexpr`.
+template<typename T> struct put_atomic_capable : std::false_type {};
+template<> struct put_atomic_capable<float>        : std::true_type {};
+template<> struct put_atomic_capable<double>       : std::true_type {};
+template<> struct put_atomic_capable<int32_t>      : std::true_type {};
+template<> struct put_atomic_capable<int64_t>      : std::true_type {};
+template<> struct put_atomic_capable<uint32_t>     : std::true_type {};
+template<> struct put_atomic_capable<uint64_t>     : std::true_type {};
+template<> struct put_atomic_capable<__half>       : std::true_type {};
+template<> struct put_atomic_capable<hip_bfloat16> : std::true_type {};
 
 template<typename T>
 __global__ void put_kernel(
@@ -1409,10 +1542,44 @@ __global__ void put_kernel(
         // Bounds checking
         if (target_idx >= 0 && target_idx < total_size) {
             if (accumulate) {
-                atomicAddHelper(&output[target_idx], source[idx]);
+                // atomicAdd only exists for the arithmetic types above. For
+                // movement-only element types the accumulate path is never taken
+                // (the host routes complex-accumulate through the dedicated
+                // componentwise kernel and rejects accumulate for byte-movement
+                // types), so gate the call out at compile time to instantiate.
+                if constexpr (put_atomic_capable<T>::value) {
+                    atomicAddHelper(&output[target_idx], source[idx]);
+                } else {
+                    output[target_idx] = source[idx];
+                }
             } else {
                 output[target_idx] = source[idx];
             }
+        }
+    }
+}
+
+// Complex put-with-accumulate. Mirrors scatter_complex_add_kernel: a complex
+// element is two contiguous reals, so a packed integer atomicAdd would carry
+// across the real/imag boundary. Accumulate the real and imaginary scalars with
+// two independent real atomicAdds. `output`/`source` point at the underlying
+// real scalar arrays (2 reals per logical element).
+template<typename RealT>
+__global__ void put_complex_add_kernel(
+    RealT* output,
+    const int64_t* indices,
+    const RealT* source,
+    int64_t num_indices,
+    int64_t total_size
+) {
+    HIP_KERNEL_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            atomicAddHelper(&output[2 * target_idx + 0], source[2 * idx + 0]);
+            atomicAddHelper(&output[2 * target_idx + 1], source[2 * idx + 1]);
         }
     }
 }
@@ -1476,6 +1643,74 @@ auto put_hip(
             accumulate
         );
         HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float16) {
+        // atomicAddHelper<__half> exists, so both accumulate and overwrite work.
+        hipLaunchKernelGGL(put_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<const __half*>(source.data<Float16>()),
+            num_indices, total_size, accumulate);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::BFloat16) {
+        // atomicAddHelper<hip_bfloat16> uses round-to-nearest-even accumulation.
+        hipLaunchKernelGGL(put_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<const hip_bfloat16*>(source.data<BFloat16>()),
+            num_indices, total_size, accumulate);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(put_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint32_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint32_t*>(source.data_ptr()),
+            num_indices, total_size, accumulate);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt64) {
+        hipLaunchKernelGGL(put_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint64_t*>(source.data_ptr()),
+            num_indices, total_size, accumulate);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        // No 16-bit atomicAdd; only the overwrite path is meaningful for these.
+        if (accumulate) {
+            throw std::runtime_error("put_hip: accumulate not supported for 16-bit integer dtype");
+        }
+        hipLaunchKernelGGL(put_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint16_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint16_t*>(source.data_ptr()),
+            num_indices, total_size, accumulate);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Complex64) {
+        if (accumulate) {
+            // Componentwise real/imag atomicAdd (packed add would carry across
+            // the real/imag boundary).
+            hipLaunchKernelGGL(put_complex_add_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
+                reinterpret_cast<float*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const float*>(source.data_ptr()),
+                num_indices, total_size);
+        } else {
+            hipLaunchKernelGGL(put_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+                reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const uint64_t*>(source.data_ptr()),
+                num_indices, total_size, accumulate);
+        }
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Complex128) {
+        if (accumulate) {
+            hipLaunchKernelGGL(put_complex_add_kernel<double>, dim3(blocks), dim3(threads), 0, stream,
+                reinterpret_cast<double*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const double*>(source.data_ptr()),
+                num_indices, total_size);
+        } else {
+            hipLaunchKernelGGL(put_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
+                reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const Bytes16*>(source.data_ptr()),
+                num_indices, total_size, accumulate);
+        }
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("put_hip: Unsupported dtype");
     }
@@ -1489,13 +1724,23 @@ auto put_hip(
 // ==============================================================================
 
 auto gather_hip(
-    const Tensor& input,
+    const Tensor& input_arg,
     int64_t dim,
-    const Tensor& indices,
+    const Tensor& indices_arg,
     hipStream_t stream
 ) -> Tensor {
+    // Materialise contiguous copies — the kernel addresses input/index with
+    // contiguous strides (matches the CPU reference).
+    Tensor input = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
+    Tensor indices = indices_arg.is_contiguous() ? indices_arg : indices_arg.contiguous();
+
     auto input_shape = input.shape();
     auto indices_shape = indices.shape();
+
+    // Indices must be Int64 — the kernel reads them as int64_t (matches CPU).
+    if (indices.dtype() != DType::Int64) {
+        throw std::invalid_argument("gather: index tensor must have dtype Int64");
+    }
 
     // Normalize negative dim (PyTorch semantics: dim=-1 → last)
     if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
@@ -1503,32 +1748,49 @@ auto gather_hip(
         throw std::out_of_range("gather_hip: dim out of range");
     }
 
-    std::vector<int64_t> output_shape;
-    for (size_t i = 0; i < input_shape.size(); ++i) {
-        if (static_cast<int64_t>(i) == dim) {
-            output_shape.push_back(indices_shape[i]);
-        } else {
-            output_shape.push_back(input_shape[i]);
+    if (indices_shape.size() != input_shape.size()) {
+        throw std::invalid_argument("gather: index must have same rank as input");
+    }
+    int ndim = static_cast<int>(input_shape.size());
+    if (ndim > MAX_GATHER_SCATTER_DIMS) {
+        throw std::runtime_error("gather_hip: ndim exceeds MAX_GATHER_SCATTER_DIMS");
+    }
+    for (int d = 0; d < ndim; ++d) {
+        if (d == dim) continue;
+        if (indices_shape[d] > input_shape[d]) {
+            throw std::out_of_range(
+                "gather: index.size(" + std::to_string(d) + ") exceeds self.size(" +
+                std::to_string(d) + ") (index extent must be <= input extent on "
+                "non-gather dims)");
         }
     }
 
+    // Output shape is exactly the index shape (PyTorch semantics).
+    std::vector<int64_t> output_shape(indices_shape.begin(), indices_shape.end());
+
     Tensor output = Tensor(output_shape, input.dtype(), input.device());
 
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= input_shape[i];
-    }
-
     int64_t dim_size = input_shape[dim];
+    int64_t total_output = output.numel();
 
-    int64_t inner_size = 1;
-    for (size_t i = dim + 1; i < input_shape.size(); ++i) {
-        inner_size *= input_shape[i];
+    GatherScatterMeta meta{};
+    {
+        int64_t is = 1, ss = 1;
+        for (int d = ndim - 1; d >= 0; --d) {
+            meta.idx_strides[d] = is;
+            meta.self_strides[d] = ss;
+            is *= indices_shape[d];
+            ss *= input_shape[d];
+        }
     }
 
-    int64_t indices_size = indices.numel();
-    int64_t index_dim_size = indices_shape[dim];
-    int64_t total_output = output.numel();
+    // Match CPU semantics: throw on any out-of-range index instead of silently
+    // skipping (kernel uses `continue`, leaving output uninitialized).
+    validate_index_bounds(indices, dim_size, "gather");
+
+    if (total_output == 0) {
+        return output;
+    }
 
     int threads = 256;
     int blocks = static_cast<int>((total_output + threads - 1) / threads);
@@ -1539,8 +1801,7 @@ auto gather_hip(
             input.data<float>(),
             indices.data<int64_t>(),
             output.data<float>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_kernel<double>,
@@ -1548,8 +1809,7 @@ auto gather_hip(
             input.data<double>(),
             indices.data<int64_t>(),
             output.data<double>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(gather_kernel<int32_t>,
@@ -1557,8 +1817,7 @@ auto gather_hip(
             input.data<int32_t>(),
             indices.data<int64_t>(),
             output.data<int32_t>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(gather_kernel<int64_t>,
@@ -1566,8 +1825,7 @@ auto gather_hip(
             input.data<int64_t>(),
             indices.data<int64_t>(),
             output.data<int64_t>(),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_kernel<__half>,
@@ -1575,8 +1833,7 @@ auto gather_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
@@ -1584,32 +1841,31 @@ auto gather_hip(
             reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             indices.data<int64_t>(),
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
-            input.numel(), indices_size, inner_size, dim_size,
-            index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
         hipLaunchKernelGGL(gather_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const uint16_t*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<uint16_t*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::UInt32) {
         hipLaunchKernelGGL(gather_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const uint32_t*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<uint32_t*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
         hipLaunchKernelGGL(gather_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const uint64_t*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<uint64_t*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Complex128) {
         hipLaunchKernelGGL(gather_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const Bytes16*>(input.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<Bytes16*>(output.data_ptr()),
-            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+            ndim, static_cast<int>(dim), dim_size, total_output, meta);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
@@ -1633,9 +1889,18 @@ auto scatter_hip(
         auto r = scatter_hip(input.to(DType::Int32), dim, indices, src.to(DType::Int32), stream);
         return r.to(input.dtype());
     }
+    // input.clone() yields a contiguous destination. The kernel decodes
+    // index/src positions linearly, so both must be contiguous too.
     Tensor output = input.clone();
     auto output_shape = output.shape();
-    auto indices_shape = indices.shape();
+    Tensor indices_c = indices.is_contiguous() ? indices : indices.contiguous();
+    Tensor src_c = src.is_contiguous() ? src : src.contiguous();
+    auto indices_shape = indices_c.shape();
+
+    // Indices must be Int64 — the kernel reads them as int64_t (matches CPU).
+    if (indices_c.dtype() != DType::Int64) {
+        throw std::invalid_argument("scatter: index tensor must have dtype Int64");
+    }
 
     // Normalize dimension
     int64_t ndim = output.ndim();
@@ -1644,20 +1909,44 @@ auto scatter_hip(
         throw std::out_of_range("scatter_hip: dim out of range");
     }
 
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= output_shape[i];
+    if (static_cast<int64_t>(indices_shape.size()) != ndim) {
+        throw std::invalid_argument("scatter: index must have same rank as self");
+    }
+    int ndim_i = static_cast<int>(ndim);
+    if (ndim_i > MAX_GATHER_SCATTER_DIMS) {
+        throw std::runtime_error("scatter_hip: ndim exceeds MAX_GATHER_SCATTER_DIMS");
+    }
+    for (int d = 0; d < ndim_i; ++d) {
+        if (d == dim) continue;
+        if (indices_shape[d] > output_shape[d]) {
+            throw std::out_of_range(
+                "scatter: index.size(" + std::to_string(d) + ") exceeds self.size(" +
+                std::to_string(d) + ") (index extent must be <= self extent on "
+                "non-scatter dims)");
+        }
     }
 
     int64_t dim_size = output_shape[dim];
-    int64_t index_dim_size = indices_shape[dim];
+    int64_t total_scatter = indices_c.numel();
 
-    int64_t inner_size = 1;
-    for (size_t i = dim + 1; i < output_shape.size(); ++i) {
-        inner_size *= output_shape[i];
+    GatherScatterMeta meta{};
+    {
+        int64_t is = 1, ss = 1;
+        for (int d = ndim_i - 1; d >= 0; --d) {
+            meta.idx_strides[d] = is;
+            meta.self_strides[d] = ss;
+            is *= indices_shape[d];
+            ss *= output_shape[d];
+        }
     }
 
-    int64_t total_scatter = indices.numel();
+    // Match CPU semantics: throw on any out-of-range index instead of silently
+    // dropping the write.
+    validate_index_bounds(indices_c, dim_size, "scatter");
+
+    if (total_scatter == 0) {
+        return output;
+    }
 
     int threads = 256;
     int blocks = (total_scatter + threads - 1) / threads;
@@ -1666,13 +1955,13 @@ auto scatter_hip(
         hipLaunchKernelGGL(scatter_kernel<float>,
             dim3(blocks), dim3(threads), 0, stream,
             output.data<float>(),
-            indices.data<int64_t>(),
-            src.data<float>(),
-            outer_size,
+            indices_c.data<int64_t>(),
+            src_c.data<float>(),
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             false
         );
         HIP_POST_LAUNCH_CHECK();
@@ -1680,13 +1969,13 @@ auto scatter_hip(
         hipLaunchKernelGGL(scatter_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
             output.data<double>(),
-            indices.data<int64_t>(),
-            src.data<double>(),
-            outer_size,
+            indices_c.data<int64_t>(),
+            src_c.data<double>(),
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             false
         );
         HIP_POST_LAUNCH_CHECK();
@@ -1694,13 +1983,13 @@ auto scatter_hip(
         hipLaunchKernelGGL(scatter_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<__half*>(output.data<Float16>()),
-            indices.data<int64_t>(),
-            reinterpret_cast<const __half*>(src.data<Float16>()),
-            outer_size,
+            indices_c.data<int64_t>(),
+            reinterpret_cast<const __half*>(src_c.data<Float16>()),
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             false
         );
         HIP_POST_LAUNCH_CHECK();
@@ -1708,13 +1997,13 @@ auto scatter_hip(
         hipLaunchKernelGGL(scatter_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
-            indices.data<int64_t>(),
-            reinterpret_cast<const hip_bfloat16*>(src.data<BFloat16>()),
-            outer_size,
+            indices_c.data<int64_t>(),
+            reinterpret_cast<const hip_bfloat16*>(src_c.data<BFloat16>()),
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             false
         );
         HIP_POST_LAUNCH_CHECK();
@@ -1722,13 +2011,13 @@ auto scatter_hip(
         hipLaunchKernelGGL(scatter_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
             output.data<int32_t>(),
-            indices.data<int64_t>(),
-            src.data<int32_t>(),
-            outer_size,
+            indices_c.data<int64_t>(),
+            src_c.data<int32_t>(),
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             false
         );
         HIP_POST_LAUNCH_CHECK();
@@ -1736,33 +2025,33 @@ auto scatter_hip(
         hipLaunchKernelGGL(scatter_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
             output.data<int64_t>(),
-            indices.data<int64_t>(),
-            src.data<int64_t>(),
-            outer_size,
+            indices_c.data<int64_t>(),
+            src_c.data<int64_t>(),
+            ndim_i,
+            static_cast<int>(dim),
             dim_size,
-            inner_size,
-            index_dim_size,
             total_scatter,
+            meta,
             false
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::UInt32) {
         hipLaunchKernelGGL(scatter_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<uint32_t*>(output.data_ptr()), indices.data<int64_t>(),
-            reinterpret_cast<const uint32_t*>(src.data_ptr()),
-            outer_size, dim_size, inner_size, index_dim_size, total_scatter, false);
+            reinterpret_cast<uint32_t*>(output.data_ptr()), indices_c.data<int64_t>(),
+            reinterpret_cast<const uint32_t*>(src_c.data_ptr()),
+            ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta, false);
         HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::UInt64 || output.dtype() == DType::Complex64) {
         hipLaunchKernelGGL(scatter_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
-            reinterpret_cast<const uint64_t*>(src.data_ptr()),
-            outer_size, dim_size, inner_size, index_dim_size, total_scatter, false);
+            reinterpret_cast<uint64_t*>(output.data_ptr()), indices_c.data<int64_t>(),
+            reinterpret_cast<const uint64_t*>(src_c.data_ptr()),
+            ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta, false);
         HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Complex128) {
         hipLaunchKernelGGL(scatter_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
-            reinterpret_cast<const Bytes16*>(src.data_ptr()),
-            outer_size, dim_size, inner_size, index_dim_size, total_scatter, false);
+            reinterpret_cast<Bytes16*>(output.data_ptr()), indices_c.data<int64_t>(),
+            reinterpret_cast<const Bytes16*>(src_c.data_ptr()),
+            ndim_i, static_cast<int>(dim), dim_size, total_scatter, meta, false);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("scatter_hip: Unsupported dtype");
@@ -1805,6 +2094,10 @@ auto index_select_hip(
 
     int64_t num_indices = indices.numel();
     int64_t total_elements = outer_size * num_indices * inner_size;
+
+    // Match CPU semantics: throw on any out-of-range index instead of silently
+    // skipping (kernel writes nothing for OOB, leaving output uninitialized).
+    validate_index_bounds(indices, dim_size, "index_select");
 
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
@@ -2013,6 +2306,14 @@ template<typename T>
 static void masked_select_flagged(const T* d_in, const bool* d_flags, T* d_out,
                                   int64_t* d_num_selected, int64_t total_elements,
                                   hipStream_t stream) {
+    // hipcub::DeviceSelect::Flagged takes a 32-bit num_items; silently casting an
+    // int64 element count > INT_MAX would truncate/overflow and select the wrong
+    // number of elements. Reject it cleanly instead of returning garbage.
+    if (total_elements > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            "masked_select: element count " + std::to_string(total_elements) +
+            " exceeds hipcub DeviceSelect 32-bit limit");
+    }
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
     HIP_CHECK(hipcub::DeviceSelect::Flagged(
@@ -2905,6 +3206,15 @@ auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         return Tensor({0, ndim}, DType::Int64, input.device());
     }
 
+    // hipcub::DeviceSelect::Flagged takes a 32-bit num_items; silently casting an
+    // int64 element count > INT_MAX would truncate/overflow and compact the wrong
+    // number of indices. Reject it cleanly instead of returning garbage.
+    if (n > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            "nonzero: element count " + std::to_string(n) +
+            " exceeds hipcub DeviceSelect 32-bit limit");
+    }
+
     constexpr int BLOCK_SIZE = 256;
     int num_blocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
@@ -2960,10 +3270,13 @@ auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         iota, d_flags, d_flat_indices, d_num_selected,
         static_cast<int>(n), stream));
 
-    // D2H sync to get count
-    int total_nonzero;
-    HIP_CHECK(hipMemcpyAsync(&total_nonzero, d_num_selected, sizeof(int), hipMemcpyDeviceToHost, stream));
+    // D2H sync to get count. hipcub writes a 32-bit count; widen to int64 for the
+    // subsequent output sizing (which is int64). The count cannot exceed n, and n
+    // is guaranteed <= INT_MAX by the guard above, so no truncation occurs.
+    int total_nonzero_i32 = 0;
+    HIP_CHECK(hipMemcpyAsync(&total_nonzero_i32, d_num_selected, sizeof(int), hipMemcpyDeviceToHost, stream));
     HIP_CHECK(hipStreamSynchronize(stream));
+    int64_t total_nonzero = static_cast<int64_t>(total_nonzero_i32);
 
     HIP_CHECK(hipFree(d_flags));
     HIP_CHECK(hipFree(d_temp));

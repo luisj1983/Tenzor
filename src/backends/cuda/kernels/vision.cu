@@ -8,6 +8,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace tenzor {
@@ -370,6 +371,9 @@ __global__ void interpolate_bilinear_kernel(
     int64_t out_w,
     bool align_corners
 ) {
+    // Compute in double for Float64 inputs to preserve FP64 precision/parity
+    // with the CPU reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total_elements = batch * channels * out_h * out_w;
 
     TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
@@ -381,22 +385,24 @@ __global__ void interpolate_bilinear_kernel(
         int64_t b = temp;
 
         // Calculate source position (floating point)
-        float y, x;
+        Compute y, x;
         if (align_corners) {
             // Align corners: map [0, out-1] to [0, in-1]
-            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+            y = (out_h > 1) ? oh * static_cast<Compute>(in_h - 1) / (out_h - 1) : Compute(0);
+            x = (out_w > 1) ? ow * static_cast<Compute>(in_w - 1) / (out_w - 1) : Compute(0);
         } else {
             // Half-pixel centers: pixels are unit squares
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+            Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+            y = (oh + Compute(0.5)) * scale_h - Compute(0.5);
+            x = (ow + Compute(0.5)) * scale_w - Compute(0.5);
         }
 
         // Clamp to valid range
-        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
-        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+        const Compute yhi = static_cast<Compute>(in_h - 1);
+        const Compute xhi = static_cast<Compute>(in_w - 1);
+        y = y < Compute(0) ? Compute(0) : (y > yhi ? yhi : y);
+        x = x < Compute(0) ? Compute(0) : (x > xhi ? xhi : x);
 
         // Get integer and fractional parts
         int64_t y0 = static_cast<int64_t>(y);
@@ -404,24 +410,24 @@ __global__ void interpolate_bilinear_kernel(
         int64_t y1 = min(y0 + 1, in_h - 1);
         int64_t x1 = min(x0 + 1, in_w - 1);
 
-        float fy = y - y0;
-        float fx = x - x0;
+        Compute fy = y - y0;
+        Compute fx = x - x0;
 
         // Bilinear interpolation weights
-        float w00 = (1.0f - fy) * (1.0f - fx);
-        float w01 = (1.0f - fy) * fx;
-        float w10 = fy * (1.0f - fx);
-        float w11 = fy * fx;
+        Compute w00 = (Compute(1) - fy) * (Compute(1) - fx);
+        Compute w01 = (Compute(1) - fy) * fx;
+        Compute w10 = fy * (Compute(1) - fx);
+        Compute w11 = fy * fx;
 
-        // Get pixel values and convert to float for interpolation
+        // Get pixel values and convert to compute type for interpolation
         int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
-        float v00 = static_cast<float>(input[base_idx + y0 * in_w + x0]);
-        float v01 = static_cast<float>(input[base_idx + y0 * in_w + x1]);
-        float v10 = static_cast<float>(input[base_idx + y1 * in_w + x0]);
-        float v11 = static_cast<float>(input[base_idx + y1 * in_w + x1]);
+        Compute v00 = static_cast<Compute>(input[base_idx + y0 * in_w + x0]);
+        Compute v01 = static_cast<Compute>(input[base_idx + y0 * in_w + x1]);
+        Compute v10 = static_cast<Compute>(input[base_idx + y1 * in_w + x0]);
+        Compute v11 = static_cast<Compute>(input[base_idx + y1 * in_w + x1]);
 
-        // Interpolate in float, then convert back
-        float result = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
+        // Interpolate, then convert back
+        Compute result = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
         output[idx] = static_cast<T>(result);
     }
 }
@@ -439,17 +445,20 @@ __global__ void interpolate_bicubic_kernel(
     int64_t out_w,
     bool align_corners
 ) {
+    // Compute in double for Float64 inputs to preserve FP64 precision/parity
+    // with the CPU reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total_elements = batch * channels * out_h * out_w;
 
     // Cubic interpolation coefficient function
-    auto cubic_interp1d = [](float x) -> float {
-        float abs_x = fabsf(x);
-        if (abs_x <= 1.0f) {
-            return 1.5f * abs_x * abs_x * abs_x - 2.5f * abs_x * abs_x + 1.0f;
-        } else if (abs_x < 2.0f) {
-            return -0.5f * abs_x * abs_x * abs_x + 2.5f * abs_x * abs_x - 4.0f * abs_x + 2.0f;
+    auto cubic_interp1d = [](Compute x) -> Compute {
+        Compute abs_x = x < Compute(0) ? -x : x;
+        if (abs_x <= Compute(1)) {
+            return Compute(1.5) * abs_x * abs_x * abs_x - Compute(2.5) * abs_x * abs_x + Compute(1);
+        } else if (abs_x < Compute(2)) {
+            return Compute(-0.5) * abs_x * abs_x * abs_x + Compute(2.5) * abs_x * abs_x - Compute(4) * abs_x + Compute(2);
         }
-        return 0.0f;
+        return Compute(0);
     };
 
     TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
@@ -461,26 +470,28 @@ __global__ void interpolate_bicubic_kernel(
         int64_t b = temp;
 
         // Calculate source position (floating point)
-        float y, x;
+        Compute y, x;
         if (align_corners) {
-            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+            y = (out_h > 1) ? oh * static_cast<Compute>(in_h - 1) / (out_h - 1) : Compute(0);
+            x = (out_w > 1) ? ow * static_cast<Compute>(in_w - 1) / (out_w - 1) : Compute(0);
         } else {
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+            Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+            y = (oh + Compute(0.5)) * scale_h - Compute(0.5);
+            x = (ow + Compute(0.5)) * scale_w - Compute(0.5);
         }
 
         // Clamp to valid range
-        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
-        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+        const Compute yhi = static_cast<Compute>(in_h - 1);
+        const Compute xhi = static_cast<Compute>(in_w - 1);
+        y = y < Compute(0) ? Compute(0) : (y > yhi ? yhi : y);
+        x = x < Compute(0) ? Compute(0) : (x > xhi ? xhi : x);
 
         int64_t y_int = static_cast<int64_t>(y);
         int64_t x_int = static_cast<int64_t>(x);
 
         // Bicubic interpolation using 4x4 neighborhood
-        float sum = 0.0f;
+        Compute sum = Compute(0);
         for (int64_t dy = -1; dy <= 2; ++dy) {
             for (int64_t dx = -1; dx <= 2; ++dx) {
                 int64_t iy = y_int + dy;
@@ -490,15 +501,15 @@ __global__ void interpolate_bicubic_kernel(
                 iy = max(int64_t(0), min(iy, in_h - 1));
                 ix = max(int64_t(0), min(ix, in_w - 1));
 
-                float weight_y = cubic_interp1d(y - (y_int + dy));
-                float weight_x = cubic_interp1d(x - (x_int + dx));
-                float weight = weight_y * weight_x;
+                Compute weight_y = cubic_interp1d(y - (y_int + dy));
+                Compute weight_x = cubic_interp1d(x - (x_int + dx));
+                Compute weight = weight_y * weight_x;
 
                 int64_t in_idx = b * (channels * in_h * in_w) +
                                 c * (in_h * in_w) +
                                 iy * in_w + ix;
 
-                sum += weight * static_cast<float>(input[in_idx]);
+                sum += weight * static_cast<Compute>(input[in_idx]);
             }
         }
 
@@ -524,6 +535,9 @@ __global__ void interpolate_trilinear_kernel(
     int64_t out_w,
     bool align_corners
 ) {
+    // Compute in double for Float64 inputs to preserve FP64 precision/parity
+    // with the CPU reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total = batch * channels * out_d * out_h * out_w;
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t temp = idx;
@@ -533,23 +547,26 @@ __global__ void interpolate_trilinear_kernel(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        float z, y, x;
+        Compute z, y, x;
         if (align_corners) {
-            z = (out_d > 1) ? static_cast<float>(od) * (in_d - 1) / (out_d - 1) : 0.0f;
-            y = (out_h > 1) ? static_cast<float>(oh) * (in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? static_cast<float>(ow) * (in_w - 1) / (out_w - 1) : 0.0f;
+            z = (out_d > 1) ? static_cast<Compute>(od) * (in_d - 1) / (out_d - 1) : Compute(0);
+            y = (out_h > 1) ? static_cast<Compute>(oh) * (in_h - 1) / (out_h - 1) : Compute(0);
+            x = (out_w > 1) ? static_cast<Compute>(ow) * (in_w - 1) / (out_w - 1) : Compute(0);
         } else {
-            float scale_d = static_cast<float>(in_d) / out_d;
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            z = (od + 0.5f) * scale_d - 0.5f;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            Compute scale_d = static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+            Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+            Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+            z = (od + Compute(0.5)) * scale_d - Compute(0.5);
+            y = (oh + Compute(0.5)) * scale_h - Compute(0.5);
+            x = (ow + Compute(0.5)) * scale_w - Compute(0.5);
         }
 
-        z = fmaxf(0.0f, fminf(z, static_cast<float>(in_d - 1)));
-        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
-        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+        const Compute zhi = static_cast<Compute>(in_d - 1);
+        const Compute yhi = static_cast<Compute>(in_h - 1);
+        const Compute xhi = static_cast<Compute>(in_w - 1);
+        z = z < Compute(0) ? Compute(0) : (z > zhi ? zhi : z);
+        y = y < Compute(0) ? Compute(0) : (y > yhi ? yhi : y);
+        x = x < Compute(0) ? Compute(0) : (x > xhi ? xhi : x);
 
         int64_t z0 = static_cast<int64_t>(z);
         int64_t y0 = static_cast<int64_t>(y);
@@ -558,29 +575,29 @@ __global__ void interpolate_trilinear_kernel(
         int64_t y1 = min(y0 + 1, in_h - 1);
         int64_t x1 = min(x0 + 1, in_w - 1);
 
-        float fz = z - z0;
-        float fy = y - y0;
-        float fx = x - x0;
+        Compute fz = z - z0;
+        Compute fy = y - y0;
+        Compute fx = x - x0;
 
         int64_t base = (b * channels + c) * in_d * in_h * in_w;
 
-        float v000 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x0]);
-        float v001 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x1]);
-        float v010 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x0]);
-        float v011 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x1]);
-        float v100 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x0]);
-        float v101 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x1]);
-        float v110 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x0]);
-        float v111 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x1]);
+        Compute v000 = static_cast<Compute>(input[base + z0 * in_h * in_w + y0 * in_w + x0]);
+        Compute v001 = static_cast<Compute>(input[base + z0 * in_h * in_w + y0 * in_w + x1]);
+        Compute v010 = static_cast<Compute>(input[base + z0 * in_h * in_w + y1 * in_w + x0]);
+        Compute v011 = static_cast<Compute>(input[base + z0 * in_h * in_w + y1 * in_w + x1]);
+        Compute v100 = static_cast<Compute>(input[base + z1 * in_h * in_w + y0 * in_w + x0]);
+        Compute v101 = static_cast<Compute>(input[base + z1 * in_h * in_w + y0 * in_w + x1]);
+        Compute v110 = static_cast<Compute>(input[base + z1 * in_h * in_w + y1 * in_w + x0]);
+        Compute v111 = static_cast<Compute>(input[base + z1 * in_h * in_w + y1 * in_w + x1]);
 
-        float result =
-            v000 * (1 - fz) * (1 - fy) * (1 - fx) +
-            v001 * (1 - fz) * (1 - fy) * fx +
-            v010 * (1 - fz) * fy * (1 - fx) +
-            v011 * (1 - fz) * fy * fx +
-            v100 * fz * (1 - fy) * (1 - fx) +
-            v101 * fz * (1 - fy) * fx +
-            v110 * fz * fy * (1 - fx) +
+        Compute result =
+            v000 * (Compute(1) - fz) * (Compute(1) - fy) * (Compute(1) - fx) +
+            v001 * (Compute(1) - fz) * (Compute(1) - fy) * fx +
+            v010 * (Compute(1) - fz) * fy * (Compute(1) - fx) +
+            v011 * (Compute(1) - fz) * fy * fx +
+            v100 * fz * (Compute(1) - fy) * (Compute(1) - fx) +
+            v101 * fz * (Compute(1) - fy) * fx +
+            v110 * fz * fy * (Compute(1) - fx) +
             v111 * fz * fy * fx;
 
         output[idx] = static_cast<T>(result);
@@ -814,6 +831,9 @@ __global__ void interpolate_bilinear_backward_kernel(
     int64_t out_h, int64_t out_w,
     bool align_corners
 ) {
+    // Compute in double for Float64 inputs to preserve FP64 precision/parity
+    // with the CPU reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total = batch * channels * out_h * out_w;
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t temp = idx;
@@ -822,32 +842,34 @@ __global__ void interpolate_bilinear_backward_kernel(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        float y, x;
+        Compute y, x;
         if (align_corners) {
-            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+            y = (out_h > 1) ? oh * static_cast<Compute>(in_h - 1) / (out_h - 1) : Compute(0);
+            x = (out_w > 1) ? ow * static_cast<Compute>(in_w - 1) / (out_w - 1) : Compute(0);
         } else {
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+            Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+            y = (oh + Compute(0.5)) * scale_h - Compute(0.5);
+            x = (ow + Compute(0.5)) * scale_w - Compute(0.5);
         }
-        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
-        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+        const Compute yhi = static_cast<Compute>(in_h - 1);
+        const Compute xhi = static_cast<Compute>(in_w - 1);
+        y = y < Compute(0) ? Compute(0) : (y > yhi ? yhi : y);
+        x = x < Compute(0) ? Compute(0) : (x > xhi ? xhi : x);
 
         int64_t y0 = static_cast<int64_t>(y);
         int64_t x0 = static_cast<int64_t>(x);
         int64_t y1 = min(y0 + 1, in_h - 1);
         int64_t x1 = min(x0 + 1, in_w - 1);
-        float fy = y - y0;
-        float fx = x - x0;
+        Compute fy = y - y0;
+        Compute fx = x - x0;
 
-        float w00 = (1.0f - fy) * (1.0f - fx);
-        float w01 = (1.0f - fy) * fx;
-        float w10 = fy * (1.0f - fx);
-        float w11 = fy * fx;
+        Compute w00 = (Compute(1) - fy) * (Compute(1) - fx);
+        Compute w01 = (Compute(1) - fy) * fx;
+        Compute w10 = fy * (Compute(1) - fx);
+        Compute w11 = fy * fx;
 
-        float g = static_cast<float>(grad_out[idx]);
+        Compute g = static_cast<Compute>(grad_out[idx]);
         int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
         // Typed atomicAdd: CUDA provides overloads for float (compute 2.0+),
         // double (6.0+), __half (7.0+), and __nv_bfloat16 (8.0+).
@@ -859,11 +881,13 @@ __global__ void interpolate_bilinear_backward_kernel(
 }
 
 // Catmull-Rom cubic convolution kernel weight (a = -0.5), matches CPU cubic_interp_coeff.
-__device__ __forceinline__ float tz_bicubic_coeff(float x) {
-    float a = fabsf(x);
-    if (a <= 1.0f) return 1.5f * a * a * a - 2.5f * a * a + 1.0f;
-    if (a < 2.0f)  return -0.5f * a * a * a + 2.5f * a * a - 4.0f * a + 2.0f;
-    return 0.0f;
+// Templated on the compute type so Float64 backward preserves FP64 precision.
+template <typename Compute>
+__device__ __forceinline__ Compute tz_bicubic_coeff(Compute x) {
+    Compute a = x < Compute(0) ? -x : x;
+    if (a <= Compute(1)) return Compute(1.5) * a * a * a - Compute(2.5) * a * a + Compute(1);
+    if (a < Compute(2))  return Compute(-0.5) * a * a * a + Compute(2.5) * a * a - Compute(4) * a + Compute(2);
+    return Compute(0);
 }
 
 // Bicubic backward (4D): scatter each output gradient to its 4x4 input neighborhood.
@@ -873,6 +897,9 @@ __global__ void interpolate_bicubic_backward_kernel(
     int64_t batch, int64_t channels, int64_t in_h, int64_t in_w,
     int64_t out_h, int64_t out_w, bool align_corners)
 {
+    // Compute in double for Float64 inputs to preserve FP64 precision/parity
+    // with the CPU reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total = batch * channels * out_h * out_w;
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t temp = idx;
@@ -888,29 +915,31 @@ __global__ void interpolate_bicubic_backward_kernel(
         // the clamp, non-align_corners border pixels (src<0) floored to -1 scatter
         // to a different neighborhood with different fractional offsets — gradcheck
         // divergence at edges.
-        float src_h, src_w;
+        Compute src_h, src_w;
         if (align_corners) {
-            src_h = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-            src_w = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+            src_h = (out_h > 1) ? oh * static_cast<Compute>(in_h - 1) / (out_h - 1) : Compute(0);
+            src_w = (out_w > 1) ? ow * static_cast<Compute>(in_w - 1) / (out_w - 1) : Compute(0);
         } else {
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            src_h = (oh + 0.5f) * scale_h - 0.5f;
-            src_w = (ow + 0.5f) * scale_w - 0.5f;
+            Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+            Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+            src_h = (oh + Compute(0.5)) * scale_h - Compute(0.5);
+            src_w = (ow + Compute(0.5)) * scale_w - Compute(0.5);
         }
-        src_h = fmaxf(0.0f, fminf(src_h, static_cast<float>(in_h - 1)));
-        src_w = fmaxf(0.0f, fminf(src_w, static_cast<float>(in_w - 1)));
+        const Compute hhi = static_cast<Compute>(in_h - 1);
+        const Compute whi = static_cast<Compute>(in_w - 1);
+        src_h = src_h < Compute(0) ? Compute(0) : (src_h > hhi ? hhi : src_h);
+        src_w = src_w < Compute(0) ? Compute(0) : (src_w > whi ? whi : src_w);
         int64_t hi = static_cast<int64_t>(src_h);
         int64_t wi = static_cast<int64_t>(src_w);
 
-        float g = static_cast<float>(grad_out[idx]);
+        Compute g = static_cast<Compute>(grad_out[idx]);
         int64_t base = b * (channels * in_h * in_w) + c * (in_h * in_w);
         for (int dy = -1; dy <= 2; ++dy) {
             int64_t iy = min(max(static_cast<int64_t>(0), hi + dy), in_h - 1);
-            float wy = tz_bicubic_coeff(src_h - static_cast<float>(hi + dy));
+            Compute wy = tz_bicubic_coeff<Compute>(src_h - static_cast<Compute>(hi + dy));
             for (int dx = -1; dx <= 2; ++dx) {
                 int64_t ix = min(max(static_cast<int64_t>(0), wi + dx), in_w - 1);
-                float wx = tz_bicubic_coeff(src_w - static_cast<float>(wi + dx));
+                Compute wx = tz_bicubic_coeff<Compute>(src_w - static_cast<Compute>(wi + dx));
                 atomicAdd(&grad_in[base + iy * in_w + ix], static_cast<T>(wy * wx * g));
             }
         }
@@ -924,6 +953,9 @@ __global__ void interpolate_trilinear_backward_kernel(
     int64_t batch, int64_t channels, int64_t in_d, int64_t in_h, int64_t in_w,
     int64_t out_d, int64_t out_h, int64_t out_w, bool align_corners)
 {
+    // Compute in double for Float64 inputs to preserve FP64 precision/parity
+    // with the CPU reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total = batch * channels * out_d * out_h * out_w;
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t temp = idx;
@@ -933,32 +965,83 @@ __global__ void interpolate_trilinear_backward_kernel(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        float scd = (align_corners && out_d > 1) ? static_cast<float>(in_d - 1) / (out_d - 1) : static_cast<float>(in_d) / out_d;
-        float sch = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1) : static_cast<float>(in_h) / out_h;
-        float scw = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1) : static_cast<float>(in_w) / out_w;
-        // Match CPU: src is NOT clamped; out-of-bounds corners are skipped (their
-        // weight is dropped), rather than clamped-and-accumulated to the boundary.
-        float sd = align_corners ? od * scd : (od + 0.5f) * scd - 0.5f;
-        float sh = align_corners ? oh * sch : (oh + 0.5f) * sch - 0.5f;
-        float sw = align_corners ? ow * scw : (ow + 0.5f) * scw - 0.5f;
-        int64_t d0 = static_cast<int64_t>(floorf(sd)), h0 = static_cast<int64_t>(floorf(sh)), w0 = static_cast<int64_t>(floorf(sw));
-        int64_t d1 = d0 + 1, h1 = h0 + 1, w1 = w0 + 1;
-        float fd = sd - d0, fh = sh - h0, fw = sw - w0;
-        float g = static_cast<float>(grad_out[idx]);
+        Compute scd = (align_corners && out_d > 1) ? static_cast<Compute>(in_d - 1) / (out_d - 1) : static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+        Compute sch = (align_corners && out_h > 1) ? static_cast<Compute>(in_h - 1) / (out_h - 1) : static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+        Compute scw = (align_corners && out_w > 1) ? static_cast<Compute>(in_w - 1) / (out_w - 1) : static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+        // Mirror the trilinear FORWARD (vision.cu interpolate_trilinear_kernel):
+        // clamp the continuous source coord to [0, in-1] BEFORE flooring, then
+        // derive the neighbor pair as {d0, min(d0+1, in_d-1)} with fractional
+        // weight fd = src - d0. This makes the backward the EXACT transpose of
+        // the clamped forward at non-align_corners borders. Without the clamp,
+        // a border output voxel whose src < 0 floors to -1, scattering the
+        // (1-fd) mass that the forward assigns to the boundary voxel into a
+        // dropped out-of-range tap — a forward/backward inconsistency that fails
+        // gradcheck at edges for non-align_corners upsampling.
+        Compute sd = align_corners ? od * scd : (od + Compute(0.5)) * scd - Compute(0.5);
+        Compute sh = align_corners ? oh * sch : (oh + Compute(0.5)) * sch - Compute(0.5);
+        Compute sw = align_corners ? ow * scw : (ow + Compute(0.5)) * scw - Compute(0.5);
+        const Compute dhi = static_cast<Compute>(in_d - 1);
+        const Compute hhi = static_cast<Compute>(in_h - 1);
+        const Compute whi = static_cast<Compute>(in_w - 1);
+        sd = sd < Compute(0) ? Compute(0) : (sd > dhi ? dhi : sd);
+        sh = sh < Compute(0) ? Compute(0) : (sh > hhi ? hhi : sh);
+        sw = sw < Compute(0) ? Compute(0) : (sw > whi ? whi : sw);
+        int64_t d0 = static_cast<int64_t>(sd), h0 = static_cast<int64_t>(sh), w0 = static_cast<int64_t>(sw);
+        int64_t d1 = min(d0 + 1, in_d - 1), h1 = min(h0 + 1, in_h - 1), w1 = min(w0 + 1, in_w - 1);
+        Compute fd = sd - d0, fh = sh - h0, fw = sw - w0;
+        Compute g = static_cast<Compute>(grad_out[idx]);
         int64_t base = b * (channels * in_d * in_h * in_w) + c * (in_d * in_h * in_w);
 #define TZ_TRI_ADD(dd, hh, ww, wgt) do { \
         if ((dd) >= 0 && (dd) < in_d && (hh) >= 0 && (hh) < in_h && (ww) >= 0 && (ww) < in_w) \
             atomicAdd(&grad_in[base + (dd) * in_h * in_w + (hh) * in_w + (ww)], static_cast<T>((wgt) * g)); \
     } while (0)
-        TZ_TRI_ADD(d0, h0, w0, (1.0f - fd) * (1.0f - fh) * (1.0f - fw));
-        TZ_TRI_ADD(d0, h0, w1, (1.0f - fd) * (1.0f - fh) * fw);
-        TZ_TRI_ADD(d0, h1, w0, (1.0f - fd) * fh * (1.0f - fw));
-        TZ_TRI_ADD(d0, h1, w1, (1.0f - fd) * fh * fw);
-        TZ_TRI_ADD(d1, h0, w0, fd * (1.0f - fh) * (1.0f - fw));
-        TZ_TRI_ADD(d1, h0, w1, fd * (1.0f - fh) * fw);
-        TZ_TRI_ADD(d1, h1, w0, fd * fh * (1.0f - fw));
+        TZ_TRI_ADD(d0, h0, w0, (Compute(1) - fd) * (Compute(1) - fh) * (Compute(1) - fw));
+        TZ_TRI_ADD(d0, h0, w1, (Compute(1) - fd) * (Compute(1) - fh) * fw);
+        TZ_TRI_ADD(d0, h1, w0, (Compute(1) - fd) * fh * (Compute(1) - fw));
+        TZ_TRI_ADD(d0, h1, w1, (Compute(1) - fd) * fh * fw);
+        TZ_TRI_ADD(d1, h0, w0, fd * (Compute(1) - fh) * (Compute(1) - fw));
+        TZ_TRI_ADD(d1, h0, w1, fd * (Compute(1) - fh) * fw);
+        TZ_TRI_ADD(d1, h1, w0, fd * fh * (Compute(1) - fw));
         TZ_TRI_ADD(d1, h1, w1, fd * fh * fw);
 #undef TZ_TRI_ADD
+    }
+}
+
+// Nearest backward (5D): each output voxel scatters its gradient to the single
+// nearest input voxel via atomicAdd. Uses the IDENTICAL source-voxel mapping as
+// the 5D nearest FORWARD kernel (interpolate_nearest_5d_kernel: float scale =
+// in/out, multiply, truncate, clamp to in-1) so the backward is the exact
+// transpose. Multiple output voxels can map to the same input voxel; atomicAdd
+// accumulates safely. Mirrors interpolate_nearest_backward_kernel (4D) and the
+// CPU nearest_backward_axis_scatter (rank-generic). No half-pixel, no
+// align_corners — PyTorch nearest convention.
+template<typename T>
+__global__ void interpolate_nearest_5d_backward_kernel(
+    const T* __restrict__ grad_out,
+    T* __restrict__ grad_in,
+    int64_t batch, int64_t channels,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w)
+{
+    float scale_d = static_cast<float>(in_d) / out_d;
+    float scale_h = static_cast<float>(in_h) / out_h;
+    float scale_w = static_cast<float>(in_w) / out_w;
+    int64_t total = batch * channels * out_d * out_h * out_w;
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        int64_t id = min(static_cast<int64_t>(od * scale_d), in_d - 1);
+        int64_t ih = min(static_cast<int64_t>(oh * scale_h), in_h - 1);
+        int64_t iw = min(static_cast<int64_t>(ow * scale_w), in_w - 1);
+
+        int64_t in_idx = ((b * channels + c) * in_d + id) * in_h * in_w + ih * in_w + iw;
+        atomicAdd(&grad_in[in_idx], grad_out[idx]);
     }
 }
 
@@ -1168,9 +1251,33 @@ auto interpolate_backward_cuda(const Tensor& grad_output,
         return grad_input;
     }
 
+    // 5D nearest backward: forward supports 5D nearest (interpolate_nearest_5d_kernel),
+    // so the backward must too (CPU routes nearest to the rank-generic
+    // nearest_backward_axis_scatter). Scatter-add each output voxel's gradient
+    // to its single nearest input voxel.
+    if (mode == "nearest" && shape.size() == 5) {
+        if (input_size.size() != 3)
+            throw std::runtime_error("interpolate_backward_cuda: 5D nearest input_size must be [in_d, in_h, in_w].");
+        const int64_t N = shape[0], C = shape[1], out_d = shape[2], out_h = shape[3], out_w = shape[4];
+        const int64_t in_d = input_size[0], in_h = input_size[1], in_w = input_size[2];
+        Tensor grad_input({N, C, in_d, in_h, in_w}, grad_output.dtype(), grad_output.device());
+        TENZOR_CUDA_CHECK(cudaMemset(grad_input.data_ptr(), 0,
+                                      static_cast<size_t>(grad_input.numel()) * dtype_size(grad_input.dtype())));
+        int64_t total = N * C * out_d * out_h * out_w;
+        int threads = 256;
+        int blocks  = static_cast<int>((total + threads - 1) / threads);
+        TENZOR_DISPATCH_FLOATING_TYPES(grad_output.dtype(), "interpolate_nearest_5d_backward", [&]() {
+            interpolate_nearest_5d_backward_kernel<scalar_t><<<blocks, threads>>>(
+                grad_output.data<scalar_t>(), grad_input.data<scalar_t>(),
+                N, C, in_d, in_h, in_w, out_d, out_h, out_w);
+        });
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        return grad_input;
+    }
+
     if (mode != "bilinear" && mode != "nearest" && mode != "bicubic") {
         throw std::runtime_error("interpolate_backward_cuda: mode '" + mode +
-            "' not supported. Use 'bilinear'/'nearest'/'bicubic' (4D) or 'trilinear' (5D).");
+            "' not supported. Use 'bilinear'/'nearest'/'bicubic' (4D), 'nearest' (5D), or 'trilinear' (5D).");
     }
     if (shape.size() != 4) {
         throw std::runtime_error("interpolate_backward_cuda: bilinear/nearest/bicubic require 4D (N,C,H,W).");

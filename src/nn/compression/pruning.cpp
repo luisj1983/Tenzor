@@ -253,11 +253,22 @@ auto prune_unstructured(
             // No "weight" parameters to prune; nothing to threshold against.
             return config;
         }
-        int64_t threshold_idx = static_cast<int64_t>(all_importances.size() * sparsity);
-        // Clamp to the last valid index so sparsity == 1.0 (or rounding) cannot
-        // index one-past-the-end.
-        threshold_idx = std::min<int64_t>(
-            threshold_idx, static_cast<int64_t>(all_importances.size()) - 1);
+        // Number of elements we intend to prune globally. This must match the
+        // rank-based selection used by create_mask_from_importance so the
+        // global and layer-wise paths produce identical sparsity for identical
+        // inputs (no over-pruning on ties).
+        int64_t target_prune =
+            static_cast<int64_t>(all_importances.size() * sparsity);
+        target_prune = std::min<int64_t>(
+            target_prune, static_cast<int64_t>(all_importances.size()));
+        target_prune = std::max<int64_t>(target_prune, 0);
+
+        // Clamp the partition index to a valid position so we can read the
+        // k-th smallest importance value (the cutoff). When target_prune == 0
+        // there is nothing to prune; when it equals the total size everything
+        // is pruned.
+        int64_t threshold_idx = std::min<int64_t>(
+            target_prune, static_cast<int64_t>(all_importances.size()) - 1);
         threshold_idx = std::max<int64_t>(threshold_idx, 0);
         // Only the element at threshold_idx is needed (the k-th smallest), so a
         // partial partition via nth_element is enough — no full sort required.
@@ -266,6 +277,22 @@ auto prune_unstructured(
             all_importances.begin() + threshold_idx,
             all_importances.end());
         float threshold = all_importances[threshold_idx];
+
+        // To prune EXACTLY target_prune elements while breaking ties at the
+        // threshold deterministically, count how many elements are strictly
+        // below the threshold value. Everything strictly below is always
+        // pruned; elements equal to the threshold are pruned only up to the
+        // remaining tie budget. This mirrors create_mask_from_importance, which
+        // sorts (stably enough for counts) and prunes the lowest num_to_prune.
+        int64_t num_below = 0;
+        for (float v : all_importances) {
+            if (v < threshold) {
+                ++num_below;
+            }
+        }
+        // Tie budget: how many at-threshold elements may still be pruned to
+        // reach target_prune. Never negative.
+        int64_t ties_budget = std::max<int64_t>(target_prune - num_below, 0);
 
         // Create masks based on global threshold
         for (auto& [name, param] : named_params) {
@@ -288,7 +315,18 @@ auto prune_unstructured(
                 auto mask_data = mask_f32.data<float>();
 
                 for (int64_t i = 0; i < importance.numel(); ++i) {
-                    mask_data[i] = (imp_data[i] > threshold) ? 1.0f : 0.0f;
+                    float v = imp_data[i];
+                    if (v < threshold) {
+                        // Strictly below the global cutoff: always pruned.
+                        mask_data[i] = 0.0f;
+                    } else if (ties_budget > 0) {  // v == threshold (ties)
+                        // At the threshold: prune only while tie budget remains
+                        // so the total pruned count equals target_prune exactly.
+                        mask_data[i] = 0.0f;
+                        --ties_budget;
+                    } else {
+                        mask_data[i] = 1.0f;
+                    }
                 }
 
                 // Convert mask to original dtype and device

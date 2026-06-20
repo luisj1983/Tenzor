@@ -42,47 +42,61 @@ void main() {
                 sigma += H[i][k] * H[i][k];
             }
             float64_t norm_x = sqrt(sigma);
-            if (norm_x < 1e-30lf) continue;
 
-            float64_t alpha = -sign(H[k+1][k]) * norm_x;
-            float64_t v0 = H[k+1][k] - alpha;
-            float64_t v_norm_sq = v0 * v0;
-            for (uint i = k + 2; i < n; i++) {
-                v_norm_sq += H[i][k] * H[i][k];
-            }
-            if (v_norm_sq < 1e-30lf) continue;
+            // Use a skip flag instead of `continue`: `continue` would make
+            // thread 0 jump straight to the next iteration's barrier() while
+            // threads 1..31 wait at this iteration's barrier(), producing a
+            // divergent barrier (undefined behaviour / deadlock on conformant
+            // Vulkan drivers). All work below is guarded so the trailing
+            // barrier() is always reached uniformly by the whole subgroup.
+            bool skip = (norm_x < 1e-30lf);  // column already zero
 
-            float64_t tau = 2.0lf / v_norm_sq;
-
-            // Left: H = (I - tau * v * v^T) * H
-            for (uint j = k; j < n; j++) {
-                float64_t dot = v0 * H[k+1][j];
+            float64_t alpha = 0.0lf;
+            float64_t v0 = 0.0lf;
+            float64_t v_norm_sq = 0.0lf;
+            if (!skip) {
+                alpha = -sign(H[k+1][k]) * norm_x;
+                v0 = H[k+1][k] - alpha;
+                v_norm_sq = v0 * v0;
                 for (uint i = k + 2; i < n; i++) {
-                    dot += H[i][k] * H[i][j];
+                    v_norm_sq += H[i][k] * H[i][k];
                 }
-                dot *= tau;
-                H[k+1][j] -= v0 * dot;
+                if (v_norm_sq < 1e-30lf) skip = true;
+            }
+
+            if (!skip) {
+                float64_t tau = 2.0lf / v_norm_sq;
+
+                // Left: H = (I - tau * v * v^T) * H
+                for (uint j = k; j < n; j++) {
+                    float64_t dot = v0 * H[k+1][j];
+                    for (uint i = k + 2; i < n; i++) {
+                        dot += H[i][k] * H[i][j];
+                    }
+                    dot *= tau;
+                    H[k+1][j] -= v0 * dot;
+                    for (uint i = k + 2; i < n; i++) {
+                        H[i][j] -= H[i][k] * dot;
+                    }
+                }
+
+                // Right: H = H * (I - tau * v * v^T)
+                for (uint i = 0; i < n; i++) {
+                    float64_t dot = v0 * H[i][k+1];
+                    for (uint j = k + 2; j < n; j++) {
+                        dot += H[j][k] * H[i][j];
+                    }
+                    dot *= tau;
+                    H[i][k+1] -= v0 * dot;
+                    for (uint j = k + 2; j < n; j++) {
+                        H[i][j] -= H[j][k] * dot;
+                    }
+                }
+
+                H[k+1][k] = alpha;
                 for (uint i = k + 2; i < n; i++) {
-                    H[i][j] -= H[i][k] * dot;
+                    H[i][k] = 0.0lf;
                 }
-            }
-
-            // Right: H = H * (I - tau * v * v^T)
-            for (uint i = 0; i < n; i++) {
-                float64_t dot = v0 * H[i][k+1];
-                for (uint j = k + 2; j < n; j++) {
-                    dot += H[j][k] * H[i][j];
-                }
-                dot *= tau;
-                H[i][k+1] -= v0 * dot;
-                for (uint j = k + 2; j < n; j++) {
-                    H[i][j] -= H[j][k] * dot;
-                }
-            }
-
-            H[k+1][k] = alpha;
-            for (uint i = k + 2; i < n; i++) {
-                H[i][k] = 0.0lf;
             }
         }
         barrier();
@@ -93,6 +107,15 @@ void main() {
 
     for (uint iter = 0; iter < max_iterations && nn > 0; iter++) {
         if (tid == 0) {
+            // Use a `handled` flag instead of `continue` for the deflation
+            // branches below. `continue` would let thread 0 advance to the
+            // next iteration's barrier() while threads 1..31 wait at this
+            // iteration's barrier(), producing a divergent barrier (undefined
+            // behaviour / deadlock on conformant Vulkan drivers). Deflation
+            // happens on nearly every convergence step, so this must reach the
+            // trailing barrier() uniformly each iteration.
+            bool handled = false;
+
             if (nn >= 2) {
                 float64_t tst = abs(H[nn-2][nn-2]) + abs(H[nn-1][nn-1]);
                 if (tst == 0.0lf) tst = 1.0lf;
@@ -101,11 +124,11 @@ void main() {
                     data_wi[batch_idx * n + nn - 1] = 0.0lf;
                     H[nn-1][nn-2] = 0.0lf;
                     nn--;
-                    continue;
+                    handled = true;
                 }
             }
 
-            if (nn >= 3) {
+            if (!handled && nn >= 3) {
                 float64_t tst = abs(H[nn-3][nn-3]) + abs(H[nn-2][nn-2]);
                 if (tst == 0.0lf) tst = 1.0lf;
                 if (abs(H[nn-2][nn-3]) < 1e-14lf * tst) {
@@ -131,17 +154,18 @@ void main() {
 
                     H[nn-2][nn-3] = 0.0lf;
                     nn -= 2;
-                    continue;
+                    handled = true;
                 }
             }
 
-            if (nn == 1) {
+            if (!handled && nn == 1) {
                 data_wr[batch_idx * n] = H[0][0];
                 data_wi[batch_idx * n] = 0.0lf;
                 nn = 0;
-                continue;
+                handled = true;
             }
 
+            if (!handled) {
             // Francis QR step
             float64_t s = H[nn-2][nn-2] + H[nn-1][nn-1];
             float64_t t = H[nn-2][nn-2] * H[nn-1][nn-1] - H[nn-2][nn-1] * H[nn-1][nn-2];
@@ -209,6 +233,7 @@ void main() {
                     }
                 }
             }
+            } // end if (!handled)
         }
         barrier();
     }

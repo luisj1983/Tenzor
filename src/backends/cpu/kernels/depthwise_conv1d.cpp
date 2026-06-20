@@ -190,6 +190,19 @@ auto depthwise_conv1d_kernel(const Tensor& input_4d,
     const int64_t L  = in_shape[3];
     const int64_t kL = w_shape[3];
 
+    // Effective (dilated) kernel extent must fit within the padded input,
+    // mirroring PyTorch's explicit size check. Validating here avoids relying
+    // on the L_out<=0 guard, which misses numerators in (-stride_l, 0) that
+    // truncate to 0 under C++ integer division and yield a misleading 1-wide
+    // output.
+    const int64_t effective_kernel = dilation_l * (kL - 1) + 1;
+    if (effective_kernel > L + 2 * padding_l) {
+        throw std::runtime_error(
+            "depthwise_conv1d_kernel: effective kernel size "
+            "(dilation*(kernel-1)+1) exceeds padded input length "
+            "(check padding / dilation / kernel size).");
+    }
+
     const int64_t L_out = (L + 2 * padding_l - dilation_l * (kL - 1) - 1) / stride_l + 1;
     if (L_out <= 0) {
         throw std::runtime_error("depthwise_conv1d_kernel: non-positive output length "
@@ -237,8 +250,8 @@ auto depthwise_conv1d_kernel(const Tensor& input_4d,
         // BUFFERS to Float32 so cache traffic and intermediate stores stay in
         // float — otherwise the per-tap conversion cost dominates. Easiest
         // route: cast inputs once, run the f32 path, narrow the result.
-        auto in_f32  = input_4d.to(DType::Float32);
-        auto w_f32   = weight_4d.to(DType::Float32);
+        auto in_f32  = in_c.to(DType::Float32);   // widen from the contiguous copy
+        auto w_f32   = w_c.to(DType::Float32);
         Tensor bias_f32_storage;
         const float* bias_f32_ptr = nullptr;
         if (bias) { bias_f32_storage = bias->to(DType::Float32); bias_f32_ptr = bias_f32_storage.data<float>(); }
@@ -257,8 +270,8 @@ auto depthwise_conv1d_kernel(const Tensor& input_4d,
         }
         output = out_f32.to(DType::Float16);
     } else if (dt == DType::BFloat16) {
-        auto in_f32  = input_4d.to(DType::Float32);
-        auto w_f32   = weight_4d.to(DType::Float32);
+        auto in_f32  = in_c.to(DType::Float32);   // widen from the contiguous copy
+        auto w_f32   = w_c.to(DType::Float32);
         Tensor bias_f32_storage;
         const float* bias_f32_ptr = nullptr;
         if (bias) { bias_f32_storage = bias->to(DType::Float32); bias_f32_ptr = bias_f32_storage.data<float>(); }

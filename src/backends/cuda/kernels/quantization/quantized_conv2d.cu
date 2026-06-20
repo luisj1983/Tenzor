@@ -44,10 +44,19 @@ __global__ void quantized_conv2d_cuda_kernel(
     // Compute output position
     int64_t ow = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t oh = blockIdx.y * blockDim.y + threadIdx.y;
-    int64_t oc = blockIdx.z % out_channels;
-    int64_t b = blockIdx.z / out_channels;
 
-    if (b >= batch || oc >= out_channels || oh >= h_out || ow >= w_out) return;
+    if (oh >= h_out || ow >= w_out) return;
+
+    // The (batch, out_channel) pair is folded onto the z-axis. CUDA's gridDim.z
+    // hardware maximum is 65535, but batch*out_channels can far exceed that for
+    // realistic models (e.g. batch=64, out_channels=2048 -> 131072). To stay
+    // within the limit the host caps gridDim.z at 65535 and we grid-stride over
+    // the flattened (b,oc) index here, so all (b,oc) pairs are still covered.
+    const int64_t bc_total = batch * out_channels;
+    const int64_t bc_stride = static_cast<int64_t>(gridDim.z);
+    for (int64_t bc = blockIdx.z; bc < bc_total; bc += bc_stride) {
+    int64_t oc = bc % out_channels;
+    int64_t b = bc / out_channels;
 
     // int64 accumulator: each int8*int8 product fits in int32, but summed over
     // in_channels*kh*kw the running total can exceed INT32_MAX for very wide
@@ -111,6 +120,7 @@ __global__ void quantized_conv2d_cuda_kernel(
 
     int64_t output_idx = ((b * out_channels + oc) * h_out + oh) * w_out + ow;
     output[output_idx] = result;
+    } // grid-stride over flattened (b, oc)
 }
 
 /**
@@ -149,12 +159,22 @@ auto quantized_conv2d_cuda(
 
     float combined_scale = input_scale * weight_scale;
 
-    // Launch configuration
+    // Launch configuration.
+    //
+    // The (batch, out_channel) pair is folded onto the z-axis, but CUDA's
+    // gridDim.z hardware maximum is 65535 on all compute capabilities. For
+    // realistic quantized models batch*out_channels easily exceeds that
+    // (e.g. batch=64, out_channels=2048 -> 131072), which would make the launch
+    // fail with cudaErrorInvalidConfiguration. Cap gridDim.z at 65535; the
+    // kernel grid-strides over the flattened (b,oc) index to cover the rest.
+    constexpr int64_t kMaxGridZ = 65535;
     dim3 threads(16, 16);  // 16x16 thread block
+    int64_t bc_total = batch * out_channels;
+    int64_t grid_z = bc_total < kMaxGridZ ? bc_total : kMaxGridZ;
     dim3 blocks(
-        (w_out + threads.x - 1) / threads.x,
-        (h_out + threads.y - 1) / threads.y,
-        batch * out_channels
+        static_cast<unsigned int>((w_out + threads.x - 1) / threads.x),
+        static_cast<unsigned int>((h_out + threads.y - 1) / threads.y),
+        static_cast<unsigned int>(grid_z)
     );
 
     quantized_conv2d_cuda_kernel<<<blocks, threads, 0, stream>>>(

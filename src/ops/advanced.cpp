@@ -15,6 +15,7 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/ops/math.hpp"
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -355,41 +356,102 @@ auto unique(const Tensor& input,
     auto process_unique = [&]<typename T>(T*) -> std::tuple<Tensor, Tensor, Tensor> {
         const T* data = input_flat.data<T>();
 
+        // Floating-point types must treat all NaNs as a single unique value
+        // (matching PyTorch / NumPy semantics). std::unordered_map keying on T
+        // would record every NaN as distinct because NaN != NaN, so we route
+        // every NaN occurrence to one dedicated slot.
+        constexpr bool is_float =
+            std::is_same_v<T, float> || std::is_same_v<T, double> ||
+            std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>;
+
+        auto value_is_nan = [](T v) -> bool {
+            if constexpr (is_float) {
+                if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>) {
+                    return std::isnan(static_cast<float>(v));
+                } else {
+                    return std::isnan(v);
+                }
+            } else {
+                (void)v;
+                return false;
+            }
+        };
+
         // Map from value to (first_index, count)
         std::vector<std::pair<T, std::pair<int64_t, int64_t>>> value_info;
         std::unordered_map<T, size_t> value_to_idx;
+        // Per-original-element slot index into value_info (pre-sort). Lets us
+        // build the inverse mapping without re-hashing values (which would fail
+        // for NaN keys).
+        std::vector<size_t> elem_slot(static_cast<size_t>(numel));
+        // Dedicated slot for NaN values; -1 until the first NaN is seen.
+        int64_t nan_slot = -1;
 
         for (int64_t i = 0; i < numel; ++i) {
             T val = data[i];
+            if (value_is_nan(val)) {
+                if (nan_slot < 0) {
+                    nan_slot = static_cast<int64_t>(value_info.size());
+                    value_info.emplace_back(val, std::make_pair(i, 1));
+                } else {
+                    value_info[static_cast<size_t>(nan_slot)].second.second++;
+                }
+                elem_slot[static_cast<size_t>(i)] = static_cast<size_t>(nan_slot);
+                continue;
+            }
             auto it = value_to_idx.find(val);
             if (it == value_to_idx.end()) {
-                value_to_idx[val] = value_info.size();
+                size_t slot = value_info.size();
+                value_to_idx[val] = slot;
                 value_info.emplace_back(val, std::make_pair(i, 1));
+                elem_slot[static_cast<size_t>(i)] = slot;
             } else {
                 value_info[it->second].second.second++;
+                elem_slot[static_cast<size_t>(i)] = it->second;
             }
         }
 
         const int64_t num_unique = static_cast<int64_t>(value_info.size());
 
-        // Sort if requested
+        // remap[old_slot] = new position after sorting (identity if unsorted).
+        std::vector<int64_t> remap(static_cast<size_t>(num_unique));
+
+        // Sort if requested. We sort an index permutation so we can build the
+        // old-slot -> new-position remap used by the inverse mapping. NaN sorts
+        // to the end (consistent ordering across positions).
+        std::vector<int64_t> order(static_cast<size_t>(num_unique));
+        for (int64_t i = 0; i < num_unique; ++i) {
+            order[static_cast<size_t>(i)] = i;
+        }
         if (sorted_output) {
-            std::sort(value_info.begin(), value_info.end(),
-                [](const auto& a, const auto& b) {
+            std::sort(order.begin(), order.end(),
+                [&](int64_t a, int64_t b) {
+                    const T& va = value_info[static_cast<size_t>(a)].first;
+                    const T& vb = value_info[static_cast<size_t>(b)].first;
+                    const bool na = value_is_nan(va);
+                    const bool nb = value_is_nan(vb);
+                    if (na || nb) {
+                        // NaN sorts after everything; ties keep stable order.
+                        if (na && nb) return a < b;
+                        return nb;  // a goes first iff b is NaN and a is not
+                    }
                     if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>) {
-                        return static_cast<float>(a.first) < static_cast<float>(b.first);
+                        return static_cast<float>(va) < static_cast<float>(vb);
                     } else {
-                        return a.first < b.first;
+                        return va < vb;
                     }
                 });
         }
+        for (int64_t pos = 0; pos < num_unique; ++pos) {
+            remap[static_cast<size_t>(order[static_cast<size_t>(pos)])] = pos;
+        }
 
-        // Create unique values tensor
+        // Create unique values tensor (in sorted/permuted order)
         Tensor unique_vals({num_unique}, dtype, Device::cpu());
         T* unique_data = unique_vals.data<T>();
 
-        for (int64_t i = 0; i < num_unique; ++i) {
-            unique_data[i] = value_info[i].first;
+        for (int64_t pos = 0; pos < num_unique; ++pos) {
+            unique_data[pos] = value_info[static_cast<size_t>(order[static_cast<size_t>(pos)])].first;
         }
 
         // Create inverse indices if requested
@@ -398,14 +460,8 @@ auto unique(const Tensor& input,
             inverse_indices = Tensor({numel}, DType::Int64, Device::cpu());
             int64_t* inverse_data = inverse_indices.data<int64_t>();
 
-            // Build value to output index map
-            std::unordered_map<T, int64_t> val_to_out_idx;
-            for (int64_t i = 0; i < num_unique; ++i) {
-                val_to_out_idx[value_info[i].first] = i;
-            }
-
             for (int64_t i = 0; i < numel; ++i) {
-                inverse_data[i] = val_to_out_idx[data[i]];
+                inverse_data[i] = remap[elem_slot[static_cast<size_t>(i)]];
             }
         }
 
@@ -415,8 +471,9 @@ auto unique(const Tensor& input,
             counts = Tensor({num_unique}, DType::Int64, Device::cpu());
             int64_t* counts_data = counts.data<int64_t>();
 
-            for (int64_t i = 0; i < num_unique; ++i) {
-                counts_data[i] = value_info[i].second.second;
+            for (int64_t pos = 0; pos < num_unique; ++pos) {
+                counts_data[pos] =
+                    value_info[static_cast<size_t>(order[static_cast<size_t>(pos)])].second.second;
             }
         }
 
@@ -777,27 +834,61 @@ auto einsum_composed(const std::string& equation,
             std::to_string(tensors.size()) + ")");
     }
 
-    // Fast paths for common patterns
+    // Canonicalize label letters so that equivalent contractions written with
+    // different letters still hit the optimized (BLAS-backed) fast paths below.
+    // Labels are renamed to a fixed alphabet 'a','b','c',... in order of first
+    // appearance across all input subscripts followed by the output subscript.
+    // This is a pure bijective relabeling and preserves einsum semantics, so
+    // e.g. "ik,kj->ij" canonicalizes to "ab,bc->ac" == "ij,jk->ik" form.
+    auto canonicalize_labels = [&]() {
+        std::unordered_map<char, char> remap;
+        char next = 'a';
+        auto remap_str = [&](const std::string& s) {
+            std::string out;
+            out.reserve(s.size());
+            for (char c : s) {
+                auto it = remap.find(c);
+                if (it == remap.end()) {
+                    char nc = next++;
+                    remap.emplace(c, nc);
+                    out.push_back(nc);
+                } else {
+                    out.push_back(it->second);
+                }
+            }
+            return out;
+        };
+        std::vector<std::string> csubs;
+        csubs.reserve(input_subs.size());
+        for (const auto& s : input_subs) {
+            csubs.push_back(remap_str(s));
+        }
+        std::string cout = remap_str(output_sub);
+        return std::make_pair(csubs, cout);
+    };
+    auto [canon_subs, canon_out] = canonicalize_labels();
+
+    // Fast paths for common patterns (matched against canonical label forms)
     if (tensors.size() == 2) {
         const auto& a = tensors[0];
         const auto& b = tensors[1];
-        const auto& sa = input_subs[0];
-        const auto& sb = input_subs[1];
+        const auto& sa = canon_subs[0];
+        const auto& sb = canon_subs[1];
 
-        // Matrix multiply: ij,jk->ik
-        if (sa == "ij" && sb == "jk" && output_sub == "ik") {
+        // Matrix multiply: ij,jk->ik  (canonical: ab,bc->ac)
+        if (sa == "ab" && sb == "bc" && canon_out == "ac") {
             return matmul(a, b);
         }
-        // Batch matmul: bij,bjk->bik
-        if (sa == "bij" && sb == "bjk" && output_sub == "bik") {
+        // Batch matmul: bij,bjk->bik  (canonical: abc,acd->abd)
+        if (sa == "abc" && sb == "acd" && canon_out == "abd") {
             return bmm(a, b);
         }
-        // Dot product: i,i->
-        if (sa == "i" && sb == "i" && output_sub.empty()) {
+        // Dot product: i,i->  (canonical: a,a->)
+        if (sa == "a" && sb == "a" && canon_out.empty()) {
             return dot(a, b);
         }
-        // Outer product: i,j->ij
-        if (sa == "i" && sb == "j" && output_sub == "ij") {
+        // Outer product: i,j->ij  (canonical: a,b->ab)
+        if (sa == "a" && sb == "b" && canon_out == "ab") {
             auto a_col = reshape(a, {a.numel(), 1});
             auto b_row = reshape(b, {1, b.numel()});
             return matmul(a_col, b_row);
@@ -805,14 +896,14 @@ auto einsum_composed(const std::string& equation,
     }
     if (tensors.size() == 1) {
         const auto& a = tensors[0];
-        const auto& sa = input_subs[0];
+        const auto& sa = canon_subs[0];
 
-        // Trace: ii->
-        if (sa == "ii" && output_sub.empty()) {
+        // Trace: ii->  (canonical: aa->)
+        if (sa == "aa" && canon_out.empty()) {
             return trace(a);
         }
-        // Diagonal: ii->i
-        if (sa == "ii" && output_sub == "i") {
+        // Diagonal: ii->i  (canonical: aa->a)
+        if (sa == "aa" && canon_out == "a") {
             return diag(a);
         }
     }
@@ -1149,6 +1240,14 @@ auto cartesian_prod(std::span<const Tensor> tensors) -> Tensor {
     if (tensors.empty()) {
         return zeros({0, 0}, DType::Float32, Device::cpu());
     }
+    // Validate that every input is 1-D before any reshaping so the single- and
+    // multi-tensor paths share the same clear diagnostic (instead of a confusing
+    // reshape size-mismatch on a 2-D-or-higher single input).
+    for (const auto& t : tensors) {
+        if (t.ndim() != 1) {
+            throw std::runtime_error("cartesian_prod: all tensors must be 1-D");
+        }
+    }
     if (tensors.size() == 1) {
         return tensors[0].reshape({tensors[0].shape()[0], 1});
     }
@@ -1156,9 +1255,6 @@ auto cartesian_prod(std::span<const Tensor> tensors) -> Tensor {
     // Compute total number of rows
     int64_t total = 1;
     for (const auto& t : tensors) {
-        if (t.ndim() != 1) {
-            throw std::runtime_error("cartesian_prod: all tensors must be 1-D");
-        }
         total *= t.shape()[0];
     }
 
@@ -1199,7 +1295,14 @@ auto combinations(const Tensor& input, int64_t r, bool with_replacement) -> Tens
         throw std::runtime_error("combinations: input must be 1-D");
     }
     int64_t n = input.shape()[0];
-    if (r <= 0 || n == 0) {
+    if (r < 0) {
+        throw std::invalid_argument("combinations: r must be non-negative");
+    }
+    // r == 0 yields exactly one empty combination (numpy/itertools semantics).
+    if (r == 0) {
+        return zeros({1, 0}, input.dtype(), input.device());
+    }
+    if (n == 0) {
         return zeros({0, r}, input.dtype(), input.device());
     }
     // Float16 / BFloat16 aren't supported by the gather; widen and narrow.

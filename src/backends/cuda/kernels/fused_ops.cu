@@ -499,6 +499,9 @@ auto fused_softmax_cross_entropy_cuda(
     // CPU supports F32/F64; CUDA gains F64 here via widen-narrow at host level
     // for the F16/BF16 paths and direct F64 dispatch via template instantiation.
     // Audit L3 — was previously F32-only, silently downcast caller F64 inputs.
+    int32_t device_id = logits.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
     if (logits.dtype() == DType::Float64) {
         // F64 dispatch: instantiate the kernel template with double. The
         // reduction below uses tenzor::dispatch(OpId::Sum) instead of
@@ -510,8 +513,8 @@ auto fused_softmax_cross_entropy_cuda(
         int blocks = batch_size;
         // Device-side out-of-range target flag (CPU reference throws on OOB).
         CudaBuffer error_buf(sizeof(int));
-        TENZOR_CUDA_CHECK(cudaMemset(error_buf.as<int>(), 0, sizeof(int)));
-        fused_softmax_cross_entropy_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+        fused_softmax_cross_entropy_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             logits.data<double>(),
             targets.data<int64_t>(),
             losses.data<double>(),
@@ -522,8 +525,9 @@ auto fused_softmax_cross_entropy_cuda(
         TENZOR_CUDA_POST_LAUNCH_CHECK();
         {
             int host_error = 0;
-            TENZOR_CUDA_CHECK(cudaMemcpy(&host_error, error_buf.as<int>(), sizeof(int),
-                                         cudaMemcpyDeviceToHost));
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                         cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
             if (host_error) {
                 throw std::runtime_error(
                     "fused_softmax_cross_entropy: target index out of range [0, " +
@@ -559,10 +563,10 @@ auto fused_softmax_cross_entropy_cuda(
     // Device-side out-of-range target flag (CPU reference throws on OOB; we
     // must match that contract rather than silently zeroing the loss).
     CudaBuffer error_buf(sizeof(int));
-    TENZOR_CUDA_CHECK(cudaMemset(error_buf.as<int>(), 0, sizeof(int)));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
 
     if (logits.dtype() == DType::Float32) {
-        fused_softmax_cross_entropy_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_softmax_cross_entropy_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             logits.data<float>(),
             targets.data<int64_t>(),
             losses.data<float>(),
@@ -572,7 +576,7 @@ auto fused_softmax_cross_entropy_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (logits.dtype() == DType::Float16) {
-        fused_softmax_cross_entropy_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_softmax_cross_entropy_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(logits.data<Float16>()),
             targets.data<int64_t>(),
             reinterpret_cast<__half*>(losses.data<Float16>()),
@@ -582,7 +586,7 @@ auto fused_softmax_cross_entropy_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (logits.dtype() == DType::BFloat16) {
-        fused_softmax_cross_entropy_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_softmax_cross_entropy_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(logits.data<BFloat16>()),
             targets.data<int64_t>(),
             reinterpret_cast<__nv_bfloat16*>(losses.data<BFloat16>()),
@@ -600,8 +604,9 @@ auto fused_softmax_cross_entropy_cuda(
 
     {
         int host_error = 0;
-        TENZOR_CUDA_CHECK(cudaMemcpy(&host_error, error_buf.as<int>(), sizeof(int),
-                                     cudaMemcpyDeviceToHost));
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                     cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
         if (host_error) {
             throw std::runtime_error(
                 "fused_softmax_cross_entropy: target index out of range [0, " +
@@ -810,7 +815,9 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
 
     int64_t n = input.numel();
     int min_grid_size, block_size;
-    cudaStream_t stream = cudaStreamPerThread;
+    int32_t device_id = input.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
 
     if (input.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
@@ -1780,7 +1787,9 @@ auto fused_conv2d_bn_relu_cuda(
     int64_t out_w = (in_w + 2 * padding_w - kernel_w) / stride_w + 1;
 
     Tensor output = create_cuda_zeros({batch_size, out_channels, out_h, out_w}, input.dtype(), input.device());
-    cudaStream_t stream = cudaStreamPerThread;
+    int32_t device_id = input.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
 
     if (input.dtype() == DType::Float32) {
         launch_fused_conv2d_bn_relu<float>(input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta,
@@ -1879,9 +1888,13 @@ auto fused_matmul_add_cuda(
     dim3 threads(TILE_SIZE, TILE_SIZE);
     dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
 
+    int32_t device_id = A.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
+
     if (A.dtype() == DType::Float32) {
         const float* bias_ptr = bias ? bias->data<float>() : nullptr;
-        fused_matmul_add_kernel<float, TILE_SIZE><<<blocks, threads>>>(
+        fused_matmul_add_kernel<float, TILE_SIZE><<<blocks, threads, 0, stream>>>(
             A.data<float>(),
             B.data<float>(),
             bias_ptr,
@@ -1951,7 +1964,9 @@ auto fused_elementwise_chain_cuda(
 
     int64_t n = a.numel();
     int min_grid_size, block_size;
-    cudaStream_t stream = cudaStreamPerThread;
+    int32_t device_id = a.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
 
     if (a.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
@@ -2278,290 +2293,6 @@ __global__ void flash_attention_v2_kernel(
     if (L != nullptr && tid == 0) {
         float lse = m_prev + logf(fmaxf(l_prev, 1e-10f));
         L[batch_head * seq_len_q + query_idx] = lse;
-    }
-}
-
-/**
- * @brief Legacy Flash Attention kernel (fallback for non-64 head_dim)
- */
-template<int Br, int Bc, int HEAD_DIM, int BLOCK_SIZE>
-__global__ void flash_attention_forward_kernel(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    float* __restrict__ O,
-    float* __restrict__ L,    // [batch_heads, seq_len_q] logsumexp (may be nullptr)
-    int64_t batch_heads,
-    int64_t seq_len_q,
-    int64_t seq_len_k,
-    int64_t head_dim,
-    float scale
-) {
-    const int64_t batch_head = blockIdx.x;
-    const int64_t q_block_idx = blockIdx.y;
-    const int tid = threadIdx.x;
-
-    const int64_t q_start = q_block_idx * Br;
-    if (q_start >= seq_len_q) return;
-    const int64_t q_end = min(q_start + (int64_t)Br, seq_len_q);
-    const int actual_Br = (int)(q_end - q_start);
-
-    extern __shared__ float smem[];
-    float* Q_tile = smem;
-    float* K_tile = Q_tile + Br * HEAD_DIM;
-    float* V_tile = K_tile + Bc * HEAD_DIM;
-    float* S_tile = V_tile + Bc * HEAD_DIM;
-    float* O_acc = S_tile + Br * Bc;
-    float* m_i = O_acc + Br * HEAD_DIM;
-    float* l_i = m_i + Br;
-
-    const float* Q_base = Q + batch_head * seq_len_q * head_dim;
-    const float* K_base = K + batch_head * seq_len_k * head_dim;
-    const float* V_base = V + batch_head * seq_len_k * head_dim;
-    float* O_base = O + batch_head * seq_len_q * head_dim;
-
-    for (int i = tid; i < Br; i += BLOCK_SIZE) {
-        m_i[i] = -INFINITY;
-        l_i[i] = 0.0f;
-    }
-    for (int i = tid; i < Br * HEAD_DIM; i += BLOCK_SIZE) {
-        O_acc[i] = 0.0f;
-    }
-    for (int i = tid; i < actual_Br * HEAD_DIM; i += BLOCK_SIZE) {
-        int row = i / HEAD_DIM;
-        int col = i % HEAD_DIM;
-        Q_tile[row * HEAD_DIM + col] = Q_base[(q_start + row) * head_dim + col];
-    }
-    __syncthreads();
-
-    const int64_t num_kv_blocks = (seq_len_k + Bc - 1) / Bc;
-
-    for (int64_t kv_block = 0; kv_block < num_kv_blocks; ++kv_block) {
-        const int64_t k_start = kv_block * Bc;
-        const int64_t k_end = min(k_start + (int64_t)Bc, seq_len_k);
-        const int actual_Bc = (int)(k_end - k_start);
-
-        for (int i = tid; i < actual_Bc * HEAD_DIM; i += BLOCK_SIZE) {
-            int row = i / HEAD_DIM;
-            int col = i % HEAD_DIM;
-            K_tile[row * HEAD_DIM + col] = K_base[(k_start + row) * head_dim + col];
-            V_tile[row * HEAD_DIM + col] = V_base[(k_start + row) * head_dim + col];
-        }
-        for (int i = tid + actual_Bc * HEAD_DIM; i < Bc * HEAD_DIM; i += BLOCK_SIZE) {
-            K_tile[i] = 0.0f;
-            V_tile[i] = 0.0f;
-        }
-        __syncthreads();
-
-        for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
-            int i = idx / actual_Bc;
-            int j = idx % actual_Bc;
-            float sum = 0.0f;
-            #pragma unroll 8
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                sum += Q_tile[i * HEAD_DIM + d] * K_tile[j * HEAD_DIM + d];
-            }
-            S_tile[i * Bc + j] = sum * scale;
-        }
-        for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
-            int i = idx / Bc;
-            int j = idx % Bc;
-            if (i >= actual_Br || j >= actual_Bc) {
-                S_tile[idx] = -INFINITY;
-            }
-        }
-        __syncthreads();
-
-        for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
-            float row_max = -INFINITY;
-            for (int j = 0; j < actual_Bc; ++j) {
-                row_max = fmaxf(row_max, S_tile[row * Bc + j]);
-            }
-            float row_sum = 0.0f;
-            for (int j = 0; j < actual_Bc; ++j) {
-                float val = expf(S_tile[row * Bc + j] - row_max);
-                S_tile[row * Bc + j] = val;
-                row_sum += val;
-            }
-            float m_old = m_i[row];
-            float m_new = fmaxf(m_old, row_max);
-            float l_old = l_i[row];
-            float scale_old = expf(m_old - m_new);
-            float scale_cur = expf(row_max - m_new);
-            float l_new = scale_old * l_old + scale_cur * row_sum;
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                O_acc[row * HEAD_DIM + d] *= scale_old;
-            }
-            for (int j = 0; j < actual_Bc; ++j) {
-                float p_ij = S_tile[row * Bc + j] * scale_cur;
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_acc[row * HEAD_DIM + d] += p_ij * V_tile[j * HEAD_DIM + d];
-                }
-            }
-            m_i[row] = m_new;
-            l_i[row] = l_new;
-        }
-        __syncthreads();
-    }
-
-    for (int i = tid; i < actual_Br * HEAD_DIM; i += BLOCK_SIZE) {
-        int row = i / HEAD_DIM;
-        int col = i % HEAD_DIM;
-        float l_inv = 1.0f / l_i[row];
-        O_base[(q_start + row) * head_dim + col] = O_acc[row * HEAD_DIM + col] * l_inv;
-    }
-
-    // Save logsumexp for backward pass: LSE = m + log(l)
-    if (L != nullptr) {
-        for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
-            float lse = m_i[row] + logf(fmaxf(l_i[row], 1e-10f));
-            L[batch_head * seq_len_q + (q_start + row)] = lse;
-        }
-    }
-}
-
-// ==============================================================================
-// Naive Fused Attention CUDA Kernel (Fallback for non-standard head_dim)
-// ==============================================================================
-
-/**
- * @brief Naive fused attention (fallback when Flash Attention constraints not met)
- */
-template<typename T, int BLOCK_SIZE, int MAX_SEQ_LEN = 1024>
-__global__ void fused_attention_kernel_naive(
-    const T* __restrict__ Q,     // (batch_heads, seq_len_q, head_dim)
-    const T* __restrict__ K,     // (batch_heads, seq_len_k, head_dim)
-    const T* __restrict__ V,     // (batch_heads, seq_len_k, head_dim)
-    T* __restrict__ output,      // (batch_heads, seq_len_q, head_dim)
-    int64_t batch_heads,
-    int64_t seq_len_q,
-    int64_t seq_len_k,
-    int64_t head_dim,
-    T scale
-) {
-    // Each block handles one (batch_head, query_row) pair
-    int64_t batch_head = blockIdx.x;
-    int64_t query_row = blockIdx.y;
-
-    if (batch_head >= batch_heads || query_row >= seq_len_q) return;
-
-    // Shared memory for scores and partial results
-    extern __shared__ char shared_mem[];
-    T* scores = reinterpret_cast<T*>(shared_mem);  // [seq_len_k] for attention scores
-    T* partial_max = scores + seq_len_k;           // [BLOCK_SIZE] for reduction
-    T* partial_sum = partial_max + BLOCK_SIZE;     // [BLOCK_SIZE] for reduction
-
-    const T* q_row = Q + (batch_head * seq_len_q + query_row) * head_dim;
-    const T* k_base = K + batch_head * seq_len_k * head_dim;
-    const T* v_base = V + batch_head * seq_len_k * head_dim;
-    T* out_row = output + (batch_head * seq_len_q + query_row) * head_dim;
-
-    // =========================================================================
-    // Step 1: Compute all attention scores Q @ K.T (store in shared memory)
-    // =========================================================================
-    T thread_max = -INFINITY;
-    for (int64_t k_idx = threadIdx.x; k_idx < seq_len_k; k_idx += blockDim.x) {
-        const T* k_row = k_base + k_idx * head_dim;
-        T score = 0;
-        #pragma unroll 4
-        for (int64_t d = 0; d < head_dim; ++d) {
-            score += q_row[d] * k_row[d];
-        }
-        score *= scale;
-        scores[k_idx] = score;
-        thread_max = fmaxf(thread_max, score);
-    }
-
-    // =========================================================================
-    // Step 2: Find global max (parallel reduction)
-    // =========================================================================
-    partial_max[threadIdx.x] = thread_max;
-    __syncthreads();
-
-    // Warp-level reduction first
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        T other = __shfl_down_sync(0xffffffff, thread_max, offset);
-        thread_max = fmaxf(thread_max, other);
-    }
-
-    // Inter-warp reduction
-    int warp_id = threadIdx.x / 32;
-    int lane = threadIdx.x % 32;
-    if (lane == 0) {
-        partial_max[warp_id] = thread_max;
-    }
-    __syncthreads();
-
-    T global_max;
-    if (threadIdx.x == 0) {
-        global_max = partial_max[0];
-        int num_warps = (blockDim.x + 31) / 32;
-        for (int i = 1; i < num_warps; ++i) {
-            global_max = fmaxf(global_max, partial_max[i]);
-        }
-        partial_max[0] = global_max;
-    }
-    __syncthreads();
-    global_max = partial_max[0];
-
-    // =========================================================================
-    // Step 3: Compute exp(score - max) and sum (softmax denominator)
-    // =========================================================================
-    T thread_sum = 0;
-    for (int64_t k_idx = threadIdx.x; k_idx < seq_len_k; k_idx += blockDim.x) {
-        T exp_score = expf(scores[k_idx] - global_max);
-        scores[k_idx] = exp_score;  // Store normalized exp for later use
-        thread_sum += exp_score;
-    }
-
-    // Reduce sum
-    partial_sum[threadIdx.x] = thread_sum;
-    __syncthreads();
-
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        T other = __shfl_down_sync(0xffffffff, thread_sum, offset);
-        thread_sum += other;
-    }
-
-    if (lane == 0) {
-        partial_sum[warp_id] = thread_sum;
-    }
-    __syncthreads();
-
-    T global_sum;
-    if (threadIdx.x == 0) {
-        global_sum = partial_sum[0];
-        int num_warps = (blockDim.x + 31) / 32;
-        for (int i = 1; i < num_warps; ++i) {
-            global_sum += partial_sum[i];
-        }
-        partial_sum[0] = global_sum;
-    }
-    __syncthreads();
-    global_sum = partial_sum[0];
-
-    T inv_sum = 1.0f / global_sum;
-
-    // =========================================================================
-    // Step 4: Normalize scores (complete softmax)
-    // =========================================================================
-    for (int64_t k_idx = threadIdx.x; k_idx < seq_len_k; k_idx += blockDim.x) {
-        scores[k_idx] *= inv_sum;
-    }
-    __syncthreads();
-
-    // =========================================================================
-    // Step 5: Compute output = attention_weights @ V
-    // =========================================================================
-    for (int64_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
-        T result = 0;
-        #pragma unroll 4
-        for (int64_t k_idx = 0; k_idx < seq_len_k; ++k_idx) {
-            result += scores[k_idx] * v_base[k_idx * head_dim + d];
-        }
-        out_row[d] = result;
     }
 }
 
@@ -4022,20 +3753,24 @@ auto fused_softmax_cross_entropy_cuda(
 
     size_t shared_mem = block_size * dtype_size(logits.dtype());
 
+    int32_t device_id = logits.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
+
     // Device-side out-of-range target flag (CPU reference throws on OOB; match
     // that contract rather than silently zeroing loss/grad).
     CudaBuffer error_buf(sizeof(int));
-    TENZOR_CUDA_CHECK(cudaMemset(error_buf.as<int>(), 0, sizeof(int)));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
 
     if (logits.dtype() == DType::Float32) {
-        fused_softmax_cross_entropy_kernel<float><<<batch_size, block_size, shared_mem>>>(
+        fused_softmax_cross_entropy_kernel<float><<<batch_size, block_size, shared_mem, stream>>>(
             logits.data<float>(), targets.data<int64_t>(),
             loss.data<float>(),
             compute_grad ? grad_logits.data<float>() : nullptr,
             batch_size, num_classes, compute_grad, error_buf.as<int>());
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (logits.dtype() == DType::Float64) {
-        fused_softmax_cross_entropy_kernel<double><<<batch_size, block_size, shared_mem>>>(
+        fused_softmax_cross_entropy_kernel<double><<<batch_size, block_size, shared_mem, stream>>>(
             logits.data<double>(), targets.data<int64_t>(),
             loss.data<double>(),
             compute_grad ? grad_logits.data<double>() : nullptr,
@@ -4049,8 +3784,9 @@ auto fused_softmax_cross_entropy_cuda(
 
     {
         int host_error = 0;
-        TENZOR_CUDA_CHECK(cudaMemcpy(&host_error, error_buf.as<int>(), sizeof(int),
-                                     cudaMemcpyDeviceToHost));
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                     cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
         if (host_error) {
             throw std::runtime_error(
                 "fused_softmax_cross_entropy: target index out of range [0, " +

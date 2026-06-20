@@ -262,6 +262,16 @@ CyclicLR::CyclicLR(
     last_lr_ = base_lr_;
     optimizer.set_lr(base_lr_);
 
+    if (step_size_up_ <= 0) {
+        throw std::invalid_argument("CyclicLR: step_size_up must be positive");
+    }
+    if (step_size_down_ < 0) {
+        throw std::invalid_argument("CyclicLR: step_size_down must be non-negative");
+    }
+    if (cycle_size_ <= 0) {
+        throw std::invalid_argument("CyclicLR: cycle size (step_size_up + step_size_down) must be positive");
+    }
+
     if (mode_ != "triangular" && mode_ != "triangular2" && mode_ != "exp_range") {
         throw std::invalid_argument("CyclicLR: mode must be 'triangular', 'triangular2', or 'exp_range'");
     }
@@ -287,6 +297,16 @@ CyclicLR::CyclicLR(
     cycle_size_ = step_size_up_ + step_size_down_;
     last_lr_ = base_lr_;
     optimizer.set_lr(base_lr_);
+
+    if (step_size_up_ <= 0) {
+        throw std::invalid_argument("CyclicLR: step_size_up must be positive");
+    }
+    if (step_size_down_ < 0) {
+        throw std::invalid_argument("CyclicLR: step_size_down must be non-negative");
+    }
+    if (cycle_size_ <= 0) {
+        throw std::invalid_argument("CyclicLR: cycle size (step_size_up + step_size_down) must be positive");
+    }
 
     if (mode_ != "triangular" && mode_ != "triangular2" && mode_ != "exp_range") {
         throw std::invalid_argument("CyclicLR: mode must be 'triangular', 'triangular2', or 'exp_range'");
@@ -314,6 +334,16 @@ CyclicLR::CyclicLR(
     last_lr_ = base_lr_;
     optimizer.set_lr(base_lr_);
 
+    if (step_size_up_ <= 0) {
+        throw std::invalid_argument("CyclicLR: step_size_up must be positive");
+    }
+    if (step_size_down_ < 0) {
+        throw std::invalid_argument("CyclicLR: step_size_down must be non-negative");
+    }
+    if (cycle_size_ <= 0) {
+        throw std::invalid_argument("CyclicLR: cycle size (step_size_up + step_size_down) must be positive");
+    }
+
     if (mode_ != "triangular" && mode_ != "triangular2" && mode_ != "exp_range") {
         throw std::invalid_argument("CyclicLR: mode must be 'triangular', 'triangular2', or 'exp_range'");
     }
@@ -339,6 +369,16 @@ CyclicLR::CyclicLR(
     cycle_size_ = step_size_up_ + step_size_down_;
     last_lr_ = base_lr_;
     optimizer.set_lr(base_lr_);
+
+    if (step_size_up_ <= 0) {
+        throw std::invalid_argument("CyclicLR: step_size_up must be positive");
+    }
+    if (step_size_down_ < 0) {
+        throw std::invalid_argument("CyclicLR: step_size_down must be non-negative");
+    }
+    if (cycle_size_ <= 0) {
+        throw std::invalid_argument("CyclicLR: cycle size (step_size_up + step_size_down) must be positive");
+    }
 
     if (mode_ != "triangular" && mode_ != "triangular2" && mode_ != "exp_range") {
         throw std::invalid_argument("CyclicLR: mode must be 'triangular', 'triangular2', or 'exp_range'");

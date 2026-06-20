@@ -71,8 +71,9 @@ void writeBF16(uint element_idx, float val) {
         if (observed == prev) return;
         prev = observed;
     }
-    // Saturation hard-stop — extremely contended word; force last attempt.
-    output_data[word_idx] = desired;
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word (matches softmax_bf16/matmul_bf16/bmm_bf16).
 }
 
 void main() {

@@ -2,6 +2,14 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Compute phase angle of complex Float64 numbers: output[i] = atan2(imag, real)
+//
+// GLSL provides no double-precision transcendental functions (its built-in
+// atan() is float-only). Computing the phase in float would cap the result at
+// ~7 significant digits and break Complex128 cross-backend parity against the
+// CPU std::arg (= std::atan2) reference at tight tolerances. We therefore
+// implement atan2 entirely in double precision using the fdlibm argument-
+// reduction + minimax polynomial scheme (the same algorithm glibc's atan/atan2
+// are built on), so results match the f64 host reference to full precision.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) readonly buffer Input { float64_t in_data[]; };
@@ -11,11 +19,150 @@ layout(push_constant) uniform PushConstants {
     uint num_complex;  // Number of complex numbers (output size)
 } params;
 
+const double D_PI       = 3.14159265358979311600e+00; // 0x400921FB54442D18
+const double D_PI_2     = 1.57079632679489655800e+00; // 0x3FF921FB54442D18
+const double D_PI_4     = 7.85398163397448278999e-01; // 0x3FE921FB54442D18
+const double D_3PI_4    = 2.35619449019234483700e+00; // 3*pi/4
+const double D_PI_2_LO  = 6.12323399573676603587e-17; // tail of pi/2
+const double D_PI_LO    = 1.22464679914735320717e-16; // tail of pi
+const double D_PI_4_LO  = 3.06161699786838301793e-17; // tail of pi/4
+
+// Core double-precision atan(x) for arbitrary finite x.
+// fdlibm s_atan.c: argument reduction into 5 ranges + degree-11 odd minimax.
+double datan(double x) {
+    // Handle sign; compute on |x| then restore.
+    bool neg = (x < 0.0lf);
+    double ax = abs(x);
+
+    // atanhi/atanlo breakpoints (atan of 0.5, 1, 1.5, inf) with extended tails.
+    // Index 0..3 selected by the magnitude range below.
+    double atanhi, atanlo;
+    double z;
+    bool reduced = true;
+
+    if (ax < 4.375000000000000000e-01) { // |x| < 7/16: no reduction
+        z = ax;
+        atanhi = 0.0lf;
+        atanlo = 0.0lf;
+        reduced = false;
+    } else if (ax < 6.875000000000000000e-01) { // 7/16 <= |x| < 11/16
+        z = (2.0lf * ax - 1.0lf) / (2.0lf + ax);
+        atanhi = 4.63647609000806093515e-01; // atan(0.5) hi
+        atanlo = 2.26987774529616870924e-17; // atan(0.5) lo
+    } else if (ax < 1.187500000000000000e+00) { // 11/16 <= |x| < 19/16
+        z = (ax - 1.0lf) / (ax + 1.0lf);
+        atanhi = 7.85398163397448278999e-01; // atan(1.0) hi
+        atanlo = 3.06161699786838301793e-17; // atan(1.0) lo
+    } else if (ax < 2.437500000000000000e+00) { // 19/16 <= |x| < 39/16
+        z = (ax - 1.5lf) / (1.0lf + 1.5lf * ax);
+        atanhi = 9.82793723247329054082e-01; // atan(1.5) hi
+        atanlo = 1.39033110312309984516e-17; // atan(1.5) lo
+    } else { // |x| >= 39/16
+        z = -1.0lf / ax;
+        atanhi = 1.57079632679489655800e+00; // atan(inf)=pi/2 hi
+        atanlo = 6.12323399573676603587e-17; // pi/2 lo
+    }
+
+    // Degree-11 odd minimax polynomial: P(z^2).
+    const double aT0  =  3.33333333333329318027e-01;
+    const double aT1  = -1.99999999998764832476e-01;
+    const double aT2  =  1.42857142725034663711e-01;
+    const double aT3  = -1.11111104054623557880e-01;
+    const double aT4  =  9.09088713343650656196e-02;
+    const double aT5  = -7.69187620504482999495e-02;
+    const double aT6  =  6.66107313738753120669e-02;
+    const double aT7  = -5.83357013379057348645e-02;
+    const double aT8  =  4.97687799461593236017e-02;
+    const double aT9  = -3.65315727442169155270e-02;
+    const double aT10 =  1.62858201153657823623e-02;
+
+    double zz = z * z;
+    double w = zz * zz;
+    // s1 = even-indexed terms, s2 = odd-indexed terms (Estrin-style split)
+    double s1 = zz * (aT0 + w * (aT2 + w * (aT4 + w * (aT6 + w * (aT8 + w * aT10)))));
+    double s2 = w  * (aT1 + w * (aT3 + w * (aT5 + w * (aT7 + w * aT9))));
+    double poly = s1 + s2;
+
+    double result;
+    if (!reduced) {
+        result = ax - ax * poly; // atan(z) ~= z - z*P(z^2), z == ax here
+    } else {
+        result = atanhi - ((z * poly - atanlo) - z);
+    }
+    return neg ? -result : result;
+}
+
+// Double-precision atan2(y, x) matching std::atan2 semantics, including the
+// signed-zero and infinity quadrant conventions.
+double datan2(double y, double x) {
+    // NaN propagation: any NaN in -> NaN out (matches std::atan2).
+    if (isnan(x) || isnan(y)) {
+        return x + y; // produces NaN
+    }
+
+    bool x_zero = (x == 0.0lf);
+    bool y_zero = (y == 0.0lf);
+
+    // sign bit extraction (handles signed zeros).
+    bool y_neg = (y < 0.0lf) || (y_zero && (1.0lf / y < 0.0lf));
+    bool x_neg = (x < 0.0lf) || (x_zero && (1.0lf / x < 0.0lf));
+
+    bool x_inf = isinf(x);
+    bool y_inf = isinf(y);
+
+    // x == 0 cases.
+    if (x_zero) {
+        if (y_zero) {
+            // atan2(+-0, +0) = +-0 ; atan2(+-0, -0) = +-pi
+            double r = x_neg ? D_PI : 0.0lf;
+            return y_neg ? -r : r;
+        }
+        // y != 0, x == 0  -> +-pi/2
+        return y_neg ? -D_PI_2 : D_PI_2;
+    }
+
+    // y == 0 (x != 0): result is 0 or pi with sign of y.
+    if (y_zero) {
+        double r = x_neg ? D_PI : 0.0lf;
+        return y_neg ? -r : r;
+    }
+
+    // Both infinite: collapse to the four diagonal directions.
+    if (x_inf && y_inf) {
+        double r = x_neg ? D_3PI_4 : D_PI_4;
+        return y_neg ? -r : r;
+    }
+    // x infinite, y finite.
+    if (x_inf) {
+        double r = x_neg ? D_PI : 0.0lf;
+        return y_neg ? -r : r;
+    }
+    // y infinite, x finite.
+    if (y_inf) {
+        return y_neg ? -D_PI_2 : D_PI_2;
+    }
+
+    // General finite, nonzero case.
+    double base = datan(abs(y) / abs(x)); // in [0, pi/2]
+
+    double result;
+    if (!x_neg && !y_neg) {        // Q1: x>0, y>0
+        result = base;
+    } else if (x_neg && !y_neg) {  // Q2: x<0, y>0
+        result = (D_PI - base) + D_PI_LO; // == pi - base with corrected tail
+    } else if (x_neg && y_neg) {   // Q3: x<0, y<0
+        result = -((D_PI - base) + D_PI_LO);
+    } else {                        // Q4: x>0, y<0
+        result = -base;
+    }
+    return result;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.num_complex) return;
 
     float64_t real_part = in_data[2u * idx];
     float64_t imag_part = in_data[2u * idx + 1u];
-    out_data[idx] = float64_t(atan(float(imag_part), float(real_part)));
+    out_data[idx] = datan2(imag_part, real_part);
 }

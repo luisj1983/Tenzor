@@ -367,13 +367,27 @@ auto parse_meta_payload(const uint8_t* buffer, size_t size)
     size_t offset = 0;
     uint32_t count = 0;
     read_pod(buffer, size, offset, count);
+    // Each entry is at minimum two uint32 length prefixes (8 bytes) for empty
+    // key/value strings; refuse a count that cannot fit before iterating.
+    check_element_count(count, 8, size, offset, "META");
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t kl = 0;
         read_pod(buffer, size, offset, kl);
+        // Validate the declared key length against the bytes remaining BEFORE
+        // allocating the string, otherwise a crafted kl (e.g. 0xFFFFFFFF) forces
+        // a multi-GB allocation before read_bytes' bounds check would reject it.
+        if (offset > size || kl > size - offset) {
+            throw std::runtime_error(
+                "TZLiteReader: META key length exceeds remaining payload");
+        }
         std::string k(kl, '\0');
         read_bytes(buffer, size, offset, k.data(), kl);
         uint32_t vl = 0;
         read_pod(buffer, size, offset, vl);
+        if (offset > size || vl > size - offset) {
+            throw std::runtime_error(
+                "TZLiteReader: META value length exceeds remaining payload");
+        }
         std::string v(vl, '\0');
         read_bytes(buffer, size, offset, v.data(), vl);
         out.emplace(std::move(k), std::move(v));

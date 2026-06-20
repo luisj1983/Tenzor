@@ -491,12 +491,19 @@ auto ModelCheckpoint::get_version(const std::string& path) -> uint32_t {
         throw std::runtime_error("Failed to open checkpoint file");
     }
 
-    // Skip magic
-    file.seekg(sizeof(uint32_t), std::ios::beg);
+    // Read and validate magic number
+    uint32_t magic = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if (!file || magic != CHECKPOINT_MAGIC) {
+        throw std::runtime_error("Invalid checkpoint format (bad magic number)");
+    }
 
     // Read version
-    uint32_t version;
+    uint32_t version = UINT32_MAX;
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (!file) {
+        throw std::runtime_error("Failed to read checkpoint version (truncated file)");
+    }
     return version;
 }
 

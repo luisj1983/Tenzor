@@ -6,10 +6,13 @@
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <chrono>
+#include <atomic>
+#include <cstdint>
 #include "fp16_saturate.h"
 
 namespace tenzor {
@@ -1934,10 +1937,32 @@ auto softmax_kernel(const Tensor& input_orig, int64_t dim, hipStream_t stream, f
 
 // Softmax backward wrapper
 auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, hipStream_t stream) -> Tensor {
-    std::vector<int64_t> shape(output.shape().begin(), output.shape().end());
-    Tensor result(shape, output.dtype(), output.device());
+    // The device kernel addresses memory as flat batch_size rows of dim_size
+    // via row*dim_size+i, which is only valid when the softmax axis is the
+    // contiguous innermost axis. Mirror softmax_kernel's normalization: when
+    // dim is not the last axis, transpose both grad_output and output so the
+    // softmax axis becomes last (and .contiguous() them), recurse with the
+    // last dim, then transpose the result back. Without this, softmax_backward
+    // over a non-last dim reduces over the wrong group of elements.
+    auto orig_shape_span = output.shape();
+    int64_t orig_ndim = static_cast<int64_t>(orig_shape_span.size());
+    int64_t norm_dim = (dim < 0) ? orig_ndim + dim : dim;
+    int64_t last = orig_ndim - 1;
+    if (orig_ndim > 0 && norm_dim != last) {
+        Tensor grad_t = grad_output.transpose(norm_dim, last).contiguous();
+        Tensor out_t = output.transpose(norm_dim, last).contiguous();
+        Tensor res = softmax_backward_kernel(grad_t, out_t, /*dim=*/last, stream);
+        return res.transpose(norm_dim, last).contiguous();
+    }
 
-    if (output.numel() == 0) {
+    // Ensure contiguous inputs since the kernel reads flat row-major memory.
+    Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    Tensor output_c = output.is_contiguous() ? output : output.contiguous();
+
+    std::vector<int64_t> shape(output_c.shape().begin(), output_c.shape().end());
+    Tensor result(shape, output_c.dtype(), output_c.device());
+
+    if (output_c.numel() == 0) {
         return result;
     }
 
@@ -1953,30 +1978,30 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         batch_size *= shape[i];
     }
 
-    if (output.dtype() == DType::Float32) {
+    if (output_c.dtype() == DType::Float32) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         hipLaunchKernelGGL(softmax_backward_kernel<float>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
-                          shared_mem_size, stream, grad_output.data<float>(), output.data<float>(),
+                          shared_mem_size, stream, grad_output_c.data<float>(), output_c.data<float>(),
                           result.data<float>(), batch_size, dim_size);
-    } else if (output.dtype() == DType::Float64) {
+    } else if (output_c.dtype() == DType::Float64) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         hipLaunchKernelGGL(softmax_backward_kernel<double>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
-                          shared_mem_size, stream, grad_output.data<double>(), output.data<double>(),
+                          shared_mem_size, stream, grad_output_c.data<double>(), output_c.data<double>(),
                           result.data<double>(), batch_size, dim_size);
-    } else if (output.dtype() == DType::Float16) {
+    } else if (output_c.dtype() == DType::Float16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);  // Compute in float for stability
         hipLaunchKernelGGL(softmax_backward_kernel_fp16, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
                           shared_mem_size, stream,
-                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-                          reinterpret_cast<const __half*>(output.data<Float16>()),
+                          reinterpret_cast<const __half*>(grad_output_c.data<Float16>()),
+                          reinterpret_cast<const __half*>(output_c.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()),
                           batch_size, dim_size);
-    } else if (output.dtype() == DType::BFloat16) {
-        auto grad_output_f32 = grad_output.to(DType::Float32);
-        auto output_f32 = output.to(DType::Float32);
+    } else if (output_c.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output_c.to(DType::Float32);
+        auto output_f32 = output_c.to(DType::Float32);
         auto result_f32 = softmax_backward_kernel(grad_output_f32, output_f32, dim, stream);
         return result_f32.to(DType::BFloat16);
     } else {
@@ -2063,10 +2088,30 @@ auto log_softmax_kernel(const Tensor& input_orig, int64_t dim, hipStream_t strea
 
 // Log Softmax backward wrapper
 auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, hipStream_t stream) -> Tensor {
-    std::vector<int64_t> shape(output.shape().begin(), output.shape().end());
-    Tensor result(shape, output.dtype(), output.device());
+    // Same dim-must-be-last assumption as the device kernel (flat row*dim_size+i
+    // indexing). Normalize by transposing the softmax axis to the last position
+    // (and .contiguous()) when it is not already last, recurse, transpose back.
+    // Mirrors log_softmax_kernel forward; without it, a non-last dim reduces
+    // over the wrong group and produces wrong gradients.
+    auto orig_shape_span = output.shape();
+    int64_t orig_ndim = static_cast<int64_t>(orig_shape_span.size());
+    int64_t norm_dim = (dim < 0) ? orig_ndim + dim : dim;
+    int64_t last_axis = orig_ndim - 1;
+    if (orig_ndim > 0 && norm_dim != last_axis) {
+        Tensor grad_t = grad_output.transpose(norm_dim, last_axis).contiguous();
+        Tensor out_t = output.transpose(norm_dim, last_axis).contiguous();
+        Tensor res = log_softmax_backward_kernel(grad_t, out_t, /*dim=*/last_axis, stream);
+        return res.transpose(norm_dim, last_axis).contiguous();
+    }
 
-    if (output.numel() == 0) {
+    // Ensure contiguous inputs since the kernel reads flat row-major memory.
+    Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    Tensor output_c = output.is_contiguous() ? output : output.contiguous();
+
+    std::vector<int64_t> shape(output_c.shape().begin(), output_c.shape().end());
+    Tensor result(shape, output_c.dtype(), output_c.device());
+
+    if (output_c.numel() == 0) {
         return result;
     }
 
@@ -2082,30 +2127,30 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
         batch_size *= shape[i];
     }
 
-    if (output.dtype() == DType::Float32) {
+    if (output_c.dtype() == DType::Float32) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         hipLaunchKernelGGL(log_softmax_backward_kernel<float>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
-                          shared_mem_size, stream, grad_output.data<float>(), output.data<float>(),
+                          shared_mem_size, stream, grad_output_c.data<float>(), output_c.data<float>(),
                           result.data<float>(), batch_size, dim_size);
-    } else if (output.dtype() == DType::Float64) {
+    } else if (output_c.dtype() == DType::Float64) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         hipLaunchKernelGGL(log_softmax_backward_kernel<double>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
-                          shared_mem_size, stream, grad_output.data<double>(), output.data<double>(),
+                          shared_mem_size, stream, grad_output_c.data<double>(), output_c.data<double>(),
                           result.data<double>(), batch_size, dim_size);
-    } else if (output.dtype() == DType::Float16) {
+    } else if (output_c.dtype() == DType::Float16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);  // Compute in float for stability
         hipLaunchKernelGGL(log_softmax_backward_kernel_fp16, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
                           shared_mem_size, stream,
-                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-                          reinterpret_cast<const __half*>(output.data<Float16>()),
+                          reinterpret_cast<const __half*>(grad_output_c.data<Float16>()),
+                          reinterpret_cast<const __half*>(output_c.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()),
                           batch_size, dim_size);
-    } else if (output.dtype() == DType::BFloat16) {
-        auto grad_output_f32 = grad_output.to(DType::Float32);
-        auto output_f32 = output.to(DType::Float32);
+    } else if (output_c.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output_c.to(DType::Float32);
+        auto output_f32 = output_c.to(DType::Float32);
         auto result_f32 = log_softmax_backward_kernel(grad_output_f32, output_f32, dim, stream);
         return result_f32.to(DType::BFloat16);
     } else {
@@ -2758,7 +2803,49 @@ __global__ void rrelu_eval_kernel(const T* input, T* output, int64_t n, T slope)
     }
 }
 
-// Train mode: per-element random slope via PCG
+// Philox4x32-10 counter-based PRNG (HIP device port — same algorithm as the
+// CPU/CUDA implementations so per-element slopes are well-distributed i.i.d.
+// Uniform samples rather than the near-ramp output of a single LCG step).
+__device__ __forceinline__ void rrelu_philox_round(uint32_t ctr[4], const uint32_t key[2]) {
+    constexpr uint64_t M0 = 0xD2511F53ULL;
+    constexpr uint64_t M1 = 0xCD9E8D57ULL;
+    uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+    uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+    uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+    uint32_t lo0 = static_cast<uint32_t>(prod0);
+    uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+    uint32_t lo1 = static_cast<uint32_t>(prod1);
+    ctr[0] = hi1 ^ ctr[1] ^ key[0];
+    ctr[1] = lo1;
+    ctr[2] = hi0 ^ ctr[3] ^ key[1];
+    ctr[3] = lo0;
+}
+
+// Returns a Uniform[0,1) sample keyed on (seed, idx) via Philox4x32-10.
+__device__ __forceinline__ float rrelu_philox_uniform(unsigned long long seed, int64_t idx) {
+    uint32_t ctr[4] = {
+        static_cast<uint32_t>(idx),
+        static_cast<uint32_t>(static_cast<uint64_t>(idx) >> 32),
+        static_cast<uint32_t>(seed),
+        static_cast<uint32_t>(seed >> 32)
+    };
+    uint32_t k[2] = {static_cast<uint32_t>(seed),
+                     static_cast<uint32_t>(seed >> 32) ^ 0x1BD11BDAU};
+    constexpr uint32_t W0 = 0x9E3779B9U;
+    constexpr uint32_t W1 = 0xBB67AE85U;
+    #pragma unroll
+    for (int r = 0; r < 10; ++r) {
+        rrelu_philox_round(ctr, k);
+        if (r < 9) { k[0] += W0; k[1] += W1; }
+    }
+    // 24-bit mantissa precision Uniform[0,1).
+    return static_cast<float>(ctr[0] >> 8) * (1.0f / 16777216.0f);
+}
+
+// Train mode: per-element random slope via counter-based Philox RNG keyed on
+// (seed, idx). The seed honors tenzor::manual_seed (folded with a process-wide
+// SplitMix64 counter host-side), so results are reproducible and two launches in
+// the same clock tick do not collide.
 __global__ void rrelu_train_kernel_f32(const float* input, float* output, int64_t n,
                                        float lower, float upper, unsigned long long seed) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
@@ -2766,9 +2853,7 @@ __global__ void rrelu_train_kernel_f32(const float* input, float* output, int64_
         if (x >= 0.0f) {
             output[idx] = x;
         } else {
-            unsigned long long state = seed + static_cast<unsigned long long>(idx) * 6364136223846793005ULL;
-            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-            float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+            float u = rrelu_philox_uniform(seed, idx);
             float slope = lower + u * (upper - lower);
             output[idx] = slope * x;
         }
@@ -2817,8 +2902,18 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
 
     if (input.dtype() == DType::Float32) {
         if (training) {
-            unsigned long long seed = static_cast<unsigned long long>(
-                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            // Seed from the library's global RNG so manual_seed is honored /
+            // RReLU is reproducible. Fold in a process-wide monotonic counter
+            // with SplitMix64 mixing so two invocations within the same clock
+            // tick cannot collide, matching the CUDA RReLU implementation.
+            static std::atomic<uint64_t> rrelu_call_counter{0};
+            uint64_t mix = rrelu_call_counter.fetch_add(1, std::memory_order_relaxed);
+            mix = (mix + 0x9E3779B97F4A7C15ULL);
+            mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
+            mix = mix ^ (mix >> 31);
+            unsigned long long seed =
+                static_cast<unsigned long long>(::tenzor::get_global_seed() ^ mix);
             hipLaunchKernelGGL(rrelu_train_kernel_f32, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                               input.data<float>(), result.data<float>(), n, lower, upper, seed);
         } else {

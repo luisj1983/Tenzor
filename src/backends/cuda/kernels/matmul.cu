@@ -22,6 +22,7 @@
 #include <cstring>
 #include <random>
 #include <atomic>
+#include <mutex>
 #include "tenzor/ops/fp8_scaling.hpp"
 
 namespace tenzor::cuda::matmul {
@@ -122,6 +123,19 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 // FP16 Saturation Utility
 // ============================================================================
 
+// Largest finite magnitude representable in IEEE-754 binary16 (Float16).
+constexpr float kHalfMaxFinite = 65504.0f;
+
+// Convert a float accumulator to __half with the same overflow semantics as the
+// cuBLAS FP16 paths: clamp out-of-range magnitudes to +/-65504 instead of letting
+// __float2half round them to +/-Inf. Used by ALL custom FP16 matmul result stores
+// (tiled, batched-tiled, WMMA) so every FP16 matmul path shares identical overflow
+// behavior regardless of matrix size/alignment. NaN is preserved (fminf/fmaxf with a
+// NaN argument return the NaN), matching saturate_fp16's element-wise clamp.
+__device__ __forceinline__ __half float_to_half_saturated(float val) {
+    return __float2half(fminf(fmaxf(val, -kHalfMaxFinite), kHalfMaxFinite));
+}
+
 // Clamp ±Inf to ±65504 in-place for Float16 arrays.
 // cuBLAS FP16 output uses standard rounding which can produce Inf for values > 65504.
 // This prevents NaN propagation when Inf interacts with 0 or other Inf values.
@@ -196,26 +210,30 @@ struct TileConfig {
 // Get architecture-appropriate tile config based on GPU compute capability.
 // Cached per-device to avoid repeated queries.
 inline TileConfig get_tile_config(int device_id = 0) {
-    // Cache per device (max 16 GPUs)
+    // Cache per device (max 16 GPUs). Initialization is guarded per device with
+    // std::call_once: get_tile_config is called from arbitrary runtime worker
+    // threads, so a plain non-atomic lazy cache would be a data race (UB / TSan
+    // flag, and a torn read could return a half-written TileConfig).
     static TileConfig configs[16] = {};
-    static bool initialized[16] = {};
+    static std::once_flag init_flags[16];
 
     if (device_id < 0 || device_id >= 16) device_id = 0;
-    if (initialized[device_id]) return configs[device_id];
 
-    int major = 0, minor = 0;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device_id);
-    int sm = major * 10 + minor;
+    std::call_once(init_flags[device_id], [device_id]() {
+        int major = 0, minor = 0;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device_id);
+        int sm = major * 10 + minor;
 
-    if (sm < 70) {
-        configs[device_id] = {16, 16, 16};       // Pascal: smaller tiles
-    } else if (sm < 80) {
-        configs[device_id] = {32, 32, 16};        // Volta/Turing: current default
-    } else {
-        configs[device_id] = {32, 32, 32};        // Ampere+: more shared mem, bigger K tile
-    }
-    initialized[device_id] = true;
+        if (sm < 70) {
+            configs[device_id] = {16, 16, 16};       // Pascal: smaller tiles
+        } else if (sm < 80) {
+            configs[device_id] = {32, 32, 16};        // Volta/Turing: current default
+        } else {
+            configs[device_id] = {32, 32, 32};        // Ampere+: more shared mem, bigger K tile
+        }
+    });
+
     return configs[device_id];
 }
 
@@ -373,7 +391,11 @@ __global__ void matmul_tiled_i32_kernel(
     int tid = ty * TILE_N + tx;
     constexpr int TOTAL_THREADS = TILE_M * TILE_N;
 
-    int32_t sum = 0;
+    // Accumulate in int64 to avoid int32 overflow, then saturate to the int32
+    // range before storing. This matches the CPU reference (matmul_microkernel_int32
+    // in src/backends/cpu/kernels/math.cpp), which accumulates in int64 and saturates
+    // to [INT32_MIN, INT32_MAX]; plain int32 wraparound here would diverge from CPU.
+    int64_t sum = 0;
 
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
@@ -398,14 +420,19 @@ __global__ void matmul_tiled_i32_kernel(
 
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
-            sum += As[ty][k] * Bs[k][tx];
+            sum += static_cast<int64_t>(As[ty][k]) * static_cast<int64_t>(Bs[k][tx]);
         }
 
         __syncthreads();
     }
 
     if (row < M && col < N) {
-        C[row * ldc + col] = sum;
+        // Saturate to int32 range, matching CPU behavior on overflow.
+        constexpr int64_t kI32Max = static_cast<int64_t>(0x7FFFFFFF);          //  INT32_MAX
+        constexpr int64_t kI32Min = -kI32Max - 1;                              //  INT32_MIN
+        if (sum > kI32Max) sum = kI32Max;
+        else if (sum < kI32Min) sum = kI32Min;
+        C[row * ldc + col] = static_cast<int32_t>(sum);
     }
 }
 
@@ -675,7 +702,7 @@ __global__ void matmul_tensor_core_f16_kernel(
                 const int64_t row = cRow + i;
                 const int64_t col = cCol + j;
                 if (row < M && col < N) {
-                    C[row * N + col] = __float2half(Cs_float[warpId][i][j]);
+                    C[row * N + col] = float_to_half_saturated(Cs_float[warpId][i][j]);
                 }
             }
         }
@@ -742,7 +769,7 @@ __global__ void matmul_tiled_f16_kernel(
     }
 
     if (row < M && col < N) {
-        C[row * ldc + col] = __float2half(sum);
+        C[row * ldc + col] = float_to_half_saturated(sum);
     }
 }
 
@@ -810,7 +837,7 @@ __global__ void batched_matmul_tiled_f16_kernel(
     }
 
     if (row < M && col < N) {
-        C_batch[row * ldc + col] = __float2half(sum);
+        C_batch[row * ldc + col] = float_to_half_saturated(sum);
     }
 }
 
@@ -928,7 +955,7 @@ __global__ void batched_matmul_tensor_core_f16_kernel(
                 const int64_t row = cRow + i;
                 const int64_t col = cCol + j;
                 if (row < M && col < N) {
-                    C_batch[row * N + col] = __float2half(Cs_float[i][j]);
+                    C_batch[row * N + col] = float_to_half_saturated(Cs_float[i][j]);
                 }
             }
         }
@@ -1910,6 +1937,13 @@ void batched_matmul_bf16(
 // ============================================================================
 
 auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    // Make the operand device current before fetching any cuBLAS handle / per-device
+    // workspace or launching kernels (handles are keyed by the current device — see
+    // cuda_launch_utils.cuh). Without this, a gemm on a device-N tensor issued from a
+    // thread current on device 0 fetches a device-0 handle and dereferences device-N
+    // pointers. Matches the established pattern in cublas_ops.cu.
+    CudaDeviceGuard dev_guard(a.device().index);
+
     // Integer dtypes other than Int32 have no native CUDA GEMM (CPU supports
     // them all). Widen losslessly, GEMM, narrow back to keep cross-backend
     // parity: small ints -> Int32 (exact, native int GEMM); 64-bit and UInt32
@@ -2304,6 +2338,10 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
 
 auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
                   double alpha, double beta, cudaStream_t stream) -> Tensor {
+    // Make the operand device current before any cuBLAS handle fetch / kernel launch
+    // (handles/workspaces are keyed by the current device). Matches cublas_ops.cu.
+    CudaDeviceGuard dev_guard(mat1.device().index);
+
     int64_t M = mat1.shape()[0];
     int64_t K = mat1.shape()[1];
     int64_t N = mat2.shape()[1];
@@ -2392,6 +2430,10 @@ auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
 
 auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
                   double alpha, double beta, cudaStream_t stream) -> Tensor {
+    // Make the operand device current before any cuBLAS handle fetch / kernel launch
+    // (handles/workspaces are keyed by the current device). Matches cublas_ops.cu.
+    CudaDeviceGuard dev_guard(mat.device().index);
+
     int64_t M = mat.shape()[0];
     int64_t K = mat.shape()[1];
 
@@ -2475,6 +2517,10 @@ auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
 
 auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
                     double alpha, double beta, cudaStream_t stream) -> Tensor {
+    // Make the operand device current before any cuBLAS handle fetch / kernel launch
+    // (handles/workspaces are keyed by the current device). Matches cublas_ops.cu.
+    CudaDeviceGuard dev_guard(batch1.device().index);
+
     int64_t B = batch1.shape()[0];
     int64_t M = batch1.shape()[1];
     int64_t K = batch1.shape()[2];

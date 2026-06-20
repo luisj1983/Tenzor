@@ -18,10 +18,16 @@ namespace {
 
 namespace fs = std::filesystem;
 
-/// Test whether `path` is a real, executable file.
+/// Test whether `path` is a real, executable file. access(X_OK) alone is not
+/// enough: POSIX X_OK on a directory tests searchability, not runnability, so a
+/// directory whose basename matches the requested binary would otherwise be
+/// accepted and later fail with a confusing popen/shell error. Require a
+/// regular file (following symlinks) in addition to the execute bit.
 auto is_executable(const std::string& path) -> bool {
     if (path.empty()) return false;
-    return access(path.c_str(), X_OK) == 0;
+    if (access(path.c_str(), X_OK) != 0) return false;
+    std::error_code ec;
+    return fs::is_regular_file(fs::status(path, ec)) && !ec;
 }
 
 /// Search $PATH for `name`. Returns absolute path or empty string.
@@ -111,6 +117,25 @@ auto resolve_iree_binary(const char* env_var,
         "iree-base-runtime`).");
 }
 
+/// Wrap `s` in single quotes for /bin/sh, escaping any embedded single quote.
+/// A literal ' is rendered as the '\'' sequence (close-quote, escaped quote,
+/// reopen-quote). Without this, a single quote in the path would terminate the
+/// quoted region and let the remainder be interpreted by the shell.
+auto shell_quote(const std::string& s) -> std::string {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('\'');
+    for (char c : s) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out.push_back(c);
+        }
+    }
+    out.push_back('\'');
+    return out;
+}
+
 /// One-shot popen(cmd) and return stdout as a string.
 auto popen_capture(const std::string& cmd) -> std::string {
     FILE* p = popen(cmd.c_str(), "r");
@@ -178,7 +203,7 @@ auto iree_compile_supported_targets() -> const std::set<std::string>& {
         const std::string& bin = resolve_iree_compile();
         // Quote the path so shells with spaces or odd characters still work.
         const std::string cmd =
-            "'" + bin + "' --iree-hal-list-target-backends 2>/dev/null";
+            shell_quote(bin) + " --iree-hal-list-target-backends 2>/dev/null";
         const std::string out = popen_capture(cmd);
         return parse_token_list(out);
     }();
@@ -189,7 +214,7 @@ auto iree_runtime_supported_drivers() -> const std::set<std::string>& {
     static const std::set<std::string> cached = []() {
         const std::string& bin = resolve_iree_run_module();
         const std::string cmd =
-            "'" + bin + "' --list_drivers 2>/dev/null";
+            shell_quote(bin) + " --list_drivers 2>/dev/null";
         const std::string out = popen_capture(cmd);
         return parse_token_list(out);
     }();

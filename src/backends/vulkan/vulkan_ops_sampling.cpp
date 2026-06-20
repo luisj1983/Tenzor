@@ -635,9 +635,17 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
             double bin_volume = 1.0;
             for (int64_t d = 0; d < D; ++d) {
                 auto sd = static_cast<size_t>(d);
-                float step = static_cast<float>(
-                    (ranges[sd].second - ranges[sd].first) / static_cast<double>(bins[sd]));
-                bin_volume *= static_cast<double>(step);
+                double width = ranges[sd].second - ranges[sd].first;
+                if (!(width > 0.0)) {
+                    throw std::runtime_error(
+                        "histogramdd: density=true requires each explicit range to "
+                        "have first < second, but dimension " + std::to_string(d) +
+                        " has range [" + std::to_string(ranges[sd].first) + ", " +
+                        std::to_string(ranges[sd].second) + "] (zero or negative width "
+                        "yields an undefined bin volume)");
+                }
+                double step = width / static_cast<double>(bins[sd]);
+                bin_volume *= step;
             }
             double norm = static_cast<double>(N) * bin_volume;
             float inv_norm = static_cast<float>(1.0 / norm);
@@ -1141,10 +1149,31 @@ struct TrapezoidPC {
     uint32_t has_x;     // 1 if non-uniform x is provided
 };
 
+// Float64 trapezoid push constants: dx must be a double so spacing keeps full
+// Float64 precision (the Float32 PC above would round dx before the device sees it).
+struct TrapezoidF64PC {
+    uint32_t outer;
+    uint32_t inner;
+    uint32_t n;         // size along integration dim
+    uint32_t total;     // outer * inner
+    double   dx;        // uniform spacing (ignored when x tensor is provided)
+    uint32_t has_x;     // 1 if non-uniform x is provided
+};
+
 auto VulkanBackend::dispatchTrapezoid(const Tensor& y, int64_t dim, double dx,
                                        const Tensor* x_ptr) -> Tensor {
     DType orig_dtype = y.dtype();
-    Tensor yf = (orig_dtype == DType::Float32) ? y.contiguous() : dispatchCast(y.contiguous(), DType::Float32);
+
+    // Float64 keeps full double precision end-to-end via the trapezoid_f64
+    // shader (double accumulation). Casting to Float32 here would silently drop
+    // ~9 digits, matching the Float32-accumulator regression pattern. All other
+    // dtypes use the Float32 path (widen -> compute -> narrow).
+    const bool use_f64 = (orig_dtype == DType::Float64);
+    const DType compute_dtype = use_f64 ? DType::Float64 : DType::Float32;
+    const size_t elem_size = use_f64 ? sizeof(double) : sizeof(float);
+
+    Tensor yf = (y.dtype() == compute_dtype) ? y.contiguous()
+                                             : dispatchCast(y.contiguous(), compute_dtype);
 
     auto shape = yf.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -1161,51 +1190,60 @@ auto VulkanBackend::dispatchTrapezoid(const Tensor& y, int64_t dim, double dx,
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    Tensor result_f32(out_shape, DType::Float32, y.device());
+    Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;
-    if (n < 2 || total == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+    if (n < 2 || total == 0)
+        return (result.dtype() == orig_dtype) ? result : dispatchCast(result, orig_dtype);
 
     Tensor xf;
     if (x_ptr) {
-        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : dispatchCast(x_ptr->contiguous(), DType::Float32);
+        xf = (x_ptr->dtype() == compute_dtype) ? x_ptr->contiguous()
+                                               : dispatchCast(x_ptr->contiguous(), compute_dtype);
     }
 
     int32_t device_id = y.device().index;
-    auto* pipeline = getPipeline("trapezoid", device_id);
-
-    TrapezoidPC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
-                   static_cast<uint32_t>(n), static_cast<uint32_t>(total),
-                   static_cast<float>(dx), x_ptr ? 1u : 0u};
+    auto* pipeline = getPipeline(use_f64 ? "trapezoid_f64" : "trapezoid", device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings;
     std::vector<size_t> sizes;
     bindings.push_back({0, yf.data_ptr()});
-    sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+    sizes.push_back(static_cast<size_t>(yf.numel()) * elem_size);
     if (x_ptr) {
         bindings.push_back({1, xf.data_ptr()});
-        sizes.push_back(static_cast<size_t>(xf.numel()) * sizeof(float));
+        sizes.push_back(static_cast<size_t>(xf.numel()) * elem_size);
     } else {
         // Bind y again as dummy for binding 1 (shader reads has_x flag)
         bindings.push_back({1, yf.data_ptr()});
-        sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+        sizes.push_back(static_cast<size_t>(yf.numel()) * elem_size);
     }
-    bindings.push_back({2, result_f32.data_ptr()});
-    sizes.push_back(static_cast<size_t>(result_f32.numel()) * sizeof(float));
+    bindings.push_back({2, result.data_ptr()});
+    sizes.push_back(static_cast<size_t>(result.numel()) * elem_size);
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
     VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(TrapezoidPC), &pc);
+    if (use_f64) {
+        TrapezoidF64PC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+                          static_cast<uint32_t>(n), static_cast<uint32_t>(total),
+                          dx, x_ptr ? 1u : 0u};
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(TrapezoidF64PC), &pc);
+    } else {
+        TrapezoidPC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+                       static_cast<uint32_t>(n), static_cast<uint32_t>(total),
+                       static_cast<float>(dx), x_ptr ? 1u : 0u};
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(TrapezoidPC), &pc);
+    }
     uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
 
-    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+    return (result.dtype() == orig_dtype) ? result : dispatchCast(result, orig_dtype);
 }
 
 // ============================================================================
@@ -1221,10 +1259,28 @@ struct CumulativeTrapezoidPC {
     uint32_t has_x;
 };
 
+// Float64 cumulative-trapezoid push constants (double dx for full precision).
+struct CumulativeTrapezoidF64PC {
+    uint32_t outer;
+    uint32_t inner;
+    uint32_t n;
+    uint32_t total;
+    double   dx;
+    uint32_t has_x;
+};
+
 auto VulkanBackend::dispatchCumulativeTrapezoid(const Tensor& y, int64_t dim, double dx,
                                                  const Tensor* x_ptr) -> Tensor {
     DType orig_dtype = y.dtype();
-    Tensor yf = (orig_dtype == DType::Float32) ? y.contiguous() : dispatchCast(y.contiguous(), DType::Float32);
+
+    // Float64 keeps full double precision via cumulative_trapezoid_f64 (double
+    // accumulation); all other dtypes widen to Float32, compute, then narrow.
+    const bool use_f64 = (orig_dtype == DType::Float64);
+    const DType compute_dtype = use_f64 ? DType::Float64 : DType::Float32;
+    const size_t elem_size = use_f64 ? sizeof(double) : sizeof(float);
+
+    Tensor yf = (y.dtype() == compute_dtype) ? y.contiguous()
+                                             : dispatchCast(y.contiguous(), compute_dtype);
 
     auto shape = yf.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -1243,50 +1299,59 @@ auto VulkanBackend::dispatchCumulativeTrapezoid(const Tensor& y, int64_t dim, do
         return Tensor(out_shape, orig_dtype, y.device());
     }
 
-    Tensor result_f32(out_shape, DType::Float32, y.device());
+    Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;
-    if (total == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+    if (total == 0)
+        return (result.dtype() == orig_dtype) ? result : dispatchCast(result, orig_dtype);
 
     Tensor xf;
     if (x_ptr) {
-        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : dispatchCast(x_ptr->contiguous(), DType::Float32);
+        xf = (x_ptr->dtype() == compute_dtype) ? x_ptr->contiguous()
+                                               : dispatchCast(x_ptr->contiguous(), compute_dtype);
     }
 
     int32_t device_id = y.device().index;
-    auto* pipeline = getPipeline("cumulative_trapezoid", device_id);
-
-    CumulativeTrapezoidPC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
-                              static_cast<uint32_t>(n), static_cast<uint32_t>(total),
-                              static_cast<float>(dx), x_ptr ? 1u : 0u};
+    auto* pipeline = getPipeline(use_f64 ? "cumulative_trapezoid_f64" : "cumulative_trapezoid", device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings;
     std::vector<size_t> sizes;
     bindings.push_back({0, yf.data_ptr()});
-    sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+    sizes.push_back(static_cast<size_t>(yf.numel()) * elem_size);
     if (x_ptr) {
         bindings.push_back({1, xf.data_ptr()});
-        sizes.push_back(static_cast<size_t>(xf.numel()) * sizeof(float));
+        sizes.push_back(static_cast<size_t>(xf.numel()) * elem_size);
     } else {
         bindings.push_back({1, yf.data_ptr()});
-        sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+        sizes.push_back(static_cast<size_t>(yf.numel()) * elem_size);
     }
-    bindings.push_back({2, result_f32.data_ptr()});
-    sizes.push_back(static_cast<size_t>(result_f32.numel()) * sizeof(float));
+    bindings.push_back({2, result.data_ptr()});
+    sizes.push_back(static_cast<size_t>(result.numel()) * elem_size);
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
     VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(CumulativeTrapezoidPC), &pc);
+    if (use_f64) {
+        CumulativeTrapezoidF64PC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+                                    static_cast<uint32_t>(n), static_cast<uint32_t>(total),
+                                    dx, x_ptr ? 1u : 0u};
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(CumulativeTrapezoidF64PC), &pc);
+    } else {
+        CumulativeTrapezoidPC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+                                 static_cast<uint32_t>(n), static_cast<uint32_t>(total),
+                                 static_cast<float>(dx), x_ptr ? 1u : 0u};
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(CumulativeTrapezoidPC), &pc);
+    }
     uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
 
-    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+    return (result.dtype() == orig_dtype) ? result : dispatchCast(result, orig_dtype);
 }
 
 // ============================================================================

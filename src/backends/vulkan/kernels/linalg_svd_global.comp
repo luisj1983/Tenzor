@@ -4,11 +4,19 @@
 // Orthogonalizes the n columns of A by Jacobi rotations applied on the right;
 // V (n x n) accumulates the rotations. After convergence the singular values are
 // the column norms, and U = A_columns / sigma. One workgroup per batch element.
-// Outputs: U (m x n, binding 1), S (n, binding 2), V (n x n, binding 3).
+//
+// full_matrices honoured: U is allocated/written m x u_cols where u_cols == m in
+// full mode (jobz 'A') or n in reduced mode (jobz 'S'). In full mode the trailing
+// columns n..m-1 of U are filled with an orthonormal completion (Gram-Schmidt of
+// canonical basis vectors against the n left singular vectors) so U is a full m x m
+// orthogonal basis matching the CPU/LAPACK reference. Since m >= n here, k == n,
+// V is already the full n x n basis (Vt = V^T is n x n in both modes).
+//
+// Outputs: U (m x u_cols, binding 1), S (n, binding 2), V (n x n, binding 3).
 layout(local_size_x = 32) in;
 
 layout(set = 0, binding = 0) buffer InputBuf { float data_in[]; };  // A (m*n per batch)
-layout(set = 0, binding = 1) buffer UBuf     { float data_u[];  };  // U (m*n), working columns
+layout(set = 0, binding = 1) buffer UBuf     { float data_u[];  };  // U (m*u_cols), working columns
 layout(set = 0, binding = 2) buffer SBuf     { float data_s[];  };  // S (n)
 layout(set = 0, binding = 3) buffer VBuf     { float data_v[];  };  // V (n*n)
 
@@ -16,6 +24,7 @@ layout(push_constant) uniform PushConstants {
     uint m;
     uint n;
     uint batch;
+    uint full_matrices; // 0=reduced (u_cols=n), 1=full (u_cols=m)
 };
 
 shared float sh_c;
@@ -28,12 +37,17 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     if (batch_idx >= batch) return;
 
-    uint u_off = batch_idx * m * n;
-    uint v_off = batch_idx * n * n;
+    // U row stride: m in full mode, n in reduced mode (m >= n so k == n).
+    uint u_cols = (full_matrices == 1u) ? m : n;
+    uint in_off = batch_idx * m * n;        // A is always m x n
+    uint u_off  = batch_idx * m * u_cols;   // U is m x u_cols
+    uint v_off  = batch_idx * n * n;
 
-    // U = A, V = I
+    // U[:, 0:n] = A, V = I. (U's trailing columns, if any, are filled later.)
     for (uint idx = tid; idx < m * n; idx += gl_WorkGroupSize.x) {
-        data_u[u_off + idx] = data_in[u_off + idx];
+        uint r = idx / n;
+        uint c = idx - r * n;
+        data_u[u_off + r * u_cols + c] = data_in[in_off + idx];
     }
     for (uint idx = tid; idx < n * n; idx += gl_WorkGroupSize.x) {
         uint r = idx / n;
@@ -51,8 +65,8 @@ void main() {
                 if (tid == 0u) {
                     float a = 0.0, b = 0.0, c = 0.0;
                     for (uint r = 0; r < m; r++) {
-                        float ui = data_u[u_off + r * n + i];
-                        float uj = data_u[u_off + r * n + j];
+                        float ui = data_u[u_off + r * u_cols + i];
+                        float uj = data_u[u_off + r * u_cols + j];
                         a += ui * ui;
                         b += uj * uj;
                         c += ui * uj;
@@ -77,10 +91,10 @@ void main() {
                     float sn = sh_s;
                     // Rotate columns i,j of U (independent across rows).
                     for (uint r = tid; r < m; r += gl_WorkGroupSize.x) {
-                        float ui = data_u[u_off + r * n + i];
-                        float uj = data_u[u_off + r * n + j];
-                        data_u[u_off + r * n + i] = cs * ui - sn * uj;
-                        data_u[u_off + r * n + j] = sn * ui + cs * uj;
+                        float ui = data_u[u_off + r * u_cols + i];
+                        float uj = data_u[u_off + r * u_cols + j];
+                        data_u[u_off + r * u_cols + i] = cs * ui - sn * uj;
+                        data_u[u_off + r * u_cols + j] = sn * ui + cs * uj;
                     }
                     // Rotate columns i,j of V.
                     for (uint r = tid; r < n; r += gl_WorkGroupSize.x) {
@@ -101,14 +115,55 @@ void main() {
     for (uint j = tid; j < n; j += gl_WorkGroupSize.x) {
         float s = 0.0;
         for (uint r = 0; r < m; r++) {
-            float uj = data_u[u_off + r * n + j];
+            float uj = data_u[u_off + r * u_cols + j];
             s += uj * uj;
         }
         float sigma = sqrt(s);
         data_s[batch_idx * n + j] = sigma;
         float inv = (sigma > 1e-30) ? 1.0 / sigma : 0.0;
         for (uint r = 0; r < m; r++) {
-            data_u[u_off + r * n + j] *= inv;
+            data_u[u_off + r * u_cols + j] *= inv;
+        }
+    }
+    barrier();
+
+    // Orthonormal completion of U from m x n to m x m (full mode, tall matrices).
+    // Gram-Schmidt each canonical basis vector e_cand against the already-accepted
+    // columns 0..filled-1; keep it if a non-degenerate remainder survives. Single
+    // thread because the columns must be filled sequentially (each new column is
+    // projected against the previous ones). m may exceed 32 here, so the working
+    // vector is read directly from / written to global memory rather than a fixed
+    // local array.
+    if (full_matrices == 1u && m > n && tid == 0u) {
+        uint filled = n;
+        for (uint cand = 0; cand < m && filled < m; cand++) {
+            // Initialize the candidate column slot with e_cand.
+            for (uint r = 0; r < m; r++) {
+                data_u[u_off + r * u_cols + filled] = (r == cand) ? 1.0 : 0.0;
+            }
+            // Subtract projections onto existing columns 0..filled-1.
+            for (uint col = 0; col < filled; col++) {
+                float dot = 0.0;
+                for (uint r = 0; r < m; r++) {
+                    dot += data_u[u_off + r * u_cols + filled] * data_u[u_off + r * u_cols + col];
+                }
+                for (uint r = 0; r < m; r++) {
+                    data_u[u_off + r * u_cols + filled] -= dot * data_u[u_off + r * u_cols + col];
+                }
+            }
+            float nrm = 0.0;
+            for (uint r = 0; r < m; r++) {
+                float w = data_u[u_off + r * u_cols + filled];
+                nrm += w * w;
+            }
+            nrm = sqrt(nrm);
+            if (nrm > 1e-6) {
+                float inv = 1.0 / nrm;
+                for (uint r = 0; r < m; r++) {
+                    data_u[u_off + r * u_cols + filled] *= inv;
+                }
+                filled++;
+            }
         }
     }
 }

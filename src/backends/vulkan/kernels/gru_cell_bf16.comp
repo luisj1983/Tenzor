@@ -60,12 +60,25 @@ float readBF16HPrev(uint idx) {
     return (idx & 1u) == 0u ? pair.x : pair.y;
 }
 
+// Atomic packed write: adjacent elements idx and idx+1 share one uint32 word
+// (word_idx = idx>>1). A non-atomic load-modify-store would race and clobber the
+// neighbour's freshly written half. Use an atomicCompSwap CAS loop that updates
+// only the target 16-bit field, matching writeBF16 in linear_backward_bf16.comp.
 void writeBF16HOut(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = h_out[word_idx];
-    vec2 pair = unpackBF16x2(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    h_out[word_idx] = packBF16x2(pair);
+    uint shift = (idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+    // Round-to-nearest-even bf16 conversion (matches packBF16x2).
+    uint b = floatBitsToUint(val);
+    uint new_bits = (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+
+    uint old_val = h_out[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(h_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
 }
 
 // exp()-based activations avoid the NVIDIA GLSL tanh intrinsic (MUFU.TANH),

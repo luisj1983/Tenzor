@@ -9,7 +9,7 @@
  * Binary format per shard file ({path}/rank_{rank}.ckpt):
  *   [Header]
  *     magic:       4 bytes  ("TZCK")
- *     version:     4 bytes  (uint32_t, currently 1)
+ *     version:     4 bytes  (uint32_t, currently 2)
  *     world_size:  8 bytes  (int64_t, world size at save time)
  *     num_entries: 8 bytes  (int64_t)
  *   [Entry] (repeated num_entries times)
@@ -18,8 +18,21 @@
  *     ndim:        8 bytes  (int64_t)
  *     shape:       ndim * 8 bytes  (int64_t each)
  *     dtype:       4 bytes  (uint32_t, DType enum value)
+ *     is_sharded:  1 byte   (uint8_t, v2+: 1 if this tensor is sharded across
+ *                            ranks along shard_dim, 0 if replicated)
+ *     shard_dim:   8 bytes  (int64_t, v2+: the dimension this tensor is
+ *                            sharded along; meaningful only when is_sharded==1)
  *     data_bytes:  8 bytes  (int64_t)
  *     data:        data_bytes bytes  (raw tensor data, contiguous)
+ *
+ * Version history:
+ *   v1: no is_sharded/shard_dim fields. On resharding load, whether a
+ *       parameter is row-sharded was *inferred* from byte-identity across
+ *       shards, which mis-classifies byte-identical row-sharded params as
+ *       replicated. v1 files are still readable for backward compatibility
+ *       (the legacy heuristic is applied) but cannot be saved.
+ *   v2: explicit per-tensor is_sharded flag + shard_dim, supplied by the
+ *       caller at save time. Resharding uses these directly — no guessing.
  */
 
 #pragma once
@@ -36,6 +49,28 @@
 #include <filesystem>
 
 namespace tenzor::distributed {
+
+/**
+ * @brief Per-tensor sharding metadata.
+ *
+ * Describes how a parameter in the state dict is distributed across ranks at
+ * save time. Persisted into the checkpoint so resharding on load is exact
+ * rather than inferred from byte content.
+ *
+ * - A *replicated* tensor (sharded == false): every rank holds the full,
+ *   identical tensor (e.g. norm weights, biases, buffers). On load it is taken
+ *   as-is from a single shard.
+ * - A *sharded* tensor (sharded == true): the global tensor was split along
+ *   `dim` and each rank holds one contiguous slice. On load all slices are
+ *   concatenated along `dim` and re-split for the new world size.
+ */
+struct ShardSpec {
+    /** @brief True if the tensor is split across ranks along `dim`. */
+    bool sharded = false;
+
+    /** @brief Dimension the tensor is sharded along (valid when sharded). */
+    int64_t dim = 0;
+};
 
 /**
  * @brief Configuration for distributed checkpointing.
@@ -111,12 +146,18 @@ public:
      * @param state_dict Map of parameter name to tensor
      * @param rank This process's rank
      * @param world_size Total number of processes
+     * @param shard_specs Optional per-tensor sharding metadata. Any tensor not
+     *        present in this map (or absent map entirely) is treated as
+     *        replicated. Supplying accurate specs is what makes resharding on a
+     *        changed world size correct.
      * @return Future that completes when save is done
      */
     auto save_async(const std::string& path,
                     const std::unordered_map<std::string, Tensor>& state_dict,
                     int64_t rank = 0,
-                    int64_t world_size = 1) -> std::future<void>;
+                    int64_t world_size = 1,
+                    const std::unordered_map<std::string, ShardSpec>& shard_specs = {})
+        -> std::future<void>;
 
     /**
      * @brief Save state dict synchronously (blocks until complete).
@@ -125,11 +166,14 @@ public:
      * @param state_dict Map of parameter name to tensor
      * @param rank This process's rank
      * @param world_size Total number of processes
+     * @param shard_specs Optional per-tensor sharding metadata (see save_async).
      */
     auto save(const std::string& path,
               const std::unordered_map<std::string, Tensor>& state_dict,
               int64_t rank = 0,
-              int64_t world_size = 1) -> void;
+              int64_t world_size = 1,
+              const std::unordered_map<std::string, ShardSpec>& shard_specs = {})
+        -> void;
 
     /**
      * @brief Load checkpoint, potentially resharding across different world size.
@@ -152,26 +196,46 @@ private:
     CheckpointConfig config_;
 
     static constexpr uint32_t MAGIC = 0x5A43'5A54;  // "TZCK" in little-endian
-    static constexpr uint32_t VERSION = 1;
+    // Format version written by this build. v1 files remain readable.
+    static constexpr uint32_t VERSION = 2;
+    static constexpr uint32_t VERSION_LEGACY_NO_SHARD_META = 1;
 
     /**
-     * @brief Serialize a state dict to binary format.
+     * @brief Result of deserializing one shard file.
+     *
+     * Carries the tensors, the saved world size, the format version that
+     * produced the file, and the per-tensor sharding metadata (empty for
+     * legacy v1 files, where sharding must be inferred).
+     */
+    struct ShardContents {
+        std::unordered_map<std::string, Tensor> tensors;
+        int64_t world_size = 0;
+        uint32_t version = 0;
+        std::unordered_map<std::string, ShardSpec> shard_specs;
+    };
+
+    /**
+     * @brief Serialize a state dict to binary format (current VERSION).
      *
      * @param state State dict to serialize
      * @param world_size World size to write into the header
+     * @param shard_specs Per-tensor sharding metadata (missing => replicated)
      * @return Serialized bytes
      */
     auto serialize_state(const std::unordered_map<std::string, Tensor>& state,
-                         int64_t world_size) const -> std::vector<uint8_t>;
+                         int64_t world_size,
+                         const std::unordered_map<std::string, ShardSpec>& shard_specs) const
+        -> std::vector<uint8_t>;
 
     /**
-     * @brief Deserialize a state dict from binary format.
+     * @brief Deserialize a shard file from binary format.
+     *
+     * Supports both the current VERSION and the legacy v1 layout.
      *
      * @param data Serialized bytes
-     * @return Deserialized state dict and the world_size from the header
+     * @return Tensors, saved world_size, file version, and per-tensor specs
      */
-    auto deserialize_state(const std::vector<uint8_t>& data) const
-        -> std::pair<std::unordered_map<std::string, Tensor>, int64_t>;
+    auto deserialize_state(const std::vector<uint8_t>& data) const -> ShardContents;
 
     /**
      * @brief Build the full filesystem path for a shard file.

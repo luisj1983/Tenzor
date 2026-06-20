@@ -281,10 +281,11 @@ auto RMSprop::step_impl() -> void {
             // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
             grad_avg_[i] = grad_avg_[i] * scalar(hp.alpha)
                          + grad * scalar(1.0 - hp.alpha);
-            // denom = sqrt(v - m^2 + eps)
-            denom = sqrt(square_avg_[i] - grad_avg_[i] * grad_avg_[i] + scalar(hp.eps));
+            // denom = sqrt(v - m^2) + eps  (PyTorch adds eps AFTER the sqrt)
+            denom = sqrt(square_avg_[i] - grad_avg_[i] * grad_avg_[i]) + scalar(hp.eps);
         } else {
-            denom = sqrt(square_avg_[i] + scalar(hp.eps));
+            // denom = sqrt(v) + eps  (PyTorch adds eps AFTER the sqrt)
+            denom = sqrt(square_avg_[i]) + scalar(hp.eps);
         }
 
         Tensor new_param;
@@ -361,11 +362,17 @@ inline double get_scalar_f64(const std::unordered_map<std::string, Tensor>& m,
                              double fallback) {
     auto it = m.find(key);
     if (it == m.end()) return fallback;
-    if (it->second.dtype() == DType::Float64) {
-        return it->second.data<double>()[0];
+    // Scalar hyperparams may have been relocated to a non-CPU device by an
+    // external loader; data<T>() dereferences a host pointer, so move to CPU
+    // first (mirrors scheduler.cpp / lbfgs.cpp).
+    const Tensor host = (it->second.device() == Device::cpu())
+                            ? it->second
+                            : it->second.to(Device::cpu());
+    if (host.dtype() == DType::Float64) {
+        return host.data<double>()[0];
     }
-    if (it->second.dtype() == DType::Float32) {
-        return static_cast<double>(it->second.data<float>()[0]);
+    if (host.dtype() == DType::Float32) {
+        return static_cast<double>(host.data<float>()[0]);
     }
     return fallback;
 }
@@ -375,11 +382,15 @@ inline int64_t get_scalar_i64(const std::unordered_map<std::string, Tensor>& m,
                               int64_t fallback) {
     auto it = m.find(key);
     if (it == m.end()) return fallback;
-    if (it->second.dtype() == DType::Int64) {
-        return it->second.data<int64_t>()[0];
+    // See get_scalar_f64: relocate to CPU before host-side data<T>() access.
+    const Tensor host = (it->second.device() == Device::cpu())
+                            ? it->second
+                            : it->second.to(Device::cpu());
+    if (host.dtype() == DType::Int64) {
+        return host.data<int64_t>()[0];
     }
-    if (it->second.dtype() == DType::Int32) {
-        return static_cast<int64_t>(it->second.data<int32_t>()[0]);
+    if (host.dtype() == DType::Int32) {
+        return static_cast<int64_t>(host.data<int32_t>()[0]);
     }
     return fallback;
 }

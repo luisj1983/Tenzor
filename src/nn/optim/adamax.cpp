@@ -108,6 +108,12 @@ auto Adamax::initialize_buffers() -> void {
             // R.16: half-precision params get Float32 state buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_inf_.push_back(make_optim_state(param->tensor()));
+        } else {
+            // Keep state vectors index-aligned with parameters_ so that
+            // step_impl()'s positional indexing never skews after a null
+            // param (mirrors on_parameters_appended_).
+            exp_avg_.push_back(Tensor{});
+            exp_inf_.push_back(Tensor{});
         }
     }
 }

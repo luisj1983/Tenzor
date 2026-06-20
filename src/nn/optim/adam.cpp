@@ -323,38 +323,38 @@ auto Adam::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
         return ParamGroup::or_else(g->amsgrad, amsgrad_);
     };
 
-    // First pass: figure out whether *any* new param needs max_exp_avg_sq_
-    // and the highest index that does, so we allocate a contiguous tail
-    // (the per-index access pattern in step_impl uses max_exp_avg_sq_[i]
-    // directly with `i < max_exp_avg_sq_.size()` as the guard).
-    bool any_amsgrad = !max_exp_avg_sq_.empty();
-    size_t max_amsgrad_idx = max_exp_avg_sq_.empty()
-        ? 0 : (max_exp_avg_sq_.size() - 1);
-    for (size_t i = old_count; i < new_count; ++i) {
-        if (group_amsgrad(i)) {
-            any_amsgrad = true;
-            max_amsgrad_idx = i;
-        }
-    }
-
+    // HH.13 (fix): step_impl()/CUDA path read max_exp_avg_sq_[i] by ABSOLUTE
+    // param index i, guarded only by `i < max_exp_avg_sq_.size()`. The buffer
+    // must therefore stay index-aligned with parameters_ — vector position i
+    // *is* param index i. When the optimizer was built with amsgrad_=false,
+    // initialize_buffers() left max_exp_avg_sq_ empty, so it is shorter than
+    // old_count; back-fill [size(), old_count) with placeholders for the prior
+    // (non-AMSGrad) params first. (When amsgrad_=true it is already size
+    // old_count and the loop below is a no-op.) Then, mirroring AdamAtan2,
+    // push exactly one entry per new index: a real state buffer when that
+    // index's resolved per-group amsgrad is true, otherwise a placeholder
+    // Tensor{} to preserve alignment.
     exp_avg_.reserve(new_count);
     exp_avg_sq_.reserve(new_count);
-    if (any_amsgrad) max_exp_avg_sq_.reserve(max_amsgrad_idx + 1);
+    max_exp_avg_sq_.reserve(new_count);
+    while (max_exp_avg_sq_.size() < old_count) {
+        max_exp_avg_sq_.push_back(Tensor{});
+    }
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
             // R.16: see Adam::initialize_buffers for the dtype rationale.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (any_amsgrad && i <= max_amsgrad_idx) {
+            if (group_amsgrad(i)) {
                 max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+            } else {
+                max_exp_avg_sq_.push_back(Tensor{});
             }
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});
-            if (any_amsgrad && i <= max_amsgrad_idx) {
-                max_exp_avg_sq_.push_back(Tensor{});
-            }
+            max_exp_avg_sq_.push_back(Tensor{});
         }
     }
 }
@@ -709,34 +709,35 @@ auto AdamW::on_parameters_appended_(size_t old_count, size_t new_count) -> void 
         return ParamGroup::or_else(g->amsgrad, amsgrad_);
     };
 
-    bool any_amsgrad = !max_exp_avg_sq_.empty();
-    size_t max_amsgrad_idx = max_exp_avg_sq_.empty()
-        ? 0 : (max_exp_avg_sq_.size() - 1);
-    for (size_t i = old_count; i < new_count; ++i) {
-        if (group_amsgrad(i)) {
-            any_amsgrad = true;
-            max_amsgrad_idx = i;
-        }
-    }
-
+    // HH.13 (fix): keep max_exp_avg_sq_ index-aligned with parameters_ so the
+    // absolute-index reads in step_impl() (`max_exp_avg_sq_[i]`, guarded by
+    // `i < max_exp_avg_sq_.size()`) land on the slot for param i. Back-fill
+    // [size(), old_count) with placeholders for prior non-AMSGrad params (the
+    // amsgrad_=false case where initialize_buffers left the vector empty), then
+    // push exactly one entry per new index — a real buffer when that index's
+    // resolved per-group amsgrad is true, else a placeholder. (See
+    // Adam::on_parameters_appended_ / AdamAtan2 for the same pattern.)
     exp_avg_.reserve(new_count);
     exp_avg_sq_.reserve(new_count);
-    if (any_amsgrad) max_exp_avg_sq_.reserve(max_amsgrad_idx + 1);
+    max_exp_avg_sq_.reserve(new_count);
+    while (max_exp_avg_sq_.size() < old_count) {
+        max_exp_avg_sq_.push_back(Tensor{});
+    }
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
             // R.16: see AdamW::initialize_buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (any_amsgrad && i <= max_amsgrad_idx) {
+            if (group_amsgrad(i)) {
                 max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+            } else {
+                max_exp_avg_sq_.push_back(Tensor{});
             }
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});
-            if (any_amsgrad && i <= max_amsgrad_idx) {
-                max_exp_avg_sq_.push_back(Tensor{});
-            }
+            max_exp_avg_sq_.push_back(Tensor{});
         }
     }
 }

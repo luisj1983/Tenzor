@@ -108,11 +108,13 @@ auto DistributedCheckpoint::save_async(
     const std::string& path,
     const std::unordered_map<std::string, Tensor>& state_dict,
     int64_t rank,
-    int64_t world_size) -> std::future<void> {
+    int64_t world_size,
+    const std::unordered_map<std::string, ShardSpec>& shard_specs)
+    -> std::future<void> {
 
     // Snapshot tensor data into the serialization buffer now,
     // so the caller can modify tensors immediately after returning
-    auto data = serialize_state(state_dict, world_size);
+    auto data = serialize_state(state_dict, world_size, shard_specs);
     auto file_path = shard_path(path, rank);
 
     return std::async(std::launch::async,
@@ -140,9 +142,10 @@ auto DistributedCheckpoint::save(
     const std::string& path,
     const std::unordered_map<std::string, Tensor>& state_dict,
     int64_t rank,
-    int64_t world_size) -> void {
+    int64_t world_size,
+    const std::unordered_map<std::string, ShardSpec>& shard_specs) -> void {
 
-    auto future = save_async(path, state_dict, rank, world_size);
+    auto future = save_async(path, state_dict, rank, world_size, shard_specs);
     future.get();  // Block until complete
 }
 
@@ -182,11 +185,11 @@ auto DistributedCheckpoint::load(
         ifs.read(reinterpret_cast<char*>(data.data()),
                  static_cast<std::streamsize>(file_size));
 
-        auto [state, saved_world_size] = deserialize_state(data);
+        auto contents = deserialize_state(data);
 
         // If world size matches, return directly — no resharding needed
-        if (saved_world_size == world_size) {
-            return state;
+        if (contents.world_size == world_size) {
+            return std::move(contents.tensors);
         }
 
         // World size changed: need to load all shards and reshard
@@ -226,19 +229,23 @@ auto DistributedCheckpoint::load(
         }
     }
     std::sort(saved_ranks.begin(), saved_ranks.end());
+    saved_ranks.erase(std::unique(saved_ranks.begin(), saved_ranks.end()),
+                      saved_ranks.end());
 
     if (saved_ranks.empty()) {
         throw std::runtime_error(
             "DistributedCheckpoint: no shard files found in: " + dir.string());
     }
 
-    int64_t saved_world_size = static_cast<int64_t>(saved_ranks.size());
-
-    // Load all shards
-    std::vector<std::unordered_map<std::string, Tensor>> all_shards;
-    all_shards.reserve(saved_ranks.size());
-
-    for (auto sr : saved_ranks) {
+    // The authoritative shard count is the world_size recorded in the shard
+    // headers at save time — NOT the number of files that happen to be on disk.
+    // Read rank 0's header to learn the saved world_size, then verify that the
+    // full contiguous set of shards [0, saved_world_size) is present and that
+    // every shard agrees on that world_size. Inferring the count from
+    // discovered files would silently truncate the reconstructed tensor (and
+    // mis-distribute every per-rank slice) whenever a shard is missing or a
+    // filename failed to parse.
+    auto read_shard = [&](int64_t sr) -> ShardContents {
         auto sp = shard_path(path, sr);
         std::ifstream ifs(sp, std::ios::binary | std::ios::ate);
         if (!ifs.is_open()) {
@@ -250,21 +257,73 @@ auto DistributedCheckpoint::load(
         std::vector<uint8_t> data(static_cast<size_t>(file_size));
         ifs.read(reinterpret_cast<char*>(data.data()),
                  static_cast<std::streamsize>(file_size));
+        return deserialize_state(data);
+    };
 
-        auto [state, ws] = deserialize_state(data);
-        all_shards.push_back(std::move(state));
+    if (saved_ranks.front() != 0) {
+        throw std::runtime_error(
+            "DistributedCheckpoint: missing shard rank_0.ckpt in: " +
+            dir.string());
+    }
+    auto shard0 = read_shard(0);
+    auto saved_world_size = shard0.world_size;
+    if (saved_world_size < 1) {
+        throw std::runtime_error(
+            "DistributedCheckpoint: shard header reports invalid world_size " +
+            std::to_string(saved_world_size) + " in: " + dir.string());
     }
 
-    // For each parameter name, concatenate shards along dim 0, then
-    // re-slice for the new world_size
+    // Load all shards in rank order [0, saved_world_size), requiring every
+    // expected shard file to exist and to report the same world_size. A missing
+    // or extra shard, or a header disagreement, means the checkpoint set is
+    // inconsistent and resharding would operate on a truncated/garbled tensor.
+    const uint32_t saved_version = shard0.version;
+    auto shard0_specs = std::move(shard0.shard_specs);
+
+    std::vector<std::unordered_map<std::string, Tensor>> all_shards;
+    all_shards.reserve(static_cast<size_t>(saved_world_size));
+    all_shards.push_back(std::move(shard0.tensors));
+
+    for (int64_t sr = 1; sr < saved_world_size; ++sr) {
+        auto sp = shard_path(path, sr);
+        if (!std::filesystem::exists(sp)) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: incomplete checkpoint — expected shard "
+                "rank_" + std::to_string(sr) + ".ckpt (saved world_size " +
+                std::to_string(saved_world_size) + ") not found in: " +
+                dir.string());
+        }
+        auto contents = read_shard(sr);
+        if (contents.world_size != saved_world_size) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: shard rank_" + std::to_string(sr) +
+                ".ckpt reports world_size " + std::to_string(contents.world_size) +
+                " but rank_0 reports " + std::to_string(saved_world_size) +
+                " — inconsistent checkpoint in: " + dir.string());
+        }
+        all_shards.push_back(std::move(contents.tensors));
+    }
+
+    // Any discovered shard with rank >= saved_world_size (e.g. a stale file
+    // left over from a larger previous run) makes the on-disk set ambiguous;
+    // reject rather than silently ignoring it.
+    if (saved_ranks.back() >= saved_world_size) {
+        throw std::runtime_error(
+            "DistributedCheckpoint: found stale shard rank_" +
+            std::to_string(saved_ranks.back()) + ".ckpt beyond saved world_size "
+            + std::to_string(saved_world_size) + " in: " + dir.string());
+    }
+
+    // For each parameter name, decide whether it is sharded and along which
+    // dim, then concatenate the shards along that dim and re-slice for the new
+    // world_size. Replicated params are taken as-is from shard 0.
     std::unordered_map<std::string, Tensor> result;
 
-    // Gather all parameter names from the first shard
     for (auto& [name, tensor] : all_shards[0]) {
-        // A parameter is a candidate for dim-0 resharding only when it is
+        // A parameter can only be reconstructed by concatenation if it is
         // present in EVERY shard file. If it is missing from any shard it
-        // cannot have been row-sharded across all ranks, so this rank just
-        // takes shard 0's copy.
+        // cannot have been sharded across all ranks, so this rank just takes
+        // shard 0's copy.
         bool present_in_all = true;
         for (size_t i = 1; i < all_shards.size(); ++i) {
             if (!all_shards[i].contains(name)) {
@@ -273,26 +332,40 @@ auto DistributedCheckpoint::load(
             }
         }
 
-        // Presence-in-all-shards is NOT sufficient to conclude the parameter
-        // is row-sharded: FSDP/DDP write replicated tensors (norm weights,
-        // biases, buffers) identically into every rank's shard. Treating those
-        // as dim-0 sharded would cat() world_size× too many rows and then slice
-        // a 1/world_size band back out — silently corrupting both data and
-        // shape. Distinguish the two by content: a replicated parameter is
-        // byte-identical across all shards, a row-sharded one is not (the rows
-        // differ, or the per-rank dim-0 lengths differ).
-        bool is_sharded = present_in_all && all_shards.size() > 1;
-        if (is_sharded) {
-            for (size_t i = 1; i < all_shards.size(); ++i) {
-                if (!tensors_byte_identical(tensor, all_shards[i].at(name))) {
-                    break;  // genuinely sharded: contents/shape differ
-                }
-                if (i + 1 == all_shards.size()) {
-                    // Reached the last shard with every comparison identical →
-                    // replicated, not sharded.
-                    is_sharded = false;
+        // Determine whether this parameter is sharded, and along which dim.
+        //
+        // v2+ checkpoints carry an explicit, per-tensor sharded flag + shard
+        // dim written at save time. This is authoritative: byte-identical
+        // row-sharded params (e.g. two ranks that happen to hold the same rows)
+        // are no longer mis-classified as replicated. Legacy v1 checkpoints
+        // have no such metadata, so we fall back to the historical
+        // byte-identity heuristic (replicated == byte-identical across shards,
+        // always along dim 0) purely for backward compatibility.
+        bool is_sharded = false;
+        int64_t shard_dim = 0;
+
+        if (saved_version >= VERSION) {
+            auto it = shard0_specs.find(name);
+            if (it != shard0_specs.end() && it->second.sharded &&
+                present_in_all && all_shards.size() > 1) {
+                is_sharded = true;
+                shard_dim = it->second.dim;
+            }
+        } else {
+            // Legacy v1 heuristic.
+            is_sharded = present_in_all && all_shards.size() > 1;
+            if (is_sharded) {
+                for (size_t i = 1; i < all_shards.size(); ++i) {
+                    if (!tensors_byte_identical(tensor, all_shards[i].at(name))) {
+                        break;  // genuinely sharded: contents/shape differ
+                    }
+                    if (i + 1 == all_shards.size()) {
+                        // Every comparison identical → replicated, not sharded.
+                        is_sharded = false;
+                    }
                 }
             }
+            shard_dim = 0;
         }
 
         if (!is_sharded) {
@@ -302,39 +375,37 @@ auto DistributedCheckpoint::load(
             continue;
         }
 
-        // Concatenate all shards along dim 0 to reconstruct the full tensor
+        // Concatenate all shards along shard_dim to reconstruct the full tensor.
         std::vector<Tensor> chunks;
         chunks.reserve(all_shards.size());
         for (auto& shard : all_shards) {
             chunks.push_back(shard.at(name));
         }
-        auto full = cat(chunks, 0);
+        auto full = cat(chunks, shard_dim);
 
         // Now slice for this rank's portion in the new world_size.
         //
-        // Use a balanced partition: the first (total % world_size) ranks get
-        // one extra row each, instead of the old floor-division scheme that
-        // dumped every remainder row onto the last rank (and handed empty
-        // slices to ranks 0..ws-2 whenever world_size > total). A tensor whose
-        // dim-0 is smaller than world_size cannot be resharded without empty
-        // shards, so reject that case explicitly rather than silently
-        // concentrating data on one rank.
-        auto total = full.shape()[0];
+        // Use a balanced partition: the first (total % world_size) entries get
+        // one extra slice each. A tensor whose shard_dim is smaller than
+        // world_size cannot be resharded without empty shards, so reject that
+        // case explicitly rather than silently concentrating data on one rank.
+        auto total = full.shape()[shard_dim];
         if (world_size > total) {
             throw std::runtime_error(
-                "DistributedCheckpoint: cannot reshard '" + name + "' (dim-0 = " +
-                std::to_string(total) + ") across world_size " +
-                std::to_string(world_size) + " without empty shards");
+                "DistributedCheckpoint: cannot reshard '" + name + "' (dim-" +
+                std::to_string(shard_dim) + " = " + std::to_string(total) +
+                ") across world_size " + std::to_string(world_size) +
+                " without empty shards");
         }
         auto base = total / world_size;
         auto rem = total % world_size;
         // start = rank*base + min(rank, rem); each of the first `rem` ranks
-        // carries one extra row.
+        // carries one extra slice.
         auto start = rank * base + std::min<int64_t>(rank, rem);
         auto count = base + (rank < rem ? 1 : 0);
         auto end = start + count;
 
-        result[name] = full.slice(0, start, end);
+        result[name] = full.slice(shard_dim, start, end);
     }
 
     return result;
@@ -342,7 +413,9 @@ auto DistributedCheckpoint::load(
 
 auto DistributedCheckpoint::serialize_state(
     const std::unordered_map<std::string, Tensor>& state,
-    int64_t world_size) const -> std::vector<uint8_t> {
+    int64_t world_size,
+    const std::unordered_map<std::string, ShardSpec>& shard_specs) const
+    -> std::vector<uint8_t> {
 
     std::vector<uint8_t> buf;
     // Reserve a reasonable initial size
@@ -362,6 +435,33 @@ auto DistributedCheckpoint::serialize_state(
             cpu_tensor = cpu_tensor.to(Device::cpu());
         }
 
+        // Resolve sharding metadata for this tensor. Anything not explicitly
+        // declared sharded is treated as replicated — the safe default that
+        // never over-concatenates on load.
+        ShardSpec spec{};
+        if (auto it = shard_specs.find(name); it != shard_specs.end()) {
+            spec = it->second;
+            if (spec.sharded) {
+                auto ndim_t = cpu_tensor.ndim();
+                if (ndim_t == 0) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: tensor '" + name +
+                        "' is marked sharded but is a 0-dim scalar");
+                }
+                // Normalize negative shard dim and bounds-check it now, so a
+                // bad spec fails at save time rather than corrupting load.
+                if (spec.dim < 0) {
+                    spec.dim += ndim_t;
+                }
+                if (spec.dim < 0 || spec.dim >= ndim_t) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: shard dim " +
+                        std::to_string(spec.dim) + " out of range for tensor '" +
+                        name + "' with " + std::to_string(ndim_t) + " dims");
+                }
+            }
+        }
+
         // Name
         auto name_len = static_cast<int64_t>(name.size());
         write_val(buf, name_len);
@@ -377,6 +477,10 @@ auto DistributedCheckpoint::serialize_state(
         // DType
         write_val(buf, static_cast<uint32_t>(cpu_tensor.dtype()));
 
+        // Sharding metadata (v2+)
+        write_val(buf, static_cast<uint8_t>(spec.sharded ? 1 : 0));
+        write_val(buf, spec.sharded ? spec.dim : int64_t{0});
+
         // Data
         auto elem_size = dtype_size(cpu_tensor.dtype());
         auto data_bytes = static_cast<int64_t>(cpu_tensor.numel() * elem_size);
@@ -388,7 +492,7 @@ auto DistributedCheckpoint::serialize_state(
 }
 
 auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) const
-    -> std::pair<std::unordered_map<std::string, Tensor>, int64_t> {
+    -> ShardContents {
 
     const uint8_t* ptr = data.data();
     const uint8_t* end = ptr + data.size();
@@ -401,11 +505,13 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
     }
 
     auto version = read_val<uint32_t>(ptr, end);
-    if (version != VERSION) {
+    if (version != VERSION && version != VERSION_LEGACY_NO_SHARD_META) {
         throw std::runtime_error(
             "DistributedCheckpoint: unsupported checkpoint version " +
             std::to_string(version));
     }
+    // v1 files carry no per-tensor sharding metadata; v2+ do.
+    const bool has_shard_meta = (version >= VERSION);
 
     auto world_size = read_val<int64_t>(ptr, end);
     auto num_entries = read_val<int64_t>(ptr, end);
@@ -414,6 +520,7 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
             "DistributedCheckpoint: negative entry count in checkpoint");
     }
 
+    std::unordered_map<std::string, ShardSpec> shard_specs;
     std::unordered_map<std::string, Tensor> state;
     // Each entry needs at least name_len + ndim + dtype + data_bytes headers, so
     // num_entries cannot exceed the remaining byte count. Cap the reservation to
@@ -464,6 +571,32 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
         // divide by a zero element size → SIGFPE).
         auto dtype = checked_dtype(read_val<uint32_t>(ptr, end), name);
 
+        // Sharding metadata (v2+ only). The raw flag is an untrusted byte: treat
+        // any non-zero value as "sharded", but require the recorded shard_dim to
+        // be a valid axis of this tensor so a malformed file cannot drive an
+        // out-of-range cat()/slice() during resharding.
+        ShardSpec spec{};
+        if (has_shard_meta) {
+            auto raw_flag = read_val<uint8_t>(ptr, end);
+            auto raw_dim = read_val<int64_t>(ptr, end);
+            spec.sharded = (raw_flag != 0);
+            spec.dim = raw_dim;
+            if (spec.sharded) {
+                if (ndim == 0) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: tensor '" + name +
+                        "' marked sharded but has 0 dims");
+                }
+                if (spec.dim < 0 || spec.dim >= ndim) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: invalid shard dim " +
+                        std::to_string(spec.dim) + " for tensor '" + name +
+                        "' with " + std::to_string(ndim) + " dims");
+                }
+            }
+        }
+        shard_specs[name] = spec;
+
         // Data
         auto data_bytes = read_val<int64_t>(ptr, end);
 
@@ -492,7 +625,8 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
         state[name] = std::move(tensor);
     }
 
-    return {std::move(state), world_size};
+    return ShardContents{std::move(state), world_size, version,
+                         std::move(shard_specs)};
 }
 
 auto DistributedCheckpoint::shard_path(const std::string& path, int64_t rank) const

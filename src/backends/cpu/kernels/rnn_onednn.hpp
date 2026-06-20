@@ -19,6 +19,7 @@
 #include <fstream>
 #include <cstdint>
 #include <thread>
+#include <algorithm>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -1113,16 +1114,23 @@ struct LSTMMultiLayerCachedPrimitive {
     }
 };
 
-// Compute fingerprint for multi-layer weights
+// Compute fingerprint for multi-layer weights.
+//
+// gates_per_cell selects the number of gate sub-tensors stacked in each weight
+// buffer: 4 for LSTM (i, f, g, o), 3 for GRU (r, z, n). Using the wrong count
+// would hash the wrong number of bytes and, for the smaller-gate variant, read
+// past the end of the real weight buffer — so the caller MUST pass the value
+// matching the cell type whose weights it owns.
 inline uint64_t compute_multilayer_fingerprint(
     const std::vector<const float*>& W_ih_list,
     const std::vector<const float*>& W_hh_list,
-    int64_t input_size, int64_t hidden_size
+    int64_t input_size, int64_t hidden_size,
+    int64_t gates_per_cell = 4
 ) {
     uint64_t hash = 0;
     for (size_t l = 0; l < W_ih_list.size(); ++l) {
-        int64_t ih_size = (l == 0 ? input_size : hidden_size) * 4 * hidden_size;
-        int64_t hh_size = hidden_size * 4 * hidden_size;
+        int64_t ih_size = (l == 0 ? input_size : hidden_size) * gates_per_cell * hidden_size;
+        int64_t hh_size = hidden_size * gates_per_cell * hidden_size;
         hash ^= compute_weight_fingerprint(W_ih_list[l], W_hh_list[l], ih_size, hh_size);
         hash = (hash << 7) | (hash >> 57);  // Rotate to mix layer contributions
     }
@@ -1301,12 +1309,20 @@ struct GRUMultiLayerCachedPrimitive {
     // Weight tracking for cache validation
     std::vector<const void*> w_ih_ptrs;
     std::vector<const void*> w_hh_ptrs;
+    // Content fingerprint over all layers' weight buffers (audit B6: in-place
+    // optimizer updates keep the pointers stable but mutate the values, so
+    // pointer identity alone would serve STALE reordered/packed weights).
+    uint64_t weight_fingerprint{0};
 
     bool matches(int64_t nl, int64_t s, int64_t b, int64_t i, int64_t h, bool bias,
                  const std::vector<const float*>& wih_list,
-                 const std::vector<const float*>& whh_list) const {
+                 const std::vector<const float*>& whh_list,
+                 uint64_t fingerprint) const {
         if (num_layers != nl || seq_len != s || batch != b ||
             input_size != i || hidden_size != h || has_bias != bias) {
+            return false;
+        }
+        if (weight_fingerprint != fingerprint) {
             return false;
         }
         if (w_ih_ptrs.size() != wih_list.size() || w_hh_ptrs.size() != whh_list.size()) {
@@ -1385,15 +1401,30 @@ inline bool gru_multilayer_forward_onednn(
         auto& stream = get_stream();
         auto& cached = get_gru_multilayer_cached();
 
-        bool has_bias = !bias_list.empty() && bias_list[0] != nullptr;
+        // The primitive must be built WITH a bias slot whenever ANY layer has a
+        // bias (mixed-bias configs are permitted by the invariant above). Using
+        // only layer 0 would zero out a later layer's real bias. Per-layer
+        // packing below is gated on bias_list[src_layer] != nullptr, so
+        // bias-less layers in a biased primitive still pack to zero correctly.
+        bool has_bias = std::any_of(bias_list.begin(), bias_list.end(),
+                                    [](const float* p) { return p != nullptr; });
+
+        // Content fingerprint over all layers' GRU weights (3 gates: r, z, n).
+        // Recomputed every call so in-place optimizer updates (stable pointers,
+        // mutated values) are detected and trigger a rebuild of the reordered/
+        // packed weights — mirrors GRUCachedPrimitive::weight_fp handling.
+        const uint64_t weight_fp = compute_multilayer_fingerprint(
+            W_ih_list, W_hh_list, input_size, hidden_size, /*gates_per_cell=*/3);
 
         // Check cache validity
         bool need_rebuild = !cached ||
                            !cached->matches(num_layers, seq_len, batch, input_size,
-                                           hidden_size, has_bias, W_ih_list, W_hh_list);
+                                           hidden_size, has_bias, W_ih_list, W_hh_list,
+                                           weight_fp);
 
         if (need_rebuild) {
             cached = std::make_shared<GRUMultiLayerCachedPrimitive>();
+            cached->weight_fingerprint = weight_fp;
             cached->num_layers = num_layers;
             cached->seq_len = seq_len;
             cached->batch = batch;
@@ -1501,8 +1532,11 @@ inline bool gru_multilayer_forward_onednn(
                     // Pack the LBR 4-term bias from this layer's [r,z,n] bias_ih.
                     // The multi-layer entry point has no separate recurrent
                     // bias_hh, so b_{c_h} packs to zero (bias_hh=nullptr).
+                    // Gate solely on this layer's own bias pointer: with the
+                    // any_of has_bias above, the primitive has a bias slot when
+                    // ANY layer is biased, and bias-less layers pack to zero.
                     float* dst_bias = bias_packed.data() + l * 4 * hidden_size;
-                    if (has_bias && bias_list[src_layer] != nullptr) {
+                    if (!bias_list.empty() && bias_list[src_layer] != nullptr) {
                         pack_lbr_gru_bias(bias_list[src_layer], nullptr, dst_bias, hidden_size);
                     } else {
                         std::memset(dst_bias, 0, 4 * hidden_size * sizeof(float));
@@ -1557,7 +1591,10 @@ inline bool gru_multilayer_forward_onednn(
             bool layer0_ok = gru_forward_onednn(
                 input,
                 W_ih_list[0], W_hh_list[0],
-                has_bias ? bias_list[0] : nullptr, nullptr,
+                // Use layer 0's OWN bias: with mixed-bias configs, has_bias
+                // (any layer) must not force a bias onto a bias-less layer 0,
+                // nor suppress layer 0's bias when only it is biased.
+                (!bias_list.empty()) ? bias_list[0] : nullptr, nullptr,
                 h0,  // First layer's h0
                 intermediate_output.data(),
                 intermediate_h.data(),

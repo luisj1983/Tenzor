@@ -36,17 +36,23 @@ float readBF16(uint element_idx) {
     return uintBitsToFloat(bits << 16);
 }
 
-// Write a single bfloat16 value to packed output buffer
+// Write a single bfloat16 value to packed output buffer.
+// Two bfloat16 elements share one 32-bit word, and neighbouring elements are
+// written by independent invocations (one per output element), so the packed
+// read-modify-write must be done atomically (CAS loop) to avoid one
+// invocation's update being lost.
 void writeBF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
-    if (word_offset == 0) {
-        uint existing = output_data[word_idx] & 0xFFFF0000u;
-        output_data[word_idx] = existing | bits;
-    } else {
-        uint existing = output_data[word_idx] & 0x0000FFFFu;
-        output_data[word_idx] = existing | (bits << 16);
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint observed = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (observed == old_word) return;
+        old_word = observed;
     }
 }
 

@@ -673,32 +673,38 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
 
     // Pass 3 + Compact: Fill with dedup (templated by dtype).
     //
-    // Dedup uses a per-(row,col) dense marker rather than a linear scan over the
-    // already-written columns. The old scan was O(K^2) per row (K = distinct
-    // output columns); with the marker each product term costs O(1), so a row is
-    // O(nnz_products). Each (row,col) cell is owned by exactly one work-item
-    // (one row per item), so the M*N marker needs no per-row reset and no atomics.
-    // d_col_marker[row*N + col] holds (relative write slot + 1), 0 meaning unseen.
-    SyclDeviceBuffer<int64_t> d_col_marker_buf(M * N, queue);
-    int64_t* d_col_marker = d_col_marker_buf.get();
-    queue.memset(d_col_marker, 0, static_cast<size_t>(M * N) * sizeof(int64_t)).wait();
-
+    // Dedup is performed entirely within each row's own slice of the upper-bound
+    // output buffers (d_col_ub / d_vals_ub), which the prefix-sum sized to that
+    // row's product-count upper bound. Each work-item owns one row, so it owns a
+    // disjoint, contiguous slice [c_start, c_start + row_nnz_ub) — no atomics and
+    // no cross-row sharing.
+    //
+    // Within a row the written columns are kept sorted ascending. For each new
+    // product (col, val) we binary-search the already-written prefix:
+    //   - hit  -> accumulate into the existing slot (O(log R));
+    //   - miss -> insert at the sorted position, shifting the tail right (O(R)).
+    // R is the row's sparse product count, not N, so the cost is proportional to
+    // the actual sparsity rather than the dense M*N marker the old code used
+    // (that marker requested O(M*N) global memory and a full M*N memset, OOMing
+    // for large sparse operands and defeating the point of a sparse format).
+    //
+    // Sorting the columns as we go also makes the SYCL output column-ordered,
+    // matching the CPU reference (cpu_spgemm_typed sorts each row by column).
     auto run_fill_and_compact = [&]<typename T>() {
         SyclDeviceBuffer<T> d_vals_ub_buf(total_nnz_ub, queue);
         T* d_vals_ub = d_vals_ub_buf.get();
         const T* av = a_vals.data<T>();
         const T* bv = b_vals.data<T>();
         const int64_t* bcol = b_col.data<int64_t>();
-        int64_t* col_marker = d_col_marker;
-        const int64_t cols = N;
 
         queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
             int64_t row = idx[0];
             int64_t c_start = d_crow_ub[row];
             int64_t a_start = ac[row];
             int64_t a_end = ac[row + 1];
-            int64_t write_pos = c_start;
-            int64_t marker_base = row * cols;
+            // Number of distinct columns written so far for this row; the slots
+            // [c_start, c_start + len) stay sorted by column at all times.
+            int64_t len = 0;
 
             for (int64_t ja = a_start; ja < a_end; ++ja) {
                 int64_t k = acol[ja];
@@ -710,19 +716,38 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
                     int64_t col = bcol[jb];
                     T val = a_val * bv[jb];
 
-                    int64_t slot = col_marker[marker_base + col];
-                    if (slot != 0) {
-                        // Already written this column in this row: accumulate.
-                        d_vals_ub[slot - 1] += val;
+                    // Binary search for `col` in the sorted prefix
+                    // d_col_ub[c_start .. c_start+len). `lo` ends as the
+                    // insertion point (lower_bound).
+                    int64_t lo = 0;
+                    int64_t hi = len;
+                    while (lo < hi) {
+                        int64_t mid = lo + (hi - lo) / 2;
+                        int64_t mid_col = d_col_ub[c_start + mid];
+                        if (mid_col < col) {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+
+                    if (lo < len && d_col_ub[c_start + lo] == col) {
+                        // Existing column: accumulate.
+                        d_vals_ub[c_start + lo] += val;
                     } else {
-                        d_col_ub[write_pos] = col;
-                        d_vals_ub[write_pos] = val;
-                        col_marker[marker_base + col] = write_pos + 1;
-                        write_pos++;
+                        // New column: shift the sorted tail right by one to
+                        // open a slot at `lo`, then insert.
+                        for (int64_t s = len; s > lo; --s) {
+                            d_col_ub[c_start + s]  = d_col_ub[c_start + s - 1];
+                            d_vals_ub[c_start + s] = d_vals_ub[c_start + s - 1];
+                        }
+                        d_col_ub[c_start + lo]  = col;
+                        d_vals_ub[c_start + lo] = val;
+                        ++len;
                     }
                 }
             }
-            d_actual_nnz[row] = write_pos - c_start;
+            d_actual_nnz[row] = len;
         }).wait();
 
         // Compact: device-side prefix sum on actual nnz → final crow indices
@@ -771,8 +796,9 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         }
     }();
 
-    // Scratch buffers (d_row_nnz, d_crow_ub, d_col_ub, d_actual_nnz,
-    // d_col_marker) are freed by their SyclDeviceBuffer guards on scope exit.
+    // Scratch buffers (d_row_nnz, d_crow_ub, d_col_ub, d_actual_nnz) are freed
+    // by their SyclDeviceBuffer guards on scope exit. The dedup no longer needs
+    // a dense per-(row,col) marker, so there is no O(M*N) scratch to free.
     return result;
 #endif
 }

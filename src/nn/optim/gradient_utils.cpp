@@ -156,7 +156,19 @@ auto unflatten_into(const Tensor& flat_tensor,
         }
     }
 
-    // Slice flat tensor and reshape into each output — device-safe
+    // Slice flat tensor and reshape into each output — device-safe.
+    //
+    // NOTE ON SEMANTICS: each element of `output_tensors` is *rebound* to a
+    // freshly-allocated contiguous slice of `flat_tensor`; the data is NOT
+    // written into the caller's pre-existing storage. The library currently
+    // exposes no device-safe primitive to copy one tensor's data into another
+    // tensor's existing storage (there is no Tensor::copy_ / OpId::Copy
+    // in-place dispatch), and raw data_ptr() memcpy would be incorrect for
+    // strided/device tensors. Consequently the caller MUST propagate the
+    // rebound elements back to their owning objects after this call (e.g.
+    // `param->tensor() = output_tensors[i];` or `param->set_grad(...)`), as the
+    // two ZeRO callers in zero_optimizer.cpp do. Any external alias of the
+    // original storage retains stale data otherwise.
     int64_t offset = 0;
     for (auto& t : output_tensors) {
         int64_t numel = t.numel();

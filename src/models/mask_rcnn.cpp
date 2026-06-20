@@ -381,14 +381,23 @@ MaskRCNN::MaskRCNN(std::shared_ptr<nn::Module> backbone,
     // semantics from P5 mixed in, instead of a raw C5 projection at stride 32.
     constexpr std::array<int64_t, 4> bottleneck_stage_channels = {256, 512, 1024, 2048};
     for (size_t i = 0; i < 4; ++i) {
+        // All four laterals are live: they build the full top-down path
+        // (lat2..lat4 + P5 lateral) that feeds P4.
         fpn_lateral_[i] = std::make_shared<nn::Conv2d>(
             bottleneck_stage_channels[i], 256, /*kernel=*/1, /*stride=*/1, /*pad=*/0);
         register_module("fpn_lateral_c" + std::to_string(i + 2), fpn_lateral_[i]);
-
-        fpn_smooth_[i] = std::make_shared<nn::Conv2d>(
-            /*in=*/256, /*out=*/256, /*kernel=*/3, /*stride=*/1, /*pad=*/1);
-        register_module("fpn_smooth_p" + std::to_string(i + 2), fpn_smooth_[i]);
     }
+
+    // Only P4 (index 2) is returned and smoothed on the forward path today, so
+    // only its smoothing conv is created and registered. Registering the
+    // P2/P3/P5 smooth convs while they are never executed would add dead
+    // trainable parameters that bloat optimizer state and drift from loaded
+    // checkpoints. The remaining fpn_smooth_ slots stay null until the
+    // multi-scale RoIAlign path is wired (G6-followup); add them back there so
+    // the registered parameter set always matches what is trained.
+    fpn_smooth_[2] = std::make_shared<nn::Conv2d>(
+        /*in=*/256, /*out=*/256, /*kernel=*/3, /*stride=*/1, /*pad=*/1);
+    register_module("fpn_smooth_p4", fpn_smooth_[2]);
 
     // Create RPN (assumes backbone output has 256 channels for FPN)
     // Anchor generator uses 3 sizes × 3 aspect ratios = 9 anchors per location
@@ -769,8 +778,9 @@ auto MaskRCNN::forward_test(const Variable& images)
     // 1. Extract features
     auto features = extract_features(images);
 
-    // 2. Generate proposals
-    auto [rpn_cls_logits, rpn_bbox_deltas] = rpn_->forward_multi(features);
+    // 2. Generate proposals (generate_proposals runs the RPN head internally,
+    //    so there is no separate rpn_->forward_multi call here — running it
+    //    twice per inference would duplicate the 3x3 + two 1x1 conv work).
     auto proposals = generate_proposals(features);
 
     // 3. ROI Align for boxes
@@ -996,7 +1006,10 @@ auto compute_rpn_loss(
 
             // Get matched GT boxes for positive anchors (targets — plain Tensors)
             auto pos_matched_boxes = tenzor::index_select(matched_boxes, 0, pos_indices_tensor);
-            auto pos_anchors = tenzor::index_select(anchors, 0, pos_indices_tensor);
+            // Use anchors_typed (already cast to gt_boxes.dtype()) so encode_boxes
+            // runs on matching dtypes — pos_matched_boxes carry gt_boxes' dtype,
+            // while the original anchors param is always Float32.
+            auto pos_anchors = tenzor::index_select(anchors_typed, 0, pos_indices_tensor);
 
             // Encode GT boxes as regression targets
             auto bbox_targets = encode_boxes(pos_matched_boxes, pos_anchors);
@@ -1218,12 +1231,11 @@ auto MaskRCNN::extract_features(const Variable& images) -> Variable {
         "nearest", /*align_corners=*/false);
     auto p2 = lat2 + p3_up;
 
-    // Smoothing 3x3 — anti-aliases the upsample. Only P4 is returned today;
-    // the P2/P3/P5 smooth convs are registered (so model state is complete
-    // and ready for multi-scale RoIAlign wiring) but not yet exercised on
-    // the forward path. That wiring is G6-followup: per-level RPN +
-    // FPN-style level assignment for ROI features. Once added, p2/p3/p5
-    // become live outputs through their respective smooth convs.
+    // Smoothing 3x3 — anti-aliases the upsample. Only P4 is returned today, so
+    // only fpn_smooth_[2] is constructed (the other slots are null — they are
+    // created together with the multi-scale path in G6-followup: per-level RPN +
+    // FPN-style level assignment for ROI features). Until then p2/p3/p5 are only
+    // intermediate top-down terms feeding p4.
     (void)p2; (void)p3; (void)p5;  // intentionally unused — see G6-followup
     p4 = fpn_smooth_[2]->forward(p4);
 

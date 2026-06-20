@@ -2754,7 +2754,12 @@ void argsort_along_dim(const T* input_data, int64_t* output_data,
     }
 }
 
-auto argsort_kernel(const Tensor& input, int64_t dim, bool descending) -> Tensor {
+auto argsort_kernel(const Tensor& input_raw, int64_t dim, bool descending) -> Tensor {
+    // Materialize a contiguous copy: argsort_along_dim computes flat element
+    // offsets purely from shape (it ignores strides), so a non-contiguous view
+    // (transpose, sliced view with offset, expand with stride 0) would otherwise
+    // read the wrong storage elements. Mirrors sum_kernel/max_kernel.
+    auto input = input_raw.contiguous();
     const int64_t ndim = input.ndim();
 
     // Normalize dimension
@@ -2838,6 +2843,24 @@ auto prod_impl(const T* input_data, int64_t n) -> T {
     for (int64_t i = 0; i < n; i++) {
         result *= input_data[i];
     }
+    return result;
+}
+
+// Complex specializations: OpenMP has no built-in reduction(*) for
+// std::complex, so use a plain scalar loop (mirrors sum_impl's complex spec).
+template<>
+inline auto prod_impl<std::complex<float>>(const std::complex<float>* input_data,
+                                           int64_t n) -> std::complex<float> {
+    std::complex<float> result{1.0f, 0.0f};
+    for (int64_t i = 0; i < n; ++i) result *= input_data[i];
+    return result;
+}
+
+template<>
+inline auto prod_impl<std::complex<double>>(const std::complex<double>* input_data,
+                                            int64_t n) -> std::complex<double> {
+    std::complex<double> result{1.0, 0.0};
+    for (int64_t i = 0; i < n; ++i) result *= input_data[i];
     return result;
 }
 
@@ -2974,6 +2997,30 @@ auto prod_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
                               input_strides, dim);
             }
             output = out_f32.to(orig);
+            break;
+        }
+        case DType::Complex64: {
+            auto* input_data = input.data<std::complex<float>>();
+            auto* output_data = output.data<std::complex<float>>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = prod_impl(input_data, input.numel());
+            } else {
+                auto strides_span = input.strides();
+                std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
+                prod_along_dim(input_data, output_data, input_shape, input_strides, dim);
+            }
+            break;
+        }
+        case DType::Complex128: {
+            auto* input_data = input.data<std::complex<double>>();
+            auto* output_data = output.data<std::complex<double>>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = prod_impl(input_data, input.numel());
+            } else {
+                auto strides_span = input.strides();
+                std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
+                prod_along_dim(input_data, output_data, input_shape, input_strides, dim);
+            }
             break;
         }
         default:
@@ -3560,7 +3607,12 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
 }
 
 // any() reduction - returns true if any element is nonzero
-auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto any_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // The REDUCE_ALL branch iterates input.data<T>()[i] flatly, which is only
+    // valid for a contiguous tensor. Materialize once at entry so both the
+    // flat full-reduction path and the strided per-dim path read logical
+    // elements of a non-contiguous view correctly.
+    auto input = input_raw.contiguous();
     const auto& input_shape = input.shape();
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
     dim = normalize_dim(dim, ndim);
@@ -3685,7 +3737,12 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 }
 
 // all() reduction - returns true if all elements are nonzero
-auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto all_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // The REDUCE_ALL branch iterates input.data<T>()[i] flatly, which is only
+    // valid for a contiguous tensor. Materialize once at entry so both the
+    // flat full-reduction path and the strided per-dim path read logical
+    // elements of a non-contiguous view correctly.
+    auto input = input_raw.contiguous();
     const auto& input_shape = input.shape();
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
     dim = normalize_dim(dim, ndim);
@@ -3957,7 +4014,12 @@ static void logsumexp_along_dim(
     }
 }
 
-auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // The REDUCE_ALL path iterates input.data<T>()[i] flatly (logsumexp_full_impl
+    // and the Float16/BFloat16 inline loops), which is only valid for a contiguous
+    // tensor. Materialize once at entry so both the flat full-reduction path and
+    // the strided per-dim path read logical elements of a non-contiguous view.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -4328,7 +4390,10 @@ auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double 
     // forced to Float32, which truncated bin assignment for Float64 tensors
     // (histogramdd already keeps Float64 — this makes histogram consistent).
     const DType ctype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
-    Tensor in_c = (input.dtype() == ctype) ? input : input.to(ctype);
+    // input.to() already returns a contiguous tensor; when no dtype conversion is
+    // needed we must still contiguify, otherwise the flat data[i] iteration below
+    // would walk the storage footprint of a non-contiguous view (transpose/slice).
+    Tensor in_c = (input.dtype() == ctype) ? input.contiguous() : input.to(ctype);
     const int64_t n = in_c.numel();
 
     Tensor edges({bins + 1}, ctype, input.device());
@@ -4398,7 +4463,10 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
     const auto orig_dtype = input.dtype();
     const bool use_f64 = (orig_dtype == DType::Float64);
     const auto compute_dtype = use_f64 ? DType::Float64 : DType::Float32;
-    Tensor inp = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input;
+    // input.to() already returns a contiguous tensor; when no dtype conversion is
+    // needed we must still contiguify, otherwise the data[i*D+d] row-major indexing
+    // below would read the wrong elements of a non-contiguous (N,D) view.
+    Tensor inp = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input.contiguous();
     const auto& device = input.device();
 
     // Auto-detect ranges from data if not provided

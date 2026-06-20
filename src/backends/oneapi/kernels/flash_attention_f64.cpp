@@ -402,28 +402,36 @@ static void launch_flash_attention_f64_backward(
                     // CUDA/ROCm FP64 backward — we don't keep an online-softmax
                     // state across the KV-tile axis, so we rebuild the row LSE
                     // here from Q/K in double).
+                    //
+                    // Single streaming pass (numerically-stable online
+                    // logsumexp): instead of one pass for the running max and a
+                    // second pass for the sum, maintain (m_row, l_row) together
+                    // and rescale l_row whenever a larger score is seen. This
+                    // halves the O(sl * hd) inner work and the redundant Q/K
+                    // global reads. Q is taken from the already-loaded Q_tile in
+                    // local memory rather than re-read from Q_base.
                     for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
+                        const double* Qr = Q_tile + row * hd;
+                        const int row_q = q_start + row;
                         double m_row = -std::numeric_limits<double>::infinity();
-                        for (int k = 0; k < sl; ++k) {
-                            if (cs && k > (q_start + row)) break;
-                            double dot = 0.0;
-                            const double* Kk = K_base + k * hd;
-                            for (int d = 0; d < hd; ++d) {
-                                dot += Q_base[(q_start + row) * hd + d] * Kk[d];
-                            }
-                            dot *= sc;
-                            if (dot > m_row) m_row = dot;
-                        }
                         double l_row = 0.0;
                         for (int k = 0; k < sl; ++k) {
-                            if (cs && k > (q_start + row)) break;
+                            if (cs && k > row_q) break;
                             double dot = 0.0;
                             const double* Kk = K_base + k * hd;
                             for (int d = 0; d < hd; ++d) {
-                                dot += Q_base[(q_start + row) * hd + d] * Kk[d];
+                                dot += Qr[d] * Kk[d];
                             }
                             dot *= sc;
-                            l_row += sycl::exp(dot - m_row);
+                            if (dot > m_row) {
+                                // Rescale the running sum to the new max.
+                                l_row = (m_row == -std::numeric_limits<double>::infinity())
+                                    ? 1.0
+                                    : l_row * sycl::exp(m_row - dot) + 1.0;
+                                m_row = dot;
+                            } else {
+                                l_row += sycl::exp(dot - m_row);
+                            }
                         }
                         l_tile[row] = (l_row > 0.0)
                             ? (m_row + sycl::log(l_row))

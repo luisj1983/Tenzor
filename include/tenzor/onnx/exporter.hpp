@@ -225,7 +225,43 @@ public:
     auto generate_name(const std::string& prefix) -> std::string;
 
 private:
-    std::unordered_map<const void*, std::string> tensor_map_; ///< Tensor pointer to ONNX name
+    /**
+     * @brief Build a stable logical identity key for a tensor.
+     *
+     * Keying the tensor map on the raw data pointer (`data_ptr()`) is unsafe:
+     * `data_ptr()` resolves to `storage->data() + offset * dtype_size`, so a
+     * view/reshape/transpose/expand whose storage offset maps to the same base
+     * address aliases its parent's pointer. Two logically distinct tensors would
+     * then collapse to one map entry, silently wiring the ONNX graph to the wrong
+     * producer.
+     *
+     * Instead we key on the full logical identity: the underlying storage object
+     * identity, the storage offset, plus the shape and strides. Two tensors share
+     * a key iff they denote exactly the same logical view of the same storage.
+     */
+    static auto tensor_identity_key(const Tensor& tensor) -> std::string {
+        std::string key;
+        // Storage object identity (intrusive_ptr -> raw Storage*). Distinct
+        // allocations never share a Storage*; views over one storage all share it.
+        const void* storage_ptr =
+            static_cast<const void*>(tensor.storage().get());
+        key.append(reinterpret_cast<const char*>(&storage_ptr), sizeof(storage_ptr));
+
+        const int64_t off = tensor.offset();
+        key.append(reinterpret_cast<const char*>(&off), sizeof(off));
+
+        key.push_back('|');
+        for (int64_t d : tensor.shape()) {
+            key.append(reinterpret_cast<const char*>(&d), sizeof(d));
+        }
+        key.push_back('|');
+        for (int64_t s : tensor.strides()) {
+            key.append(reinterpret_cast<const char*>(&s), sizeof(s));
+        }
+        return key;
+    }
+
+    std::unordered_map<std::string, std::string> tensor_map_; ///< Logical tensor identity to ONNX name
     std::unordered_map<std::string, int64_t> name_counters_;  ///< Prefix to counter mapping
 };
 

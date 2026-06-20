@@ -134,10 +134,20 @@ auto SymbolicShapeInference::infer_matmul(const Node* node) -> std::vector<Symbo
     }
 
     // General MatMul: (..., M, K) @ (..., K, N) -> (..., M, N)
-    // Output shape = lhs shape with last dim replaced by rhs last dim
+    // Broadcast the leading batch dims (everything but the last two) of both
+    // operands, mirroring torch.matmul and the concrete infer_types path in
+    // graph.cpp. The naive "lhs with last dim replaced" form is wrong when rhs
+    // has more batch dims (e.g. (M,K) @ (B,K,N) -> (B,M,N)).
     if (lhs.rank() >= 2 && rhs.rank() >= 2) {
-        SymbolicShape out_shape(lhs.dims());
-        out_shape[out_shape.rank() - 1] = rhs[rhs.rank() - 1];
+        const SymbolicDim M = lhs[lhs.rank() - 2];
+        const SymbolicDim N = rhs[rhs.rank() - 1];
+        SymbolicShape lhs_batch(std::vector<SymbolicDim>(
+            lhs.dims().begin(), lhs.dims().end() - 2));
+        SymbolicShape rhs_batch(std::vector<SymbolicDim>(
+            rhs.dims().begin(), rhs.dims().end() - 2));
+        SymbolicShape out_shape = broadcast_symbolic_shapes(lhs_batch, rhs_batch);
+        out_shape.push_back(M);
+        out_shape.push_back(N);
         return {std::move(out_shape)};
     }
     return {};
@@ -161,14 +171,28 @@ auto SymbolicShapeInference::infer_conv2d(const Node* node) -> std::vector<Symbo
     // records kernel_size/stride/padding/dilation as {h,w} vec attrs), so the
     // legacy int-attr path is only a fallback for hand-built graphs. This
     // mirrors the concrete inference in graph.cpp's OpType::Conv2d case.
+    // Track resolution: a value is only usable if it came from an explicit
+    // int-attr or from a concrete weight dim. get_int_attr returns 0 for
+    // missing keys, so an unresolved 0 must not be fabricated into a shape.
+    bool have_out_channels = node->has_attr("out_channels");
+    bool have_kernel_h = node->has_attr("kernel_h");
+    bool have_kernel_w = node->has_attr("kernel_w");
     auto out_channels = node->get_int_attr("out_channels");
     auto kernel_h = node->get_int_attr("kernel_h");
     auto kernel_w = node->get_int_attr("kernel_w");
     if (input_shapes.size() >= 2 && input_shapes[1].rank() == 4) {
         const auto& w_shape = input_shapes[1];
-        if (w_shape[0].is_concrete()) out_channels = w_shape[0].value();
-        if (w_shape[2].is_concrete()) kernel_h = w_shape[2].value();
-        if (w_shape[3].is_concrete()) kernel_w = w_shape[3].value();
+        if (w_shape[0].is_concrete()) { out_channels = w_shape[0].value(); have_out_channels = true; }
+        if (w_shape[2].is_concrete()) { kernel_h = w_shape[2].value(); have_kernel_h = true; }
+        if (w_shape[3].is_concrete()) { kernel_w = w_shape[3].value(); have_kernel_w = true; }
+    }
+
+    // If out_channels / kernel_h / kernel_w could not be resolved from either
+    // the weight tensor or int-attrs, do not fabricate a confidently-wrong
+    // output shape (kernel_term would collapse and out_channels would be 0).
+    // Mirror the other branches that return {} on missing information.
+    if (!have_out_channels || !have_kernel_h || !have_kernel_w) {
+        return {};
     }
 
     // Honor both the paired *_h/*_w int attrs and the pair-as-vec form
@@ -405,8 +429,11 @@ auto SymbolicShapeInference::infer_linear(const Node* node) -> std::vector<Symbo
 
     auto out_shape = input_shapes[0];
 
-    // Weight shape is [out_features, in_features]
-    if (input_shapes[1].rank() > 0) {
+    // A Linear activation must be rank >= 1 (*, in_features). Guard out_shape's
+    // rank before computing rank()-1 (size_t underflow to SIZE_MAX would index
+    // out of bounds via the unchecked operator[]). Weight shape is
+    // [out_features, in_features]; replace the trailing dim with out_features.
+    if (out_shape.rank() >= 1 && input_shapes[1].rank() > 0) {
         out_shape[out_shape.rank() - 1] = input_shapes[1][0];
     }
 

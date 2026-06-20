@@ -40,14 +40,21 @@ public:
     /**
      * @param mixture_distribution Categorical distribution over K components
      * @param component_distribution Distribution with rightmost batch dim K
-     * @param mixture_logits Log-probabilities of each mixture component (pre-normalized)
+     * @param mixture_logits Unnormalized log-weights of each mixture component
+     *
+     * Matches PyTorch's torch.distributions.MixtureSameFamily semantics: the
+     * supplied logits need NOT be normalized. They are converted to normalized
+     * log-weights on ingest via log_weights = logits - logsumexp(logits, -1),
+     * so log_prob / mean / variance always see a proper probability simplex
+     * (Σ_k w_k = 1). Passing already-normalized log-weights is also valid
+     * since logsumexp of normalized log-weights is 0.
      */
     MixtureSameFamily(std::shared_ptr<Distribution> mixture_distribution,
                      std::shared_ptr<Distribution> component_distribution,
                      Tensor mixture_logits)
         : mixture_(std::move(mixture_distribution))
         , component_(std::move(component_distribution))
-        , log_weights_(std::move(mixture_logits))
+        , log_weights_(normalize_log_weights(mixture_logits))
     {}
 
     /**
@@ -235,6 +242,22 @@ private:
         auto shifted = x - tenzor::unsqueeze(max_val, -1);
         auto log_sum = tenzor::log(tenzor::sum(tenzor::exp(shifted), -1));
         return max_val + log_sum;
+    }
+
+    // Convert (possibly unnormalized) mixture logits to normalized log-weights:
+    //   log_weights = logits - logsumexp(logits, dim=-1, keepdim=True)
+    // so that exp(log_weights) sums to 1 along the component dim. This mirrors
+    // PyTorch's MixtureSameFamily, which normalizes the mixing logits, and keeps
+    // log_prob / mean / variance consistent regardless of input scale.
+    static auto normalize_log_weights(const Tensor& logits) -> Tensor {
+        // Numerically-stable logsumexp over the last (component) dim, kept as a
+        // length-1 dim so it broadcasts back against `logits`.
+        auto max_val = tenzor::unsqueeze(tenzor::max(logits, -1), -1);
+        auto shifted = logits - max_val;
+        auto log_sum = tenzor::log(
+            tenzor::unsqueeze(tenzor::sum(tenzor::exp(shifted), -1), -1));
+        auto lse = max_val + log_sum;  // logsumexp(logits, -1, keepdim=True)
+        return logits - lse;
     }
 };
 

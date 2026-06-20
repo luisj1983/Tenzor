@@ -21,7 +21,14 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input_orig, int64_t dim, bool k
     auto input_shape = input.shape();
 
     if (dim < 0) {
-        out_shape = {1};
+        // Full reduction: keepdim=true yields an all-ones shape matching the
+        // input rank (CPU/PyTorch parity); keepdim=false yields a scalar.
+        // Mirrors dispatchVarianceWelford's full-reduction handling.
+        if (keepdim) {
+            out_shape.assign(input_shape.size(), 1);
+        } else {
+            out_shape = {};
+        }
     } else {
         out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
         if (keepdim) {
@@ -132,7 +139,14 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input_orig, int64_t dim, bool k
     auto input_shape = input.shape();
 
     if (dim < 0) {
-        out_shape = {1};
+        // Full reduction: keepdim=true yields an all-ones shape matching the
+        // input rank (CPU/PyTorch parity); keepdim=false yields a scalar.
+        // Mirrors dispatchVarianceWelford's full-reduction handling.
+        if (keepdim) {
+            out_shape.assign(input_shape.size(), 1);
+        } else {
+            out_shape = {};
+        }
     } else {
         out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
         if (keepdim) {
@@ -813,7 +827,12 @@ auto VulkanBackend::dispatchLogSumExp(const Tensor& input_orig, int64_t dim, boo
 }
 
 auto VulkanBackend::dispatchTriuTril(const std::string& op_name,
-                                      const Tensor& input, int64_t diagonal) -> Tensor {
+                                      const Tensor& input_orig, int64_t diagonal) -> Tensor {
+    // Materialize to packed, zero-offset storage: the shader indexes the bound
+    // buffer with stride-from-shape (rows/cols), so a transposed/permuted
+    // offset-0 view (which slips past the descriptor-offset guard) would be read
+    // with the wrong element mapping. Matches dispatchFlip/dispatchArgmax.
+    Tensor input = dispatchContiguous(input_orig);
     auto input_shape = input.shape();
     if (input_shape.size() < 2) {
         throw std::invalid_argument("triu/tril requires at least a 2D tensor");
@@ -896,7 +915,12 @@ auto VulkanBackend::dispatchTriuTril(const std::string& op_name,
     return output;
 }
 
-auto VulkanBackend::dispatchDiag(const Tensor& input, int64_t diagonal) -> Tensor {
+auto VulkanBackend::dispatchDiag(const Tensor& input_orig, int64_t diagonal) -> Tensor {
+    // Materialize to packed, zero-offset storage: the shader indexes the bound
+    // buffer with stride-from-shape (rows/cols), so a transposed/permuted
+    // offset-0 view would be misread. Matches dispatchFlip/dispatchArgmax.
+    // (dispatchTrace inherits this fix via dispatchDiag.)
+    Tensor input = dispatchContiguous(input_orig);
     auto input_shape = input.shape();
 
     int32_t device_id = input.device().index;
@@ -1122,7 +1146,11 @@ auto VulkanBackend::dispatchFlip(const Tensor& input_orig, int64_t dim) -> Tenso
     return output;
 }
 
-auto VulkanBackend::dispatchRoll(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
+auto VulkanBackend::dispatchRoll(const Tensor& input_orig, int64_t shift, int64_t dim) -> Tensor {
+    // Materialize to packed, zero-offset storage: the shader indexes the bound
+    // buffer with stride-from-shape (dim_size/inner_size), so a transposed/
+    // permuted offset-0 view would be misread. Matches dispatchFlip.
+    Tensor input = dispatchContiguous(input_orig);
     auto input_shape = input.shape();
 
     if (input.numel() == 0) {
@@ -1205,7 +1233,11 @@ auto VulkanBackend::dispatchRoll(const Tensor& input, int64_t shift, int64_t dim
     return output;
 }
 
-auto VulkanBackend::dispatchRepeatInterleave(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor {
+auto VulkanBackend::dispatchRepeatInterleave(const Tensor& input_orig, int64_t repeats, int64_t dim) -> Tensor {
+    // Materialize to packed, zero-offset storage: the shader indexes the bound
+    // buffer with stride-from-shape (dim_size/inner_size), so a transposed/
+    // permuted offset-0 view would be misread. Matches dispatchFlip.
+    Tensor input = dispatchContiguous(input_orig);
     auto input_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(input_shape.size());
 
@@ -1299,7 +1331,11 @@ auto VulkanBackend::dispatchRepeatInterleave(const Tensor& input, int64_t repeat
     return output;
 }
 
-auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor {
+auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input_orig, const Tensor& repeats, int64_t dim) -> Tensor {
+    // Materialize to packed, zero-offset storage: the shader indexes the bound
+    // input buffer with stride-from-shape (dim_size/inner_size), so a
+    // transposed/permuted offset-0 view would be misread. Matches dispatchFlip.
+    Tensor input = dispatchContiguous(input_orig);
     auto input_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(input_shape.size());
 
@@ -1307,6 +1343,32 @@ auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Te
     if (dim < 0) dim += ndim;
 
     int32_t device_id = input.device().index;
+
+    // For non-float types, round-trip through a float dtype the shader can
+    // safely reinterpret. The shader hardcodes `float input_data[]` /
+    // `float output_data[]` SSBO bindings, so any 4-byte non-float input
+    // would silently get reinterpreted as float garbage. Int64 values up
+    // to 2^53 are exactly representable in Float64; smaller integer types
+    // are routed via Float32. (Found by sparse SpGEMM → to_dense round-trip
+    // returning wrong rows: arange Int64 ⇒ Vulkan saw garbage repeats.)
+    //
+    // Done BEFORE the prefix-sum/offsets GPU work below so that the heavy
+    // cumsum + blocking host readback + build_offsets dispatch run only once,
+    // in the float recursion, instead of being computed and discarded here on
+    // every integer-typed call (the common case for index/repeat tensors).
+    DType orig_dtype = input.dtype();
+    if (orig_dtype == DType::Int8 || orig_dtype == DType::Bool ||
+        orig_dtype == DType::UInt8 || orig_dtype == DType::Int16 ||
+        orig_dtype == DType::Int32) {
+        Tensor f32_input = dispatchCast(input, DType::Float32);
+        Tensor f32_result = dispatchRepeatInterleaveTensor(f32_input, repeats, dim);
+        return dispatchCast(f32_result, orig_dtype);
+    }
+    if (orig_dtype == DType::Int64) {
+        Tensor f64_input = dispatchCast(input, DType::Float64);
+        Tensor f64_result = dispatchRepeatInterleaveTensor(f64_input, repeats, dim);
+        return dispatchCast(f64_result, DType::Int64);
+    }
 
     // Cast repeats to Int32 if needed (shader expects int buffer)
     Tensor int_repeats = (repeats.dtype() != DType::Int32)
@@ -1362,27 +1424,6 @@ auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Te
     // Build output shape
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     out_shape[dim] = total_repeats;
-
-    // For non-float types, round-trip through a float dtype the shader can
-    // safely reinterpret. The shader hardcodes `float input_data[]` /
-    // `float output_data[]` SSBO bindings, so any 4-byte non-float input
-    // would silently get reinterpreted as float garbage. Int64 values up
-    // to 2^53 are exactly representable in Float64; smaller integer types
-    // are routed via Float32. (Found by sparse SpGEMM → to_dense round-trip
-    // returning wrong rows: arange Int64 ⇒ Vulkan saw garbage repeats.)
-    DType orig_dtype = input.dtype();
-    if (orig_dtype == DType::Int8 || orig_dtype == DType::Bool ||
-        orig_dtype == DType::UInt8 || orig_dtype == DType::Int16 ||
-        orig_dtype == DType::Int32) {
-        Tensor f32_input = dispatchCast(input, DType::Float32);
-        Tensor f32_result = dispatchRepeatInterleaveTensor(f32_input, repeats, dim);
-        return dispatchCast(f32_result, orig_dtype);
-    }
-    if (orig_dtype == DType::Int64) {
-        Tensor f64_input = dispatchCast(input, DType::Float64);
-        Tensor f64_result = dispatchRepeatInterleaveTensor(f64_input, repeats, dim);
-        return dispatchCast(f64_result, DType::Int64);
-    }
 
     // Float32 vs Float64 shader. Other dtypes are handled via cast-roundtrip
     // above; Float16 / BFloat16 / FP8 are widened to Float32 by dispatchCast
@@ -1446,20 +1487,27 @@ auto VulkanBackend::dispatchCountNonzero(const Tensor& input) -> Tensor {
         return dispatchCountNonzero(input.to(DType::Float32));
     }
 
-    int32_t device_id = input.device().index;
+    // Materialize to packed, zero-offset storage: the shader reads numel
+    // consecutive elements from the bound buffer, so a strided slice view would
+    // read the wrong elements. Matches dispatchVarianceWelford.
+    Tensor work_input = dispatchContiguous(input);
 
-    // Shader outputs the count as a float (or float64), which we then convert to Int64
-    bool is_f64 = (input.dtype() == DType::Float64);
+    int32_t device_id = work_input.device().index;
+
+    // Shader outputs the count: f64 path stores it as float64, f32 path stores
+    // the exact integer count as a uint (avoids the 2^24 float mantissa limit).
+    // Both are converted to Int64 on host below.
+    bool is_f64 = (work_input.dtype() == DType::Float64);
     std::string shader_name = is_f64 ? "count_nonzero_f64" : "count_nonzero";
-    DType out_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    DType out_dtype = is_f64 ? DType::Float64 : DType::UInt32;
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    Tensor output({1}, out_dtype, input.device());
+    Tensor output({1}, out_dtype, work_input.device());
 
-    const void* buffer_in  = input.data_ptr();
+    const void* buffer_in  = work_input.data_ptr();
     const void* buffer_out = output.data_ptr();
 
-    size_t buffer_size_in  = input.numel() * input.dtype_size();
+    size_t buffer_size_in  = work_input.numel() * work_input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -1474,7 +1522,7 @@ auto VulkanBackend::dispatchCountNonzero(const Tensor& input) -> Tensor {
     struct {
         uint32_t num_elements;
     } pushConstants;
-    pushConstants.num_elements = static_cast<uint32_t>(input.numel());
+    pushConstants.num_elements = static_cast<uint32_t>(work_input.numel());
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -1490,7 +1538,8 @@ auto VulkanBackend::dispatchCountNonzero(const Tensor& input) -> Tensor {
     endSingleTimeCommands(cmdBuffer, device_id);
     synchronize(device_id);
 
-    // Convert float -> Int64; keep shape {1} to match CPU backend
+    // Convert count (uint32 for f32 path, float64 for f64 path) -> Int64;
+    // keep shape {1} to match CPU backend
     return output.to(DType::Int64);
 }
 
@@ -1506,6 +1555,10 @@ auto VulkanBackend::dispatchNansum(const Tensor& input) -> Tensor {
     if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
         work_input = input.to(DType::Float32);
     }
+    // Materialize to packed, zero-offset storage: the shader reads numel
+    // consecutive elements from the bound buffer, so a strided slice view would
+    // read the wrong elements. Matches dispatchVarianceWelford.
+    work_input = dispatchContiguous(work_input);
 
     int32_t device_id = work_input.device().index;
 
@@ -1567,6 +1620,10 @@ auto VulkanBackend::dispatchNanmean(const Tensor& input) -> Tensor {
     if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
         work_input = input.to(DType::Float32);
     }
+    // Materialize to packed, zero-offset storage: the shader reads numel
+    // consecutive elements from the bound buffer, so a strided slice view would
+    // read the wrong elements. Matches dispatchVarianceWelford.
+    work_input = dispatchContiguous(work_input);
 
     int32_t device_id = work_input.device().index;
 
@@ -1629,6 +1686,10 @@ auto VulkanBackend::dispatchAminmax(const Tensor& input) -> std::pair<Tensor, Te
     if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
         work_input = input.to(DType::Float32);
     }
+    // Materialize to packed, zero-offset storage: the shader reads numel
+    // consecutive elements from the bound buffer, so a strided slice view would
+    // read the wrong elements. Matches dispatchVarianceWelford.
+    work_input = dispatchContiguous(work_input);
 
     int32_t device_id = work_input.device().index;
 

@@ -144,8 +144,16 @@ tenzor_discover_tests(test_quantization_e2e_parity LABELS "backend_parity;quanti
 # Real-int8 quantized-kernel parity (QuantizedLinear across backends)
 add_parity_test(test_quantized_kernel_parity test_quantized_kernel_parity.cpp)
 
+# Quantized conv2d with batch*out_channels > 65535 — guards the CUDA gridDim.z
+# overflow fix (cap grid_z at 65535 + grid-stride over flattened (b, oc)).
+add_parity_test(test_quantized_conv2d_large_batch test_quantized_conv2d_large_batch.cpp)
+
 # Nested tensor parity tests (nested_softmax, layer_norm, attention fwd+bwd)
 add_parity_test(test_nested_parity test_nested_parity.cpp)
+
+# Nested layer norm with NON-power-of-two inner dim — guards the nested LN
+# tree-reduction fix (a power-of-two-only reduction drops the per-row tail).
+add_parity_test(test_nested_layernorm_parity test_nested_layernorm_parity.cpp)
 
 # Vision helpers and fused ops parity (Phase 3.1)
 add_parity_test(test_vision_fused_parity test_vision_fused_parity.cpp)

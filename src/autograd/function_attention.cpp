@@ -167,16 +167,29 @@ auto composed_attention_backward(const Tensor& dO,
     Tensor S_exp_sum = tenzor::sum(S_exp, /*dim=*/std::optional<int64_t>{-1}, /*keepdim=*/true);
     Tensor P = S_exp / S_exp_sum;
 
-    // Replay forward Philox dropout on P (audit M4-rem follow-up, A.11):
+    // Replay forward Philox dropout (audit M4-rem follow-up, A.11):
     // Build the same dropout mask the forward applied using the shared
     // `philox_dropout_mask` op (same counter convention `(bh, qi, ki, 0)`
     // as host_philox_uniform / forward replay). The mask is generated on
     // CPU then ferried to P's device — replaces the previous host triple-
     // for-loop, which was effectively a hand-rolled re-implementation of
-    // philox_dropout_mask. The mask op already returns scale=1/(1-p) for
-    // kept positions and 0 for dropped, which is exactly the
-    // multiplicative correction we need on P (inverted dropout).
-    if (dropout_p > 0.0f && rng_seed != 0ull) {
+    // philox_dropout_mask. The mask op returns scale=1/(1-p) for kept
+    // positions and 0 for dropped, the multiplicative correction for the
+    // inverted-dropout forward (Pd = P_soft * mask, O = Pd @ V).
+    //
+    // CRITICAL (audit core-25): the softmax Jacobian must use the *unmasked*
+    // softmax P_soft, not Pd. The dropout mask sits between P_soft and the
+    // output, so its only effect on the softmax backward is to scale the
+    // incoming gradient: dL/dP_soft = dP * mask. Folding the mask into both
+    // the outer P factor and the row-sum (dS = Pd*(dP - rowsum(dP*Pd)))
+    // double-applies it to the row-correction term, over-scaling it by
+    // 1/(1-p) at every kept position and corrupting dQ/dK/dV whenever
+    // dropout_p > 0. Keep P (= P_soft) for the Jacobian; track Pd separately
+    // for dV and for masking the incoming gradient.
+    Tensor Pd = P;          // Pd = P_soft * mask (== P_soft when no dropout)
+    bool has_dropout = (dropout_p > 0.0 && rng_seed != 0ull);
+    Tensor mask_dev;        // valid only when has_dropout
+    if (has_dropout) {
         auto P_shape = P.shape();
         std::vector<int64_t> mask_shape(P_shape.begin(), P_shape.end());
         Tensor mask_cpu = philox_dropout_mask(
@@ -185,22 +198,27 @@ auto composed_attention_backward(const Tensor& dO,
             rng_seed,
             /*offset=*/0,
             DType::Float32);
-        Tensor mask_dev = mask_cpu.to(P.device()).to(P.dtype());
-        P = P * mask_dev;
+        mask_dev = mask_cpu.to(P.device()).to(P.dtype());
+        Pd = P * mask_dev;
     }
 
-    // dV = P^T @ dO
-    Tensor Pt = tenzor::transpose(P, -1, -2);
+    // dV = Pd^T @ dO   (forward used Pd, so dV depends on the masked product)
+    Tensor Pt = tenzor::transpose(Pd, -1, -2);
     Tensor dV3 = tenzor::bmm(Pt, dO3);
 
-    // dP = dO @ V^T
+    // dP = dO @ V^T   (= dL/dPd)
     Tensor Vt = tenzor::transpose(V3, -1, -2);
     Tensor dP = tenzor::bmm(dO3, Vt);
 
-    // dS = P * (dP - sum(dP * P, dim=-1, keepdim))
-    Tensor dPP = dP * P;
-    Tensor row_sum = tenzor::sum(dPP, /*dim=*/std::optional<int64_t>{-1}, /*keepdim=*/true);
-    Tensor dS = P * (dP - row_sum);
+    // Gradient flowing into the softmax output: dL/dP_soft = dP * mask.
+    // Without dropout this is just dP.
+    Tensor g = has_dropout ? (dP * mask_dev) : dP;
+
+    // Softmax backward on the UNMASKED softmax P (= P_soft):
+    //   dS = P * (g - sum(g * P, dim=-1, keepdim))
+    Tensor gP = g * P;
+    Tensor row_sum = tenzor::sum(gP, /*dim=*/std::optional<int64_t>{-1}, /*keepdim=*/true);
+    Tensor dS = P * (g - row_sum);
 
     // dQ = dS @ K * scale
     Tensor dQ3 = tenzor::bmm(dS, K3);

@@ -279,6 +279,23 @@ auto maxpool2d_forward_kernel(const Tensor& input_orig,
     int64_t H = shape[2];
     int64_t W = shape[3];
 
+    // PyTorch semantics: padding must not exceed half the effective kernel
+    // size, otherwise a pooling window can lie entirely in the padded region
+    // (the effective kernel span is dilation*(kernel-1)+1). Enforcing this
+    // guarantees every output window contains at least one valid input
+    // element, so the forward impl never emits -inf / a bogus index 0 that
+    // would corrupt the backward scatter.
+    for (int i = 0; i < 2; ++i) {
+        int64_t effective_kernel = dilation[i] * (kernel_size[i] - 1) + 1;
+        if (2 * padding[i] > effective_kernel) {
+            throw std::runtime_error(
+                "maxpool2d: padding (" + std::to_string(padding[i]) +
+                ") should be at most half of the effective kernel size (" +
+                std::to_string(effective_kernel) + ") on axis " +
+                std::to_string(i));
+        }
+    }
+
     int64_t H_out = (H + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) / stride[0] + 1;
     int64_t W_out = (W + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) / stride[1] + 1;
 
@@ -2274,7 +2291,7 @@ void fractional_maxpool3d_backward_impl(const T* grad_out_data, const int64_t* i
     int64_t in_spatial = D * H * W;
     int64_t out_spatial = out_d * out_h * out_w;
 
-    std::memset(grad_in_data, 0, N * C * in_spatial * sizeof(T));
+    std::fill_n(grad_in_data, N * C * in_spatial, T{});
 
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -2517,7 +2534,7 @@ void max_unpool3d_impl(const T* in_data, const int64_t* idx_data, T* out_data,
     int64_t out_spatial = out_d * out_h * out_w;
     int64_t in_spatial = in_d * in_h * in_w;
 
-    std::memset(out_data, 0, N * C * out_spatial * sizeof(T));
+    std::fill_n(out_data, N * C * out_spatial, T{});
 
     #pragma omp parallel for collapse(2)
     for (int64_t n = 0; n < N; ++n) {

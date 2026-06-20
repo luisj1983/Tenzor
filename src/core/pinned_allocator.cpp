@@ -5,6 +5,8 @@
 
 #include "tenzor/core/pinned_allocator.hpp"
 #include <algorithm>
+#include <functional>
+#include <numeric>
 #include <stdexcept>
 #include <sstream>
 #include <cstring>
@@ -288,19 +290,38 @@ auto PinnedMemoryAllocator::defragment() -> size_t {
 
     size_t coalesce_count = 0;
 
-    // Bucket every block into its owning pool in a SINGLE pass over block_map_
-    // (O(N)), rather than rescanning the whole map once per pool (O(pools*N)).
-    // block_map_ is keyed by pointer, so each pool's bucket is already sorted
-    // by address on insertion.
+    // Bucket every block into its owning pool. Pool regions are disjoint
+    // address ranges, so sort their indices once by base_ptr (O(P log P)) and
+    // binary-search the owning pool for each block (O(N log P)) rather than
+    // rescanning every pool per block (O(N*P)). block_map_ is keyed by pointer,
+    // so each pool's bucket is already sorted by address on insertion.
+    std::vector<size_t> pool_order(pools_.size());
+    std::iota(pool_order.begin(), pool_order.end(), size_t{0});
+    // Use std::less<void*> for a well-defined total order over pointers,
+    // matching the ordering std::map<void*,...> uses for block_map_.
+    const std::less<void*> ptr_less{};
+    std::sort(pool_order.begin(), pool_order.end(),
+              [this, &ptr_less](size_t a, size_t b) {
+                  return ptr_less(pools_[a].base_ptr, pools_[b].base_ptr);
+              });
+
     std::vector<std::vector<MemoryBlock*>> pool_blocks(pools_.size());
     for (auto& [ptr, block] : block_map_) {
-        for (size_t p = 0; p < pools_.size(); ++p) {
-            const auto& pool = pools_[p];
-            if (block->ptr >= pool.base_ptr &&
-                block->ptr < static_cast<char*>(pool.base_ptr) + pool.size) {
-                pool_blocks[p].push_back(block.get());
-                break;
-            }
+        // Find the last pool whose base_ptr is <= block->ptr (the only pool
+        // that could contain it, since ranges are disjoint and ordered).
+        auto it = std::upper_bound(
+            pool_order.begin(), pool_order.end(), block->ptr,
+            [this, &ptr_less](void* value, size_t idx) {
+                return ptr_less(value, pools_[idx].base_ptr);
+            });
+        if (it == pool_order.begin()) {
+            continue;  // Below the lowest pool base; not owned by any pool.
+        }
+        const size_t p = *std::prev(it);
+        const auto& pool = pools_[p];
+        if (block->ptr >= pool.base_ptr &&
+            block->ptr < static_cast<char*>(pool.base_ptr) + pool.size) {
+            pool_blocks[p].push_back(block.get());
         }
     }
 

@@ -1,12 +1,15 @@
 #version 450
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // EmbeddingBag Backward Pass (Float32)
 // Scatter-add gradients from grad_output back to embedding table based on indices and offsets.
 // Each thread handles one (bag, dim) pair: for each index in the bag range,
 // atomicAdd grad to the corresponding embedding row.
 //
-// Input: grad_output (num_bags, embedding_dim), indices (total_indices), offsets (num_offsets)
+// Input: grad_output (num_bags, embedding_dim), indices (total_indices), offsets (num_offsets),
+//        max_indices (num_bags, embedding_dim) — per-(bag,feature) global argmax element index,
+//        produced by the forward pass; only meaningful in max mode.
 // Output: grad_weight (num_embeddings, embedding_dim) — zero-initialized by host
 
 layout(local_size_x_id = 0) in;
@@ -15,6 +18,7 @@ layout(binding = 0) buffer GradOutput { float grad_output_data[]; };   // (num_b
 layout(binding = 1) buffer Indices { int indices_data[]; };             // (total_indices)
 layout(binding = 2) buffer Offsets { int offset_data[]; };              // (num_offsets)
 layout(binding = 3) buffer GradWeight { float grad_weight_data[]; };   // (num_embeddings, embedding_dim)
+layout(binding = 4) buffer MaxIndices { int64_t max_idx_data[]; };      // (num_bags, embedding_dim) argmax element idx (max mode)
 
 layout(push_constant) uniform PushConstants {
     uint num_bags;
@@ -53,16 +57,28 @@ void main() {
 
     float grad_val = grad_output_data[bag * params.embedding_dim + j];
 
+    // Max mode: the full gradient routes only to the single embedding row that
+    // achieved the per-feature maximum in the forward pass. The forward emits, for
+    // each (bag, feature), the GLOBAL element index (position into the indices
+    // array) that won the argmax; the gradient goes to that element's vocabulary
+    // row only. This matches the CPU reference (scatter_max).
+    if (params.mode == 2) {
+        int64_t elem = max_idx_data[bag * params.embedding_dim + j];
+        if (elem < 0) return;  // empty bag — no contribution
+        if (elem >= int64_t(params.total_indices)) return;  // guard against stale/out-of-range
+        int idx = indices_data[uint(elem)];
+        if (idx >= 0 && idx < int(params.num_embeddings)) {
+            atomicAdd(grad_weight_data[uint(idx) * params.embedding_dim + j], grad_val);
+        }
+        return;
+    }
+
     // For mean mode, divide gradient by bag size
     if (params.mode == 1) {
         grad_val /= float(bag_size);
     }
 
-    // For max mode, only the max element gets the gradient.
-    // Without saved argmax indices, we approximate by distributing to all elements
-    // (same as sum mode). The host should pass argmax for exact max backward.
-
-    // Scatter-add to each embedding row in this bag
+    // Sum / mean mode: scatter-add the gradient to every embedding row in this bag.
     for (int i = start; i < end_val; ++i) {
         int idx = indices_data[i];
         if (idx >= 0 && idx < int(params.num_embeddings)) {

@@ -603,7 +603,12 @@ auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets,
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off = off_cpu.data<int64_t>();
     int64_t B = off_cpu.numel() - 1;
-    int64_t D = (values.shape().size() > 1) ? values.shape()[1] : 1;
+    // Inner feature size = product of ALL dims after dim 0, so a values tensor
+    // [total_len, d1, d2, ...] is fully covered (not just shape[1]). This
+    // matches the CUDA kernel's D = values.numel() / total_len.
+    const auto& v_shape = values.shape();
+    int64_t total_len = v_shape.empty() ? 0 : v_shape[0];
+    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
 
     auto padded = tenzor::full({B, max_len, D}, padding_value,
                                 values.dtype(), values.device());
@@ -615,7 +620,10 @@ auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets,
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t len = off[b + 1] - start;
-            for (int64_t pos = 0; pos < len; ++pos) {
+            // Truncate to the padded width so a segment longer than max_len
+            // cannot write past the row (matches the CUDA kernel's behavior).
+            int64_t copy = len < max_len ? len : max_len;
+            for (int64_t pos = 0; pos < copy; ++pos) {
                 for (int64_t d = 0; d < D; ++d) {
                     pad_ptr[(b * max_len + pos) * D + d] = val_ptr[(start + pos) * D + d];
                 }
@@ -628,7 +636,10 @@ auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets,
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t len = off[b + 1] - start;
-            for (int64_t pos = 0; pos < len; ++pos) {
+            // Truncate to the padded width so a segment longer than max_len
+            // cannot write past the row (matches the CUDA kernel's behavior).
+            int64_t copy = len < max_len ? len : max_len;
+            for (int64_t pos = 0; pos < copy; ++pos) {
                 for (int64_t d = 0; d < D; ++d) {
                     pad_ptr[(b * max_len + pos) * D + d] = val_ptr[(start + pos) * D + d];
                 }
@@ -652,7 +663,9 @@ auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> T
     const auto* off = off_cpu.data<int64_t>();
     int64_t B = off_cpu.numel() - 1;
     int64_t max_len = padded.shape()[1];
-    int64_t D = (padded.shape().size() > 2) ? padded.shape()[2] : 1;
+    // Inner feature size = product of ALL dims after dim 1, covering 4D+ padded
+    // inputs (not just shape[2]). Matches CUDA's D = padded.numel() / (B * max_len).
+    int64_t D = (B > 0 && max_len > 0) ? padded.numel() / (B * max_len) : 1;
     int64_t total_len = off[B];
 
     auto values = tenzor::empty({total_len, D}, padded.dtype(), padded.device());
@@ -664,7 +677,10 @@ auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> T
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t len = off[b + 1] - start;
-            for (int64_t pos = 0; pos < len; ++pos) {
+            // Truncate to the padded width so a segment longer than max_len
+            // cannot write past the row (matches the CUDA kernel's behavior).
+            int64_t copy = len < max_len ? len : max_len;
+            for (int64_t pos = 0; pos < copy; ++pos) {
                 for (int64_t d = 0; d < D; ++d) {
                     val_ptr[(start + pos) * D + d] = pad_ptr[(b * max_len + pos) * D + d];
                 }
@@ -677,7 +693,10 @@ auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> T
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t len = off[b + 1] - start;
-            for (int64_t pos = 0; pos < len; ++pos) {
+            // Truncate to the padded width so a segment longer than max_len
+            // cannot write past the row (matches the CUDA kernel's behavior).
+            int64_t copy = len < max_len ? len : max_len;
+            for (int64_t pos = 0; pos < copy; ++pos) {
                 for (int64_t d = 0; d < D; ++d) {
                     val_ptr[(start + pos) * D + d] = pad_ptr[(b * max_len + pos) * D + d];
                 }

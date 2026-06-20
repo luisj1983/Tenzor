@@ -458,7 +458,7 @@ namespace oneapi {
     auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::queue& queue) -> Tensor;
     auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, sycl::queue& queue) -> Tensor;
     auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& queue) -> Tensor;
-    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sycl::queue& queue) -> Tensor;
+    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value, sycl::queue& queue) -> Tensor;
     auto nonzero_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto one_hot_kernel(const Tensor& indices, int64_t num_classes, DType output_dtype, sycl::queue& queue) -> Tensor;
     auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue& queue) -> Tensor;
@@ -2080,7 +2080,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaskedFill,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+            double value = attrs.get_float(AttrKey::Value, 0.0);
             return {oneapi::masked_fill_kernel(inputs[0], inputs[1], value, get_q(inputs))};
         });
 
@@ -3686,10 +3686,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
                 rows = tenzor::reshape(rows, {seq_len, 1});
                 cols = tenzor::reshape(cols, {1, seq_len});
-                Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
-                Tensor neg_inf = tenzor::full(scores_shape, -1e9,
-                                              scores.dtype(), scores.device());
-                scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
+                Tensor causal_mask = tenzor::gt(cols.to(DType::Float64), rows.to(DType::Float64));
+                // Use where-based selection rather than scores + mask*(-inf):
+                // a -1e9 sentinel saturates to ~-65504 in Float16/BFloat16, which
+                // leaves masked (future) positions with nonzero softmax weight and
+                // leaks gradient mass into dQ/dK/dV. True -inf zeroes those weights,
+                // matching the OneAPI forward composed path. where() (not additive)
+                // avoids the 0.0 * -inf = NaN that would poison every kept score.
+                Tensor neg_inf = tenzor::full(scores_shape,
+                    -std::numeric_limits<double>::infinity(),
+                    scores.dtype(), scores.device());
+                scores = tenzor::where(causal_mask, neg_inf, scores);
             }
 
             // Softmax along last dim

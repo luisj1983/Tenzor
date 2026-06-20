@@ -302,7 +302,13 @@ add_custom_command(
         -o ${ONEAPI_SO_OUTPUT}
         -Wl,-soname,tenzor_backend_oneapi.so
         -L${CMAKE_SOURCE_DIR}/bin -ltenzor_core
+        # Build-tree rpath (find libtenzor_core during local runs) plus
+        # relocatable $ORIGIN rpaths so the INSTALLED .so finds libtenzor_core
+        # relative to itself: $ORIGIN for the wheel (co-located) layout and
+        # $ORIGIN/../.. for the FHS layout (lib/tenzor/backends -> lib).
         -Wl,-rpath,${CMAKE_SOURCE_DIR}/bin
+        -Wl,-rpath,$ORIGIN
+        -Wl,-rpath,$ORIGIN/../..
         ${SYCL_LINK_FLAGS}
         ${ONEMKL_LINK_FLAGS}
         ${ONEDNN_LINK_FLAGS}

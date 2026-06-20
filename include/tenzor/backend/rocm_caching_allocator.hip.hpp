@@ -352,6 +352,15 @@ private:
      */
     bool handle_allocation_failure(size_t size, int device);
 
+    /**
+     * @brief Garbage-collect free blocks assuming mutex_ is already held.
+     *
+     * Internal helper used by both the public garbage_collect() (which acquires
+     * the lock) and handle_allocation_failure() (which is already called under
+     * the lock from allocate()). Must NOT lock mutex_ itself.
+     */
+    void garbage_collect_locked(int device, bool aggressive);
+
     // Per-device data structures
     struct DeviceAllocator {
         // Free blocks ordered by size (for best-fit)

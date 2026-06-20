@@ -1209,11 +1209,31 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
 
     int32_t device_id = a.device().index;
 
+    // Small integer dtypes (Int8/Int16/UInt8/UInt16) have no dedicated
+    // comparison shader. The Float32 "comparison" shader declares its buffers as
+    // `float a[]` (4 bytes/element), so binding a 1- or 2-byte integer tensor
+    // would reinterpret integer bytes as IEEE-754 floats and read past the end of
+    // the buffer. Upcast them to Int32 so they route to comparison_i32.
+    switch (a.dtype()) {
+        case DType::Int8:
+        case DType::Int16:
+        case DType::UInt8:
+        case DType::UInt16:
+            a = a.to(DType::Int32);
+            b = b.to(DType::Int32);
+            break;
+        default:
+            break;
+    }
+
     // Select shader based on input dtype
     std::string shader_name;
     switch (a.dtype()) {
         case DType::Bool:
             shader_name = "comparison_bool";
+            break;
+        case DType::Float32:
+            shader_name = "comparison";
             break;
         case DType::Float64:
             shader_name = "comparison_f64";
@@ -1231,9 +1251,11 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
             shader_name = "comparison_bf16";
             break;
         default:
-            // Float32 uses the default comparison shader
-            shader_name = "comparison";
-            break;
+            // Reject any dtype without a layout-matched comparison shader rather
+            // than silently falling back to the Float32 buffer layout.
+            throw std::runtime_error(
+                "dispatchComparisonOp: unsupported dtype for comparison '" +
+                op_name + "': " + std::string(dtype_name(a.dtype())));
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -1480,42 +1502,17 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
 
         constexpr uint32_t WG_SIZE = 256;
         uint32_t input_size = static_cast<uint32_t>(reduction_input.numel());
-        uint32_t num_workgroups = (input_size + WG_SIZE - 1) / WG_SIZE;
-
-        // Pass 1: reduce input -> partial results (one per workgroup)
-        Tensor partial({static_cast<int64_t>(num_workgroups)}, reduction_input.dtype(), reduction_input.device());
 
         auto* tree_pipeline = getPipeline("reduction_tree", device_id);
-
-        const void* buf_in = reduction_input.data_ptr();
-        const void* buf_partial = partial.data_ptr();
-        size_t sz_in = input_size * reduction_input.dtype_size();
-        size_t sz_partial = num_workgroups * partial.dtype_size();
-
-        std::vector<std::pair<uint32_t, const void*>> bindings1 = {{0, buf_in}, {1, buf_partial}};
-        std::vector<size_t> sizes1 = {sz_in, sz_partial};
-        VkDescriptorSet ds1 = allocateAndWriteDescriptorSet(device_id, tree_pipeline, bindings1, sizes1);
 
         struct TreePushConstants {
             uint32_t input_size;
             uint32_t output_size;
             uint32_t reduce_op;
         } treePC;
-        treePC.input_size = input_size;
-        treePC.output_size = num_workgroups;
         treePC.reduce_op = tree_reduce_op;
 
-        VkCommandBuffer cmd1 = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE, tree_pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               tree_pipeline->layout(), 0, 1, &ds1, 0, nullptr);
-        vkCmdPushConstants(cmd1, tree_pipeline->layout(),
-                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(treePC), &treePC);
-        vkCmdDispatch(cmd1, num_workgroups, 1, 1);
-        insertComputeOnlyBarrier(cmd1);
-
-        // Pass 2: reduce partial results -> single scalar
-        // Calculate output shape for full reduction
+        // Output shape for full reduction
         std::vector<int64_t> out_shape;
         if (keepdim) {
             out_shape.assign(input_shape.size(), 1);
@@ -1524,24 +1521,71 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         }
         Tensor output(out_shape, reduction_input.dtype(), reduction_input.device());
 
+        // Iterative tree reduction. Each pass reduces `cur_size` values into
+        // ceil(cur_size / WG_SIZE) partials by dispatching that many workgroups
+        // (the shader writes output_buf.data[group_id], one value per group).
+        // We ping-pong between two scratch buffers until a single value remains.
+        // The final pass (next_wg == 1) writes straight into the scalar output,
+        // so output[0] always holds the sum of ALL input elements.
+        //
+        // The previous two-pass implementation broke for numel > WG_SIZE*WG_SIZE
+        // (~65536): pass 2 then needed >1 workgroup, each writing output[group_id]
+        // into the 1-element output buffer — a wrong result plus an out-of-bounds
+        // device write. The loop below correctly collapses any input size.
+        VkCommandBuffer cmd1 = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE, tree_pipeline->pipeline());
+
+        // Two ping-pong scratch buffers, each sized for the first pass's partials.
+        uint32_t first_wg = (input_size + WG_SIZE - 1) / WG_SIZE;
+        Tensor scratch_a({static_cast<int64_t>(first_wg)}, reduction_input.dtype(), reduction_input.device());
+        Tensor scratch_b({static_cast<int64_t>(std::max<uint32_t>((first_wg + WG_SIZE - 1) / WG_SIZE, 1u))},
+                         reduction_input.dtype(), reduction_input.device());
+
+        const void* cur_buf = reduction_input.data_ptr();
+        size_t cur_bytes = static_cast<size_t>(input_size) * reduction_input.dtype_size();
+        uint32_t cur_size = input_size;
+        bool use_a = true;  // next pass writes into scratch_a
+
         const void* buf_out = output.data_ptr();
         size_t sz_out = std::max<size_t>(output.numel(), 1) * output.dtype_size();
 
-        // Reuse the same pipeline for pass 2
-        std::vector<std::pair<uint32_t, const void*>> bindings2 = {{0, buf_partial}, {1, buf_out}};
-        std::vector<size_t> sizes2 = {sz_partial, sz_out};
-        VkDescriptorSet ds2 = allocateAndWriteDescriptorSet(device_id, tree_pipeline, bindings2, sizes2);
+        while (true) {
+            uint32_t next_wg = (cur_size + WG_SIZE - 1) / WG_SIZE;
+            bool final_pass = (next_wg == 1);
 
-        treePC.input_size = num_workgroups;
-        treePC.output_size = 1;
-        uint32_t pass2_wg = (num_workgroups + WG_SIZE - 1) / WG_SIZE;
+            const void* dst_buf;
+            size_t dst_bytes;
+            if (final_pass) {
+                dst_buf = buf_out;
+                dst_bytes = sz_out;
+            } else {
+                Tensor& dst = use_a ? scratch_a : scratch_b;
+                dst_buf = dst.data_ptr();
+                dst_bytes = static_cast<size_t>(next_wg) * dst.dtype_size();
+            }
 
-        vkCmdBindDescriptorSets(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               tree_pipeline->layout(), 0, 1, &ds2, 0, nullptr);
-        vkCmdPushConstants(cmd1, tree_pipeline->layout(),
-                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(treePC), &treePC);
-        vkCmdDispatch(cmd1, pass2_wg, 1, 1);
-        insertComputeOnlyBarrier(cmd1);
+            std::vector<std::pair<uint32_t, const void*>> bindings = {{0, cur_buf}, {1, dst_buf}};
+            std::vector<size_t> sizes = {cur_bytes, dst_bytes};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, tree_pipeline, bindings, sizes);
+
+            treePC.input_size = cur_size;
+            treePC.output_size = next_wg;
+
+            vkCmdBindDescriptorSets(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   tree_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd1, tree_pipeline->layout(),
+                              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(treePC), &treePC);
+            vkCmdDispatch(cmd1, next_wg, 1, 1);
+            insertComputeOnlyBarrier(cmd1);
+
+            if (final_pass) break;
+
+            // Output of this pass becomes the input of the next pass.
+            cur_buf = dst_buf;
+            cur_bytes = dst_bytes;
+            cur_size = next_wg;
+            use_a = !use_a;
+        }
 
         endSingleTimeCommands(cmd1, device_id);
         // No synchronize() here — see comment in dispatchReduction.
@@ -1754,7 +1798,13 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a_raw, const Tensor& b_raw) -> 
     // This is common in linear layers: weight.transpose(0, 1)
     // Check if B is a simple transpose (common for linear layers: weight.T)
     // If so, we can use the _bt shader variant instead of making a contiguous copy
-    bool b_is_transposed = !b.is_contiguous() && isSimpleTranspose2D(b);
+    // The _bt fast path binds b's underlying storage base (storage()->data(),
+    // see below) and the shader indexes from element 0, so it is only valid when
+    // the view starts at storage offset 0. A transposed view with a non-zero
+    // offset must take the contiguous-copy fallback (dispatchContiguous produces
+    // an offset-0 tensor), otherwise the kernel would read from the wrong start
+    // and silently produce wrong results.
+    bool b_is_transposed = !b.is_contiguous() && b.offset() == 0 && isSimpleTranspose2D(b);
     Tensor b_for_compute = b_is_transposed ? b : ((b.is_contiguous() && b.offset() == 0) ? b : dispatchContiguous(b));
 
     auto a_shape = a_contig.shape();
@@ -2252,20 +2302,30 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     // Create gradient input tensor
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
+    // The shaders assume dense, zero-offset NCHW layout (they index from the
+    // storage base with contiguous strides). A non-contiguous or offset view
+    // would read from the wrong locations and silently produce wrong gradients,
+    // so materialize contiguous, offset-0 copies first (mirrors the binary /
+    // unary / matmul paths).
+    Tensor grad_output_c = (grad_output.is_contiguous() && grad_output.offset() == 0)
+                               ? grad_output : dispatchContiguous(grad_output);
+    Tensor weight_c = (weight.is_contiguous() && weight.offset() == 0)
+                          ? weight : dispatchContiguous(weight);
+
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_weight = weight_c.data_ptr();
     const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_weight, buffer_size_grad_in;
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
-        buffer_size_weight = ((weight.numel() + 1) / 2) * 4;
+        buffer_size_grad_out = ((grad_output_c.numel() + 1) / 2) * 4;
+        buffer_size_weight = ((weight_c.numel() + 1) / 2) * 4;
         buffer_size_grad_in = ((grad_input.numel() + 1) / 2) * 4;
     } else {
-        buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
-        buffer_size_weight = weight.numel() * weight.dtype_size();
+        buffer_size_grad_out = grad_output_c.numel() * grad_output_c.dtype_size();
+        buffer_size_weight = weight_c.numel() * weight_c.dtype_size();
         buffer_size_grad_in = grad_input.numel() * grad_input.dtype_size();
     }
 
@@ -2401,20 +2461,29 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     // Create gradient weight tensor
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
+    // The shaders assume dense, zero-offset NCHW layout (they index from the
+    // storage base with contiguous strides). Materialize contiguous, offset-0
+    // copies so a non-contiguous/offset view cannot silently produce wrong
+    // gradients (mirrors the binary / unary / matmul paths).
+    Tensor grad_output_c = (grad_output.is_contiguous() && grad_output.offset() == 0)
+                               ? grad_output : dispatchContiguous(grad_output);
+    Tensor input_c = (input.is_contiguous() && input.offset() == 0)
+                         ? input : dispatchContiguous(input);
+
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_grad_weight = grad_weight.data_ptr();
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_input, buffer_size_grad_weight;
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
-        buffer_size_input = ((input.numel() + 1) / 2) * 4;
+        buffer_size_grad_out = ((grad_output_c.numel() + 1) / 2) * 4;
+        buffer_size_input = ((input_c.numel() + 1) / 2) * 4;
         buffer_size_grad_weight = ((grad_weight.numel() + 1) / 2) * 4;
     } else {
-        buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
-        buffer_size_input = input.numel() * input.dtype_size();
+        buffer_size_grad_out = grad_output_c.numel() * grad_output_c.dtype_size();
+        buffer_size_input = input_c.numel() * input_c.dtype_size();
         buffer_size_grad_weight = grad_weight.numel() * grad_weight.dtype_size();
     }
 
@@ -2525,17 +2594,23 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
     std::vector<int64_t> bias_shape = {channels_out};
     Tensor grad_bias(bias_shape, grad_output.dtype(), grad_output.device());
 
+    // The shader assumes dense, zero-offset NCHW layout; materialize a
+    // contiguous, offset-0 copy so a non-contiguous/offset grad_output cannot
+    // silently produce a wrong bias gradient (mirrors the other conv paths).
+    Tensor grad_output_c = (grad_output.is_contiguous() && grad_output.offset() == 0)
+                               ? grad_output : dispatchContiguous(grad_output);
+
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
     const void* buffer_grad_bias = grad_bias.data_ptr();
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_grad_bias;
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
+        buffer_size_grad_out = ((grad_output_c.numel() + 1) / 2) * 4;
         buffer_size_grad_bias = ((grad_bias.numel() + 1) / 2) * 4;
     } else {
-        buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
+        buffer_size_grad_out = grad_output_c.numel() * grad_output_c.dtype_size();
         buffer_size_grad_bias = grad_bias.numel() * grad_bias.dtype_size();
     }
 
@@ -2638,11 +2713,17 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     // Total elements to process
     int64_t total_elements = batch * channels * kernel_h * kernel_w * num_blocks;
 
+    // The im2col shader indexes the input as dense, zero-offset NCHW from the
+    // storage base. Materialize a contiguous, offset-0 copy so a
+    // non-contiguous/offset input cannot silently produce wrong columns.
+    Tensor input_c = (input.is_contiguous() && input.offset() == 0)
+                         ? input : dispatchContiguous(input);
+
     // Prepare buffers
-    const void* buffer_in = input.data_ptr();
+    const void* buffer_in = input_c.data_ptr();
     const void* buffer_out = output.data_ptr();
 
-    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_in = input_c.numel() * input_c.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -2797,7 +2878,20 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     const void* buffer_out = output.data_ptr();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
-    // Zero-initialize output buffer
+    // Zero-initialize output buffer.
+    //
+    // fill.comp declares the output as `uint data[]` and writes one 4-byte word
+    // per invocation for idx < n. The zero-init must therefore be expressed in
+    // 4-byte WORDS, not elements, so it covers exactly the backing allocation
+    // for every dtype and never writes past it:
+    //   - Float16/BFloat16 (2 bytes/elem): numel words would write ~numel*4
+    //     bytes into a ~numel*2-byte allocation -> OOB device write.
+    //   - Float64 (8 bytes/elem): numel words would only zero the first half of
+    //     the buffer, leaving the upper words uninitialized.
+    // ceil(byte_size/4) words is correct for all of them; since the fill value
+    // is 0, byte-pattern zeroing is dtype-agnostic. The VkBuffer allocation is
+    // rounded up to 4 bytes, so this stays in-bounds.
+    size_t fill_words = (buffer_size_out + 3) / 4;
     {
         std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buffer_out}};
         std::vector<size_t> sizes = {buffer_size_out};
@@ -2808,7 +2902,7 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
             uint32_t n;
             float value;
         } fill_push;
-        fill_push.n = static_cast<uint32_t>(output.numel());
+        fill_push.n = static_cast<uint32_t>(fill_words);
         fill_push.value = 0.0f;
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -2818,7 +2912,7 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
         vkCmdPushConstants(cmdBuffer, fill_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(FillPushConstants), &fill_push);
-        uint32_t fill_workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
+        uint32_t fill_workgroups = div_wg(fill_words, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, fill_workgroups, 1, 1);
         // Barrier between fill and col2im accumulation to prevent WAW race
         insertComputeOnlyBarrier(cmdBuffer);
@@ -2846,10 +2940,16 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
         ? (batch * channels * height * width)
         : (batch * col_channels * num_blocks);
 
-    // Prepare buffers
-    const void* buffer_in = input.data_ptr();
+    // The col2im shaders index the input as dense, zero-offset (N, C*K*K, L)
+    // from the storage base. Materialize a contiguous, offset-0 copy so a
+    // non-contiguous/offset input cannot silently produce wrong accumulations.
+    Tensor input_c = (input.is_contiguous() && input.offset() == 0)
+                         ? input : dispatchContiguous(input);
 
-    size_t buffer_size_in = input.numel() * input.dtype_size();
+    // Prepare buffers
+    const void* buffer_in = input_c.data_ptr();
+
+    size_t buffer_size_in = input_c.numel() * input_c.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},

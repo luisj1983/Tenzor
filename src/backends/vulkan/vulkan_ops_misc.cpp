@@ -1613,10 +1613,12 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
     if (grad_output.dtype() == DType::Float64) {
         vulkan::ensure_fp64_supported(device_id, "ROIAlignBackward");
-        // Y.10: roi_align_backward_f64.comp uses GL_EXT_shader_atomic_float for
-        // CAS-based double atomicAdd via uint64 reinterpret; gate so unsupported
-        // devices fail fast instead of hitting an opaque SPIR-V error.
-        vulkan::ensure_atomic_float_supported(device_id, "ROIAlignBackward");
+        // Y.10: roi_align_backward_f64.comp accumulates via uint64 CAS
+        // (GL_EXT_shader_atomic_int64) for race-free double atomicAdd; gate so
+        // unsupported devices fail fast instead of hitting an opaque SPIR-V error.
+        // Matches AdaptiveMaxPool2dBackward / FractionalMaxPool*Backward /
+        // max_pool2d_backward_f64.
+        vulkan::ensure_atomic_int64_supported(device_id, "ROIAlignBackward");
     }
     // S.4: gate FP16 dispatch on shaderFloat16 device support.
     if (grad_output.dtype() == DType::Float16) {
@@ -3941,22 +3943,45 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
         return Tensor({0}, result_dtype, input.device());
     }
 
+    // Float64 weights accumulate in double precision via the bincount_f64 shader
+    // (64-bit CAS-loop atomics), matching the CPU Float64 reference instead of
+    // rounding through a Float32 accumulator. Requires VK_KHR_shader_atomic_int64.
+    const bool use_f64 = has_weights && weights.value().dtype() == DType::Float64
+                         && devices_[device_id].hasAtomicInt64;
+
     // Device-side accumulator: uint counts (exact, integer atomics) for the
-    // unweighted path, float CAS-adds for the weighted path. Cast to the
-    // public result dtype at the end.
-    Tensor output = has_weights ? dispatchFull({num_bins}, 0.0f, DType::Float32)
-                                : dispatchFull({num_bins}, 0.0, DType::Int32);
+    // unweighted path, float64 CAS-adds for Float64 weights (when supported),
+    // float32 CAS-adds otherwise. Cast to the public result dtype at the end.
+    Tensor output;
+    if (use_f64) {
+        // The bincount_f64 shader binds this buffer as uint64_t[] and starts the
+        // CAS loop from the stored bits; double-precision zero is all-zero bits,
+        // so a Float64 zero buffer is the correct accumulator and also already
+        // carries the public result dtype (no final cast needed).
+        vulkan::ensure_fp64_supported(device_id, "Bincount");
+        output = dispatchFull({num_bins}, 0.0, DType::Float64);
+    } else if (has_weights) {
+        output = dispatchFull({num_bins}, 0.0f, DType::Float32);
+    } else {
+        output = dispatchFull({num_bins}, 0.0, DType::Int32);
+    }
     // Move output to the correct device if needed
     if (output.device() != input.device()) {
         output = output.to(input.device());
     }
 
     if (input.numel() == 0) {
-        return dispatchCast(output, result_dtype);
+        return use_f64 ? output : dispatchCast(output, result_dtype);
     }
-    Tensor w_tensor = has_weights ? weights.value() : dispatchFull({1}, 1.0f, DType::Float32);
-    if (has_weights && w_tensor.dtype() != DType::Float32) {
-        w_tensor = dispatchCast(w_tensor, DType::Float32);
+
+    // Weights dtype: Float64 for the f64 path, Float32 otherwise. The unweighted
+    // path still binds a 1-element Float32 dummy buffer (its shader ignores it).
+    const DType weights_dtype = use_f64 ? DType::Float64 : DType::Float32;
+    const size_t weight_elem_size = use_f64 ? sizeof(double) : sizeof(float);
+    Tensor w_tensor = has_weights ? weights.value()
+                                  : dispatchFull({1}, 1.0f, DType::Float32);
+    if (has_weights && w_tensor.dtype() != weights_dtype) {
+        w_tensor = dispatchCast(w_tensor, weights_dtype);
     }
     // w_tensor is bound directly into a STORAGE_BUFFER descriptor; route views
     // through dispatchContiguous to guarantee offset()==0.
@@ -3964,7 +3989,7 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
                    ? w_tensor
                    : dispatchContiguous(w_tensor);
 
-    auto* pipeline = getPipeline("bincount", device_id);
+    auto* pipeline = getPipeline(use_f64 ? "bincount_f64" : "bincount", device_id);
 
     uint32_t n = static_cast<uint32_t>(input.numel());
 
@@ -3978,8 +4003,10 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
     pc.has_weights = has_weights ? 1 : 0;
 
     size_t input_buf_size = static_cast<size_t>(n) * sizeof(int32_t);
-    size_t weights_buf_size = has_weights ? static_cast<size_t>(n) * sizeof(float) : sizeof(float);
-    size_t output_buf_size = static_cast<size_t>(num_bins) * sizeof(float);
+    size_t weights_buf_size = has_weights ? static_cast<size_t>(n) * weight_elem_size
+                                          : sizeof(float);
+    size_t output_buf_size = static_cast<size_t>(num_bins)
+                             * (use_f64 ? sizeof(double) : sizeof(float));
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, int_input.data_ptr()}, {1, w_tensor.data_ptr()}, {2, output.data_ptr()}
@@ -3997,7 +4024,9 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return dispatchCast(output, result_dtype);
+    // The f64 accumulator already holds Float64; other paths cast to the public
+    // result dtype (Float32 -> Float64 for weights, Int32 -> Int64 for counts).
+    return use_f64 ? output : dispatchCast(output, result_dtype);
 }
 
 // ============================================================================
@@ -5318,6 +5347,21 @@ auto VulkanBackend::dispatchNanToNum(const Tensor& input,
         return Tensor(std::vector<int64_t>(s.begin(), s.end()), input.dtype(), input.device());
     }
 
+    // Only fp32 ("nan_to_num") and fp64 ("nan_to_num_f64") shaders exist, both
+    // indexing a `float`/`double data[]` buffer (4/8 bytes per element). Half
+    // dtypes have no packed shader: binding a Float16/BFloat16 buffer to the
+    // fp32 shader reinterprets value pairs as one fp32 (garbage NaN/Inf
+    // detection) and writes numel*4 bytes into a numel*2-byte buffer (OOB).
+    // Widen to Float32, run the fp32 shader, narrow back — same discipline as
+    // the bicubic/interpolate paths above. Replacement values are already
+    // float, so the round-trip preserves them exactly.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return dispatchNanToNum(input.to(DType::Float32), nan_val, posinf_val,
+                                neginf_val)
+            .to(orig);
+    }
+
     int32_t device_id = input.device().index;
     auto s = input.shape();
     std::vector<int64_t> output_shape(s.begin(), s.end());
@@ -5689,8 +5733,11 @@ auto VulkanBackend::dispatchIsin(const Tensor& elements, const Tensor& test_elem
 // ============================================================================
 
 auto VulkanBackend::dispatchKthvalue(const Tensor& input, int64_t k, int64_t dim, bool keepdim) -> std::pair<Tensor, Tensor> {
-    // Cast non-Float32 to Float32 for the shader
-    if (input.dtype() != DType::Float32) {
+    const bool is_f64 = (input.dtype() == DType::Float64);
+    // Float64 inputs use the dedicated f64 shader (preserves value precision and
+    // tie/index ordering vs the CPU reference). All other non-Float32 dtypes are
+    // promoted to Float32 and narrowed back.
+    if (input.dtype() != DType::Float32 && !is_f64) {
         auto input_f32 = input.to(DType::Float32);
         auto [vals, idxs] = dispatchKthvalue(input_f32, k, dim, keepdim);
         return {vals.to(input.dtype()), idxs};
@@ -5715,7 +5762,10 @@ auto VulkanBackend::dispatchKthvalue(const Tensor& input, int64_t k, int64_t dim
     if (out_shape.empty()) out_shape.push_back(1);
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("kthvalue", device_id);
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "Kthvalue");
+    }
+    auto* pipeline = getPipeline(is_f64 ? "kthvalue_f64" : "kthvalue", device_id);
 
     Tensor values(out_shape, input.dtype(), input.device());
     Tensor indices(out_shape, DType::Int32, input.device());
@@ -5727,7 +5777,7 @@ auto VulkanBackend::dispatchKthvalue(const Tensor& input, int64_t k, int64_t dim
     pc.k = static_cast<uint32_t>(k);
 
     size_t in_buf = static_cast<size_t>(input.numel()) * input.dtype_size();
-    size_t out_buf = static_cast<size_t>(total_slices) * sizeof(float);
+    size_t out_buf = static_cast<size_t>(total_slices) * values.dtype_size();
     size_t idx_buf = static_cast<size_t>(total_slices) * sizeof(int32_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -5754,7 +5804,10 @@ auto VulkanBackend::dispatchKthvalue(const Tensor& input, int64_t k, int64_t dim
 // ============================================================================
 
 auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim, bool keepdim) -> Tensor {
-    if (input.dtype() != DType::Float32) {
+    const bool is_f64 = (input.dtype() == DType::Float64);
+    // Float64 inputs use the dedicated f64 shader (full precision sort/interp);
+    // other non-Float32 dtypes are promoted to Float32 and narrowed back.
+    if (input.dtype() != DType::Float32 && !is_f64) {
         auto input_f32 = input.to(DType::Float32);
         return dispatchQuantile(input_f32, q, dim, keepdim).to(input.dtype());
     }
@@ -5778,11 +5831,14 @@ auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim,
     if (out_shape.empty()) out_shape.push_back(1);
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("quantile", device_id);
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "Quantile");
+    }
+    auto* pipeline = getPipeline(is_f64 ? "quantile_f64" : "quantile", device_id);
 
     Tensor output(out_shape, input.dtype(), input.device());
-    // Scratch buffer for per-slice sorting
-    Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, DType::Float32, input.device());
+    // Scratch buffer for per-slice sorting (same dtype as input)
+    Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, input.dtype(), input.device());
 
     struct { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; float q; } pc;
     pc.total_slices = total_slices;
@@ -5790,9 +5846,9 @@ auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim,
     pc.inner_size = inner_sz;
     pc.q = static_cast<float>(q);
 
-    size_t in_buf = static_cast<size_t>(input.numel()) * sizeof(float);
-    size_t out_buf = static_cast<size_t>(total_slices) * sizeof(float);
-    size_t scratch_buf = static_cast<size_t>(total_slices) * dim_size * sizeof(float);
+    size_t in_buf = static_cast<size_t>(input.numel()) * input.dtype_size();
+    size_t out_buf = static_cast<size_t>(total_slices) * output.dtype_size();
+    size_t scratch_buf = static_cast<size_t>(total_slices) * dim_size * scratch.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, input.data_ptr()}, {1, output.data_ptr()}, {2, scratch.data_ptr()}
@@ -5818,7 +5874,10 @@ auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim,
 // ============================================================================
 
 auto VulkanBackend::dispatchNanquantile(const Tensor& input, double q, int64_t dim, bool keepdim) -> Tensor {
-    if (input.dtype() != DType::Float32) {
+    const bool is_f64 = (input.dtype() == DType::Float64);
+    // Float64 inputs use the dedicated f64 shader (full precision sort/interp);
+    // other non-Float32 dtypes are promoted to Float32 and narrowed back.
+    if (input.dtype() != DType::Float32 && !is_f64) {
         auto input_f32 = input.to(DType::Float32);
         return dispatchNanquantile(input_f32, q, dim, keepdim).to(input.dtype());
     }
@@ -5842,10 +5901,13 @@ auto VulkanBackend::dispatchNanquantile(const Tensor& input, double q, int64_t d
     if (out_shape.empty()) out_shape.push_back(1);
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("nanquantile", device_id);
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "Nanquantile");
+    }
+    auto* pipeline = getPipeline(is_f64 ? "nanquantile_f64" : "nanquantile", device_id);
 
     Tensor output(out_shape, input.dtype(), input.device());
-    Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, DType::Float32, input.device());
+    Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, input.dtype(), input.device());
 
     struct { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; float q; } pc;
     pc.total_slices = total_slices;
@@ -5853,9 +5915,9 @@ auto VulkanBackend::dispatchNanquantile(const Tensor& input, double q, int64_t d
     pc.inner_size = inner_sz;
     pc.q = static_cast<float>(q);
 
-    size_t in_buf = static_cast<size_t>(input.numel()) * sizeof(float);
-    size_t out_buf = static_cast<size_t>(total_slices) * sizeof(float);
-    size_t scratch_buf = static_cast<size_t>(total_slices) * dim_size * sizeof(float);
+    size_t in_buf = static_cast<size_t>(input.numel()) * input.dtype_size();
+    size_t out_buf = static_cast<size_t>(total_slices) * output.dtype_size();
+    size_t scratch_buf = static_cast<size_t>(total_slices) * dim_size * scratch.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, input.data_ptr()}, {1, output.data_ptr()}, {2, scratch.data_ptr()}

@@ -134,6 +134,13 @@ auto NAdam::initialize_buffers() -> void {
             // R.16: half-precision params get Float32 state buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+        } else {
+            // Keep buffers index-aligned with parameters_: step_impl indexes
+            // exp_avg_[i]/exp_avg_sq_[i] by parameter position, so a null
+            // parameter must still occupy a (placeholder) slot. Matches
+            // on_parameters_appended_'s null handling.
+            exp_avg_.push_back(Tensor{});
+            exp_avg_sq_.push_back(Tensor{});
         }
     }
 }
@@ -201,9 +208,20 @@ auto NAdam::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto NAdam::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Dtype-aware scalar reader (mirrors LAMB::get_f64): externally produced
+    // or device-adapted checkpoints may store these scalars as Float32, so
+    // reading them blindly as double would reinterpret 4-byte floats as
+    // 8-byte doubles and yield garbage hyperparameters.
     auto load_double = [&](const char* key, double& out) {
         auto it = state.find(key);
-        if (it != state.end()) out = it->second.data<double>()[0];
+        if (it == state.end()) return;
+        if (it->second.dtype() == DType::Float64) {
+            out = it->second.data<double>()[0];
+        } else if (it->second.dtype() == DType::Float32) {
+            out = static_cast<double>(it->second.data<float>()[0]);
+        } else {
+            out = it->second.to(DType::Float64).to(Device::cpu()).data<double>()[0];
+        }
     };
 
     // Z.12: explicit num_params guard mirroring Adam / LAMB / SparseAdam.

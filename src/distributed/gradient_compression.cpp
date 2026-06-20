@@ -152,8 +152,18 @@ auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
 
     // Reshape compressed back to original shape
     result.data = compressed.reshape(result.original_shape);
-    result.compression_ratio = static_cast<float>(k) /
-                               static_cast<float>(numel);
+    // CompressedGradient::compression_ratio is documented as
+    // compressed_size / original_size, i.e. the fraction of bytes actually
+    // placed on the wire. TopK emits a *full-size, original-dtype* dense
+    // tensor (with zeros in the pruned positions), so the transport sends the
+    // same number of bytes as the uncompressed gradient: the realized ratio is
+    // 1.0, NOT k/numel. Reporting k/numel would advertise a bandwidth saving
+    // the dense all-reduce path does not deliver (the logical sparsity is
+    // k/numel, but that only becomes a byte saving under a sparse/entropy-
+    // coding transport, which this dense representation does not use). Report
+    // the honest, transport-realized ratio so callers (e.g. ZeRO bucketing)
+    // size buffers and log savings correctly.
+    result.compression_ratio = 1.0f;
 
     // Update the input gradient in-place to the compressed version.
     //

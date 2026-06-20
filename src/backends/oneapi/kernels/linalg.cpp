@@ -1189,16 +1189,18 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
         float* wi_data = get_data_ptr<float>(WI);
         float* v_data = get_data_ptr<float>(V);
 
+        // n is loop-invariant: query the scratchpad size and allocate the
+        // device scratch once, then reuse for every batch element.
+        auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<float>(
+            queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
+            n, n);
+        SyclDeviceBuffer<float> scratch(sp, queue);
+
         for (int64_t b = 0; b < nbatch; b++) {
             float* mat = a_data + b * n * n;
             float* wr_vec = wr_data + b * n;
             float* wi_vec = wi_data + b * n;
             float* vl = v_data + b * n * n;
-
-            auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<float>(
-                queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
-                n, n);
-            SyclDeviceBuffer<float> scratch(sp, queue);
 
             ::oneapi::mkl::lapack::geev(
                 queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
@@ -1213,16 +1215,18 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
         double* wi_data = get_data_ptr<double>(WI);
         double* v_data = get_data_ptr<double>(V);
 
+        // n is loop-invariant: query the scratchpad size and allocate the
+        // device scratch once, then reuse for every batch element.
+        auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<double>(
+            queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
+            n, n);
+        SyclDeviceBuffer<double> scratch(sp, queue);
+
         for (int64_t b = 0; b < nbatch; b++) {
             double* mat = a_data + b * n * n;
             double* wr_vec = wr_data + b * n;
             double* wi_vec = wi_data + b * n;
             double* vl = v_data + b * n * n;
-
-            auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<double>(
-                queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
-                n, n);
-            SyclDeviceBuffer<double> scratch(sp, queue);
 
             ::oneapi::mkl::lapack::geev(
                 queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
@@ -1487,7 +1491,6 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
         row_to_col_major<float, SyclTransposeOrmqrCF32>(
             d_c.get(), get_data_ptr<const float>(C), c_m, c_n, queue);
 
-        int64_t lda = left ? c_m : c_n;
         auto sp = ::oneapi::mkl::lapack::ormqr_scratchpad_size<float>(
             queue, mkl_side, mkl_trans, c_m, c_n, k_refl, r_m, c_m);
         SyclDeviceBuffer<float> scratch(sp, queue);
@@ -1856,6 +1859,15 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, sycl::queue& queue) -> 
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
+    // Per-batch LAPACK-style info flag: 0 == success, k>0 == leading minor of
+    // order k is not positive-definite (potrf reports info=k for the first
+    // non-positive pivot at column k-1, 1-based). Mirrors the oneMKL potrf
+    // path which surfaces info>0 to the caller via an exception so that
+    // cholesky_inverse / cholesky_solve do not silently consume a corrupt
+    // factor.
+    SyclDeviceBuffer<int> d_info(nbatch, queue);
+    queue.memset(d_info.ptr, 0, nbatch * sizeof(int)).wait();
+
     auto launch_cholesky = [&](auto* data_ptr) {
         using T = std::remove_pointer_t<decltype(data_ptr)>;
         // Global-memory Cholesky (one work-item per batch). In-place
@@ -1863,6 +1875,7 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, sycl::queue& queue) -> 
         // mask to the requested triangle. No local memory -> arbitrary N.
         queue.submit([&](sycl::handler& h) {
             auto* data = data_ptr;
+            auto* info = d_info.ptr;
             int n_ = static_cast<int>(n);
             bool upper_ = upper;
             h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
@@ -1875,7 +1888,17 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, sycl::queue& queue) -> 
                 for (int j = 0; j < n_; j++) {
                     T sum = A[j * n_ + j];
                     for (int k = 0; k < j; k++) sum -= A[j * n_ + k] * A[j * n_ + k];
-                    if (sum <= T(0)) { A[j * n_ + j] = T(0); continue; }
+                    if (sum <= T(0)) {
+                        // Non-positive pivot: matrix is not positive-definite.
+                        // Record the (1-based) failing leading-minor order, then
+                        // zero the diagonal AND the remaining strict-lower of
+                        // this column so later columns never consume stale input
+                        // values. Keep the first failure (smallest j).
+                        if (info[b] == 0) info[b] = j + 1;
+                        A[j * n_ + j] = T(0);
+                        for (int i = j + 1; i < n_; i++) A[i * n_ + j] = T(0);
+                        continue;
+                    }
                     A[j * n_ + j] = sycl::sqrt(sum);
                     T diag = A[j * n_ + j];
                     for (int i = j + 1; i < n_; i++) {
@@ -1914,6 +1937,19 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, sycl::queue& queue) -> 
         launch_cholesky(work.data<float>());
     else
         launch_cholesky(work.data<double>());
+
+    // Copy the per-batch info flags back and throw on the first breakdown,
+    // matching the oneMKL potrf contract (info>0 == not positive-definite).
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    queue.memcpy(h_info.data(), d_info.ptr, nbatch * sizeof(int)).wait();
+    for (int64_t b = 0; b < nbatch; b++) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg_cholesky: the leading minor of order " +
+                std::to_string(h_info[b]) +
+                " is not positive-definite (matrix is not positive-definite)");
+        }
+    }
 
     return work;
 }
@@ -2997,10 +3033,21 @@ auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Ten
     // geev: real eigenvalue k -> column k; complex pair (wi[k]>0) -> column k =
     // Re, column k+1 = Im (conjugate in column k+1).
     auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
+
+    // Per-batch convergence flag, mirroring LAPACK geev's `info` contract:
+    // 0 == converged; info>0 == the QR iteration failed to compute all
+    // eigenvalues (the value records the 1-based index of the eigenvalue that
+    // was still being deflated when the iteration limit was hit). Surfaced to
+    // the host so the op throws instead of returning silently-wrong (zero)
+    // eigenpairs for hard / non-converging matrices.
+    SyclDeviceBuffer<int> d_info(nbatch, queue);
+    queue.memset(d_info.ptr, 0, nbatch * sizeof(int)).wait();
+
     auto launch_eig = [&](auto* work_ptr, auto* wr_ptr, auto* wi_ptr, auto* v_ptr, auto* vbuf_ptr) {
         using T = std::remove_pointer_t<decltype(work_ptr)>;
         int n_ = static_cast<int>(n);
         long long nb = static_cast<long long>(nbatch);
+        auto* info_ptr = d_info.ptr;
         queue.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<1>(static_cast<size_t>(nbatch)),
                 [=](sycl::id<1> id) {
@@ -3083,7 +3130,7 @@ auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Ten
                                 } else { wr[na] = wr[en] = x + p; wi[na] = zz; wi[en] = -zz; }
                                 en -= 2; break;
                             }
-                            if (its == 30) { en = -1; break; }
+                            if (its == 30) { info_ptr[b] = en + 1; en = -1; break; }
                             if (its == 10 || its == 20) {
                                 t += x;
                                 for (int i = 0; i <= en; ++i) H[i*n_+i] -= x;
@@ -3235,6 +3282,20 @@ auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Ten
 
     if (A.dtype() == DType::Float32) launch_eig(work.data<float>(), WR.data<float>(), WI.data<float>(), V.data<float>(), vbuf.data<float>());
     else launch_eig(work.data<double>(), WR.data<double>(), WI.data<double>(), V.data<double>(), vbuf.data<double>());
+
+    // Copy the per-batch convergence flags back and throw on the first
+    // failure, matching LAPACK geev's info>0 contract so callers do not
+    // receive silently-wrong (zero-initialized) eigenpairs.
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    queue.memcpy(h_info.data(), d_info.ptr, nbatch * sizeof(int)).wait();
+    for (int64_t b = 0; b < nbatch; b++) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg_eig: QR iteration failed to converge for eigenvalue " +
+                std::to_string(h_info[b]) +
+                " (the eigenvalue computation did not converge)");
+        }
+    }
 
     return {WR, WI, V};
 }

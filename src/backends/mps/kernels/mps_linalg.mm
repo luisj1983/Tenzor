@@ -86,6 +86,36 @@ auto batch_shape(const Tensor& A) -> std::vector<int64_t> {
     return std::vector<int64_t>(shape.begin(), shape.end() - 2);
 }
 
+// ----------------------------------------------------------------------------
+// Row-major <-> column-major conversion helpers.
+//
+// Tenzor tensors are row-major contiguous, but Fortran CLAPACK (sgetrf_, sgesv_,
+// sgesdd_, ...) interprets buffers as COLUMN-major. To keep cross-backend parity
+// with the CPU reference (which uses LAPACKE row-major), we explicitly transpose
+// the row-major data into a column-major scratch buffer before each LAPACK call
+// and transpose any matrix results back to row-major afterwards.
+// ----------------------------------------------------------------------------
+
+/// Convert a row-major (rows x cols) matrix at src into column-major layout at dst.
+/// dst[j*rows + i] = src[i*cols + j]
+inline void row_to_col_major(const float* src, float* dst, int64_t rows, int64_t cols) {
+    for (int64_t i = 0; i < rows; ++i) {
+        for (int64_t j = 0; j < cols; ++j) {
+            dst[j * rows + i] = src[i * cols + j];
+        }
+    }
+}
+
+/// Convert a column-major (rows x cols) matrix at src into row-major layout at dst.
+/// dst[i*cols + j] = src[j*rows + i]
+inline void col_to_row_major(const float* src, float* dst, int64_t rows, int64_t cols) {
+    for (int64_t i = 0; i < rows; ++i) {
+        for (int64_t j = 0; j < cols; ++j) {
+            dst[i * cols + j] = src[j * rows + i];
+        }
+    }
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -187,8 +217,9 @@ Tensor mps_linalg_solve_kernel(const Tensor& A, const Tensor& B) {
     float* b_data = b_work.data<float>();
 
     auto b_shape = B.shape();
-    int64_t nrhs = (b_shape.size() > 1 && b_shape.back() != n) ? b_shape.back() : 1;
-    // If B is (batch, n), treat as (batch, n, 1)
+    // If B is (batch, n) it represents a single RHS column; otherwise the trailing
+    // dimension is the number of right-hand-side columns.
+    int64_t nrhs;
     if (static_cast<int64_t>(b_shape.size()) == ndim_a - 1) {
         nrhs = 1;
     } else {
@@ -202,15 +233,27 @@ Tensor mps_linalg_solve_kernel(const Tensor& A, const Tensor& B) {
     __CLPK_integer info = 0;
     std::vector<__CLPK_integer> ipiv(static_cast<size_t>(n));
 
+    // Scratch column-major buffers. Tenzor storage is row-major; Fortran CLAPACK
+    // expects column-major, so transpose into scratch, solve, transpose result back.
+    std::vector<float> a_col(static_cast<size_t>(n * n));
+    std::vector<float> b_col(static_cast<size_t>(n * nrhs));
+
     for (int64_t b = 0; b < batch; ++b) {
         float* a_mat = a_data + b * n * n;
         float* b_mat = b_data + b * n * nrhs;
+
+        row_to_col_major(a_mat, a_col.data(), n, n);
+        row_to_col_major(b_mat, b_col.data(), n, nrhs);
+
         info = 0;
-        sgesv_(&N, &NRHS, a_mat, &lda, ipiv.data(), b_mat, &ldb, &info);
+        sgesv_(&N, &NRHS, a_col.data(), &lda, ipiv.data(), b_col.data(), &ldb, &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgSolve: sgesv_ failed (error " +
                                      std::to_string(info) + ")");
         }
+
+        // b_col is the column-major solution (n x nrhs); write back row-major.
+        col_to_row_major(b_col.data(), b_mat, n, nrhs);
     }
 
     return b_work;
@@ -232,21 +275,31 @@ Tensor mps_linalg_cholesky_kernel(const Tensor& A, bool upper) {
     __CLPK_integer info = 0;
     char uplo = upper ? 'U' : 'L';
 
+    // Column-major scratch buffer; transpose row-major input in, factor, transpose out.
+    std::vector<float> a_col(static_cast<size_t>(n * n));
+
     for (int64_t b = 0; b < batch; ++b) {
-        float* mat = data + b * n * n;
+        float* mat = data + b * n * n; // row-major storage
+
+        row_to_col_major(mat, a_col.data(), n, n);
+
         info = 0;
-        spotrf_(&uplo, &N, mat, &lda, &info);
+        spotrf_(&uplo, &N, a_col.data(), &lda, &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgCholesky: spotrf_ failed (error " +
                                      std::to_string(info) + ")");
         }
-        // Zero out the opposite triangle
+
+        // Write factor back to row-major storage.
+        col_to_row_major(a_col.data(), mat, n, n);
+
+        // Zero out the opposite triangle (row-major indexing: (i,j) = i*n + j).
         for (int64_t i = 0; i < n; ++i) {
             for (int64_t j = 0; j < n; ++j) {
                 if (upper && j < i) {
-                    mat[j * n + i] = 0.0f; // column-major: (i,j) = j*lda + i
+                    mat[i * n + j] = 0.0f;
                 } else if (!upper && j > i) {
-                    mat[j * n + i] = 0.0f;
+                    mat[i * n + j] = 0.0f;
                 }
             }
         }
@@ -307,12 +360,20 @@ std::vector<Tensor> mps_linalg_svd_kernel(const Tensor& A, bool full_matrices) {
     __CLPK_integer ldvt = static_cast<__CLPK_integer>(vt_rows);
     __CLPK_integer info = 0;
 
+    // Column-major scratch buffers. Tenzor storage is row-major; Fortran sgesdd_
+    // expects column-major. We transpose A into a_col, run the decomposition into
+    // column-major U/Vt scratch, then transpose those back into the row-major
+    // Tenzor outputs so the result matches the CPU (LAPACKE row-major) reference.
+    std::vector<float> a_col(static_cast<size_t>(m * n));
+    std::vector<float> u_col(static_cast<size_t>(m * u_cols));
+    std::vector<float> vt_col(static_cast<size_t>(vt_rows * n));
+
     // Query optimal workspace
     __CLPK_integer lwork = -1;
     float work_query;
     std::vector<__CLPK_integer> iwork(static_cast<size_t>(8 * k));
-    sgesdd_(&jobz, &M, &N, a_data, &lda, s_data, u_data, &ldu,
-            vt_data, &ldvt, &work_query, &lwork, iwork.data(), &info);
+    sgesdd_(&jobz, &M, &N, a_col.data(), &lda, s_data, u_col.data(), &ldu,
+            vt_col.data(), &ldvt, &work_query, &lwork, iwork.data(), &info);
     lwork = static_cast<__CLPK_integer>(work_query);
     std::vector<float> work(static_cast<size_t>(lwork));
 
@@ -321,13 +382,20 @@ std::vector<Tensor> mps_linalg_svd_kernel(const Tensor& A, bool full_matrices) {
         float* u_mat = u_data + b * m * u_cols;
         float* s_vec = s_data + b * k;
         float* vt_mat = vt_data + b * vt_rows * n;
+
+        row_to_col_major(a_mat, a_col.data(), m, n);
+
         info = 0;
-        sgesdd_(&jobz, &M, &N, a_mat, &lda, s_vec, u_mat, &ldu,
-                vt_mat, &ldvt, work.data(), &lwork, iwork.data(), &info);
+        sgesdd_(&jobz, &M, &N, a_col.data(), &lda, s_vec, u_col.data(), &ldu,
+                vt_col.data(), &ldvt, work.data(), &lwork, iwork.data(), &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgSVD: sgesdd_ failed (error " +
                                      std::to_string(info) + ")");
         }
+
+        // U is column-major (m x u_cols), Vt is column-major (vt_rows x n).
+        col_to_row_major(u_col.data(), u_mat, m, u_cols);
+        col_to_row_major(vt_col.data(), vt_mat, vt_rows, n);
     }
 
     return {U, S, Vt};
@@ -359,10 +427,16 @@ std::vector<Tensor> mps_linalg_qr_kernel(const Tensor& A) {
 
     std::vector<float> tau(static_cast<size_t>(k));
 
+    // Column-major scratch buffers: a_col holds A and the packed QR factors;
+    // q_col holds the explicitly-formed Q. Tenzor storage is row-major, so we
+    // transpose in/out around the Fortran CLAPACK calls.
+    std::vector<float> a_col(static_cast<size_t>(m * n));
+    std::vector<float> q_col(static_cast<size_t>(m * k));
+
     // Query optimal workspace for sgeqrf
     __CLPK_integer lwork = -1;
     float work_query;
-    sgeqrf_(&M, &N, a_data, &lda, tau.data(), &work_query, &lwork, &info);
+    sgeqrf_(&M, &N, a_col.data(), &lda, tau.data(), &work_query, &lwork, &info);
     lwork = static_cast<__CLPK_integer>(work_query);
     std::vector<float> work(static_cast<size_t>(std::max(lwork, __CLPK_integer(1))));
 
@@ -385,42 +459,46 @@ std::vector<Tensor> mps_linalg_qr_kernel(const Tensor& A) {
         float* a_mat = a_data + b * m * n;
         info = 0;
 
-        // QR factorization
-        sgeqrf_(&M, &N, a_mat, &lda, tau.data(), work.data(), &lwork, &info);
+        row_to_col_major(a_mat, a_col.data(), m, n);
+
+        // QR factorization (column-major in a_col)
+        sgeqrf_(&M, &N, a_col.data(), &lda, tau.data(), work.data(), &lwork, &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgQR: sgeqrf_ failed (error " +
                                      std::to_string(info) + ")");
         }
 
-        // Extract R (upper triangular part)
+        // Extract R (k x n upper-triangular) from the column-major factored matrix
+        // and store it row-major: R[i,j] = a_col[j*m + i] for i <= j.
         float* r_mat = r_data + b * k * n;
         std::memset(r_mat, 0, static_cast<size_t>(k * n) * sizeof(float));
         for (int64_t j = 0; j < n; ++j) {
             for (int64_t i = 0; i <= std::min(j, k - 1); ++i) {
-                r_mat[j * k + i] = a_mat[j * m + i]; // column-major
+                r_mat[i * n + j] = a_col[j * m + i]; // col-major source -> row-major dest
             }
         }
 
-        // Generate Q from Householder reflectors (sorgqr)
-        // Copy the first k columns of the factored matrix
-        float* q_mat = q_data + b * m * k;
-        for (int64_t j = 0; j < k; ++j) {
-            std::memcpy(q_mat + j * m, a_mat + j * m,
-                        static_cast<size_t>(m) * sizeof(float));
-        }
+        // Generate Q (m x k) from Householder reflectors. Copy the first k columns
+        // of the column-major factored matrix into q_col, then call sorgqr_.
+        std::memcpy(q_col.data(), a_col.data(),
+                    static_cast<size_t>(m * k) * sizeof(float));
 
         __CLPK_integer lwork_q = -1;
         float wq;
-        sorgqr_(&M, &K, &K, q_mat, &M, tau.data(), &wq, &lwork_q, &info);
+        sorgqr_(&M, &K, &K, q_col.data(), &M, tau.data(), &wq, &lwork_q, &info);
         lwork_q = static_cast<__CLPK_integer>(wq);
         std::vector<float> work_q(static_cast<size_t>(std::max(lwork_q, __CLPK_integer(1))));
 
         info = 0;
-        sorgqr_(&M, &K, &K, q_mat, &M, tau.data(), work_q.data(), &lwork_q, &info);
+        sorgqr_(&M, &K, &K, q_col.data(), &M, tau.data(), work_q.data(), &lwork_q, &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgQR: sorgqr_ failed (error " +
                                      std::to_string(info) + ")");
         }
+
+        // q_col is column-major (m x k); store row-major into Q.
+        float* q_mat = q_data + b * m * k;
+        col_to_row_major(q_col.data(), q_mat, m, k);
     }
 
     return {Q, R};
@@ -451,12 +529,17 @@ std::vector<Tensor> mps_linalg_eigh_kernel(const Tensor& A) {
     char jobz = 'V'; // Compute eigenvalues and eigenvectors
     char uplo = 'U';
 
+    // Column-major scratch buffer. We transpose A in (uplo='U' then reads the true
+    // upper triangle of A, matching the CPU LAPACKE row-major reference), and
+    // transpose the eigenvector matrix back to row-major afterwards.
+    std::vector<float> a_col(static_cast<size_t>(n * n));
+
     // Query optimal workspace
     __CLPK_integer lwork = -1;
     __CLPK_integer liwork = -1;
     float work_query;
     __CLPK_integer iwork_query;
-    ssyevd_(&jobz, &uplo, &N, a_data, &lda, w_data,
+    ssyevd_(&jobz, &uplo, &N, a_col.data(), &lda, w_data,
             &work_query, &lwork, &iwork_query, &liwork, &info);
     lwork = static_cast<__CLPK_integer>(work_query);
     liwork = iwork_query;
@@ -466,16 +549,22 @@ std::vector<Tensor> mps_linalg_eigh_kernel(const Tensor& A) {
     for (int64_t b = 0; b < batch; ++b) {
         float* a_mat = a_data + b * n * n;
         float* w_vec = w_data + b * n;
+
+        row_to_col_major(a_mat, a_col.data(), n, n);
+
         info = 0;
-        ssyevd_(&jobz, &uplo, &N, a_mat, &lda, w_vec,
+        ssyevd_(&jobz, &uplo, &N, a_col.data(), &lda, w_vec,
                 work.data(), &lwork, iwork.data(), &liwork, &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgEigh: ssyevd_ failed (error " +
                                      std::to_string(info) + ")");
         }
+
+        // a_col now holds the eigenvectors as columns (column-major); store the
+        // eigenvector matrix row-major into work_a so columns remain eigenvectors.
+        col_to_row_major(a_col.data(), a_mat, n, n);
     }
 
-    // a_data now contains eigenvectors (column-major)
     return {W, work_a};
 }
 
@@ -513,12 +602,18 @@ std::vector<Tensor> mps_linalg_eig_kernel(const Tensor& A) {
     char jobvl = 'N'; // No left eigenvectors
     char jobvr = 'V'; // Compute right eigenvectors
 
+    // Column-major scratch buffers. Transpose A in, transpose the right
+    // eigenvector matrix out, reproducing the CPU LAPACKE row-major convention
+    // (including the packed real/imag storage for complex-conjugate pairs).
+    std::vector<float> a_col(static_cast<size_t>(n * n));
+    std::vector<float> vr_col(static_cast<size_t>(n * n));
+
     // Query optimal workspace
     __CLPK_integer lwork = -1;
     float work_query;
-    sgeev_(&jobvl, &jobvr, &N, a_data, &lda,
+    sgeev_(&jobvl, &jobvr, &N, a_col.data(), &lda,
            wr_data, wi_data,
-           nullptr, &N, v_data, &ldvr,
+           nullptr, &N, vr_col.data(), &ldvr,
            &work_query, &lwork, &info);
     lwork = static_cast<__CLPK_integer>(work_query);
     std::vector<float> work(static_cast<size_t>(std::max(lwork, __CLPK_integer(1))));
@@ -528,15 +623,21 @@ std::vector<Tensor> mps_linalg_eig_kernel(const Tensor& A) {
         float* wr = wr_data + b * n;
         float* wi = wi_data + b * n;
         float* vr = v_data + b * n * n;
+
+        row_to_col_major(a_mat, a_col.data(), n, n);
+
         info = 0;
-        sgeev_(&jobvl, &jobvr, &N, a_mat, &lda,
+        sgeev_(&jobvl, &jobvr, &N, a_col.data(), &lda,
                wr, wi,
-               nullptr, &N, vr, &ldvr,
+               nullptr, &N, vr_col.data(), &ldvr,
                work.data(), &lwork, &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgEig: sgeev_ failed (error " +
                                      std::to_string(info) + ")");
         }
+
+        // vr_col is column-major (n x n); store row-major into V.
+        col_to_row_major(vr_col.data(), vr, n, n);
     }
 
     return {W_real, W_imag, V};
@@ -576,10 +677,18 @@ std::vector<Tensor> mps_linalg_lu_kernel(const Tensor& A) {
     __CLPK_integer info = 0;
     std::vector<__CLPK_integer> ipiv(static_cast<size_t>(n));
 
+    // Column-major scratch buffer holding A and the packed LU factors. Transpose
+    // the row-major input in; the resulting factorization (PA = LU, partial
+    // pivoting) matches the CPU LAPACKE row-major reference.
+    std::vector<float> a_col(static_cast<size_t>(n * n));
+
     for (int64_t b = 0; b < batch; ++b) {
         float* a_mat = a_data + b * n * n;
+
+        row_to_col_major(a_mat, a_col.data(), n, n);
+
         info = 0;
-        sgetrf_(&N, &N, a_mat, &lda, ipiv.data(), &info);
+        sgetrf_(&N, &N, a_col.data(), &lda, ipiv.data(), &info);
         if (info < 0) {
             throw std::runtime_error("MPS LinalgLU: sgetrf_ illegal argument");
         }
@@ -588,21 +697,22 @@ std::vector<Tensor> mps_linalg_lu_kernel(const Tensor& A) {
         float* u_mat = u_data + b * n * n;
         float* p_vec = p_data + b * n;
 
-        // Extract L (lower triangular with unit diagonal)
-        // and U (upper triangular) from packed LU
-        // LAPACK stores in column-major
-        for (int64_t j = 0; j < n; ++j) {
-            for (int64_t i = 0; i < n; ++i) {
-                float val = a_mat[j * n + i]; // column-major
+        // Extract L (unit lower triangular) and U (upper triangular) from the
+        // packed column-major factored matrix, storing them row-major:
+        //   element (i,j) lives at a_col[j*n + i] (column-major) and is written
+        //   to l_mat/u_mat at [i*n + j] (row-major).
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = 0; j < n; ++j) {
+                float val = a_col[j * n + i]; // column-major source
                 if (i > j) {
-                    l_mat[j * n + i] = val;
-                    u_mat[j * n + i] = 0.0f;
+                    l_mat[i * n + j] = val;
+                    u_mat[i * n + j] = 0.0f;
                 } else if (i == j) {
-                    l_mat[j * n + i] = 1.0f;
-                    u_mat[j * n + i] = val;
+                    l_mat[i * n + j] = 1.0f;
+                    u_mat[i * n + j] = val;
                 } else {
-                    l_mat[j * n + i] = 0.0f;
-                    u_mat[j * n + i] = val;
+                    l_mat[i * n + j] = 0.0f;
+                    u_mat[i * n + j] = val;
                 }
             }
         }
@@ -650,6 +760,11 @@ Tensor mps_linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
     std::vector<__CLPK_integer> ipiv(static_cast<size_t>(n));
     char trans = 'N';
 
+    // The packed LU factors and RHS are row-major; transpose into column-major
+    // scratch for Fortran sgetrs_, then transpose the solution back to row-major.
+    std::vector<float> lu_col(static_cast<size_t>(n * n));
+    std::vector<float> b_col(static_cast<size_t>(n * nrhs));
+
     for (int64_t b = 0; b < batch; ++b) {
         float* lu_mat = lu_data + b * n * n;
         float* b_mat = b_data + b * n * nrhs;
@@ -659,12 +774,17 @@ Tensor mps_linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
             ipiv[static_cast<size_t>(i)] = static_cast<__CLPK_integer>(p_vec[i]);
         }
 
+        row_to_col_major(lu_mat, lu_col.data(), n, n);
+        row_to_col_major(b_mat, b_col.data(), n, nrhs);
+
         info = 0;
-        sgetrs_(&trans, &N, &NRHS, lu_mat, &lda, ipiv.data(), b_mat, &ldb, &info);
+        sgetrs_(&trans, &N, &NRHS, lu_col.data(), &lda, ipiv.data(), b_col.data(), &ldb, &info);
         if (info != 0) {
             throw std::runtime_error("MPS LinalgLUSolve: sgetrs_ failed (error " +
                                      std::to_string(info) + ")");
         }
+
+        col_to_row_major(b_col.data(), b_mat, n, nrhs);
     }
 
     return b_work;
@@ -687,35 +807,30 @@ Tensor mps_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     auto b_shape = B.shape();
     int64_t nrhs = (static_cast<int64_t>(b_shape.size()) >= 2) ? b_shape.back() : 1;
 
-    __CLPK_integer N = static_cast<__CLPK_integer>(n);
-    __CLPK_integer NRHS = static_cast<__CLPK_integer>(nrhs);
-    __CLPK_integer lda = N;
-    __CLPK_integer ldb = N;
-    __CLPK_integer info = 0;
-
-    char side = 'L';
-    char uplo_c = upper ? 'U' : 'L';
-    char trans = 'N';
-    char diag = unitriangular ? 'U' : 'N';
-    float alpha = 1.0f;
+    // Tenzor storage is row-major; use the row-major CBLAS layout (matching the
+    // CPU reference) so no transpose is needed. Row-major leading dimensions:
+    // lda = #cols of A = n, ldb = #cols of B = nrhs.
+    const float alpha = 1.0f;
+    const auto ln = static_cast<int>(n);
+    const auto lnrhs = static_cast<int>(nrhs);
 
     for (int64_t b = 0; b < batch; ++b) {
         float* a_mat = a_data + b * n * n;
         float* b_mat = b_data + b * n * nrhs;
 
         // Use BLAS strsm for triangular solve (faster than LAPACK strtrs)
-        cblas_strsm(CblasColMajor,
+        cblas_strsm(CblasRowMajor,
                      CblasLeft,
                      upper ? CblasUpper : CblasLower,
                      CblasNoTrans,
                      unitriangular ? CblasUnit : CblasNonUnit,
-                     static_cast<int>(n),
-                     static_cast<int>(nrhs),
+                     ln,
+                     lnrhs,
                      alpha,
                      a_mat,
-                     static_cast<int>(n),
+                     ln,
                      b_mat,
-                     static_cast<int>(n));
+                     lnrhs);
     }
 
     return b_work;

@@ -16,6 +16,9 @@
 #include "../../include/tenzor/utils/logging.hpp"
 #include <cstddef>
 #include <cstring>
+#include <functional>
+#include <tuple>
+#include <utility>
 #include <filesystem>
 #include <sstream>
 #include <iomanip>
@@ -834,13 +837,48 @@ void ONNXExporter::export_model(nn::Module& model,
                         output_name
                     );
                 } else if (weight_shape.size() == 4) {
-                    // Flat-module Conv2d — same accessor path as the Sequential branch
+                    // Flat-module Conv2d — resolve the Conv2d that actually OWNS
+                    // the 4D weight rather than blindly casting the top-level
+                    // model. If the flat module is a wrapper that contains a
+                    // Conv2d (but is not itself one), casting &model fails and we
+                    // would silently drop stride/pad/dilation/groups. Walk the
+                    // module tree, preferring the submodule whose "weight"
+                    // parameter is identical to the one we surfaced.
                     std::vector<int64_t> kernel_size = {weight_shape[2], weight_shape[3]};
                     std::vector<int64_t> stride = {1, 1};
                     std::vector<int64_t> padding = {0, 0};
                     std::vector<int64_t> dilation = {1, 1};
                     int64_t groups = 1;
-                    if (auto* c = dynamic_cast<const nn::Conv2d*>(&model)) {
+
+                    const nn::Conv2d* owning_conv = nullptr;
+                    const nn::Conv2d* first_conv = nullptr;
+                    {
+                        std::function<void(const nn::Module*)> visit =
+                            [&](const nn::Module* m) {
+                            if (owning_conv) return;
+                            if (auto* c = dynamic_cast<const nn::Conv2d*>(m)) {
+                                if (!first_conv) first_conv = c;
+                                // Match by weight-parameter identity.
+                                for (const auto& [pn, pv] :
+                                     const_cast<nn::Module*>(m)->named_parameters()) {
+                                    if (pn.find("weight") != std::string::npos &&
+                                        pv && weight_param && pv == weight_param) {
+                                        owning_conv = c;
+                                        return;
+                                    }
+                                }
+                            }
+                            for (const auto& [child_name, child] : m->get_submodules()) {
+                                (void)child_name;
+                                if (child) visit(child.get());
+                                if (owning_conv) return;
+                            }
+                        };
+                        visit(&model);
+                    }
+
+                    const nn::Conv2d* c = owning_conv ? owning_conv : first_conv;
+                    if (c) {
                         stride   = {c->stride_h(),   c->stride_w()};
                         padding  = {c->padding_h(),  c->padding_w()};
                         dilation = {c->dilation_h(), c->dilation_w()};
@@ -999,11 +1037,11 @@ auto ONNXGraph::get_unique_name(const std::string& prefix) -> std::string {
 // ============================================================================
 
 auto ExportContext::register_tensor(const Tensor& tensor, const std::string& onnx_name) -> void {
-    tensor_map_[tensor.data_ptr()] = onnx_name;
+    tensor_map_[tensor_identity_key(tensor)] = onnx_name;
 }
 
 auto ExportContext::get_tensor_name(const Tensor& tensor) -> std::optional<std::string> {
-    auto it = tensor_map_.find(tensor.data_ptr());
+    auto it = tensor_map_.find(tensor_identity_key(tensor));
     if (it != tensor_map_.end()) {
         return it->second;
     }
@@ -1011,7 +1049,7 @@ auto ExportContext::get_tensor_name(const Tensor& tensor) -> std::optional<std::
 }
 
 auto ExportContext::has_tensor(const Tensor& tensor) -> bool {
-    return tensor_map_.find(tensor.data_ptr()) != tensor_map_.end();
+    return tensor_map_.find(tensor_identity_key(tensor)) != tensor_map_.end();
 }
 
 auto ExportContext::generate_name(const std::string& prefix) -> std::string {
@@ -1304,7 +1342,15 @@ auto ONNXExporter::export_conv2d(const Tensor& input, const Tensor& weight,
     // Set attributes
     node.set_attr("kernel_shape", kernel_size);
     node.set_attr("strides", stride);
-    node.set_attr("pads", std::vector<int64_t>{padding[0], padding[1], padding[0], padding[1]}); // [top, left, bottom, right]
+    // ONNX expects [top, left, bottom, right] for 2D pads. Guard against an
+    // undersized padding vector to avoid an out-of-bounds read; mirror the
+    // size()==2 handling used by export_quantized_conv2d and the JIT path.
+    if (padding.size() == 2) {
+        node.set_attr("pads", std::vector<int64_t>{
+            padding[0], padding[1], padding[0], padding[1]}); // [top, left, bottom, right]
+    } else {
+        node.set_attr("pads", padding);
+    }
     node.set_attr("dilations", dilation);
     node.set_attr("group", groups);
 
@@ -1563,6 +1609,11 @@ auto ONNXExporter::export_groupnorm(const Tensor& input, const Tensor& weight,
         int64_t ndim = static_cast<int64_t>(input_shape.size());
         int64_t N = input_shape[0];
         int64_t C = input_shape[1];
+        if (num_groups <= 0 || C % num_groups != 0) {
+            throw std::invalid_argument(
+                "export GroupNorm: channels (" + std::to_string(C) +
+                ") must be divisible by num_groups (" + std::to_string(num_groups) + ")");
+        }
         int64_t channels_per_group = C / num_groups;
 
         // Build reshape target: (N*G, C/G, spatial_dims...)
@@ -1587,15 +1638,19 @@ auto ONNXExporter::export_groupnorm(const Tensor& input, const Tensor& weight,
         reshape1_node.add_output(reshaped_name);
         graph_.add_node(reshape1_node);
 
-        // Create per-channel scale (ones) and bias (zeros) for InstanceNorm
-        // Shape: (channels_per_group,)
+        // Create per-channel scale (ones) and bias (zeros) for InstanceNorm.
+        // Shape: (channels_per_group,). ONNX InstanceNormalization requires the
+        // scale/bias element type to match the input, so honour input.dtype()
+        // instead of hardcoding Float32 (which would emit a type-mismatched op
+        // for Float16/BFloat16/Float64 GroupNorm).
+        DType io_dtype = input.dtype();
         std::string instnorm_scale_name = context_.generate_name("gn_instnorm_scale");
-        Tensor instnorm_scale({channels_per_group}, DType::Float32, Device::cpu());
+        Tensor instnorm_scale({channels_per_group}, io_dtype, Device::cpu());
         instnorm_scale.fill_(1.0f);
         add_initializer_tensor(instnorm_scale, instnorm_scale_name);
 
         std::string instnorm_bias_name = context_.generate_name("gn_instnorm_bias");
-        Tensor instnorm_bias({channels_per_group}, DType::Float32, Device::cpu());
+        Tensor instnorm_bias({channels_per_group}, io_dtype, Device::cpu());
         instnorm_bias.fill_(0.0f);
         add_initializer_tensor(instnorm_bias, instnorm_bias_name);
 
@@ -3546,8 +3601,14 @@ auto ONNXExporter::convert_jit_node_to_onnx(
         }
         case jit::OpType::Softmax:
         case jit::OpType::LogSoftmax: {
-            auto axis = node->get_int_attr("axis");
-            onnx_node.set_attr("axis", axis != 0 ? axis : static_cast<int64_t>(-1));
+            // get_int_attr returns 0 both for "unset" and an explicit axis=0, so
+            // distinguish them via has_int_attr: emit the recorded axis verbatim
+            // (including a legitimate 0) when present, else the ONNX default (-1).
+            if (node->has_int_attr("axis")) {
+                onnx_node.set_attr("axis", node->get_int_attr("axis"));
+            } else {
+                onnx_node.set_attr("axis", static_cast<int64_t>(-1));
+            }
             break;
         }
         case jit::OpType::Transpose:
@@ -3564,8 +3625,14 @@ auto ONNXExporter::convert_jit_node_to_onnx(
             break;
         }
         case jit::OpType::Flatten: {
-            auto axis = node->get_int_attr("axis");
-            onnx_node.set_attr("axis", axis != 0 ? axis : static_cast<int64_t>(1));
+            // get_int_attr cannot distinguish unset from an explicit axis=0; use
+            // has_int_attr so a genuine axis=0 is preserved instead of being
+            // rewritten to the ONNX default (1).
+            if (node->has_int_attr("axis")) {
+                onnx_node.set_attr("axis", node->get_int_attr("axis"));
+            } else {
+                onnx_node.set_attr("axis", static_cast<int64_t>(1));
+            }
             break;
         }
         case jit::OpType::Clamp: {
@@ -3999,52 +4066,98 @@ auto ONNXExporter::export_search_sorted(const Tensor& sorted_sequence,
 
 // --- Group 3: Signal processing ---
 
+namespace {
+
+// ONNX DFT treats the final tensor dimension as the real/imaginary component
+// axis, so the signal axes are the dims *before* it. `signal_ndim` is a count of
+// trailing signal dimensions (PyTorch legacy fft convention), NOT an axis index.
+// The last signal axis is therefore physical axis -2, the next -3, and so on.
+// ONNX DFT is single-axis per node, so an N-D transform is emitted as a chain of
+// `signal_ndim` DFT nodes. Returns the ordered list of (negative) axis indices,
+// outermost-first so chaining transforms each signal axis exactly once.
+auto dft_signal_axes(int64_t signal_ndim) -> std::vector<int64_t> {
+    std::vector<int64_t> axes;
+    if (signal_ndim <= 0) {
+        // Default: transform the second-to-last dimension (per ONNX DFT spec).
+        axes.push_back(-2);
+        return axes;
+    }
+    for (int64_t k = 0; k < signal_ndim; ++k) {
+        axes.push_back(-(signal_ndim - k) - 1); // ..., -3, -2 for the last axis
+    }
+    return axes;
+}
+
+}  // namespace
+
 auto ONNXExporter::export_fft(const Tensor& input, int64_t signal_ndim,
                                const Tensor& output,
                                const std::string& output_name) -> void {
-    // ONNX DFT (opset 17+)
-    ONNXExportNode node("DFT", context_.generate_name("fft"));
+    // ONNX DFT (opset 17+). Chain one DFT per signal axis.
     std::string input_name = get_tensor_name(input, "fft_input");
-    node.add_input(input_name);
-    node.add_output(output_name);
-    // axis defaults to -2 (second-to-last dim, per ONNX DFT spec)
-    if (signal_ndim > 0) {
-        node.set_attr("axis", static_cast<int64_t>(signal_ndim));
+    auto axes = dft_signal_axes(signal_ndim);
+    std::string current = input_name;
+    for (size_t i = 0; i < axes.size(); ++i) {
+        ONNXExportNode node("DFT", context_.generate_name("fft"));
+        node.add_input(current);
+        std::string out = (i + 1 == axes.size())
+            ? output_name
+            : context_.generate_name("fft_stage");
+        node.add_output(out);
+        node.set_attr("axis", axes[i]);
+        graph_.add_node(node);
+        current = out;
     }
-    graph_.add_node(node);
     context_.register_tensor(output, output_name);
 }
 
 auto ONNXExporter::export_ifft(const Tensor& input, int64_t signal_ndim,
                                 const Tensor& output,
                                 const std::string& output_name) -> void {
-    // ONNX DFT with inverse=1 (opset 17+)
-    ONNXExportNode node("DFT", context_.generate_name("ifft"));
+    // ONNX DFT with inverse=1 (opset 17+). Chain one DFT per signal axis.
     std::string input_name = get_tensor_name(input, "ifft_input");
-    node.add_input(input_name);
-    node.add_output(output_name);
-    node.set_attr("inverse", static_cast<int64_t>(1));
-    if (signal_ndim > 0) {
-        node.set_attr("axis", static_cast<int64_t>(signal_ndim));
+    auto axes = dft_signal_axes(signal_ndim);
+    std::string current = input_name;
+    for (size_t i = 0; i < axes.size(); ++i) {
+        ONNXExportNode node("DFT", context_.generate_name("ifft"));
+        node.add_input(current);
+        std::string out = (i + 1 == axes.size())
+            ? output_name
+            : context_.generate_name("ifft_stage");
+        node.add_output(out);
+        node.set_attr("inverse", static_cast<int64_t>(1));
+        node.set_attr("axis", axes[i]);
+        graph_.add_node(node);
+        current = out;
     }
-    graph_.add_node(node);
     context_.register_tensor(output, output_name);
 }
 
 auto ONNXExporter::export_rfft(const Tensor& input, int64_t signal_ndim,
                                 const Tensor& output,
                                 const std::string& output_name) -> void {
-    // ONNX DFT for real-to-complex (opset 17+)
-    // onesided=1 is the default for real input in ONNX DFT
-    ONNXExportNode node("DFT", context_.generate_name("rfft"));
+    // ONNX DFT for real-to-complex (opset 17+). onesided=1 produces the
+    // non-redundant half spectrum and applies only to the (last) real-input
+    // transform; remaining axes are full complex DFTs.
     std::string input_name = get_tensor_name(input, "rfft_input");
-    node.add_input(input_name);
-    node.add_output(output_name);
-    node.set_attr("onesided", static_cast<int64_t>(1));
-    if (signal_ndim > 0) {
-        node.set_attr("axis", static_cast<int64_t>(signal_ndim));
+    auto axes = dft_signal_axes(signal_ndim);
+    std::string current = input_name;
+    for (size_t i = 0; i < axes.size(); ++i) {
+        ONNXExportNode node("DFT", context_.generate_name("rfft"));
+        node.add_input(current);
+        std::string out = (i + 1 == axes.size())
+            ? output_name
+            : context_.generate_name("rfft_stage");
+        node.add_output(out);
+        // Only the innermost real signal axis (the last in the chain, physical
+        // axis -2) is transformed one-sided for real input.
+        if (i + 1 == axes.size()) {
+            node.set_attr("onesided", static_cast<int64_t>(1));
+        }
+        node.set_attr("axis", axes[i]);
+        graph_.add_node(node);
+        current = out;
     }
-    graph_.add_node(node);
     context_.register_tensor(output, output_name);
 }
 
@@ -4189,26 +4302,17 @@ auto ONNXExporter::export_roll(const Tensor& input, int64_t shift, int64_t axis,
 // --- Group 5: Layer ops ---
 
 auto ONNXExporter::export_embedding_bag(const Tensor& weight, const Tensor& indices,
-                                         [[maybe_unused]] const Tensor& offsets, int64_t mode,
+                                         const Tensor& offsets, int64_t mode,
                                          const Tensor& output,
                                          const std::string& output_name) -> void {
-    // EmbeddingBag = Gather embeddings + ReduceSum/ReduceMean per bag
-    // mode: 0=sum, 1=mean, 2=max
+    // EmbeddingBag = Gather embeddings, then a per-bag reduction segmented by
+    // `offsets`. mode: 0=sum, 1=mean, 2=max.
+    // Decomposition: Gather -> (per bag) Slice + Reduce(keepdims=1) -> Concat.
+    // offsets[i] is the start index of bag i in `indices`; bag i spans
+    // [offsets[i], offsets[i+1]) and the final bag runs to the end.
     std::string weight_name = get_tensor_name(weight, "embbag_weight");
     std::string indices_name = get_tensor_name(indices, "embbag_indices");
 
-    // Step 1: Gather all embeddings by indices
-    std::string gathered_name = context_.generate_name("embbag_gathered");
-    ONNXExportNode gather_node("Gather", context_.generate_name("embbag_gather"));
-    gather_node.add_input(weight_name);
-    gather_node.add_input(indices_name);
-    gather_node.set_attr("axis", static_cast<int64_t>(0));
-    gather_node.add_output(gathered_name);
-    graph_.add_node(gather_node);
-
-    // Step 2: Reduce along the bag dimension
-    // For simplicity, this emits a single ReduceSum/ReduceMean over axis=0
-    // A full implementation would use offsets to segment the reduction.
     std::string reduce_op;
     switch (mode) {
         case 0: reduce_op = "ReduceSum"; break;
@@ -4217,12 +4321,104 @@ auto ONNXExporter::export_embedding_bag(const Tensor& weight, const Tensor& indi
         default: reduce_op = "ReduceSum"; break;
     }
 
-    ONNXExportNode reduce_node(reduce_op, context_.generate_name("embbag_reduce"));
-    reduce_node.add_input(gathered_name);
-    reduce_node.add_output(output_name);
-    reduce_node.set_attr("axes", std::vector<int64_t>{0});
-    reduce_node.set_attr("keepdims", static_cast<int64_t>(0));
-    graph_.add_node(reduce_node);
+    // Step 1: Gather all embeddings by indices -> [total_indices, embedding_dim]
+    std::string gathered_name = context_.generate_name("embbag_gathered");
+    ONNXExportNode gather_node("Gather", context_.generate_name("embbag_gather"));
+    gather_node.add_input(weight_name);
+    gather_node.add_input(indices_name);
+    gather_node.set_attr("axis", static_cast<int64_t>(0));
+    gather_node.add_output(gathered_name);
+    graph_.add_node(gather_node);
+
+    const int64_t total_indices = indices.numel();
+
+    // Build the per-bag [start, end) ranges from offsets.
+    std::vector<std::pair<int64_t, int64_t>> bag_ranges;
+    if (offsets.numel() == 0) {
+        // Empty offsets: the whole gathered tensor is a single bag.
+        bag_ranges.emplace_back(0, total_indices);
+    } else {
+        Tensor off_cpu = offsets.to(DType::Int64).cpu().contiguous();
+        const int64_t* off = off_cpu.data<int64_t>();
+        const int64_t num_bags = off_cpu.numel();
+        for (int64_t b = 0; b < num_bags; ++b) {
+            int64_t start = off[b];
+            int64_t end = (b + 1 < num_bags) ? off[b + 1] : total_indices;
+            bag_ranges.emplace_back(start, end);
+        }
+    }
+
+    // Helper: build starts/ends/axes initializers for a Slice over axis 0.
+    auto make_slice_init = [&](const std::string& prefix, int64_t start, int64_t end) {
+        std::string starts_name = context_.generate_name(prefix + "_starts");
+        std::string ends_name = context_.generate_name(prefix + "_ends");
+        std::string axes_name = context_.generate_name(prefix + "_axes");
+
+        Tensor starts_t({1}, DType::Int64, Device::cpu());
+        *starts_t.data<int64_t>() = start;
+        add_initializer_tensor(starts_t, starts_name);
+
+        Tensor ends_t({1}, DType::Int64, Device::cpu());
+        *ends_t.data<int64_t>() = end;
+        add_initializer_tensor(ends_t, ends_name);
+
+        Tensor axes_t({1}, DType::Int64, Device::cpu());
+        *axes_t.data<int64_t>() = 0;
+        add_initializer_tensor(axes_t, axes_name);
+
+        return std::tuple{starts_name, ends_name, axes_name};
+    };
+
+    // Single bag covering the whole tensor: reduce directly (keepdims=0).
+    if (bag_ranges.size() == 1 && bag_ranges[0].first == 0 &&
+        bag_ranges[0].second == total_indices) {
+        ONNXExportNode reduce_node(reduce_op, context_.generate_name("embbag_reduce"));
+        reduce_node.add_input(gathered_name);
+        reduce_node.add_output(output_name);
+        reduce_node.set_attr("axes", std::vector<int64_t>{0});
+        reduce_node.set_attr("keepdims", static_cast<int64_t>(0));
+        graph_.add_node(reduce_node);
+        context_.register_tensor(output, output_name);
+        return;
+    }
+
+    // Multiple bags: per-bag Slice + Reduce(keepdims=1) then Concat on axis 0.
+    std::vector<std::string> bag_outputs;
+    bag_outputs.reserve(bag_ranges.size());
+    for (size_t b = 0; b < bag_ranges.size(); ++b) {
+        auto [start, end] = bag_ranges[b];
+        std::string prefix = "embbag_bag" + std::to_string(b);
+
+        auto [starts_name, ends_name, axes_name] =
+            make_slice_init(prefix, start, end);
+        std::string slice_out = context_.generate_name(prefix + "_slice");
+        ONNXExportNode slice_node("Slice", context_.generate_name(prefix + "_slice_node"));
+        slice_node.add_input(gathered_name);
+        slice_node.add_input(starts_name);
+        slice_node.add_input(ends_name);
+        slice_node.add_input(axes_name);
+        slice_node.add_output(slice_out);
+        graph_.add_node(slice_node);
+
+        std::string reduce_out = context_.generate_name(prefix + "_reduce");
+        ONNXExportNode reduce_node(reduce_op, context_.generate_name(prefix + "_reduce_node"));
+        reduce_node.add_input(slice_out);
+        reduce_node.add_output(reduce_out);
+        reduce_node.set_attr("axes", std::vector<int64_t>{0});
+        reduce_node.set_attr("keepdims", static_cast<int64_t>(1));
+        graph_.add_node(reduce_node);
+
+        bag_outputs.push_back(reduce_out);
+    }
+
+    ONNXExportNode concat_node("Concat", context_.generate_name("embbag_concat"));
+    for (const auto& name : bag_outputs) {
+        concat_node.add_input(name);
+    }
+    concat_node.add_output(output_name);
+    concat_node.set_attr("axis", static_cast<int64_t>(0));
+    graph_.add_node(concat_node);
+
     context_.register_tensor(output, output_name);
 }
 

@@ -25,14 +25,26 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 // Shared memory tile for input patch.
-// Max tile: (16*stride + (kernel_h-1)*dilation) * (16*stride + (kernel_w-1)*dilation)
-// For common cases (stride<=2, kernel<=7, dilation<=2): max ~45x45 = 2025 floats
-shared float tile[2048];
+// Required tile: tile_h * tile_w where
+//   tile_h = 16*stride + (kernel_h-1)*dilation
+//   tile_w = 16*stride + (kernel_w-1)*dilation
+// The capacity is a specialization constant so the host can size it to the
+// actual (stride,kernel,dilation) configuration and validate it against
+// VkPhysicalDeviceLimits::maxComputeSharedMemorySize before creating the
+// pipeline. The default (2048 floats = 8 KiB) covers the common case
+// (stride<=2, kernel<=7, dilation<=2 -> max ~45x45 = 2025 floats); larger
+// configurations MUST raise TILE_CAPACITY via the specialization constant.
+layout(constant_id = 0) const uint TILE_CAPACITY = 2048;
+shared float tile[TILE_CAPACITY];
 
 void main() {
     uint out_x = gl_GlobalInvocationID.x;
     uint out_y = gl_GlobalInvocationID.y;
-    uint out_c = gl_GlobalInvocationID.z;
+    // gl_GlobalInvocationID.z packs (batch * out_channels). Split it so each
+    // sample of the batch gets its own output-channel slot.
+    uint nc = gl_GlobalInvocationID.z;
+    uint out_c = nc % params.out_channels;
+    uint n = nc / params.out_channels;
 
     uint lx = gl_LocalInvocationID.x;
     uint ly = gl_LocalInvocationID.y;
@@ -51,14 +63,26 @@ void main() {
     uint tile_w = 16 * params.stride + (params.kernel_w - 1) * params.dilation;
     uint tile_size = tile_h * tile_w;
 
+    // The shared tile capacity is fixed at pipeline-creation time via the
+    // TILE_CAPACITY specialization constant. If the host failed to size it for
+    // this configuration, abort instead of indexing out of bounds. The host is
+    // responsible for guaranteeing tile_size <= TILE_CAPACITY (and that
+    // TILE_CAPACITY*4 <= maxComputeSharedMemorySize); this is a defensive
+    // backstop only.
+    if (tile_size > TILE_CAPACITY) {
+        return;
+    }
+
     bool in_bounds = (out_x < params.out_width && out_y < params.out_height &&
-                      out_c < params.out_channels);
+                      out_c < params.out_channels && n < params.batch);
 
     float sum = 0.0;
 
     for (uint in_c = 0; in_c < params.in_channels; in_c++) {
-        // Cooperatively load input tile into shared memory
-        uint base_input = in_c * params.in_height * params.in_width;
+        // Cooperatively load input tile into shared memory.
+        // Input layout is NCHW: offset by the batch sample as well.
+        uint base_input = (n * params.in_channels + in_c) *
+                          params.in_height * params.in_width;
 
         // Use all 256 threads to load the tile (may need multiple iterations)
         for (uint i = lid; i < tile_size; i += 256) {
@@ -102,9 +126,10 @@ void main() {
             sum += bias_data[out_c];
         }
 
-        // Write output
-        uint output_idx = out_c * params.out_height * params.out_width +
-                         out_y * params.out_width + out_x;
+        // Write output. Output layout is NCHW: offset by the batch sample.
+        uint output_idx = (n * params.out_channels + out_c) *
+                          params.out_height * params.out_width +
+                          out_y * params.out_width + out_x;
         output_data[output_idx] = sum;
     }
 }

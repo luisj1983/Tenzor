@@ -7,6 +7,9 @@
 
 #include "register.hpp"
 
+#include <algorithm>
+#include <vector>
+
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 
@@ -30,15 +33,70 @@ namespace py = pybind11;
 
 namespace tenzor::python {
 
-// Per-thread flag tracking whether the Python Tracer API pushed a tracing
-// interceptor onto the (thread-local) DispatchInterceptorStack, so end_trace
-// pops exactly what start_trace pushed and a repeated start_trace does not
-// stack duplicate interceptors. Tracing is inherently thread-local (Tracer
-// uses a thread-local instance), so a thread_local flag is the right scope.
-static bool& py_tracer_interceptor_installed() {
-    static thread_local bool installed = false;
-    return installed;
+// Per-thread, *per-Tracer-instance* bookkeeping for the tracing interceptor
+// that the Python Tracer API pushes onto the (thread-local)
+// DispatchInterceptorStack. A single thread-wide flag was wrong: the Python
+// `Tracer` class exposes `py::init<>()`, so a user can create several distinct
+// Tracer objects on one thread and interleave their start/end calls. A shared
+// flag let a second `start_trace()` skip installing its own interceptor (it
+// would then record an empty graph) and let one tracer's `end_trace()` pop an
+// interceptor owned by another tracer, corrupting the latter's recording.
+//
+// We therefore track installation state keyed by `Tracer*`. The underlying
+// DispatchInterceptorStack is strictly LIFO (only the top can be popped), so we
+// additionally keep a per-thread stack of the Tracer instances that currently
+// own an installed interceptor. This lets us:
+//   * install at most one interceptor per Tracer instance (idempotent
+//     start_trace per instance), while still allowing distinct instances to
+//     each install their own;
+//   * pop the correct interceptor in `end_trace()` / `clear()` even when calls
+//     are properly nested, and detect+repair improper (non-LIFO) teardown by
+//     unwinding everything above the target so the stack is never left holding
+//     a stale interceptor for a finished tracer.
+//
+// Tracing is inherently thread-local (the dispatch stack is thread-local), so
+// thread_local storage is the right scope.
+namespace {
+
+// Owner stack: front == bottom, back == top of the matching slice of the
+// DispatchInterceptorStack that the Python Tracer API installed on this thread.
+std::vector<tenzor::jit::Tracer*>& py_tracer_owner_stack() {
+    static thread_local std::vector<tenzor::jit::Tracer*> owners;
+    return owners;
 }
+
+bool py_tracer_is_installed(tenzor::jit::Tracer* self) {
+    auto& owners = py_tracer_owner_stack();
+    return std::find(owners.begin(), owners.end(), self) != owners.end();
+}
+
+// Push a tracing interceptor for `self` if it does not already own one.
+void py_tracer_install(tenzor::jit::Tracer& self) {
+    if (py_tracer_is_installed(&self)) return;
+    DispatchInterceptorStack::push(
+        tenzor::jit::make_tracing_interceptor(self, nullptr));
+    py_tracer_owner_stack().push_back(&self);
+}
+
+// Remove the tracing interceptor owned by `self`, if any. To keep the LIFO
+// DispatchInterceptorStack consistent, pop every interceptor sitting above
+// `self`'s entry as well (those belong to tracers that were never properly
+// ended). Returns true if `self` owned an interceptor that was removed.
+bool py_tracer_uninstall(tenzor::jit::Tracer* self) {
+    auto& owners = py_tracer_owner_stack();
+    auto it = std::find(owners.rbegin(), owners.rend(), self);
+    if (it == owners.rend()) return false;
+    // Number of owners from the top down to and including `self`.
+    const std::size_t pops =
+        static_cast<std::size_t>(std::distance(owners.rbegin(), it)) + 1;
+    for (std::size_t i = 0; i < pops; ++i) {
+        DispatchInterceptorStack::pop();
+        owners.pop_back();
+    }
+    return true;
+}
+
+} // namespace
 
 void register_jit(py::module_& m) {
     auto jit = m.def_submodule("jit", "JIT compilation and tracing");
@@ -196,30 +254,35 @@ void register_jit(py::module_& m) {
                 // this, a Python `Tracer().start_trace()` produced an empty
                 // graph (op_types == []). Install it here so the direct Tracer
                 // API records ops the same way TracingGuard does.
+                //
+                // Installation is keyed per Tracer instance, so two distinct
+                // Tracer objects on the same thread each get their own
+                // interceptor instead of the second silently reusing (or
+                // skipping) the first's.
                 self.start_trace();
-                auto& installed = py_tracer_interceptor_installed();
-                if (!installed) {
-                    DispatchInterceptorStack::push(
-                        tenzor::jit::make_tracing_interceptor(self, nullptr));
-                    installed = true;
-                }
+                py_tracer_install(self);
              },
              "Start recording operations")
         .def("end_trace", [](tenzor::jit::Tracer& self,
                              const std::vector<tenzor::Variable>& inputs,
                              const std::vector<tenzor::Variable>& outputs) {
-                auto& installed = py_tracer_interceptor_installed();
-                if (installed) {
-                    DispatchInterceptorStack::pop();
-                    installed = false;
-                }
+                py_tracer_uninstall(&self);
                 return self.end_trace(inputs, outputs);
              },
              py::arg("inputs"), py::arg("outputs"),
              "Stop recording and build IR graph")
         .def("is_tracing", &tenzor::jit::Tracer::is_tracing,
              "Check if tracing is active")
-        .def("clear", &tenzor::jit::Tracer::clear,
+        .def("clear", [](tenzor::jit::Tracer& self) {
+                // Recovery path: if a trace was started but never properly
+                // ended (e.g. an exception fired in the traced region before
+                // end_trace ran), the interceptor would otherwise stay
+                // installed forever and keep recording every dispatched op.
+                // Remove this tracer's interceptor before clearing its state so
+                // clear() is a complete reset reachable from Python.
+                py_tracer_uninstall(&self);
+                self.clear();
+             },
              "Clear all recorded operations")
         .def("graph_break_count", &tenzor::jit::Tracer::graph_break_count,
              "Number of graph breaks recorded during the current (or last)\n"

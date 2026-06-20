@@ -52,6 +52,18 @@ auto MasterWeightManager::sync_from_working() -> void {
     }
 }
 
+auto MasterWeightManager::zero_working_grads() -> void {
+    // The optimizer's zero_grad() only touches the FP32 master Variables (which
+    // replaced the model's params in the optimizer). The working FP16/BF16
+    // parameters are the leaves that backward() accumulates into, so they must
+    // be zeroed independently each step to avoid cross-step grad accumulation.
+    for (auto& working : working_refs_) {
+        if (working) {
+            working->zero_grad();
+        }
+    }
+}
+
 auto MasterWeightManager::master_params() -> std::vector<std::shared_ptr<Variable>>& {
     return master_variables_;
 }
@@ -65,8 +77,20 @@ auto MixedPrecisionTrainer::train_step(const Variable& input, const Variable& ta
     model_->train();
     training_ = true;
 
-    // Zero gradients from previous iteration
+    // Zero gradients from previous iteration.
+    // optimizer_->zero_grad() only clears the parameters currently registered
+    // with the optimizer. When master weights are active the optimizer was
+    // swapped to the FP32 master Variables (see constructor /
+    // replace_parameters), so this clears only the masters. The model's actual
+    // working (FP16/BF16) parameters are the autograd leaves that backward()
+    // writes into, and the engine ACCUMULATES leaf gradients across successive
+    // backward() calls. Without clearing them here their grads would grow by the
+    // sum of all gradients ever seen, producing exploding, incorrect updates.
+    // Therefore explicitly zero the working parameters' grads as well.
     optimizer_->zero_grad();
+    if (master_weights_) {
+        master_weights_->zero_working_grads();
+    }
 
     Variable loss;
     float loss_value = 0.0f;

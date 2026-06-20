@@ -37,17 +37,27 @@ float readF16(uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Write a single float16 value to packed output buffer
+// Write a single float16 value to packed output buffer.
+// im2col dispatches one invocation per output element with block_idx as the
+// fastest-varying dimension, so consecutive output_idx values share the same
+// 32-bit word and are written by concurrent invocations. A plain
+// read-modify-write would race and drop half the unfolded columns. We commit
+// only the targeted 16-bit lane via a bounded atomicCompSwap loop (same pattern
+// as col2im_f16.comp / diag_bf16.comp), which never clobbers its neighbour.
 void writeF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
-    if (word_offset == 0) {
-        uint existing = output_data[word_idx] & 0xFFFF0000u;
-        output_data[word_idx] = existing | bits;
-    } else {
-        uint existing = output_data[word_idx] & 0x0000FFFFu;
-        output_data[word_idx] = existing | (bits << 16);
+    uint shift = (element_idx % 2) * 16;
+    uint mask = 0xFFFFu << shift;
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+
+    uint old_word = output_data[word_idx];
+    // Bounded retries to prevent GPU hangs from infinite spinning under
+    // pathological contention (hardware/driver failure).
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << shift);
+        uint observed = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (observed == old_word) return;
+        old_word = observed;
     }
 }
 

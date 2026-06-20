@@ -99,7 +99,16 @@ auto SparseAdam::step_impl() -> void {
         if (param.has_sparse_grad()) {
             const auto& sg_opt = param.sparse_grad();
             if (sg_opt.has_value()) {
-                const auto& sg = sg_opt.value();
+                // Coalesce first: a producer-supplied sparse grad may contain
+                // duplicate index rows (e.g. a token referenced by several
+                // samples). Coalescing sums those duplicates into unique rows,
+                // after which the index_select + scatter (overwrite) sequence
+                // below is correct. Without it, scatter keeps only the last
+                // duplicate and silently drops the other contributions.
+                const SparseTensor sg_coalesced =
+                    sg_opt.value().is_coalesced() ? sg_opt.value()
+                                                  : sg_opt.value().coalesce();
+                const auto& sg = sg_coalesced;
                 if (sg.nnz() > 0) {
                     const int64_t sparse_dim = sg.sparse_dim();
                     const auto& sg_shape = sg.shape();
@@ -121,12 +130,21 @@ auto SparseAdam::step_impl() -> void {
                             flat_row_idx = idx_mat.reshape({sg.nnz()});
                         } else {
                             // Build flat = sum_d idx_mat[d] * stride[d].
-                            // Compute on idx_mat's device/dtype (Int64).
+                            // The stride table is filled from host memory via
+                            // std::memcpy, so it must be staged on the CPU
+                            // first: Tensor::data<int64_t>() returns the raw
+                            // storage pointer with no H2D handling, and
+                            // idx_mat.device() may be a GPU. After filling,
+                            // move it onto idx_mat's device so the
+                            // idx_mat * stride_t multiply dispatches correctly.
                             Tensor stride_t({sparse_dim, 1}, DType::Int64,
-                                            idx_mat.device());
+                                            Device::cpu());
                             std::memcpy(stride_t.data<int64_t>(),
                                         sparse_strides.data(),
                                         sparse_dim * sizeof(int64_t));
+                            if (stride_t.device() != idx_mat.device()) {
+                                stride_t = stride_t.to(idx_mat.device());
+                            }
                             // idx_mat * stride_t broadcasts to (sparse_dim, nnz);
                             // sum along dim 0 collapses to (nnz,).
                             Tensor weighted = idx_mat * stride_t;

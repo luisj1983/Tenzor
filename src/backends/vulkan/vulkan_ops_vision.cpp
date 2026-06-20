@@ -207,13 +207,48 @@ auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float
 // Phase 3: OneHot - GPU implementation
 auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -> Tensor {
     int32_t device_id = indices.device().index;
-    // Select shader and output dtype — use F64 shader for Float64 output
-    bool is_f64 = false;  // Default Float32; callers can extend via overload
-    std::string shader_name = is_f64 ? "one_hot_f64" : "one_hot";
-    DType out_dtype = is_f64 ? DType::Float64 : DType::Float32;
-    auto* pipeline = getPipeline(shader_name, device_id);
 
-    // The one_hot shader reads int indices_data[] (32-bit), so convert Int64→Int32
+    // Match the CPU reference (cpu/kernels/indexing.cpp:one_hot_kernel): indices
+    // must be an integer type and the output is always Float32. There is no
+    // Float64 one_hot at the op level — the OneHot op carries no output-dtype
+    // attribute and the reference kernel produces Float32 unconditionally — so
+    // emitting Float64 here would break cross-backend parity. The one_hot_f64
+    // shader is intentionally left for a future dtype-propagating op variant.
+    if (indices.dtype() != DType::Int64 && indices.dtype() != DType::Int32) {
+        throw std::runtime_error("one_hot: indices must be integer type");
+    }
+
+    auto* pipeline = getPipeline("one_hot", device_id);
+    DType out_dtype = DType::Float32;
+
+    // Validate index values host-side so out-of-range classes raise the same
+    // std::out_of_range as the CPU reference instead of the shader silently
+    // writing all-zero rows (negative indices wrap to a huge uint, and indices
+    // beyond INT32 range would wrap when narrowed to the 32-bit shader buffer).
+    // Valid class indices satisfy 0 <= cls < num_classes, and num_classes fits
+    // in int32, so this check also guarantees the Int64->Int32 narrowing below
+    // is lossless.
+    {
+        Tensor idx_host = indices.to(Device::cpu());
+        auto check_range = [&](int64_t cls) {
+            if (cls < 0 || cls >= num_classes) {
+                throw std::out_of_range(
+                    "one_hot: class index " + std::to_string(cls) +
+                    " out of range [0, " + std::to_string(num_classes) + ")");
+            }
+        };
+        int64_t n = idx_host.numel();
+        if (indices.dtype() == DType::Int64) {
+            const int64_t* p = idx_host.data<int64_t>();
+            for (int64_t i = 0; i < n; ++i) check_range(p[i]);
+        } else {
+            const int32_t* p = idx_host.data<int32_t>();
+            for (int64_t i = 0; i < n; ++i) check_range(static_cast<int64_t>(p[i]));
+        }
+    }
+
+    // The one_hot shader reads int indices_data[] (32-bit), so convert Int64→Int32.
+    // The host-side range check above guarantees every value fits in int32.
     Tensor indices_i32 = (indices.dtype() == DType::Int32) ? indices : indices.to(DType::Int32);
 
     int64_t batch_size = indices_i32.numel();
@@ -228,7 +263,7 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
     };
     std::vector<size_t> sizes = {
         static_cast<size_t>(batch_size) * indices_i32.dtype_size(),
-        static_cast<size_t>(batch_size * num_classes) * (is_f64 ? sizeof(double) : sizeof(float)),
+        static_cast<size_t>(batch_size * num_classes) * sizeof(float),
     };
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(

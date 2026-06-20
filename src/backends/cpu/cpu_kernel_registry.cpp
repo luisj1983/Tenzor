@@ -289,7 +289,7 @@ namespace cpu {
     auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
     auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, const std::string& reduce, bool include_self) -> Tensor;
     auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor;
-    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor;
+    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
     auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Tensor;
     auto slice_multi_kernel(const Tensor& input, const std::vector<int64_t>& starts, const std::vector<int64_t>& ends, const std::vector<int64_t>& steps) -> Tensor;
@@ -1043,6 +1043,18 @@ static void register_cpu_kernels_elementwise_math(BackendDispatchTable& table) {
             int64_t ndim = static_cast<int64_t>(output.shape().size());
             if (dim < 0) dim += ndim;
 
+            // Normalize negative index (PyTorch: -1 = last) and bounds-check,
+            // mirroring the dim normalization above. Tensor::slice re-normalizes
+            // negative start values, so we must resolve index here first.
+            int64_t dim_size = output.shape()[dim];
+            if (index < 0) index += dim_size;
+            if (index < 0 || index >= dim_size) {
+                throw std::out_of_range(
+                    "SelectScatter: index " + std::to_string(index) +
+                    " out of range for dimension " + std::to_string(dim) +
+                    " of size " + std::to_string(dim_size));
+            }
+
             // select(dim, index) gives a view with dim removed;
             // we use slice(dim, index, index+1, 1) to keep the dimension,
             // then copy src (unsqueezed) into it.
@@ -1096,11 +1108,18 @@ static void register_cpu_kernels_elementwise_math(BackendDispatchTable& table) {
             if (dim < 0) dim += ndim;
             int64_t dim_size = output.shape()[dim];
 
-            // Normalize negative indices
+            // Normalize negative indices, then fully clamp to [0, dim_size]
+            // (PyTorch slice clamping). We must produce a fully-resolved,
+            // in-bounds [start, end] here because Tensor::slice re-normalizes
+            // negatives (double-subtracting dim_size) and strictly validates
+            // bounds, which would otherwise throw or corrupt the extent.
             if (start < 0) start += dim_size;
             if (end < 0) end += dim_size;  // slice negative-index convention (matches slice_kernel)
             if (start < 0) start = 0;
+            if (start > dim_size) start = dim_size;
+            if (end < 0) end = 0;
             if (end > dim_size) end = dim_size;
+            if (end < start) end = start;  // empty slice rather than negative extent
 
             auto dst_slice = output.slice(dim, start, end, step);
             auto dst_sh = dst_slice.shape();
@@ -1319,8 +1338,22 @@ static void register_cpu_kernels_extended_math(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::LinalgMatrixNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t ord = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
         if (ord == 0) {
-            // Frobenius norm: sqrt(sum(x^2))
-            return cpu::norm_kernel(inputs[0], 2.0f, INT64_MIN, false);
+            // Frobenius norm: sqrt(sum(x^2)) reduced ONLY over the last two
+            // (matrix) axes, preserving batch dims so a batched [B,M,N] input
+            // yields [B] instead of collapsing to a scalar. Matches
+            // tenzor::linalg::matrix_norm semantics.
+            const auto& in = inputs[0];
+            int64_t in_ndim = static_cast<int64_t>(in.shape().size());
+            if (in_ndim < 2) {
+                throw std::invalid_argument(
+                    "LinalgMatrixNorm: input must be at least 2D");
+            }
+            Tensor sq = cpu::square_kernel(in);
+            // Reduce the last axis, then the (now-last) matrix axis. With
+            // keepdim=false the second reduction targets index in_ndim-2.
+            Tensor s = cpu::sum_kernel(sq, in_ndim - 1, false);
+            s = cpu::sum_kernel(s, in_ndim - 2, false);
+            return cpu::sqrt_kernel(s);
         }
         // Nuclear (ord==1) or Spectral (ord==2): use SVD
         auto svd_result = linalg::svd(inputs[0], /*full_matrices=*/false);
@@ -1607,7 +1640,7 @@ static void register_cpu_kernels_indexing(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         double value = attrs.get_float(AttrKey::Value, 0.0);
-        return cpu::masked_fill_kernel(inputs[0], inputs[1], static_cast<float>(value));
+        return cpu::masked_fill_kernel(inputs[0], inputs[1], value);
     });
 
     TENZOR_REGISTER_TERNARY_KERNEL(table, Where, cpu::where_kernel);

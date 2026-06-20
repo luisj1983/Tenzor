@@ -146,6 +146,12 @@ auto LAMB::initialize_buffers() -> void {
             // R.16: half-precision params get Float32 state buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+        } else {
+            // Keep state vectors index-aligned with parameters_ for null
+            // params (matches on_parameters_appended_); step_impl indexes by
+            // parameter position.
+            exp_avg_.push_back(Tensor{});
+            exp_avg_sq_.push_back(Tensor{});
         }
     }
 }

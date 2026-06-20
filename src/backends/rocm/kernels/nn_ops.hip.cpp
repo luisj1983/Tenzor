@@ -319,6 +319,13 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     HIP_CHECK(hipMemsetAsync(grad_weight.data_ptr(), 0,
         num_embeddings * embedding_dim * dtype_size(grad_output.dtype()), stream));
 
+    // Empty index batch (e.g. fully-masked/padded sequences): grad_weight is
+    // already correctly zeroed; launching with a zero-block grid would be an
+    // invalid HIP configuration. Mirror the forward kernel's empty-input guard.
+    if (num_indices == 0) {
+        return grad_weight;
+    }
+
     int64_t total_elements = num_indices * embedding_dim;
     int num_blocks = get_num_blocks(total_elements);
 
@@ -574,44 +581,6 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
         hipLaunchKernelGGL(sum_over_batch_kernel<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             grad_output.data<double>(), grad_bias.data<double>(), batch_size, out_features);
-    } else if (input.dtype() == DType::Float16) {
-        const rocblas_half alpha = rocblas_half(1.0f);
-        const rocblas_half beta = rocblas_half(0.0f);
-
-        // grad_input = grad_output @ weight
-        ROCBLAS_CHECK(rocblas_hgemm(handle,
-            rocblas_operation_none, rocblas_operation_none,
-            in_features, batch_size, out_features,
-            &alpha,
-            reinterpret_cast<const rocblas_half*>(weight.data<Float16>()), in_features,
-            reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()), out_features,
-            &beta,
-            reinterpret_cast<rocblas_half*>(grad_input.data<Float16>()), in_features));
-
-        // grad_weight = grad_output.T @ input
-        ROCBLAS_CHECK(rocblas_hgemm(handle,
-            rocblas_operation_none, rocblas_operation_transpose,
-            in_features, out_features, batch_size,
-            &alpha,
-            reinterpret_cast<const rocblas_half*>(input.data<Float16>()), in_features,
-            reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()), out_features,
-            &beta,
-            reinterpret_cast<rocblas_half*>(grad_weight.data<Float16>()), in_features));
-
-        // grad_bias = sum over batch dimension (accumulate in float, then convert)
-        Tensor grad_bias_f32({out_features}, DType::Float32, input.device());
-        HIP_CHECK(hipMemsetAsync(grad_bias_f32.data<float>(), 0, out_features * sizeof(float), stream));
-        int num_blocks = get_num_blocks(batch_size * out_features);
-        hipLaunchKernelGGL(sum_over_batch_kernel_fp16,
-            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-            reinterpret_cast<const __half*>(grad_output.data<Float16>()), grad_bias_f32.data<float>(), batch_size, out_features);
-        // Convert float grad_bias to Float16
-        int convert_blocks = get_num_blocks(out_features);
-        hipLaunchKernelGGL(convert_f32_to_f16_kernel,
-            dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
-            grad_bias_f32.data<float>(),
-            reinterpret_cast<__half*>(grad_bias.data<Float16>()),
-            out_features);
     } else if (input.dtype() == DType::BFloat16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);
