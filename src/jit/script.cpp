@@ -350,8 +350,44 @@ private:
     std::vector<Token> toks_;
     size_t pos_ = 0;
 
-    const Token& peek(size_t off = 0) const { return toks_[pos_ + off]; }
-    const Token& consume() { return toks_[pos_++]; }
+    // Hardening: bound recursion depth of the recursive-descent parser so that
+    // a crafted source with deeply nested parentheses / method chains / nested
+    // if-for blocks (e.g. "((((...))))" or "f(f(f(...)))" thousands deep) throws
+    // a clean error instead of overflowing the native C++ stack (DoS / crash on
+    // untrusted input). 256 comfortably exceeds any legitimate hand-written
+    // script while staying far below the typical 1–8 MB stack budget.
+    static constexpr int kMaxRecursionDepth = 256;
+    int depth_ = 0;
+
+    // RAII depth guard: increments on construction, throws if the limit is
+    // exceeded, decrements on scope exit. Placed at the top of every mutually
+    // recursive parse entry point.
+    struct DepthGuard {
+        Parser& p;
+        explicit DepthGuard(Parser& parser) : p(parser) {
+            if (++p.depth_ > kMaxRecursionDepth) {
+                fail(p.peek(),
+                     "expression/statement nesting too deep (max " +
+                         std::to_string(kMaxRecursionDepth) + ")");
+            }
+        }
+        ~DepthGuard() { --p.depth_; }
+    };
+
+    // Bounds-safe lookahead. The lexer always appends a single End token, but a
+    // one-token lookahead (peek(1)) at the final real token, or any off>0 past
+    // End, would index past the vector (OOB read on untrusted input). Clamp to
+    // the last token (always End) so the parser sees a well-formed terminator
+    // rather than reading out of bounds.
+    const Token& peek(size_t off = 0) const {
+        size_t i = pos_ + off;
+        if (i >= toks_.size()) return toks_.back();
+        return toks_[i];
+    }
+    const Token& consume() {
+        if (pos_ >= toks_.size()) return toks_.back();  // End sentinel
+        return toks_[pos_++];
+    }
 
     const Token& expect(Tok kind, std::string_view msg) {
         if (peek().kind != kind) fail(peek(), msg);
@@ -371,6 +407,7 @@ private:
     }
 
     std::vector<Stmt> parse_block() {
+        DepthGuard guard(*this);  // bound nested if/for block depth
         std::vector<Stmt> stmts;
         while (true) {
             skip_newlines();
@@ -382,6 +419,7 @@ private:
     }
 
     Stmt parse_stmt() {
+        DepthGuard guard(*this);  // bound recursion via nested if/for bodies
         if (peek().kind == Tok::Return) {
             consume();
             ExprPtr v = parse_expression();
@@ -421,6 +459,16 @@ private:
             auto body = parse_block();
             int64_t count = static_cast<int64_t>(n_tok.number);
             if (count < 0) fail(n_tok, "range(N) requires N >= 0");
+            // Hardening: `for i in range(N)` is statically unrolled into N copies
+            // of the loop body in the traced graph (exec_one below). A crafted
+            // large N (e.g. range(2000000000)) would unroll into billions of
+            // graph nodes — an OOM / unbounded-work DoS. Cap N at parse time so
+            // untrusted scripts can't drive an arbitrarily large unroll.
+            constexpr int64_t kMaxUnroll = 1 << 20;  // 1,048,576 iterations
+            if (count > kMaxUnroll) {
+                fail(n_tok, "range(N) unroll limit exceeded (max " +
+                                std::to_string(kMaxUnroll) + ")");
+            }
             return Stmt{ForStmt{std::move(var), count, std::move(body)}};
         }
         if (peek().kind == Tok::Ident && peek(1).kind == Tok::Equals) {
@@ -435,6 +483,11 @@ private:
 
     // expr := term (cmp_op term)?
     ExprPtr parse_expression() {
+        // Bound nested-parenthesis / method-chain / call-argument recursion:
+        // parse_expression -> parse_term -> ... -> parse_unary -> '(' expr ')'
+        // (and method/call args) re-enters parse_expression, so guarding here
+        // caps the entire expression-recursion cycle on untrusted input.
+        DepthGuard guard(*this);
         ExprPtr lhs = parse_term();
         if (peek().kind == Tok::Less || peek().kind == Tok::Greater) {
             char op = peek().kind == Tok::Less ? '<' : '>';
@@ -829,11 +882,30 @@ private:
 // Public entry point
 // ============================================================================
 
+// Hardening: cap the accepted script source length. compile_script forwards a
+// raw (potentially untrusted) string into this hand-written lexer/parser; an
+// arbitrarily large input is a DoS vector (memory + parse time) even before any
+// nesting-depth concern. 1 MiB dwarfs any legitimate hand-written script.
+static constexpr size_t kMaxScriptSourceBytes = 1u << 20;  // 1 MiB
+
+static void validate_script_length(const char* source) {
+    // strnlen-style bounded scan: stop at the cap so we never walk an
+    // unterminated / huge buffer further than necessary.
+    size_t len = 0;
+    while (len <= kMaxScriptSourceBytes && source[len] != '\0') ++len;
+    if (len > kMaxScriptSourceBytes) {
+        throw std::runtime_error(
+            "compile_script: source exceeds maximum supported length (" +
+            std::to_string(kMaxScriptSourceBytes) + " bytes)");
+    }
+}
+
 auto compile_script_with_dummy(const char* source, const Tensor& dummy)
     -> std::shared_ptr<CompiledModule> {
     if (source == nullptr) {
         throw std::runtime_error("compile_script: null source");
     }
+    validate_script_length(source);
 
     Lexer lexer(source);
     auto tokens = lexer.tokenize();
@@ -874,6 +946,7 @@ auto compile_script_multi_with_dummies(const char* source,
     if (source == nullptr) {
         throw std::runtime_error("compile_script: null source");
     }
+    validate_script_length(source);
     Lexer lexer(source);
     auto tokens = lexer.tokenize();
     Parser parser(std::move(tokens));

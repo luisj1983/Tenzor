@@ -1357,17 +1357,28 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
 
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // Materialize to a contiguous offset-0 layout: the interpolate shaders
+    // address the source by logical N/C/H/W assuming a row-major offset-0 buffer,
+    // and a non-zero storage offset can trip minStorageBufferOffsetAlignment.
+    const Tensor input_c = dispatchContiguous(input);
+
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, channels, out_height, out_width};
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, input_c.dtype(), input_c.device());
 
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_output = output.data_ptr();
 
-    // Calculate buffer sizes
-    size_t buffer_size_input = input.numel() * input.dtype_size();
+    // Calculate buffer sizes. The F16 shaders bind packed 32-bit words (2 halves
+    // each) and read/CAS whole words, so round both ranges up to ((numel+1)/2)*4
+    // for an odd-numel input/output tail word.
+    size_t buffer_size_input = input_c.numel() * input_c.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
+    if (is_float16) {
+        buffer_size_input = ((static_cast<size_t>(input_c.numel()) + 1) / 2) * sizeof(uint32_t);
+        buffer_size_output = ((static_cast<size_t>(output.numel()) + 1) / 2) * sizeof(uint32_t);
+    }
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -2349,6 +2360,16 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         // through Float32 would lose precision for |Int32| > 2^24, violating
         // the modular-truncating contract — so this must precede the catch-all.
         shader_name = "cast_i32_i16";
+    } else if ((src_dtype == DType::Int64 || src_dtype == DType::UInt64) &&
+               (target_dtype == DType::Int32 || target_dtype == DType::UInt32)) {
+        // Direct modular-truncating 64->32 cast (keep low 32 bits), matching
+        // PyTorch/numpy. The generic two-step catch-all below routes through
+        // Float32, whose 24-bit mantissa rounds any |value| > 2^24 and whose
+        // Float32->Int32 leg additionally clamps to +/-2^31 — both wrong. Must
+        // precede the catch-all. cast_int64_to_int32 reads each 64-bit value as
+        // a uvec2 and writes the low word — exactly low-32-bit truncation,
+        // bit-identical for Int32 and UInt32 targets.
+        shader_name = "cast_int64_to_int32";
     } else if (src_dtype != DType::Float32 && target_dtype != DType::Float32) {
         // Generic two-step via Float32 for any remaining dtype pair
         two_step = true;
@@ -4902,6 +4923,28 @@ auto VulkanBackend::dispatchIndexAdd(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
+    // Validate index VALUES host-side. PyTorch index_add_ requires every index in
+    // [0, dim_size) and raises on violation (it does NOT wrap negatives, unlike
+    // gather/index_select). The shader silently skips out-of-range/negative
+    // indices, which would diverge from the CPU reference's throw. Mirror the
+    // dispatchEmbedding readback-and-throw validation.
+    {
+        int64_t ndim_self = static_cast<int64_t>(self_shape.size());
+        int64_t norm_dim = dim < 0 ? dim + ndim_self : dim;
+        int64_t dim_size = self_shape[norm_dim];
+        Tensor idx_host = dispatchContiguous(index).to(Device::cpu());
+        Tensor idx_i64 = idx_host.dtype() == DType::Int64 ? idx_host : idx_host.to(DType::Int64);
+        const int64_t* ip = idx_i64.data<int64_t>();
+        for (int64_t i = 0; i < idx_i64.numel(); ++i) {
+            if (ip[i] < 0 || ip[i] >= dim_size) {
+                throw std::out_of_range(
+                    "index_add_(): index " + std::to_string(ip[i]) +
+                    " is out of bounds for dimension " + std::to_string(norm_dim) +
+                    " with size " + std::to_string(dim_size));
+            }
+        }
+    }
+
     // Mirror dispatchScatterAdd: route integers through the native Int32 atomic
     // shader and Float64 through the native Float64 atomic shader, so Int64 /
     // Float64 are not rounded through Float32 (24 mantissa bits drop precision
@@ -5073,6 +5116,27 @@ auto VulkanBackend::dispatchIndexCopy(const Tensor& self, int64_t dim,
     }
 
     int32_t device_id = self.device().index;
+
+    // Validate index VALUES host-side: PyTorch index_copy_ requires every index
+    // in [0, dim_size) and raises on violation (no negative wrapping). The shader
+    // silently skips out-of-range indices, diverging from the CPU throw. Mirror
+    // the dispatchEmbedding readback-and-throw validation.
+    {
+        int64_t ndim_self = static_cast<int64_t>(self_shape.size());
+        int64_t norm_dim = dim < 0 ? dim + ndim_self : dim;
+        int64_t dim_size = self_shape[norm_dim];
+        Tensor idx_host = dispatchContiguous(index).to(Device::cpu());
+        Tensor idx_i64 = idx_host.dtype() == DType::Int64 ? idx_host : idx_host.to(DType::Int64);
+        const int64_t* ip = idx_i64.data<int64_t>();
+        for (int64_t i = 0; i < idx_i64.numel(); ++i) {
+            if (ip[i] < 0 || ip[i] >= dim_size) {
+                throw std::out_of_range(
+                    "index_copy_(): index " + std::to_string(ip[i]) +
+                    " is out of bounds for dimension " + std::to_string(norm_dim) +
+                    " with size " + std::to_string(dim_size));
+            }
+        }
+    }
 
     // index_copy is a pure (bit-exact) data move, so values must NOT be rounded
     // through Float32 (24 mantissa bits drop Int64/Float64 precision above 2^24).

@@ -676,10 +676,10 @@ namespace rocm {
     auto maxpool3d_backward_hip(const Tensor& grad_output, const Tensor& indices,
                                 const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
     auto avgpool3d_forward_hip(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride,
-                               std::array<int64_t, 3> padding, hipStream_t stream) -> Tensor;
+                               std::array<int64_t, 3> padding, bool count_include_pad, hipStream_t stream) -> Tensor;
     auto avgpool3d_backward_hip(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
-                                hipStream_t stream) -> Tensor;
+                                bool count_include_pad, hipStream_t stream) -> Tensor;
     auto adaptive_maxpool3d_forward_hip(const Tensor& input,
                                          int64_t output_d, int64_t output_h, int64_t output_w,
                                          hipStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -1689,8 +1689,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
+        // PyTorch/library default is count_include_pad=true (divide by full
+        // window kD*kH*kW). Matches the 2D avgpool dispatch and CPU reference.
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         return rocm::avgpool3d_forward_hip(inputs[0],
-            kernel_size, stride, padding, get_hip_stream(attrs));
+            kernel_size, stride, padding, count_include_pad, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1700,8 +1703,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         return rocm::avgpool3d_backward_hip(inputs[0], input_shape,
-            kernel_size, stride, padding, get_hip_stream(attrs));
+            kernel_size, stride, padding, count_include_pad, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -4023,7 +4027,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::permute_kernel(inputs[0], dims, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        // Default to a sentinel that cannot collide with a real (possibly
+        // negative) axis, so squeeze(-1)/squeeze(-2) are NOT mistaken for
+        // squeeze-all. Matches the CPU/OneAPI dispatch convention.
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
         return rocm::squeeze_kernel(inputs[0], dim, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -5281,7 +5288,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Quantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return rocm::quantile_kernel(inputs[0], q, dim, keepdim, get_hip_stream(attrs));
@@ -5289,7 +5296,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Nanquantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return rocm::nanquantile_kernel(inputs[0], q, dim, keepdim, get_hip_stream(attrs));
@@ -5303,9 +5310,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Histc,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t bins = attrs.get_int(AttrKey::N, 100);
-            double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
-            double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+            int64_t bins = attrs.get_int(AttrKey::NumBins, 100);
+            double min_val = attrs.get_float(AttrKey::Min, 0.0);
+            double max_val = attrs.get_float(AttrKey::Max, 0.0);
             return rocm::histc_kernel(inputs[0], bins, min_val, max_val, get_hip_stream(attrs));
         });
 

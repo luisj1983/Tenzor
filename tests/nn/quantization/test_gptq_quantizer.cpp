@@ -2,6 +2,9 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/quantization/gptq.hpp>
 #include "../../backend_test_fixture.hpp"
+#include "gptq_dequant_helper.hpp"
+
+#include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::nn::quantization;
@@ -97,10 +100,19 @@ TEST_P(GPTQQuantizerTest, QuantizeLayerOutputShapes) {
 
     auto result = q.quantize_layer(weight, hessian);
 
-    // Packed weight should have correct first dimension
+    // Packed weight should have correct first dimension and be INT4-packed.
     ASSERT_EQ(result.packed_weight.dim(), 2);
     EXPECT_EQ(result.packed_weight.size(0), 64);
+    EXPECT_EQ(result.packed_weight.size(1), (128 + 1) / 2);
     EXPECT_GT(result.scales.numel(), 0);
+
+    // Round-trip: reconstruction must be far from the zero/garbage baseline.
+    auto recon = ::tenzor::testing::gptq_detail::reconstruct_gptq(
+        result, config.group_size, config.sym);
+    double rel_err = ::tenzor::testing::gptq_detail::relative_frobenius_error(
+        recon, weight);
+    EXPECT_LT(rel_err, 0.40)
+        << "GPTQ INT4 relative reconstruction error " << rel_err;
 }
 
 TEST_P(GPTQQuantizerTest, QuantizeLayerErrorBounded) {
@@ -116,6 +128,7 @@ TEST_P(GPTQQuantizerTest, QuantizeLayerErrorBounded) {
     auto hessian = GPTQQuantizer::compute_hessian(input);
 
     auto result = q.quantize_layer(weight, hessian);
+    ASSERT_EQ(result.in_features, 128);
 
     // Verify the scales are finite
     auto s_cpu = result.scales.cpu();
@@ -124,6 +137,19 @@ TEST_P(GPTQQuantizerTest, QuantizeLayerErrorBounded) {
         EXPECT_TRUE(std::isfinite(data[i]))
             << "Non-finite scale at index " << i;
     }
+
+    // Actually measure the round-trip error the test is named for: dequantize
+    // the packed INT4 weight and bound the relative reconstruction error.
+    // GPTQ error-compensates, so the per-element half-step bound does not hold;
+    // the meaningful, name-matching quantity is the aggregate relative error,
+    // which a correct quantizer keeps well below 1 (returning zeros => 1.0).
+    auto recon = ::tenzor::testing::gptq_detail::reconstruct_gptq(
+        result, config.group_size, config.sym);
+    double rel_err = ::tenzor::testing::gptq_detail::relative_frobenius_error(
+        recon, weight);
+    EXPECT_LT(rel_err, 0.30)
+        << "GPTQ INT4 relative reconstruction error " << rel_err
+        << " too large — quantizer likely broken (zeros/garbage gives ~1.0)";
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +172,16 @@ TEST_P(GPTQQuantizerTest, QuantizeLayerPackedOutput) {
     // Packed weight should have correct first dimension
     ASSERT_EQ(result.packed_weight.dim(), 2);
     EXPECT_EQ(result.packed_weight.size(0), 32);
+    EXPECT_EQ(result.packed_weight.size(1), (128 + 1) / 2)
+        << "INT4 output should be nibble-packed (2 cols per byte)";
+    EXPECT_EQ(result.packed_weight.dtype(), DType::UInt8);
+
+    auto recon = ::tenzor::testing::gptq_detail::reconstruct_gptq(
+        result, config.group_size, config.sym);
+    double rel_err = ::tenzor::testing::gptq_detail::relative_frobenius_error(
+        recon, weight);
+    EXPECT_LT(rel_err, 0.40)
+        << "GPTQ INT4 relative reconstruction error " << rel_err;
 }
 
 TEST_P(GPTQQuantizerTest, QuantizeLayerLargerWeight) {
@@ -163,6 +199,14 @@ TEST_P(GPTQQuantizerTest, QuantizeLayerLargerWeight) {
 
     EXPECT_EQ(result.packed_weight.size(0), 64);
     EXPECT_GT(result.scales.numel(), 0);
+    ASSERT_EQ(result.in_features, 256);
+
+    auto recon = ::tenzor::testing::gptq_detail::reconstruct_gptq(
+        result, config.group_size, config.sym);
+    double rel_err = ::tenzor::testing::gptq_detail::relative_frobenius_error(
+        recon, weight);
+    EXPECT_LT(rel_err, 0.40)
+        << "GPTQ INT4 relative reconstruction error " << rel_err;
 }
 
 INSTANTIATE_BACKEND_TESTS(GPTQQuantizerTest);

@@ -9,8 +9,14 @@ namespace tenzor::data::datasets {
 namespace {
 
 auto read_be_uint32(std::ifstream& f) -> uint32_t {
-    uint8_t buf[4];
+    uint8_t buf[4] = {0, 0, 0, 0};
     f.read(reinterpret_cast<char*>(buf), 4);
+    // On a truncated/empty file read() short-reads and leaves buf partly
+    // indeterminate (here zero-initialized). Reject the short read here rather
+    // than assembling a header value from incomplete bytes downstream.
+    if (f.gcount() != 4) {
+        throw std::runtime_error("MNIST: truncated header (expected 4 bytes)");
+    }
     return (static_cast<uint32_t>(buf[0]) << 24) |
            (static_cast<uint32_t>(buf[1]) << 16) |
            (static_cast<uint32_t>(buf[2]) << 8) |

@@ -157,4 +157,54 @@ TEST_P(HvpVhpTest, HvpAndVhpAgreeForSymmetricHessian) {
     }
 }
 
+// Regression: the Hessian-vector product for a transcendental f must match the
+// closed form to high precision. hvp uses a Float64 central difference of the
+// gradient (eps=1e-5), which is accurate to ~1e-7 — far tighter than the old
+// native-dtype FD path (~1e-4) that the silently-inflated gradcheck tolerance
+// used to hide. (An exact analytic H·v awaits the jvp walker's higher-order
+// multi-occurrence tangent accumulation; see hvp's implementation note.)
+//   f(x) = sum(sin(x))  ->  H = diag(-sin(x))  ->  H·v = -sin(x) ⊙ v
+TEST_P(HvpVhpTest, HvpTranscendentalHighPrecision) {
+    double x_data[] = {0.3, 1.1, -0.7, 2.4};
+    auto x = Variable(from_data(x_data, {4}).to(DType::Float64).to(device), true);
+    double v_data[] = {1.0, -2.0, 0.5, 3.0};
+    auto v = from_data(v_data, {4}).to(DType::Float64).to(device);
+
+    auto func = [](const Variable& input) -> Variable {
+        return sum(sin(input));
+    };
+
+    auto [output, hv] = hvp(func, x, v);
+
+    auto hv_cpu = hv.cpu();
+    auto hv_data = hv_cpu.data<double>();
+    for (int i = 0; i < 4; ++i) {
+        double expected = -std::sin(x_data[i]) * v_data[i];
+        // 1e-6 is far tighter than the old native-dtype FD path's ~1e-4: only
+        // the Float64 central-difference implementation can satisfy it.
+        EXPECT_NEAR(hv_data[i], expected, 1e-6) << "index " << i;
+    }
+}
+
+// Companion: the full Hessian (built from per-basis hvp) is likewise accurate.
+//   f(x) = sum(sin(x))  ->  H = diag(-sin(x))
+TEST_P(HvpVhpTest, HessianTranscendentalHighPrecision) {
+    double x_data[] = {0.3, 1.1, -0.7};
+    auto x = Variable(from_data(x_data, {3}).to(DType::Float64).to(device), true);
+
+    auto func = [](const Variable& input) -> Variable {
+        return sum(sin(input));
+    };
+
+    auto H = hessian(func, x).cpu();
+    auto H_data = H.data<double>();
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            double expected = (i == j) ? -std::sin(x_data[i]) : 0.0;
+            EXPECT_NEAR(H_data[i * 3 + j], expected, 1e-6)
+                << "H[" << i << "," << j << "]";
+        }
+    }
+}
+
 INSTANTIATE_BACKEND_TESTS(HvpVhpTest);

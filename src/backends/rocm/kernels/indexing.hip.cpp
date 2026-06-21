@@ -1395,6 +1395,14 @@ auto cat_hip(
     HIP_CHECK(hipMalloc(&d_input_ptrs, cont_tensors.size() * sizeof(void*)));
     HIP_CHECK(hipMalloc(&d_dim_sizes, cont_tensors.size() * sizeof(int64_t)));
 
+    // RAII so both scratch buffers are freed even if a dtype-dispatched
+    // HIP_POST_LAUNCH_CHECK() throws (previously the frees only ran on the
+    // normal path after the switch, leaking on any launch failure).
+    struct CatScratchGuard {
+        void* a; void* b;
+        ~CatScratchGuard() noexcept { if (a) hipFree(a); if (b) hipFree(b); }
+    } cat_scratch{d_input_ptrs, d_dim_sizes};
+
     HIP_CHECK(hipMemcpy(d_input_ptrs, h_input_ptrs.data(), cont_tensors.size() * sizeof(void*), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_dim_sizes, dim_sizes.data(), cont_tensors.size() * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -1492,15 +1500,12 @@ auto cat_hip(
             outer_size, total_dim_size, inner_size, d_dim_sizes);
         HIP_POST_LAUNCH_CHECK();
     } else {
-        HIP_CHECK(hipFree(d_input_ptrs));
-        HIP_CHECK(hipFree(d_dim_sizes));
         throw std::runtime_error("cat_hip: Unsupported dtype");
     }
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_input_ptrs));
-    HIP_CHECK(hipFree(d_dim_sizes));
     HIP_POST_LAUNCH_CHECK();
+    // cat_scratch frees d_input_ptrs / d_dim_sizes on scope exit.
 
     return output;
 }

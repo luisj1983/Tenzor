@@ -50,6 +50,7 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input_orig, int64_t dim, bool k
     if (input.dtype() == DType::Int32) shader_name = "argmax_argmin_i32";
     else if (input.dtype() == DType::Float64) shader_name = "argmax_argmin_f64";
     else if (input.dtype() == DType::Float16) shader_name = "argmax_argmin_f16";
+    else if (input.dtype() == DType::BFloat16) shader_name = "argmax_argmin_bf16";
     else shader_name = "argmax_argmin";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -62,8 +63,10 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input_orig, int64_t dim, bool k
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (input.dtype() == DType::Float16) {
-        // Round up input buffer to 4-byte boundary for uint32 shader access
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // F16/BF16 argmax shaders bind packed 32-bit words (2 halves each) and
+        // read whole words; round the input range up to ((numel+1)/2)*4 so the
+        // tail word of an odd-numel tensor stays in-bounds.
         size_t in_pairs = (input.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
     }
@@ -168,6 +171,7 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input_orig, int64_t dim, bool k
     if (input.dtype() == DType::Int32) shader_name = "argmax_argmin_i32";
     else if (input.dtype() == DType::Float64) shader_name = "argmax_argmin_f64";
     else if (input.dtype() == DType::Float16) shader_name = "argmax_argmin_f16";
+    else if (input.dtype() == DType::BFloat16) shader_name = "argmax_argmin_bf16";
     else shader_name = "argmax_argmin";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -180,8 +184,10 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input_orig, int64_t dim, bool k
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (input.dtype() == DType::Float16) {
-        // Round up input buffer to 4-byte boundary for uint32 shader access
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // F16/BF16 argmax shaders bind packed 32-bit words (2 halves each) and
+        // read whole words; round the input range up to ((numel+1)/2)*4 so the
+        // tail word of an odd-numel tensor stays in-bounds.
         size_t in_pairs = (input.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
     }
@@ -767,7 +773,11 @@ auto VulkanBackend::dispatchLogSumExp(const Tensor& input_orig, int64_t dim, boo
 
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {
+        // The f16 AND bf16 variants both bind packed 32-bit words (2 halves
+        // each) and read/CAS whole words; round both ranges up to ((numel+1)/2)*4
+        // so odd-numel tail words stay in-bounds. (BFloat16 previously used
+        // numel*2, overrunning the final word by 2 bytes on odd sizes.)
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
@@ -876,7 +886,11 @@ auto VulkanBackend::dispatchTriuTril(const std::string& op_name,
 
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {
+        // The f16 AND bf16 variants both bind packed 32-bit words (2 halves
+        // each) and read/CAS whole words; round both ranges up to ((numel+1)/2)*4
+        // so odd-numel tail words stay in-bounds. (BFloat16 previously used
+        // numel*2, overrunning the final word by 2 bytes on odd sizes.)
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
@@ -1107,7 +1121,11 @@ auto VulkanBackend::dispatchFlip(const Tensor& input_orig, int64_t dim) -> Tenso
 
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {
+        // The f16 AND bf16 variants both bind packed 32-bit words (2 halves
+        // each) and read/CAS whole words; round both ranges up to ((numel+1)/2)*4
+        // so odd-numel tail words stay in-bounds. (BFloat16 previously used
+        // numel*2, overrunning the final word by 2 bytes on odd sizes.)
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;

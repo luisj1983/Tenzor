@@ -97,6 +97,28 @@ auto gather_kernel(const Tensor& input_in, int64_t dim, const Tensor& index_in, 
 
     const int64_t numel = output.numel();
 
+    // Validate index values host-side (normalize negatives, throw on out-of-range)
+    // before they are used unguarded in device pointer arithmetic — an OOB index
+    // would otherwise cause an out-of-bounds device read / memory corruption.
+    {
+        const int64_t dim_size = input_shape[dim];
+        const int64_t index_numel = index.numel();
+        if (index_numel > 0) {
+            const int64_t* idx_host_src = get_data_ptr<const int64_t>(index);
+            std::vector<int64_t> host_idx(static_cast<size_t>(index_numel));
+            queue.memcpy(host_idx.data(), idx_host_src,
+                         static_cast<size_t>(index_numel) * sizeof(int64_t)).wait();
+            for (int64_t i = 0; i < index_numel; ++i) {
+                int64_t di = host_idx[i];
+                if (di < 0) di += dim_size;
+                if (di < 0 || di >= dim_size) {
+                    throw std::out_of_range("gather: index " + std::to_string(host_idx[i]) +
+                        " out of range [0, " + std::to_string(dim_size) + ")");
+                }
+            }
+        }
+    }
+
     // Copy vectors to arrays for device copyability (max 8 dimensions)
     int64_t input_shape_arr[8], input_strides_arr[8], index_strides_arr[8];
     const size_t ndims = index_shape.size();
@@ -248,6 +270,11 @@ auto gather_kernel(const Tensor& input_in, int64_t dim, const Tensor& index_in, 
         throw std::runtime_error("Unsupported dtype for gather");
     }
 
+    // The gather parallel_for above is enqueued asynchronously. allocate() returns
+    // USM-shared host-accessible memory and the function-local `input`/`index`
+    // contiguous copies are freed at return; drain the queue first so the kernel
+    // has finished reading them and the host sees the written output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -325,6 +352,23 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index_in,
     const int64_t ndim = static_cast<int64_t>(ndims);
 
     const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
+
+    // Validate index values host-side (normalize negatives, throw on out-of-range
+    // against the scatter dim of self) before they are used unguarded as
+    // output_ptr[...] write offsets — an OOB index would corrupt device memory.
+    if (numel > 0) {
+        std::vector<int64_t> host_idx(static_cast<size_t>(numel));
+        queue.memcpy(host_idx.data(), index_ptr,
+                     static_cast<size_t>(numel) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < numel; ++i) {
+            int64_t di = host_idx[i];
+            if (di < 0) di += input_dim_size;
+            if (di < 0 || di >= input_dim_size) {
+                throw std::out_of_range("scatter: index " + std::to_string(host_idx[i]) +
+                    " out of range [0, " + std::to_string(input_dim_size) + ")");
+            }
+        }
+    }
 
     // Deterministic scatter: one work-item per INDEX element. Addressing the
     // index/src buffers uses the INDEX's own (smaller-or-equal) extents and
@@ -424,6 +468,27 @@ auto index_select_kernel(const Tensor& input_in, int64_t dim, const Tensor& inde
     auto output_strides = calculate_strides(output_shape);
 
     const int64_t numel = output.numel();
+
+    // Validate index values host-side (normalize negatives, throw on out-of-range)
+    // before they are used unguarded in device pointer arithmetic.
+    {
+        const int64_t dim_size = input_shape[dim];
+        const int64_t index_numel = index.numel();
+        if (index_numel > 0) {
+            const int64_t* idx_host_src = get_data_ptr<const int64_t>(index);
+            std::vector<int64_t> host_idx(static_cast<size_t>(index_numel));
+            queue.memcpy(host_idx.data(), idx_host_src,
+                         static_cast<size_t>(index_numel) * sizeof(int64_t)).wait();
+            for (int64_t i = 0; i < index_numel; ++i) {
+                int64_t di = host_idx[i];
+                if (di < 0) di += dim_size;
+                if (di < 0 || di >= dim_size) {
+                    throw std::out_of_range("index_select: index " + std::to_string(host_idx[i]) +
+                        " out of range [0, " + std::to_string(dim_size) + ")");
+                }
+            }
+        }
+    }
 
     // Copy vectors to arrays for device copyability (max 8 dimensions)
     int64_t input_shape_arr[8], input_strides_arr[8], output_strides_arr[8];
@@ -641,6 +706,9 @@ auto index_select_kernel(const Tensor& input_in, int64_t dim, const Tensor& inde
         throw std::runtime_error("Unsupported dtype for index_select");
     }
 
+    // Drain the queue before the function-local contiguous `input`/`index`
+    // copies are freed and before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -763,6 +831,9 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, double value
         throw std::runtime_error("Unsupported dtype for masked_fill");
     }
 
+    // Drain the queue before the function-local `mask_storage` (non-Bool mask
+    // normalization) is freed and before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1059,6 +1130,8 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes, DType output_dty
         throw std::runtime_error("one_hot: unsupported output dtype");
     }
 
+    // Drain the fill + scatter before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1647,6 +1720,11 @@ auto put_kernel(
         }
     }
 
+    // The accumulate path waits per-kernel, but the non-accumulate path enqueues
+    // its parallel_for without a wait. Drain so the host sees the scattered writes
+    // (output = input.clone() is USM-shared) and any local source/indices copies
+    // stay alive until the kernel finishes.
+    queue.wait_and_throw();
     return output;
 }
 

@@ -15,6 +15,10 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/linalg.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/fft.hpp"
+#include "tenzor/ops/advanced.hpp"
 #include <cmath>
 #include <limits>
 
@@ -178,6 +182,84 @@ TEST_P(EdgeCaseTest, Float64Precision) {
     EXPECT_DOUBLE_EQ(c64_data[0], 1.0)
         << "Float64 subtraction should be exact for integers on "
         << device.to_string();
+}
+
+// ============================================================================
+// Regression tests for ops_sparse review fixes (2026-06-20)
+// ============================================================================
+
+// triu/tril on a zero-size matrix dimension must not divide by zero (SIGFPE).
+// Previously batch_size = numel / (rows*cols) crashed when rows*cols == 0.
+TEST_P(EdgeCaseTest, TriuTrilZeroSizeMatrixDim) {
+    if (device.type != Device::Type::CPU) GTEST_SKIP();
+    for (std::vector<int64_t> shp : {std::vector<int64_t>{0, 5},
+                                     std::vector<int64_t>{5, 0},
+                                     std::vector<int64_t>{3, 0, 4}}) {
+        auto x = zeros(shp, DType::Float32, device);
+        auto u = triu(x, 0);
+        auto l = tril(x, 0);
+        EXPECT_EQ(u.numel(), 0);
+        EXPECT_EQ(l.numel(), 0);
+        for (size_t d = 0; d < shp.size(); ++d) {
+            EXPECT_EQ(u.shape()[d], shp[d]);
+            EXPECT_EQ(l.shape()[d], shp[d]);
+        }
+    }
+}
+
+// argsort with the PyTorch-default negative dim (-1) must normalize before
+// dispatch; a raw -1 reaching the kernel would index shape[-1] OOB.
+TEST_P(EdgeCaseTest, ArgsortNegativeDim) {
+    std::vector<float> xd{3, 1, 2, 6, 5, 4};
+    auto x = tenzor::from_data(xd.data(), {2, 3}, Device::cpu()).to(device);
+    auto idx_neg = argsort(x, -1, false);
+    auto idx_pos = argsort(x, 1, false);
+    auto a = idx_neg.to(Device::cpu()).contiguous();
+    auto b = idx_pos.to(Device::cpu()).contiguous();
+    ASSERT_EQ(a.numel(), b.numel());
+    for (int64_t i = 0; i < a.numel(); ++i)
+        EXPECT_EQ(a.data<int64_t>()[i], b.data<int64_t>()[i]);
+}
+
+// unique_consecutive with negative dim must normalize identically to dim=1.
+TEST_P(EdgeCaseTest, UniqueConsecutiveNegativeDim) {
+    if (device.type != Device::Type::CPU) GTEST_SKIP();
+    std::vector<float> xd{1, 1, 2, 1, 1, 2};
+    auto x = tenzor::from_data(xd.data(), {2, 3}, Device::cpu()).to(device);
+    auto [u_neg, inv_neg, cnt_neg] = unique_consecutive(x, false, false, -1);
+    auto [u_pos, inv_pos, cnt_pos] = unique_consecutive(x, false, false, 1);
+    auto a = u_neg.to(Device::cpu()).contiguous();
+    auto b = u_pos.to(Device::cpu()).contiguous();
+    ASSERT_EQ(a.numel(), b.numel());
+    for (int64_t i = 0; i < a.numel(); ++i)
+        EXPECT_FLOAT_EQ(a.data<float>()[i], b.data<float>()[i]);
+}
+
+// linalg::solve must reject a B whose row dimension != A's order n, rather
+// than letting LAPACK write n*nrhs elements into an under-sized buffer.
+TEST_P(EdgeCaseTest, SolveRejectsMismatchedBRows) {
+    if (device.type != Device::Type::CPU) GTEST_SKIP();
+    auto A = tenzor::eye(4, std::nullopt, DType::Float32, device);
+    auto B = zeros({2, 3}, DType::Float32, device);  // wrong: 2 rows, need 4
+    EXPECT_THROW(tenzor::linalg::solve(A, B), std::invalid_argument);
+}
+
+// fftfreq(0) must return an empty tensor, not [NaN] from 1/(0*d).
+TEST_P(EdgeCaseTest, FftfreqZeroReturnsEmpty) {
+    if (device.type != Device::Type::CPU) GTEST_SKIP();
+    auto f = tenzor::fft::fftfreq(0, 1.0, DType::Float32, device);
+    EXPECT_EQ(f.numel(), 0);
+    EXPECT_THROW(tenzor::fft::fftfreq(-3, 1.0, DType::Float32, device),
+                 std::invalid_argument);
+}
+
+// take must reject a flat index that is out of bounds (OOB read otherwise).
+TEST_P(EdgeCaseTest, TakeRejectsOutOfBoundsIndex) {
+    if (device.type != Device::Type::CPU) GTEST_SKIP();
+    auto x = zeros({4}, DType::Float32, device);
+    std::vector<int64_t> idxd{0, 9};
+    auto bad_idx = tenzor::from_data(idxd.data(), {2}, Device::cpu()).to(device);
+    EXPECT_THROW(tenzor::take(x, bad_idx), std::out_of_range);
 }
 
 INSTANTIATE_BACKEND_TESTS(EdgeCaseTest);

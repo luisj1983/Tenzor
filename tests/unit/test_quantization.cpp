@@ -280,6 +280,60 @@ TEST_P(QuantizationTest, FakeQuantize_Forward) {
     }
 }
 
+// Regression: a FakeQuantize created with a PER-TENSOR scheme that later
+// receives PER-CHANNEL qparams (a length-C scale vector) must quantize each
+// channel with its own scale, not collapse to channel 0's scalar. The buggy
+// forward_impl branched on scheme_ alone, read scale[0], and silently quantized
+// every channel with channel 0's scale. The fix branches on the actual qparams
+// (per-channel when scale.numel() > 1 or axis >= 0).
+TEST_P(QuantizationTest, FakeQuantize_PerChannelParamsOnPerTensorScheme) {
+    // Per-tensor scheme, observer DISABLED so it cannot overwrite our injected
+    // qparams during the training-mode forward.
+    auto fake_quant = std::make_shared<FakeQuantize>(
+        QuantDType::INT8,
+        QuantizationScheme::PerTensorSymmetric,
+        /*learnable=*/false,
+        /*observer_enabled=*/false,
+        /*axis=*/-1);
+
+    // Inject per-channel params along axis=0 (channels = rows). Channel 0 uses a
+    // tiny scale 0.1 (max representable ~12.7), channel 1 a large scale 1.0
+    // (max ~127). With the bug both rows use scale 0.1 and row 1's large values
+    // saturate near 12.7; the fix keeps row 1 near its true values.
+    Tensor scale_host({2}, DType::Float32, Device::cpu());
+    scale_host.data<float>()[0] = 0.1f;
+    scale_host.data<float>()[1] = 1.0f;
+    Tensor zp_host({2}, DType::Int32, Device::cpu());
+    zp_host.data<int32_t>()[0] = 0;
+    zp_host.data<int32_t>()[1] = 0;
+
+    QuantizationParams params(scale_host.to(device), zp_host.to(device),
+                              QuantDType::INT8,
+                              QuantizationScheme::PerChannelSymmetric,
+                              /*axis=*/0);
+    fake_quant->set_qparams(params);
+    fake_quant->train();
+
+    Tensor input_host({2, 2}, DType::Float32, Device::cpu());
+    float* d = input_host.data<float>();
+    d[0] = 1.0f;  d[1] = 2.0f;    // channel 0 (scale 0.1)
+    d[2] = 50.0f; d[3] = 60.0f;   // channel 1 (scale 1.0)
+    Variable input(input_host.to(device), /*requires_grad=*/true);
+
+    Variable output = fake_quant->forward(input);
+    auto out_cpu = output.tensor().cpu();
+    const float* o = out_cpu.data<float>();
+
+    // Channel 0 round-trips at scale 0.1 (well within range): ~1,2.
+    EXPECT_NEAR(o[0], 1.0f, 0.05f);
+    EXPECT_NEAR(o[1], 2.0f, 0.05f);
+    // Channel 1 round-trips at scale 1.0: ~50,60 (NOT clamped near 12.7, which
+    // is what collapsing to channel 0's scale would produce).
+    EXPECT_NEAR(o[2], 50.0f, 1.0f);
+    EXPECT_NEAR(o[3], 60.0f, 1.0f);
+    EXPECT_GT(o[3], 30.0f);  // guards against the buggy ~12.7 saturation
+}
+
 TEST_P(QuantizationTest, FakeQuantize_EnableDisable) {
     auto fake_quant = std::make_shared<FakeQuantize>();
 
@@ -402,6 +456,43 @@ TEST_P(QuantizationTest, CalibrateQuantizationParams) {
     auto zp_cpu = params.zero_point.cpu();
     EXPECT_GT(scale_cpu.data<float>()[0], 0.0f);
     EXPECT_EQ(zp_cpu.data<int32_t>()[0], 0);  // Symmetric
+}
+
+// Regression: per-channel calibration along a NON-leading axis (axis != 0).
+// The buggy implementation read data[c*channel_size + i] from the raw row-major
+// buffer, which only groups elements by channel when axis == 0. For a [2,3]
+// tensor calibrated per-channel along axis=1 (channels = columns), that flat
+// indexing gathers the wrong elements and yields wrong per-channel scales. The
+// fix transposes the channel axis to the front before grouping, matching
+// quantize_per_channel_* and the observers.
+TEST_P(QuantizationTest, CalibratePerChannel_NonLeadingAxis) {
+    // [2,3] with values:
+    //   row0: 1 2 3
+    //   row1: 4 5 6
+    // Per-channel along axis=1 (columns): col0={1,4}, col1={2,5}, col2={3,6}.
+    // Symmetric scale per channel = max(|.|) / 127, so channel maxima 4,5,6 must
+    // give strictly increasing scales. The buggy flat indexing would instead see
+    // channel0={1,2}, channel1={3,4}, channel2={5,6} (max 2,4,6).
+    Tensor host({2, 3}, DType::Float32, Device::cpu());
+    float* d = host.data<float>();
+    d[0] = 1.0f; d[1] = 2.0f; d[2] = 3.0f;
+    d[3] = 4.0f; d[4] = 5.0f; d[5] = 6.0f;
+
+    std::vector<Tensor> samples{host.to(device)};
+    auto params = calibrate_quantization_params(
+        samples,
+        QuantDType::INT8,
+        QuantizationScheme::PerChannelSymmetric,
+        /*axis=*/1);
+
+    auto scale_cpu = params.scale.cpu();
+    ASSERT_EQ(scale_cpu.numel(), 3);
+    const float* s = scale_cpu.data<float>();
+    // Expected symmetric scales = {4,5,6} / 127.
+    EXPECT_NEAR(s[0], 4.0f / 127.0f, 1e-6f);
+    EXPECT_NEAR(s[1], 5.0f / 127.0f, 1e-6f);
+    EXPECT_NEAR(s[2], 6.0f / 127.0f, 1e-6f);
+    EXPECT_EQ(params.axis, 1);
 }
 
 // ============================================================================

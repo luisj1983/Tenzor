@@ -635,7 +635,6 @@ auto calibrate_quantization_params(
         // Per-channel quantization
         auto shape = samples[0].shape();
         int64_t num_channels = shape[axis];
-        int64_t channel_size = samples[0].numel() / num_channels;
 
         // Create min/max on CPU for data access
         Tensor min({num_channels}, DType::Float32, Device::cpu());
@@ -649,7 +648,13 @@ auto calibrate_quantization_params(
             max_data[c] = std::numeric_limits<float>::lowest();
         }
 
-        // Compute per-channel min/max across all samples
+        // Compute per-channel min/max across all samples. The naive
+        // `data[c*channel_size + i]` indexing is only correct for axis==0
+        // (channel-major contiguous). For axis!=0 the element at that flat
+        // offset belongs to a DIFFERENT channel, so move the channel axis to
+        // the front (transpose+contiguous) and reshape to [C, rest] — exactly
+        // what quantize_per_channel_* and MinMaxObserver::per_channel_reduce
+        // do — before grouping by channel.
         for (const auto& sample : samples) {
             // Convert to Float32 and CPU for data access
             Tensor sample_f32 = sample;
@@ -659,7 +664,15 @@ auto calibrate_quantization_params(
             if (sample_f32.device() != Device::cpu()) {
                 sample_f32 = sample_f32.to(Device::cpu());
             }
-            const float* data = sample_f32.data<const float>();
+            int64_t channel_size = sample_f32.numel() / num_channels;
+            Tensor reshaped;
+            if (axis == 0) {
+                reshaped = sample_f32.reshape({num_channels, channel_size});
+            } else {
+                reshaped = sample_f32.transpose(0, axis).contiguous()
+                                     .reshape({num_channels, channel_size});
+            }
+            const float* data = reshaped.data<const float>();
             for (int64_t c = 0; c < num_channels; ++c) {
                 for (int64_t i = 0; i < channel_size; ++i) {
                     float val = data[c * channel_size + i];

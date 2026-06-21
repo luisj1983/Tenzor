@@ -7,6 +7,7 @@
 #include <cuda_bf16.h>
 #include <device_launch_parameters.h>
 #include <cfloat>
+#include <climits>
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
@@ -210,6 +211,12 @@ template<typename T> __device__ __forceinline__ bool arg_is_nan(T v) {
 __device__ __forceinline__ bool arg_is_nan(__half v) { return __hisnan(v); }
 __device__ __forceinline__ bool arg_is_nan(__nv_bfloat16 v) { return __hisnan(v); }
 
+// Exact-equality wrappers usable across real and half types (half compares via
+// the __heq intrinsic to match the explicit __hgt/__hlt convention used here).
+template<typename T> __device__ __forceinline__ bool arg_is_eq(T a, T b) { return a == b; }
+__device__ __forceinline__ bool arg_is_eq(__half a, __half b) { return __heq(a, b); }
+__device__ __forceinline__ bool arg_is_eq(__nv_bfloat16 a, __nv_bfloat16 b) { return __heq(a, b); }
+
 // Index-aware variants for combine steps where the candidate may carry a LOWER
 // original index than the current best (e.g. combining unsorted block winners).
 // On a NaN-vs-NaN tie (or any exact tie), the lower original index wins so the
@@ -217,14 +224,20 @@ __device__ __forceinline__ bool arg_is_nan(__nv_bfloat16 v) { return __hisnan(v)
 template<typename T>
 __device__ __forceinline__ bool arg_max_takes_idx(T cand, int64_t cand_idx, T best, int64_t best_idx) {
     if (arg_max_takes(cand, best)) return true;
-    // Tie-break: equal NaNs -> keep lower original index.
+    // Tie-break: on an EXACT tie (equal NaNs, or equal finite values) keep the
+    // lower original index, matching the CPU reference whose ascending sequential
+    // scan retains the first occurrence on value ties. Without this, the unsorted
+    // tree/warp combine could keep a later index on a finite tie -> cross-backend
+    // parity break for tensors with duplicated max/min values.
     if (arg_is_nan(cand) && arg_is_nan(best)) return cand_idx < best_idx;
+    if (!arg_is_nan(cand) && !arg_is_nan(best) && arg_is_eq(cand, best)) return cand_idx < best_idx;
     return false;
 }
 template<typename T>
 __device__ __forceinline__ bool arg_min_takes_idx(T cand, int64_t cand_idx, T best, int64_t best_idx) {
     if (arg_min_takes(cand, best)) return true;
     if (arg_is_nan(cand) && arg_is_nan(best)) return cand_idx < best_idx;
+    if (!arg_is_nan(cand) && !arg_is_nan(best) && arg_is_eq(cand, best)) return cand_idx < best_idx;
     return false;
 }
 
@@ -782,9 +795,11 @@ __global__ void sum_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    // Grid-stride over output positions so a grid clamped to maxGridDim still
+    // covers every output slice (int64-safe for output_size > INT_MAX*block).
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices for output position.
     // Decompose in reverse order (innermost dim first) to match row-major layout.
@@ -816,6 +831,7 @@ __global__ void sum_along_dim_kernel(
     }
 
     output[out_idx] = T(sum);
+    }
 }
 
 // Max reduction along a specific dimension
@@ -829,9 +845,9 @@ __global__ void max_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -865,6 +881,7 @@ __global__ void max_along_dim_kernel(
     }
 
     output[out_idx] = max_val;
+    }
 }
 
 // Min reduction along a specific dimension
@@ -878,9 +895,9 @@ __global__ void min_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -914,6 +931,7 @@ __global__ void min_along_dim_kernel(
     }
 
     output[out_idx] = min_val;
+    }
 }
 
 // Specialized max_along_dim_kernel for __half
@@ -926,9 +944,9 @@ __global__ void max_along_dim_kernel_half(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -962,6 +980,7 @@ __global__ void max_along_dim_kernel_half(
     }
 
     output[out_idx] = max_val;
+    }
 }
 
 // Specialized min_along_dim_kernel for __half
@@ -974,9 +993,9 @@ __global__ void min_along_dim_kernel_half(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -1010,6 +1029,7 @@ __global__ void min_along_dim_kernel_half(
     }
 
     output[out_idx] = min_val;
+    }
 }
 
 // Specialized max_along_dim_kernel for __nv_bfloat16
@@ -1022,9 +1042,9 @@ __global__ void max_along_dim_kernel_bf16(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -1058,6 +1078,7 @@ __global__ void max_along_dim_kernel_bf16(
     }
 
     output[out_idx] = max_val;
+    }
 }
 
 // Specialized min_along_dim_kernel for __nv_bfloat16
@@ -1070,9 +1091,9 @@ __global__ void min_along_dim_kernel_bf16(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -1106,6 +1127,7 @@ __global__ void min_along_dim_kernel_bf16(
     }
 
     output[out_idx] = min_val;
+    }
 }
 
 // ============================================================================
@@ -1265,7 +1287,7 @@ static void launch_dim_reduction_sum(
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     // Launch kernel
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     sum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -1297,7 +1319,7 @@ static void launch_dim_reduction_max(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     max_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -1329,7 +1351,7 @@ static void launch_dim_reduction_min(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     min_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -1414,7 +1436,7 @@ static void launch_dim_reduction_max_half(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     max_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -1445,7 +1467,7 @@ static void launch_dim_reduction_min_half(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     min_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -1530,7 +1552,7 @@ static void launch_dim_reduction_max_bf16(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     max_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -1561,7 +1583,7 @@ static void launch_dim_reduction_min_bf16(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     min_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -2270,9 +2292,9 @@ __global__ void argmax_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -2310,6 +2332,7 @@ __global__ void argmax_along_dim_kernel(
     }
 
     output[out_idx] = max_idx;
+    }
 }
 
 // Argmin along a specific dimension
@@ -2323,9 +2346,9 @@ __global__ void argmin_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -2363,6 +2386,7 @@ __global__ void argmin_along_dim_kernel(
     }
 
     output[out_idx] = min_idx;
+    }
 }
 
 // ============================================================================
@@ -2499,9 +2523,9 @@ __global__ void argmax_along_dim_kernel_half(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -2539,6 +2563,7 @@ __global__ void argmax_along_dim_kernel_half(
     }
 
     output[out_idx] = max_idx;
+    }
 }
 
 // Specialized argmin_along_dim_kernel for __half
@@ -2551,9 +2576,9 @@ __global__ void argmin_along_dim_kernel_half(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -2591,6 +2616,7 @@ __global__ void argmin_along_dim_kernel_half(
     }
 
     output[out_idx] = min_idx;
+    }
 }
 
 // ============================================================================
@@ -2819,9 +2845,9 @@ __global__ void argmax_along_dim_kernel_bf16(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -2859,6 +2885,7 @@ __global__ void argmax_along_dim_kernel_bf16(
     }
 
     output[out_idx] = max_idx;
+    }
 }
 
 // Specialized argmin_along_dim_kernel for __nv_bfloat16
@@ -2871,9 +2898,9 @@ __global__ void argmin_along_dim_kernel_bf16(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -2911,6 +2938,7 @@ __global__ void argmin_along_dim_kernel_bf16(
     }
 
     output[out_idx] = min_idx;
+    }
 }
 
 // Helper function to launch argmax reduction
@@ -3001,7 +3029,7 @@ static void launch_dim_argmax(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     argmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -3034,7 +3062,7 @@ static void launch_dim_argmin(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     argmin_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -3128,7 +3156,7 @@ static void launch_dim_argmax_half(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     argmax_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -3159,7 +3187,7 @@ static void launch_dim_argmin_half(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     argmin_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -3252,7 +3280,7 @@ static void launch_dim_argmax_bf16(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     argmax_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -3283,7 +3311,7 @@ static void launch_dim_argmin_bf16(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     argmin_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -3638,9 +3666,9 @@ __global__ void prod_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices
     int64_t indices[DIM_META_MAX_RANK];
@@ -3670,6 +3698,7 @@ __global__ void prod_along_dim_kernel(
     }
 
     output[out_idx] = prod_val;
+    }
 }
 
 // Helper function to launch product reduction
@@ -3731,7 +3760,7 @@ static void launch_dim_reduction_prod(
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
 
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     prod_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -4032,8 +4061,9 @@ __global__ void var_along_dim_kernel(
     int64_t dim_size,
     int64_t correction
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices for output position
     int64_t indices[DIM_META_MAX_RANK];
@@ -4072,6 +4102,7 @@ __global__ void var_along_dim_kernel(
     // (undefined), matching CPU/PyTorch rather than returning 0.
     int64_t denom = count - correction;
     output[out_idx] = denom > 0 ? T(m2 / Acc(denom)) : static_cast<T>(NAN);
+    }
 }
 
 // Public API for variance
@@ -4139,7 +4170,7 @@ auto var_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, int64_t corr
         DimMeta meta = make_dim_meta(shape_vec, strides_vec);
 
         constexpr int BLOCK = 256;
-        int blocks = (output_size + BLOCK - 1) / BLOCK;
+        int blocks = compute_grid_size(output_size, BLOCK);
 
         TENZOR_DISPATCH_FLOATING_TYPES(dtype, "var", [&]() {
             var_along_dim_kernel<scalar_t><<<blocks, BLOCK, 0, stream>>>(
@@ -4466,8 +4497,9 @@ __global__ void norm_along_dim_kernel(
     int64_t dim_size,
     float p
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices for output position
     int64_t indices[DIM_META_MAX_RANK];
@@ -4521,6 +4553,7 @@ __global__ void norm_along_dim_kernel(
             acc = acc + pow(val < cuda_zero<T>() ? -val : val, T(p));
         }
         output[out_idx] = pow(acc, T(1.0f / p));
+    }
     }
 }
 
@@ -4583,7 +4616,7 @@ auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, cu
         DimMeta meta = make_dim_meta(shape_vec, strides_vec);
 
         constexpr int BLOCK = 256;
-        int blocks = (output_size + BLOCK - 1) / BLOCK;
+        int blocks = compute_grid_size(output_size, BLOCK);
 
         TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "norm", [&]() {
             norm_along_dim_kernel<scalar_t><<<blocks, BLOCK, 0, stream>>>(
@@ -4920,6 +4953,17 @@ static void launch_argsort_along_dim(const T* d_input, int64_t* d_output,
     const int64_t num_segments = outer_size * inner_size;
     const int64_t total = num_segments * dim_size;
     if (total == 0) return;
+    // cub::DeviceSegmentedRadixSort takes `int num_items` / `int num_segments`
+    // and int begin/end offsets (offsets[idx] = idx * dim_size). For total or
+    // num_segments > INT_MAX those silently overflow/garble the segmented sort.
+    // Reject up front with a clear message rather than producing wrong indices.
+    if (total > static_cast<int64_t>(INT_MAX) ||
+        num_segments > static_cast<int64_t>(INT_MAX)) {
+        throw std::runtime_error(
+            "argsort: per-dim segmented sort exceeds CUB's int32 element/segment "
+            "limit (total elements or segment count > 2^31-1); reduce the sorted "
+            "extent or batch the operation");
+    }
     if (dim_size == 1) {
         // Each slice trivially sorts to local index 0.
         CUDA_CHECK(cudaMemsetAsync(d_output, 0, total * sizeof(int64_t), stream));
@@ -4937,12 +4981,12 @@ static void launch_argsort_along_dim(const T* d_input, int64_t* d_output,
     backend::CachedMemoryGuard offsets_guard((num_segments + 1) * sizeof(int));
     auto* d_offsets = static_cast<int*>(offsets_guard.get());
 
-    int gather_blocks = static_cast<int>((total + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE);
+    int gather_blocks = compute_grid_size(total, REDUCTION_BLOCK_SIZE);
     argsort_gather_kernel<T><<<gather_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_gathered, d_local_idx, outer_size, dim_size, inner_size);
     CUDA_CHECK(cudaGetLastError());
 
-    int off_blocks = static_cast<int>((num_segments + 1 + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE);
+    int off_blocks = compute_grid_size(num_segments + 1, REDUCTION_BLOCK_SIZE);
     argsort_segment_offsets_kernel<<<off_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_offsets, num_segments, dim_size);
     CUDA_CHECK(cudaGetLastError());
@@ -5065,8 +5109,9 @@ __global__ void any_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices for output position
     int64_t indices[DIM_META_MAX_RANK];
@@ -5094,6 +5139,7 @@ __global__ void any_along_dim_kernel(
         }
     }
     output[out_idx] = result;
+    }
 }
 
 // Specialization for __half (no != operator with T(0))
@@ -5107,8 +5153,9 @@ __global__ void any_along_dim_kernel<__half>(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5126,6 +5173,7 @@ __global__ void any_along_dim_kernel<__half>(
         if (__half2float(input[in_idx]) != 0.0f) { result = 1; break; }
     }
     output[out_idx] = result;
+    }
 }
 
 // Specialization for __nv_bfloat16
@@ -5139,8 +5187,9 @@ __global__ void any_along_dim_kernel<__nv_bfloat16>(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5158,6 +5207,7 @@ __global__ void any_along_dim_kernel<__nv_bfloat16>(
         if (__bfloat162float(input[in_idx]) != 0.0f) { result = 1; break; }
     }
     output[out_idx] = result;
+    }
 }
 
 // Per-dimension all reduction kernel: output[out_idx] = AND of (input != 0) along dim
@@ -5171,8 +5221,9 @@ __global__ void all_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5196,6 +5247,7 @@ __global__ void all_along_dim_kernel(
         }
     }
     output[out_idx] = result;
+    }
 }
 
 // Specialization for __half
@@ -5209,8 +5261,9 @@ __global__ void all_along_dim_kernel<__half>(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5228,6 +5281,7 @@ __global__ void all_along_dim_kernel<__half>(
         if (__half2float(input[in_idx]) == 0.0f) { result = 0; break; }
     }
     output[out_idx] = result;
+    }
 }
 
 // Specialization for __nv_bfloat16
@@ -5241,8 +5295,9 @@ __global__ void all_along_dim_kernel<__nv_bfloat16>(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5260,6 +5315,7 @@ __global__ void all_along_dim_kernel<__nv_bfloat16>(
         if (__bfloat162float(input[in_idx]) == 0.0f) { result = 0; break; }
     }
     output[out_idx] = result;
+    }
 }
 
 // Full reduction any kernel: check if any element in entire tensor is non-zero
@@ -5539,7 +5595,7 @@ static void launch_dim_reduction_any(
     if (output_size == 0 || dim_size == 0) return;
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     any_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -5567,7 +5623,7 @@ static void launch_dim_reduction_all(
     if (output_size == 0 || dim_size == 0) return;
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     all_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
@@ -5809,8 +5865,9 @@ __global__ void logsumexp_max_along_dim_kernel(
     int64_t dim_size
 ) {
     using Acc = typename AccumType<T>::type;
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5831,6 +5888,7 @@ __global__ void logsumexp_max_along_dim_kernel(
         if (val > m) m = val;
     }
     max_out[out_idx] = m;
+    }
 }
 
 // Specialization for float: use -FLT_MAX
@@ -5844,8 +5902,9 @@ __global__ void logsumexp_max_along_dim_kernel<float>(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5866,6 +5925,7 @@ __global__ void logsumexp_max_along_dim_kernel<float>(
         if (val > m) m = val;
     }
     max_out[out_idx] = m;
+    }
 }
 
 // Specialization for double: use -DBL_MAX
@@ -5879,8 +5939,9 @@ __global__ void logsumexp_max_along_dim_kernel<double>(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5901,6 +5962,7 @@ __global__ void logsumexp_max_along_dim_kernel<double>(
         if (val > m) m = val;
     }
     max_out[out_idx] = m;
+    }
 }
 
 // Step 2: Compute sum(exp(x - max)) and result = max + log(sum)
@@ -5916,8 +5978,9 @@ __global__ void logsumexp_sum_exp_kernel(
     int64_t dim_size
 ) {
     using Acc = typename AccumType<T>::type;
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
@@ -5928,10 +5991,12 @@ __global__ void logsumexp_sum_exp_kernel(
     }
 
     Acc m = max_vals[out_idx];
-    // Handle inf: if max is +/-inf, result should be the same inf
+    // Handle inf: if max is +/-inf, result should be the same inf.
+    // `continue` (not `return`) so the grid-stride loop still processes this
+    // thread's remaining output slices.
     if (isinf(float(m))) {
         output[out_idx] = T(m);
-        return;
+        continue;
     }
 
     Acc sum = Acc(0);
@@ -5944,6 +6009,7 @@ __global__ void logsumexp_sum_exp_kernel(
         sum += exp(Acc(input[in_idx]) - m);
     }
     output[out_idx] = T(log(sum) + m);
+    }
 }
 
 // Full reduction version
@@ -6098,7 +6164,7 @@ auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaSt
         }
 
         DimMeta meta = make_dim_meta(shape_vec, strides_vec);
-        int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+        int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
 
         switch (dtype) {
             case DType::Float32: {
@@ -6185,8 +6251,9 @@ __global__ void cosine_similarity_along_dim_kernel(
     int64_t dim_size,
     float eps
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
 
     // Compute multi-dimensional indices for the row-major output position.
     // The earlier loop peeled dims left-to-right which corresponds to
@@ -6226,6 +6293,7 @@ __global__ void cosine_similarity_along_dim_kernel(
 
     AccT denom = sqrt(norm_a_acc) * sqrt(norm_b_acc) + static_cast<AccT>(eps);
     output[out_idx] = static_cast<T>(dot_acc / denom);
+    }
 }
 
 auto cosine_similarity_kernel(const Tensor& a, const Tensor& b, int64_t dim, double eps, cudaStream_t stream) -> Tensor {
@@ -6276,7 +6344,7 @@ auto cosine_similarity_kernel(const Tensor& a, const Tensor& b, int64_t dim, dou
     DimMeta meta = make_dim_meta(shape_vec, strides_vec);
 
     constexpr int BLOCK = 256;
-    int blocks = (output_size + BLOCK - 1) / BLOCK;
+    int blocks = compute_grid_size(output_size, BLOCK);
 
     TENZOR_DISPATCH_FLOATING_TYPES(a.dtype(), "cosine_similarity", [&]() {
         cosine_similarity_along_dim_kernel<scalar_t><<<blocks, BLOCK, 0, stream>>>(

@@ -120,8 +120,16 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
     // contiguous buffer before reading with linear indexing.
     int64_t offset_in_concat_dim = 0;
 
+    // The per-input copy kernels below are enqueued without an immediate wait,
+    // so the function-local `.contiguous()` materializations must outlive every
+    // in-flight kernel. Keep them alive in this vector and drain the queue once
+    // before returning (see queue.wait_and_throw() after the loop).
+    std::vector<Tensor> contiguous_keepalive;
+    contiguous_keepalive.reserve(tensors.size());
+
     for (const auto& tensor_in : tensors) {
-        Tensor tensor = tensor_in.contiguous();
+        contiguous_keepalive.push_back(tensor_in.contiguous());
+        Tensor& tensor = contiguous_keepalive.back();
         auto tensor_shape = tensor.shape();
         const int64_t tensor_size_in_dim = tensor_shape[dim];
 
@@ -364,6 +372,9 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
         offset_in_concat_dim += tensor_size_in_dim;
     }
 
+    // Drain all per-input copy kernels before the contiguous keep-alive copies
+    // are freed and before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -399,9 +410,14 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, sycl::que
 
     const int64_t numel = input.numel();
 
+    // The kernels below read in_ptr[idx] with a flat (contiguous) index, so a
+    // non-contiguous input (transpose/slice/permute view) would read the wrong
+    // elements. Materialize a contiguous copy and read from it.
+    Tensor in_cont = input.is_contiguous() ? input : input.contiguous();
+
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<ClampKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -410,7 +426,7 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, sycl::que
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         const double min_d = static_cast<double>(min_val);
@@ -422,7 +438,7 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, sycl::que
         }).wait();
     }
     else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<ClampKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -431,7 +447,7 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, sycl::que
         }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
         queue.parallel_for<ClampKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -440,7 +456,7 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, sycl::que
         }).wait();
     }
     else if (input.dtype() == DType::Int32) {
-        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
 
         const int32_t min_i = static_cast<int32_t>(min_val);
@@ -454,7 +470,7 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, sycl::que
     else {
         // Remaining integer dtypes (Int32 handled above). Matches CPU/CUDA/ROCm.
         auto run = [&]<typename T>() {
-            const T* in_ptr = get_data_ptr<const T>(input);
+            const T* in_ptr = get_data_ptr<const T>(in_cont);
             T* out_ptr = get_data_ptr<T>(output);
             const T lo = static_cast<T>(min_val), hi = static_cast<T>(max_val);
             queue.parallel_for<OneapiClampIntKernel<T>>(sycl::range<1>(numel),
@@ -504,9 +520,14 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
     const int64_t numel = input.numel();
 
+    // The kernels below read in_ptr[idx] with a flat (contiguous) index, so a
+    // non-contiguous input would read the wrong elements. Read from a contiguous
+    // copy.
+    Tensor in_cont = input.is_contiguous() ? input : input.contiguous();
+
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<SignKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -522,7 +543,7 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<SignKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -537,7 +558,7 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         }).wait();
     }
     else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<SignKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -552,7 +573,7 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
         const uint16_t bf16_zero = f32_to_bf16(0.0f);
@@ -571,7 +592,7 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         }).wait();
     }
     else if (input.dtype() == DType::Int32) {
-        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
 
         queue.parallel_for<SignKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -588,7 +609,7 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     else {
         // Remaining integer dtypes (Int32 handled above): -1/0/1 signed, 0/1 unsigned.
         auto run = [&]<typename T>() {
-            const T* in_ptr = get_data_ptr<const T>(input);
+            const T* in_ptr = get_data_ptr<const T>(in_cont);
             T* out_ptr = get_data_ptr<T>(output);
             const bool is_signed = (T(-1) < T(0));
             queue.parallel_for<OneapiSignIntKernel<T>>(sycl::range<1>(numel),

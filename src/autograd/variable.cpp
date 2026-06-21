@@ -17,6 +17,11 @@ static thread_local bool grad_enabled{true};
 // Thread-local create_graph state for higher-order gradients
 static thread_local bool creating_graph{false};
 
+// Thread-local higher-order graph retention state. When set, forward ops save
+// their input Variables (with grad_fn) so a later create_graph backward can
+// build the second-order graph through saved intermediates.
+static thread_local bool higher_order_graph_retention{false};
+
 // Thread-local inference mode state
 static thread_local bool inference_mode_enabled{false};
 
@@ -434,6 +439,24 @@ CreateGraphGuard::~CreateGraphGuard() {
     set_creating_graph(prev_state_);
 }
 
+// Higher-order graph retention state
+auto higher_order_graph_retention_enabled() -> bool {
+    return higher_order_graph_retention;
+}
+
+auto set_higher_order_graph_retention(bool enabled) -> void {
+    higher_order_graph_retention = enabled;
+}
+
+HigherOrderGraphRetentionGuard::HigherOrderGraphRetentionGuard()
+    : prev_state_(higher_order_graph_retention_enabled()) {
+    set_higher_order_graph_retention(true);
+}
+
+HigherOrderGraphRetentionGuard::~HigherOrderGraphRetentionGuard() {
+    set_higher_order_graph_retention(prev_state_);
+}
+
 // Anomaly detection state
 auto is_anomaly_detection_enabled() -> bool {
     return anomaly_detection_enabled;
@@ -537,7 +560,15 @@ auto Variable::operator*(const Variable& other) const -> Variable {
         grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
         grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
-        if (is_creating_graph()) {
+        // Save the input Variables (with their grad_fn) so a later create_graph
+        // backward can reconstruct the second-order graph THROUGH the saved
+        // operands. Gating this on is_creating_graph() alone is a no-op in the
+        // forward pass (is_creating_graph() is only true during a create_graph
+        // backward), which left first-order forward ops with detached saved
+        // tensors — severing forward-over-reverse / double-backward when an
+        // input reaches the gradient via a saved INTERMEDIATE (e.g. the x² in
+        // d/dx(x³)). Saving here when higher-order is requested keeps the chain.
+        if (is_creating_graph() || higher_order_graph_retention_enabled()) {
             grad_fn->save_variables_for_backward({*this, other});
         }
 
@@ -572,7 +603,7 @@ auto Variable::operator/(const Variable& other) const -> Variable {
         grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
         grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
-        if (is_creating_graph()) {
+        if (is_creating_graph() || higher_order_graph_retention_enabled()) {
             grad_fn->save_variables_for_backward({*this, other});
         }
 

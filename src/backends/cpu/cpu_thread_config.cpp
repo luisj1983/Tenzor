@@ -18,7 +18,10 @@
 #include "cpu_thread_config.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -41,8 +44,20 @@ auto parse_positive_int_env(const char* name) -> int {
     if (env == nullptr || *env == '\0') {
         return 0;
     }
-    int value = std::atoi(env);
-    return value > 0 ? value : 0;
+    // std::atoi is UB on overflow; use std::strtol with explicit range checking
+    // and reject trailing garbage. Out-of-range / non-positive values yield 0
+    // (meaning "unset / auto-detect"). Values above INT_MAX are clamped to
+    // INT_MAX here; configure_omp_threads applies a further sane upper bound.
+    errno = 0;
+    char* end = nullptr;
+    long value = std::strtol(env, &end, 10);
+    if (end == env || errno == ERANGE || value <= 0) {
+        return 0;
+    }
+    if (value > static_cast<long>(std::numeric_limits<int>::max())) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>(value);
 }
 
 auto detect_online_cores() -> int {
@@ -71,6 +86,15 @@ void configure_omp_threads() {
         if (chosen < 1) {
             chosen = 1;
         }
+        // Clamp to a sane upper bound to prevent resource exhaustion / DoS from
+        // a hostile or fat-fingered TENZOR_NUM_THREADS/OMP_NUM_THREADS (e.g.
+        // 100000 → omp_set_num_threads(100000) would attempt to spawn 100k
+        // threads). Allow generous headroom over the detected core count.
+        int hw = detect_online_cores();
+        int max_threads = std::max(64, hw * 8);
+        if (chosen > max_threads) {
+            chosen = max_threads;
+        }
         g_threads = chosen;
 #ifdef _OPENMP
         omp_set_num_threads(g_threads);
@@ -78,6 +102,11 @@ void configure_omp_threads() {
     });
 }
 
-int get_configured_threads() { return g_threads; }
+int get_configured_threads() {
+    // Before configure_omp_threads() has run, g_threads is 0. Return 1 in that
+    // case so callers that size/divide by the thread count cannot divide-by-zero
+    // or allocate a zero-length per-thread buffer.
+    return g_threads > 0 ? g_threads : 1;
+}
 
 } // namespace tenzor::backends::cpu

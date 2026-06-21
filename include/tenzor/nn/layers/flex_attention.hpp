@@ -65,12 +65,15 @@ public:
     /**
      * @brief Create a causal (lower-triangular) block mask.
      *
-     * A block (q_blk, kv_blk) is active iff kv_blk <= q_blk, which is the
-     * block-level analog of the standard causal mask.
+     * A block (q_blk, kv_blk) is active iff kv_blk <= q_blk. In addition the
+     * returned mask sets requires_element_causal(), so the attention kernel
+     * enforces an exact position-level causal constraint (kv_pos <= q_pos)
+     * inside the diagonal blocks. The result is therefore strictly causal for
+     * any block_size, with no need to also pass causal_score_mod().
      *
      * @param seq_len Sequence length
      * @param block_size Side length of each block
-     * @return Causal BlockMask
+     * @return Causal BlockMask (element-level causal within blocks)
      */
     static auto causal(int64_t seq_len, int64_t block_size = 128) -> BlockMask;
 
@@ -92,12 +95,17 @@ public:
      * @brief Create a prefix-LM block mask.
      *
      * The first prefix_len positions attend to each other fully (bidirectional),
-     * while remaining positions use causal masking.
+     * while remaining positions use causal masking. The returned mask sets
+     * requires_element_causal() so that the causal region is enforced exactly
+     * at the element level (kv_pos <= q_pos) within diagonal blocks; keys in
+     * the prefix region remain fully visible. (The element-level constraint is
+     * applied only on diagonal blocks, which is precisely where causal leakage
+     * could occur; off-diagonal active blocks are unaffected.)
      *
      * @param seq_len Sequence length
      * @param prefix_len Length of the bidirectional prefix
      * @param block_size Side length of each block
-     * @return Prefix-LM BlockMask
+     * @return Prefix-LM BlockMask (element-level causal within blocks)
      */
     static auto prefix_lm(int64_t seq_len, int64_t prefix_len,
                            int64_t block_size = 128) -> BlockMask;
@@ -132,9 +140,41 @@ public:
      */
     auto is_active(int64_t q_block, int64_t kv_block) const -> bool;
 
+    /**
+     * @brief Whether element-level causal masking must be applied within blocks.
+     *
+     * Block-level activation alone is too coarse: an active diagonal block
+     * (kv_block == q_block) covers a (block_size x block_size) region in which
+     * a query may attend to keys at strictly greater positions. For causal
+     * masks (BlockMask::causal, the causal region of prefix_lm) this would leak
+     * future tokens whenever block_size > 1. When this flag is set, the
+     * attention kernel applies an exact position-level causal mask
+     * (kv_pos <= q_pos) inside every active block, so the result is correctly
+     * causal regardless of block_size without requiring an extra
+     * causal_score_mod().
+     *
+     * @return true if the kernel must enforce kv_pos <= q_pos within blocks.
+     */
+    auto requires_element_causal() const -> bool { return requires_element_causal_; }
+
+    /**
+     * @brief Prefix length for element-level causal masking.
+     *
+     * Only meaningful when requires_element_causal() is true. Within active
+     * blocks the kernel keeps a score iff (kv_pos < causal_prefix_len() ||
+     * kv_pos <= q_pos). For a pure causal mask this is 0, reducing to the
+     * standard kv_pos <= q_pos constraint. For a prefix-LM mask it equals the
+     * bidirectional prefix length so prefix keys remain fully visible.
+     *
+     * @return The bidirectional prefix length (0 for pure causal).
+     */
+    auto causal_prefix_len() const -> int64_t { return causal_prefix_len_; }
+
 private:
     Tensor mask_;             ///< Bool tensor of shape (num_q_blocks, num_kv_blocks)
     int64_t block_size_ = 128;
+    bool requires_element_causal_ = false;  ///< Enforce kv_pos <= q_pos within active blocks.
+    int64_t causal_prefix_len_ = 0;         ///< Prefix keys (pos < this) stay visible under causal masking.
 };
 
 // =============================================================================

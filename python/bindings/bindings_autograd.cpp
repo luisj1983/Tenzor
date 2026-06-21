@@ -17,6 +17,7 @@
 #include <tenzor/autograd/graph_optimizer.hpp>
 #include <tenzor/autograd/graph_viz.hpp>
 #include <tenzor/autograd/vmap.hpp>
+#include <tenzor/autograd/ops.hpp>  // tenzor::permute(Variable, ...) for vmap out_dim
 #include <tenzor/core/tensor.hpp>
 
 namespace py = pybind11;
@@ -204,8 +205,8 @@ void register_autograd(py::module_& m) {
     // inner lambda is a no-op when the GIL is already held (re-entry-safe)
     // and a real acquire on a child thread.
 
-    func_mod.def("vmap", [](py::function f, int64_t in_dim, [[maybe_unused]] int64_t out_dim) {
-        return py::cpp_function([f, in_dim](const tenzor::Variable& batched_input) -> tenzor::Variable {
+    func_mod.def("vmap", [](py::function f, int64_t in_dim, int64_t out_dim) {
+        return py::cpp_function([f, in_dim, out_dim](const tenzor::Variable& batched_input) -> tenzor::Variable {
             auto cpp_fn = [&f](const tenzor::Variable& x) -> tenzor::Variable {
                 py::gil_scoped_acquire inner_gil;
                 py::object result = f(x);
@@ -213,7 +214,35 @@ void register_autograd(py::module_& m) {
             };
             // R.22: outer GIL release; inner cpp_fn reacquires for the Python callback.
             py::gil_scoped_release release;
-            return tenzor::vmap(cpp_fn, batched_input, in_dim);
+            // tenzor::vmap stacks the per-slice results back along `in_dim`, so
+            // the batch axis of the output sits at position in_dim. Honour
+            // out_dim by moving that axis from in_dim to out_dim — previously
+            // out_dim was accepted but ignored ([[maybe_unused]]), silently
+            // placing the batch axis on the wrong dimension for out_dim !=
+            // in_dim vs. the documented torch.func.vmap semantics. The move is
+            // done at the Variable level (autograd::permute) so the grad_fn
+            // chain is preserved.
+            tenzor::Variable result = tenzor::vmap(cpp_fn, batched_input, in_dim);
+            const int64_t ndim =
+                static_cast<int64_t>(result.tensor().shape().size());
+            int64_t src = in_dim < 0 ? in_dim + ndim : in_dim;
+            int64_t dst = out_dim < 0 ? out_dim + ndim : out_dim;
+            if (src == dst || ndim == 0) {
+                return result;
+            }
+            if (src < 0 || src >= ndim || dst < 0 || dst >= ndim) {
+                throw std::runtime_error(
+                    "func.vmap: out_dim is out of range for the vmapped output");
+            }
+            std::vector<int64_t> order;
+            order.reserve(static_cast<size_t>(ndim));
+            for (int64_t d = 0; d < ndim; ++d) {
+                if (d != src) {
+                    order.push_back(d);
+                }
+            }
+            order.insert(order.begin() + dst, src);
+            return tenzor::permute(result, order);
         });
     }, py::arg("f"), py::arg("in_dim") = 0, py::arg("out_dim") = 0,
     "Return a vectorized version of f that maps over a batch dimension.");

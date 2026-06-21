@@ -7,12 +7,56 @@
 #include <tenzor/utils/tensorboard.hpp>
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/tenzor.hpp>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <unistd.h>  // getpid — audit-5 Y.33
 
 using namespace tenzor;
+
+namespace {
+
+// Locate the single events.out.tfevents file inside a log dir.
+std::string find_event_file(const std::string& dir) {
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.path().filename().string().find("events.out.tfevents") !=
+            std::string::npos) {
+            return entry.path().string();
+        }
+    }
+    return {};
+}
+
+// Read an entire (binary) file into a byte buffer.
+std::vector<uint8_t> read_all_bytes(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+}
+
+// Size of the (single) event file in a log dir, or 0 if none yet.
+std::uintmax_t event_file_size(const std::string& dir) {
+    const std::string p = find_event_file(dir);
+    if (p.empty()) return 0;
+    return std::filesystem::file_size(p);
+}
+
+// True if `needle` appears as a contiguous byte subsequence of `hay`.
+bool contains_bytes(const std::vector<uint8_t>& hay,
+                    const std::vector<uint8_t>& needle) {
+    if (needle.empty() || needle.size() > hay.size()) return false;
+    for (size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+        if (std::memcmp(hay.data() + i, needle.data(), needle.size()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
 
 // Global test environment for initialization
 class TensorBoardTestEnvironment : public ::testing::Environment {
@@ -82,23 +126,54 @@ TEST_F(TensorBoardTest, EventFileCreated) {
     EXPECT_TRUE(found_event_file);
 }
 
-// Test 3: Add scalar writes to file
+// Test 3: Add scalar writes the TAG and VALUE to the event file.
+//
+// The production encoder writes the tag as a length-delimited protobuf string
+// (so the ASCII tag bytes appear verbatim) and the scalar as a `simple_value`
+// field: the field tag byte 0x15 (field 2, wire-type 5 / fixed32) followed by
+// the 4 little-endian IEEE-754 bytes of the float. We verify BOTH round-trip,
+// so a writer that emitted the wrong tag, the wrong value, or unrelated bytes
+// would fail — unlike the old size>0 check.
 TEST_F(TensorBoardTest, AddScalar) {
+    const std::string tag = "loss_unique_tag";
+    const float v0 = 0.5f, v1 = 0.4f, v2 = 0.3f;
     {
         SummaryWriter writer(test_log_dir_);
-        writer.add_scalar("loss", 0.5f, 0);
-        writer.add_scalar("loss", 0.4f, 1);
-        writer.add_scalar("loss", 0.3f, 2);
+        writer.add_scalar(tag, v0, 0);
+        writer.add_scalar(tag, v1, 1);
+        writer.add_scalar(tag, v2, 2);
         writer.flush();
     }
 
-    // Verify event file exists and has content
-    for (const auto& entry : std::filesystem::directory_iterator(test_log_dir_)) {
-        if (entry.path().filename().string().find("events.out.tfevents") != std::string::npos) {
-            auto file_size = std::filesystem::file_size(entry.path());
-            EXPECT_GT(file_size, 0);
-        }
-    }
+    const std::string event_path = find_event_file(test_log_dir_);
+    ASSERT_FALSE(event_path.empty()) << "no event file was created";
+    const auto bytes = read_all_bytes(event_path);
+    ASSERT_GT(bytes.size(), 0u);
+
+    // Tag must be serialized literally.
+    const std::vector<uint8_t> tag_bytes(tag.begin(), tag.end());
+    EXPECT_TRUE(contains_bytes(bytes, tag_bytes))
+        << "scalar tag was not serialized into the event file";
+
+    // Each scalar value must appear as simple_value: 0x15 + float LE bytes.
+    auto simple_value_seq = [](float v) {
+        std::vector<uint8_t> seq{0x15};
+        uint8_t fb[4];
+        std::memcpy(fb, &v, 4);  // host is little-endian on supported targets
+        seq.insert(seq.end(), fb, fb + 4);
+        return seq;
+    };
+    EXPECT_TRUE(contains_bytes(bytes, simple_value_seq(v0)))
+        << "scalar value 0.5 not found as simple_value in event file";
+    EXPECT_TRUE(contains_bytes(bytes, simple_value_seq(v1)))
+        << "scalar value 0.4 not found as simple_value in event file";
+    EXPECT_TRUE(contains_bytes(bytes, simple_value_seq(v2)))
+        << "scalar value 0.3 not found as simple_value in event file";
+
+    // A value never written must NOT be present (guards against a writer that
+    // dumps arbitrary/constant bytes that happen to contain our values).
+    EXPECT_FALSE(contains_bytes(bytes, simple_value_seq(123.456f)))
+        << "a value that was never logged appeared in the event file";
 }
 
 // Test 4: Add histogram
@@ -113,18 +188,18 @@ TEST_F(TensorBoardTest, AddHistogram) {
             data[i] = static_cast<float>(i) / 100.0f;
         }
 
+        // File already holds the version event from construction; capture its
+        // size, then assert the histogram event strictly grows the file.
+        writer.flush();
+        const auto before = event_file_size(test_log_dir_);
+        ASSERT_GT(before, 0u) << "version event missing before add_histogram";
+
         writer.add_histogram("weights", tensor, 0);
         writer.flush();
+        const auto after = event_file_size(test_log_dir_);
+        EXPECT_GT(after, before)
+            << "add_histogram wrote nothing (no-op): size unchanged at " << before;
     }
-
-    // Verify file was written
-    bool has_content = false;
-    for (const auto& entry : std::filesystem::directory_iterator(test_log_dir_)) {
-        if (entry.path().filename().string().find("events.out.tfevents") != std::string::npos) {
-            has_content = std::filesystem::file_size(entry.path()) > 100;
-        }
-    }
-    EXPECT_TRUE(has_content);
 }
 
 // Test 5: Add image grayscale
@@ -139,12 +214,19 @@ TEST_F(TensorBoardTest, AddImageGrayscale) {
             data[i] = static_cast<float>(i % 256) / 255.0f;
         }
 
+        // add_image must actually write bytes — the dir already exists from the
+        // constructor, so the old exists() check passed even if add_image was a
+        // complete no-op. Compare event-file size before/after instead.
+        writer.flush();
+        const auto before = event_file_size(test_log_dir_);
+        ASSERT_GT(before, 0u);
+
         writer.add_image("mnist/sample", img, 0);
         writer.flush();
+        const auto after = event_file_size(test_log_dir_);
+        EXPECT_GT(after, before)
+            << "add_image (grayscale) wrote nothing: size unchanged at " << before;
     }
-
-    // Verify file exists
-    EXPECT_TRUE(std::filesystem::exists(test_log_dir_));
 }
 
 // Test 6: Add image RGB
@@ -159,11 +241,16 @@ TEST_F(TensorBoardTest, AddImageRGB) {
             data[i] = 0.5f;
         }
 
+        writer.flush();
+        const auto before = event_file_size(test_log_dir_);
+        ASSERT_GT(before, 0u);
+
         writer.add_image("generated/sample", img, 0);
         writer.flush();
+        const auto after = event_file_size(test_log_dir_);
+        EXPECT_GT(after, before)
+            << "add_image (RGB) wrote nothing: size unchanged at " << before;
     }
-
-    EXPECT_TRUE(std::filesystem::exists(test_log_dir_));
 }
 
 // Test 7: Add graph
@@ -177,11 +264,16 @@ TEST_F(TensorBoardTest, AddGraph) {
         Variable b(tenzor::randn({1, 4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
         auto y = x.matmul(w) + b;
 
+        writer.flush();
+        const auto before = event_file_size(test_log_dir_);
+        ASSERT_GT(before, 0u);
+
         writer.add_graph("ToyModel", y);
         writer.flush();
+        const auto after = event_file_size(test_log_dir_);
+        EXPECT_GT(after, before)
+            << "add_graph wrote nothing (no-op): size unchanged at " << before;
     }
-
-    EXPECT_TRUE(std::filesystem::exists(test_log_dir_));
 }
 
 // Test 8: is_open status

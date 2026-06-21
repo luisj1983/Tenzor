@@ -112,26 +112,15 @@ TEST_P(IndexScatterParity, MaskedScatter_Half) {
     // 16 elements covers the 16 true positions.
     auto source = randn({16}, DType::Float32, Device::cpu());
 
-    // Run CPU and target_device manually so we can dump the values when
-    // they differ — masked_scatter has had a Vulkan workgroup-prefix-sum
-    // bug that the dispatch-table probe at the bottom of this file
-    // surfaced. Keeping the manual diff pipeline on by default makes any
-    // future regression on the same path easy to spot in the test log.
-    auto cpu_result = masked_scatter(input, mask_bool, source);
-    if (device.type == Device::Type::CPU) return;
-    auto dev_result = masked_scatter(input.to(device), mask_bool.to(device), source.to(device));
-    device.synchronize();
-    auto dev_on_cpu = dev_result.to(Device::cpu());
-
-    int64_t mismatch = 0;
-    for (int64_t i = 0; i < 32; ++i) {
-        if (std::abs(cpu_result.data<float>()[i] - dev_on_cpu.data<float>()[i]) > 1e-5f) {
-            ++mismatch;
-        }
-    }
-    ASSERT_EQ(mismatch, 0)
-        << "MaskedScatter_Half mismatch on " << backend_name(device)
-        << ": " << mismatch << "/32 positions disagree with CPU.";
+    // Route through test_operation_parity_single so the CPU parameterization
+    // gets the golden/skip fallback (instead of the old `if (CPU) return;`
+    // which was a no-op PASS that verified nothing and bypassed the golden
+    // path entirely). masked_scatter has had a Vulkan workgroup-prefix-sum
+    // bug, so this op must be held to the same parity machinery as its
+    // siblings.
+    test_operation_parity_single([&](const std::vector<Tensor>& inputs) {
+        return masked_scatter(inputs[0], inputs[1], inputs[2]);
+    }, {input, mask_bool, source}, device, 1e-5f, 1e-7f, "MaskedScatter_Half");
 }
 
 // ----------------------------------------------------------------------------

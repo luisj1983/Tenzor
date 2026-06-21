@@ -56,7 +56,14 @@ auto BlockMask::causal(int64_t seq_len, int64_t block_size) -> BlockMask {
             data[q * n_blocks + kv] = true;
         }
     }
-    return BlockMask(std::move(mask_tensor), block_size);
+    BlockMask bm(std::move(mask_tensor), block_size);
+    // Block-level activation is too coarse for the diagonal block: with
+    // block_size > 1 a query could attend to future keys in its own block.
+    // Flag exact element-level causal masking so the kernel enforces
+    // kv_pos <= q_pos inside active blocks (prefix_len = 0 -> pure causal).
+    bm.requires_element_causal_ = true;
+    bm.causal_prefix_len_ = 0;
+    return bm;
 }
 
 auto BlockMask::sliding_window(int64_t seq_len, int64_t window_size,
@@ -95,7 +102,14 @@ auto BlockMask::prefix_lm(int64_t seq_len, int64_t prefix_len,
             }
         }
     }
-    return BlockMask(std::move(mask_tensor), block_size);
+    BlockMask bm(std::move(mask_tensor), block_size);
+    // Enforce element-level causal masking within blocks for the causal
+    // region, while keeping all prefix keys (pos < prefix_len) visible. The
+    // kernel rule kv_pos < prefix_len || kv_pos <= q_pos exactly matches the
+    // intended prefix-LM semantics regardless of block_size.
+    bm.requires_element_causal_ = true;
+    bm.causal_prefix_len_ = prefix_len;
+    return bm;
 }
 
 auto BlockMask::full(int64_t seq_len, int64_t block_size) -> BlockMask {
@@ -333,6 +347,10 @@ auto flex_attention(
         block_mask_host = BlockMask(block_mask.mask().to(Device::cpu()),
                                      block_mask.block_size());
     }
+    // Element-level causal masking flags. The CPU-rebuild constructor above
+    // does not carry these through, so read them from the original mask.
+    const bool element_causal = block_mask.requires_element_causal();
+    const int64_t causal_prefix_len = block_mask.causal_prefix_len();
 
     // Allocate the working-precision (Float32) output on CPU. The final cast
     // back to `original_dtype` happens after the raw-pointer loops complete.
@@ -430,6 +448,28 @@ auto flex_attention(
                         auto modified = score_mod(score_tensor, b, h, q_start, kv_start);
                         const float* mod_ptr = static_cast<const float*>(modified.data_ptr());
                         std::copy(mod_ptr, mod_ptr + q_len * kv_len, scores.begin());
+                    }
+
+                    // Element-level causal masking. Block-level activation only
+                    // skips whole blocks; on a diagonal (or otherwise partially
+                    // causal) active block a query could still attend to future
+                    // keys when block_size > 1. Enforce the exact position-level
+                    // constraint here so BlockMask::causal / prefix_lm are
+                    // strictly causal regardless of block_size. A key at
+                    // absolute position kv_pos is kept iff it is in the
+                    // bidirectional prefix (kv_pos < causal_prefix_len) or at or
+                    // before the query position (kv_pos <= q_pos).
+                    if (element_causal) {
+                        for (int64_t qi = 0; qi < q_len; ++qi) {
+                            const int64_t q_pos = q_start + qi;
+                            for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
+                                const int64_t kv_pos = kv_start + kvi;
+                                if (kv_pos < causal_prefix_len || kv_pos <= q_pos) {
+                                    continue;
+                                }
+                                scores[static_cast<size_t>(qi * kv_len + kvi)] = neg_inf;
+                            }
+                        }
                     }
 
                     // ---- Online softmax update ----

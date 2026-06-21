@@ -654,7 +654,10 @@ auto unfold_cuda(const Tensor& input,
                  int64_t dilation_h,
                  int64_t dilation_w,
                  cudaStream_t stream) -> Tensor {
-    auto shape = input.shape();
+    // The unfold kernel indexes input with flat contiguous-NCHW offsets, so a
+    // non-contiguous (sliced/permuted/channels-last) view must be materialized.
+    auto input_c = input.contiguous();
+    auto shape = input_c.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t height = shape[2];
@@ -667,25 +670,25 @@ auto unfold_cuda(const Tensor& input,
 
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, channels * kernel_h * kernel_w, num_blocks};
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, input_c.dtype(), input_c.device());
 
     // Launch kernel
     int64_t total_elements = batch * channels * kernel_h * kernel_w * num_blocks;
     dim3 grid, block;
     compute_launch_config_1d(total_elements, grid, block);
 
-    if (input.dtype() == DType::Float16) {
+    if (input_c.dtype() == DType::Float16) {
         unfold_kernel<__half><<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(input_c.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::BFloat16) {
+    } else if (input_c.dtype() == DType::BFloat16) {
         unfold_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(input_c.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
@@ -693,9 +696,9 @@ auto unfold_cuda(const Tensor& input,
             out_h, out_w);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "unfold_cuda", [&]() {
+        TENZOR_DISPATCH_FLOATING_TYPES(input_c.dtype(), "unfold_cuda", [&]() {
             unfold_kernel<scalar_t><<<grid, block, 0, stream>>>(
-                input.data<scalar_t>(),
+                input_c.data<scalar_t>(),
                 output.data<scalar_t>(),
                 batch, channels, height, width,
                 kernel_h, kernel_w, stride_h, stride_w,
@@ -723,7 +726,9 @@ auto fold_cuda(const Tensor& input,
                int64_t dilation_h,
                int64_t dilation_w,
                cudaStream_t stream) -> Tensor {
-    auto shape = input.shape();
+    // The fold kernel reads the column buffer with flat contiguous offsets.
+    auto input_c = input.contiguous();
+    auto shape = input_c.shape();
     int64_t batch = shape[0];
     int64_t col_channels = shape[1];
     int64_t num_blocks = shape[2];
@@ -738,7 +743,7 @@ auto fold_cuda(const Tensor& input,
 
     // Create output tensor (initialized to zero)
     std::vector<int64_t> output_shape = {batch, channels, height, width};
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, input_c.dtype(), input_c.device());
 
     // Initialize to zero
     TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * output.dtype_size(), stream));
@@ -748,18 +753,18 @@ auto fold_cuda(const Tensor& input,
     dim3 grid, block;
     compute_launch_config_1d(total_elements, grid, block);
 
-    if (input.dtype() == DType::Float16) {
+    if (input_c.dtype() == DType::Float16) {
         fold_kernel_fp16<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(input_c.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w);
         TENZOR_CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::BFloat16) {
+    } else if (input_c.dtype() == DType::BFloat16) {
         fold_kernel_bf16<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(input_c.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
@@ -767,9 +772,9 @@ auto fold_cuda(const Tensor& input,
             out_h, out_w);
         TENZOR_CUDA_CHECK(cudaGetLastError());
     } else {
-        TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "fold_cuda", [&]() {
+        TENZOR_DISPATCH_FLOATING_TYPES(input_c.dtype(), "fold_cuda", [&]() {
             fold_kernel<scalar_t><<<grid, block, 0, stream>>>(
-                input.data<scalar_t>(),
+                input_c.data<scalar_t>(),
                 output.data<scalar_t>(),
                 batch, channels, height, width,
                 kernel_h, kernel_w, stride_h, stride_w,
@@ -1046,10 +1051,14 @@ __global__ void interpolate_nearest_5d_backward_kernel(
 }
 
 // Interpolate host function
-auto interpolate_cuda(const Tensor& input,
+auto interpolate_cuda(const Tensor& input_in,
                       const std::vector<int64_t>& size,
                       const std::string& mode,
                       bool align_corners) -> Tensor {
+    // The interpolate kernels index input with flat contiguous-NCHW/NCDHW
+    // offsets, so a non-contiguous view must be materialized first.
+    auto input_c = input_in.contiguous();
+    const Tensor& input = input_c;
     auto shape = input.shape();
 
     // Handle 5D input (trilinear / nearest-5d)
@@ -1422,7 +1431,13 @@ __global__ void box_iou_kernel(
     output[i * M + j] = iou;
 }
 
-auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor {
+auto box_iou_cuda(const Tensor& boxes1_in, const Tensor& boxes2_in, int iou_type) -> Tensor {
+    // box_iou_kernel indexes each box row flat (i*4+k); materialize contiguous
+    // copies so a sliced/permuted boxes view is not read with wrong strides.
+    auto boxes1_c = boxes1_in.contiguous();
+    auto boxes2_c = boxes2_in.contiguous();
+    const Tensor& boxes1 = boxes1_c;
+    const Tensor& boxes2 = boxes2_c;
     int64_t N = boxes1.shape()[0];
     int64_t M = boxes2.shape()[0];
 

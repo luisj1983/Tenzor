@@ -40,7 +40,7 @@ protected:
                                float rtol = 1e-5f, float atol = 1e-7f) {
         auto backend_grad_cpu = backend_grad.to(Device::cpu());
         device.synchronize();
-        expectTensorNear(cpu_grad, backend_grad_cpu, atol);
+        expectTensorNear(cpu_grad, backend_grad_cpu, rtol, atol);
     }
 
     void testUnaryGradient(
@@ -166,7 +166,12 @@ TEST_P(GradLinalgParityTest, AddmmBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
+        // addmm has three differentiable inputs (a, b, c); assert grad flows
+        // to every one, not just `a` — a backward that fails to propagate to
+        // b or c was silently passing on CPU-only hosts.
         EXPECT_GRAD_FLOWS(a_cpu);
+        EXPECT_GRAD_FLOWS(b_cpu);
+        EXPECT_GRAD_FLOWS(c_cpu);
         return;
     }
 
@@ -222,7 +227,10 @@ TEST_P(GradLinalgParityTest, SolveBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
+        // solve(a, b) is differentiable in both a and b; assert grad flows to
+        // both, not just `a`.
         EXPECT_GRAD_FLOWS(a_cpu);
+        EXPECT_GRAD_FLOWS(b_cpu);
         return;
     }
 

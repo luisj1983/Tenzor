@@ -116,4 +116,32 @@ TEST_P(LazyTensorTest, ShapeWithoutMaterialize) {
     EXPECT_EQ(reshaped.shape()[0], 15);
 }
 
+// Regression: lazy matmul must validate the contraction (K) dim when the op is
+// RECORDED, mirroring eager tenzor::matmul. Before the fix, matmul_shape built
+// the output from a[-2]/b[-1] without checking a[-1] == b[-2], so an
+// incompatible matmul recorded a bogus [M,N] node and only failed deep inside
+// materialization (or silently, against the wrong shape downstream).
+TEST_P(LazyTensorTest, MatmulValidatesContractionDim) {
+    auto a = randn({4, 3}, DType::Float32, device);  // [M=4, K=3]
+    auto b = randn({5, 6}, DType::Float32, device);  // [K=5, N=6] — K mismatch
+    auto la = lazy::LazyTensor::from_tensor(a);
+    auto lb = lazy::LazyTensor::from_tensor(b);
+    EXPECT_THROW(lazy::matmul(la, lb), std::invalid_argument);
+
+    // 1D dot product with mismatched lengths.
+    auto v1 = randn({3}, DType::Float32, device);
+    auto v2 = randn({4}, DType::Float32, device);
+    auto lv1 = lazy::LazyTensor::from_tensor(v1);
+    auto lv2 = lazy::LazyTensor::from_tensor(v2);
+    EXPECT_THROW(lazy::matmul(lv1, lv2), std::invalid_argument);
+
+    // A compatible matmul still records fine and reports the right shape.
+    auto c = randn({3, 7}, DType::Float32, device);  // [K=3, N=7]
+    auto lc = lazy::LazyTensor::from_tensor(c);
+    auto lr = lazy::matmul(la, lc);
+    ASSERT_EQ(lr.ndim(), 2);
+    EXPECT_EQ(lr.shape()[0], 4);
+    EXPECT_EQ(lr.shape()[1], 7);
+}
+
 INSTANTIATE_BACKEND_TESTS(LazyTensorTest);

@@ -103,6 +103,18 @@ target_link_libraries(test_gradcheck PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_gradcheck_direct test_gradcheck_direct.cpp)
 target_link_libraries(test_gradcheck_direct PRIVATE tenzor_core GTest::gtest_main)
 
+# Regression: binary-wrapper conditional-input_variables misalignment
+# (second-operand-only-requires-grad routes the wrong adjoint to the leaf).
+add_executable(test_binary_input_order_regression test_binary_input_order_regression.cpp)
+target_link_libraries(test_binary_input_order_regression PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_binary_input_order_regression LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Regression: CPU FlashAttention dropout Philox counter convention (forward
+# vs composed-backward mask replay) must agree for B>1 / H>1.
+add_executable(test_flash_attention_dropout_composed_multibatch test_flash_attention_dropout_composed_multibatch.cpp)
+target_link_libraries(test_flash_attention_dropout_composed_multibatch PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_flash_attention_dropout_composed_multibatch LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
 # Extended gradcheck tests (multi-backend)
 add_executable(test_gradcheck_extended test_gradcheck_extended.cpp)
 target_link_libraries(test_gradcheck_extended PRIVATE tenzor_core GTest::gtest_main)

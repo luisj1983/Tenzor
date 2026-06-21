@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <limits>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -431,7 +432,22 @@ auto arange_kernel(double start, double end, double step, DType dtype, const Dev
         return Tensor({0}, dtype, device);
     }
 
-    int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
+    // Length matches PyTorch's torch.arange: ceil((end - start) / step), but a
+    // naive ceil over a floating-point ratio rounds an exact-integer quotient
+    // (e.g. (1.0 - 0.0) / 0.1 = 9.999999999999998 or 10.000000000000002) up by
+    // one, yielding a spurious final element whose value can also drift past
+    // `end`. Snap a ratio that is integral within a relative epsilon to that
+    // integer before applying ceil, so exact ranges produce the exact count.
+    const double ratio = (end - start) / step;
+    double rounded = std::round(ratio);
+    double count_d;
+    if (std::abs(ratio - rounded) < std::numeric_limits<double>::epsilon() *
+                                    std::max(1.0, std::abs(ratio)) * 4.0) {
+        count_d = rounded;  // exact integer ratio: half-open interval => `rounded` elements
+    } else {
+        count_d = std::ceil(ratio);
+    }
+    int64_t numel = static_cast<int64_t>(count_d);
     if (numel < 0) numel = 0;
     Tensor result({numel}, dtype, device);
 
@@ -688,11 +704,28 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replaceme
     Tensor result(out_shape, DType::Int64, probs.device());
     int64_t* out_data = result.data<int64_t>();
 
-    std::mt19937 rng(detail::get_base_seed());
-    std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+    // Reproducibility contract (matches rand/randn/randint/poisson_sample in this
+    // file): the RNG stream is keyed deterministically from (seed, batch, sample)
+    // via splitmix64, so the output is identical regardless of thread count and
+    // regardless of how many draws sibling rows consume. The previous single
+    // serial std::mt19937 broke that contract (output depended on iteration
+    // order / draw counts of earlier rows).
+    const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+    auto mix64 = [](uint64_t z) {
+        z += 0x9E3779B97F4A7C15ULL;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    };
 
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* row = p_data + b * num_categories;
+
+        // Per-row RNG stream keyed by (seed, b): each row is independent and
+        // reproducible. A draw advances this local generator, so within a row
+        // the draws are correlation-free; across rows the keys differ.
+        std::mt19937_64 local(mix64(seed ^ (static_cast<uint64_t>(b) * 0x9E3779B97F4A7C15ULL)));
+        std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
 
         // Compute cumulative sum (unnormalized CDF)
         std::vector<float> cumsum(static_cast<size_t>(num_categories));
@@ -714,7 +747,7 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replaceme
 
         if (replacement) {
             for (int64_t s = 0; s < num_samples; ++s) {
-                float u = uniform(rng);
+                float u = uniform(local);
                 // Binary search in cumsum
                 auto it = std::lower_bound(cumsum.begin(), cumsum.end(), u);
                 int64_t idx = static_cast<int64_t>(std::distance(cumsum.begin(), it));
@@ -748,7 +781,7 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replaceme
                 if (!(total_w > 0.0)) {
                     throw std::runtime_error("multinomial: ran out of positive-weight categories");
                 }
-                double u = static_cast<double>(uniform(rng)) * total_w;
+                double u = static_cast<double>(uniform(local)) * total_w;
 
                 // Fenwick lower_bound: smallest 1-indexed pos whose prefix sum
                 // is strictly greater than u (i.e. first index where the

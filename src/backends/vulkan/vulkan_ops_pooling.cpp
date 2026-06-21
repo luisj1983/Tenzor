@@ -6,10 +6,14 @@
 namespace tenzor {
 
 // Pooling operations implementation
-auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
+auto VulkanBackend::dispatchMaxPool2d(const Tensor& input_orig, int64_t kernel_h, int64_t kernel_w,
                                       int64_t stride_h, int64_t stride_w,
                                       int64_t padding_h, int64_t padding_w,
                                       int64_t dilation_h, int64_t dilation_w) -> std::pair<Tensor, Tensor> {
+    // The shader gathers input via logical N/C/H/W offsets assuming a contiguous
+    // offset-0 layout; materialize first so a permuted/sliced view reads the
+    // right elements (mirrors the adaptive-pool entry points).
+    const Tensor input = input_orig.contiguous();
     auto input_shape = input.shape();
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -37,7 +41,14 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, out_height, out_width};
-    Tensor output(out_shape, input.dtype(), input.device());
+    // For Float16 odd-numel outputs, allocate an extra padding half so the
+    // pair-packed shader's final whole-word CAS store stays in-bounds; slice back
+    // at return. Indices are Int32 (4-byte, unpacked) and need no padding.
+    const int64_t logical_numel = batch * channels * out_height * out_width;
+    const bool need_fp16_pad = (input.dtype() == DType::Float16) && ((logical_numel & 1) == 1);
+    Tensor output = need_fp16_pad
+        ? Tensor({logical_numel + 1}, input.dtype(), input.device())
+        : Tensor(out_shape, input.dtype(), input.device());
     Tensor indices(out_shape, DType::Int32, input.device());  // Use Int32 for Vulkan
 
     // Push constants matching pooling_forward_with_indices.comp
@@ -127,6 +138,10 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    if (need_fp16_pad) {
+        Tensor sliced = tenzor::slice(output, 0, 0, logical_numel);
+        return {sliced.reshape(out_shape).contiguous(), indices};
+    }
     return {output, indices};
 }
 
@@ -147,7 +162,13 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, out_h, out_w};
-    Tensor output(out_shape, cont_input.dtype(), cont_input.device());
+    // Float16 odd-numel: allocate a padding half so the pair-packed CAS store of
+    // the final word stays in-bounds; slice back at return. Indices are Int32.
+    const int64_t logical_numel = batch * channels * out_h * out_w;
+    const bool need_fp16_pad = (cont_input.dtype() == DType::Float16) && ((logical_numel & 1) == 1);
+    Tensor output = need_fp16_pad
+        ? Tensor({logical_numel + 1}, cont_input.dtype(), cont_input.device())
+        : Tensor(out_shape, cont_input.dtype(), cont_input.device());
     Tensor indices(out_shape, DType::Int32, cont_input.device());
 
     // Push constants
@@ -224,6 +245,10 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    if (need_fp16_pad) {
+        Tensor sliced = tenzor::slice(output, 0, 0, logical_numel);
+        return {sliced.reshape(out_shape).contiguous(), indices};
+    }
     return {output, indices};
 }
 
@@ -251,7 +276,13 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, out_h, out_w};
-    Tensor output(out_shape, cont_input.dtype(), cont_input.device());
+    // Float16 odd-numel: pad with one half so the pair-packed CAS store of the
+    // final word stays in-bounds; slice back at return.
+    const int64_t logical_numel = batch * channels * out_h * out_w;
+    const bool need_fp16_pad = (cont_input.dtype() == DType::Float16) && ((logical_numel & 1) == 1);
+    Tensor output = need_fp16_pad
+        ? Tensor({logical_numel + 1}, cont_input.dtype(), cont_input.device())
+        : Tensor(out_shape, cont_input.dtype(), cont_input.device());
 
     // Create dummy indices buffer for avg pool (shader requires it)
     Tensor dummy_indices(out_shape, DType::Int32, cont_input.device());
@@ -329,6 +360,10 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    if (need_fp16_pad) {
+        Tensor sliced = tenzor::slice(output, 0, 0, logical_numel);
+        return sliced.reshape(out_shape).contiguous();
+    }
     return output;
 }
 
@@ -485,7 +520,10 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
 // Pooling Operations Implementation (OpAttributes versions)
 // ============================================================================
 
-auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor {
+auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input_orig, const OpAttributes& attrs) -> Tensor {
+    // Materialize to a contiguous offset-0 layout; the shader gathers input via
+    // logical N/C/H/W offsets (mirrors the adaptive-pool entry points).
+    const Tensor input = input_orig.contiguous();
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
         throw std::invalid_argument("avg_pool2d requires 4D input (N, C, H, W)");
@@ -619,7 +657,11 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
     return output;
 }
 
-auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor {
+auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input_orig, const OpAttributes& attrs) -> Tensor {
+    // The shader gathers input via logical N/C/H/W offsets assuming a contiguous
+    // offset-0 layout; materialize so a permuted/sliced view reads the right
+    // elements (mirrors the adaptive-pool entry points).
+    const Tensor input = input_orig.contiguous();
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
         throw std::invalid_argument("max_pool2d requires 4D input (N, C, H, W)");
@@ -667,9 +709,15 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    // Create output tensor
+    // Create output tensor. For Float16 odd-numel outputs, allocate an extra
+    // padding half so the pair-packed shader's final whole-word CAS store stays
+    // in-bounds; slice back at return.
     std::vector<int64_t> output_shape = {batch, channels, out_height, out_width};
-    Tensor output(output_shape, input.dtype(), input.device());
+    const int64_t logical_numel = batch * channels * out_height * out_width;
+    const bool need_fp16_pad = (input.dtype() == DType::Float16) && ((logical_numel & 1) == 1);
+    Tensor output = need_fp16_pad
+        ? Tensor({logical_numel + 1}, input.dtype(), input.device())
+        : Tensor(output_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles
     const void* buffer_input = input.data_ptr();
@@ -716,7 +764,9 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
         uint32_t dilation_w;
     } push_constants;
 
-    push_constants.n_elements = static_cast<uint32_t>(output.numel());
+    // Use the logical element count, not the (possibly +1 padded) allocation, so
+    // the shader doesn't process a phantom output position.
+    push_constants.n_elements = static_cast<uint32_t>(logical_numel);
     push_constants.batch = static_cast<uint32_t>(batch);
     push_constants.channels = static_cast<uint32_t>(channels);
     push_constants.in_height = static_cast<uint32_t>(in_height);
@@ -737,7 +787,7 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(logical_numel, devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -745,6 +795,10 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    if (need_fp16_pad) {
+        Tensor sliced = tenzor::slice(output, 0, 0, logical_numel);
+        return sliced.reshape(output_shape).contiguous();
+    }
     return output;
 }
 
@@ -921,10 +975,19 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
     const void* buffer_input = input.data_ptr();
     const void* buffer_grad_input = grad_input.data_ptr();
 
-    // Calculate buffer sizes
-    size_t buffer_size_grad_output = grad_output.numel() * grad_output.dtype_size();
-    size_t buffer_size_input = input.numel() * input.dtype_size();
-    size_t buffer_size_grad_input = grad_input.numel() * grad_input.dtype_size();
+    // Calculate buffer sizes. The F16 AND BF16 shaders bind packed buffers (2
+    // halves per 32-bit word) for grad_output, input AND grad_input
+    // (CAS-accumulated), reading/writing whole words up to index (numel-1)/2.
+    // Round each range up to ((numel+1)/2)*4 so an odd-numel tail word stays
+    // in-bounds.
+    const bool packed16 = is_f16 || is_bf16;
+    auto packed_bytes = [packed16](int64_t numel, size_t dtype_size) -> size_t {
+        if (packed16) return ((static_cast<size_t>(numel) + 1) / 2) * sizeof(uint32_t);
+        return static_cast<size_t>(numel) * dtype_size;
+    };
+    size_t buffer_size_grad_output = packed_bytes(grad_output.numel(), grad_output.dtype_size());
+    size_t buffer_size_input = packed_bytes(input.numel(), input.dtype_size());
+    size_t buffer_size_grad_input = packed_bytes(grad_input.numel(), grad_input.dtype_size());
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -1042,9 +1105,17 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
     const void* buffer_indices = const_cast<void*>(indices.data_ptr());
     const void* buffer_grad_in = grad_input.data_ptr();
 
-    size_t grad_out_size = grad_out_numel * grad_output.dtype_size();
+    // F16 binds packed-F16 buffers (grad_out read, grad_in CAS-accumulated);
+    // round those ranges up to whole 32-bit words so an odd-numel tail word stays
+    // in-bounds. Indices are Int32, unaffected.
+    const bool idx_is_f16 = (grad_output.dtype() == DType::Float16);
+    size_t grad_out_size = idx_is_f16
+        ? ((static_cast<size_t>(grad_out_numel) + 1) / 2) * sizeof(uint32_t)
+        : grad_out_numel * grad_output.dtype_size();
     size_t indices_size = indices.numel() * indices.dtype_size();
-    size_t grad_in_size = grad_in_numel * grad_input.dtype_size();
+    size_t grad_in_size = idx_is_f16
+        ? ((static_cast<size_t>(grad_in_numel) + 1) / 2) * sizeof(uint32_t)
+        : grad_in_numel * grad_input.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},

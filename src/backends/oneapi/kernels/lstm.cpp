@@ -59,15 +59,22 @@ auto lstm_cell_forward_kernel(
         return {h.to(DType::Float16), c.to(DType::Float16)};
     }
 
+    // The kernel indexes gates/c_prev via flat shape-derived offsets, so they must
+    // be contiguous. The canonical dispatch builds gates via matmul (already
+    // contiguous), but legacy 2/5-input fused forms can pass a non-contiguous
+    // state view; guard so a strided input is not misread.
+    Tensor gates_c = gates.is_contiguous() ? gates : gates.contiguous();
+    Tensor c_prev_c = c_prev.is_contiguous() ? c_prev : c_prev.contiguous();
+
     std::vector<int64_t> output_shape = {batch_size, hidden_size};
-    Tensor h_out(output_shape, gates.dtype(), gates.device());
-    Tensor c_out(output_shape, gates.dtype(), gates.device());
+    Tensor h_out(output_shape, gates_c.dtype(), gates_c.device());
+    Tensor c_out(output_shape, gates_c.dtype(), gates_c.device());
 
     int64_t total_elements = batch_size * hidden_size;
 
-    if (gates.dtype() == DType::Float32) {
-        const float* gates_ptr = get_data_ptr<const float>(gates);
-        const float* c_prev_ptr = get_data_ptr<const float>(c_prev);
+    if (gates_c.dtype() == DType::Float32) {
+        const float* gates_ptr = get_data_ptr<const float>(gates_c);
+        const float* c_prev_ptr = get_data_ptr<const float>(c_prev_c);
         float* h_out_ptr = get_data_ptr<float>(h_out);
         float* c_out_ptr = get_data_ptr<float>(c_out);
 
@@ -117,9 +124,9 @@ auto lstm_cell_forward_kernel(
             }
         );
     }
-    else if (gates.dtype() == DType::Float64) {
-        const double* gates_ptr = get_data_ptr<const double>(gates);
-        const double* c_prev_ptr = get_data_ptr<const double>(c_prev);
+    else if (gates_c.dtype() == DType::Float64) {
+        const double* gates_ptr = get_data_ptr<const double>(gates_c);
+        const double* c_prev_ptr = get_data_ptr<const double>(c_prev_c);
         double* h_out_ptr = get_data_ptr<double>(h_out);
         double* c_out_ptr = get_data_ptr<double>(c_out);
 
@@ -157,9 +164,9 @@ auto lstm_cell_forward_kernel(
             }
         );
     }
-    else if (gates.dtype() == DType::BFloat16) {
-        const uint16_t* gates_ptr = get_data_ptr<const uint16_t>(gates);
-        const uint16_t* c_prev_ptr = get_data_ptr<const uint16_t>(c_prev);
+    else if (gates_c.dtype() == DType::BFloat16) {
+        const uint16_t* gates_ptr = get_data_ptr<const uint16_t>(gates_c);
+        const uint16_t* c_prev_ptr = get_data_ptr<const uint16_t>(c_prev_c);
         uint16_t* h_out_ptr = get_data_ptr<uint16_t>(h_out);
         uint16_t* c_out_ptr = get_data_ptr<uint16_t>(c_out);
 
@@ -201,6 +208,9 @@ auto lstm_cell_forward_kernel(
         throw std::runtime_error("lstm_cell_forward: only Float32, Float64, and BFloat16 supported");
     }
 
+    // Drain before the host reads the USM-shared h_out/c_out (and before the
+    // function-local contiguous copies of gates/c_prev, if any, are freed).
+    queue.wait_and_throw();
     return {h_out, c_out};
 }
 
@@ -238,20 +248,28 @@ auto lstm_cell_backward_kernel(
         return {gg.to(DType::Float16), gc.to(DType::Float16)};
     }
 
+    // Kernel indexes all inputs via flat shape-derived offsets; guard against
+    // non-contiguous state views (legacy fused dispatch forms).
+    Tensor grad_h_c = grad_h.is_contiguous() ? grad_h : grad_h.contiguous();
+    Tensor grad_c_c = grad_c.is_contiguous() ? grad_c : grad_c.contiguous();
+    Tensor gates_c = gates.is_contiguous() ? gates : gates.contiguous();
+    Tensor c_prev_c = c_prev.is_contiguous() ? c_prev : c_prev.contiguous();
+    Tensor c_out_c = c_out.is_contiguous() ? c_out : c_out.contiguous();
+
     std::vector<int64_t> gate_shape = {batch_size, 4 * hidden_size};
     std::vector<int64_t> state_shape = {batch_size, hidden_size};
 
-    Tensor grad_gates(gate_shape, gates.dtype(), gates.device());
-    Tensor grad_c_prev(state_shape, gates.dtype(), gates.device());
+    Tensor grad_gates(gate_shape, gates_c.dtype(), gates_c.device());
+    Tensor grad_c_prev(state_shape, gates_c.dtype(), gates_c.device());
 
     int64_t total_elements = batch_size * hidden_size;
 
-    if (gates.dtype() == DType::Float32) {
-        const float* grad_h_ptr = get_data_ptr<const float>(grad_h);
-        const float* grad_c_ptr = get_data_ptr<const float>(grad_c);
-        const float* gates_ptr = get_data_ptr<const float>(gates);
-        const float* c_prev_ptr = get_data_ptr<const float>(c_prev);
-        const float* c_out_ptr = get_data_ptr<const float>(c_out);
+    if (gates_c.dtype() == DType::Float32) {
+        const float* grad_h_ptr = get_data_ptr<const float>(grad_h_c);
+        const float* grad_c_ptr = get_data_ptr<const float>(grad_c_c);
+        const float* gates_ptr = get_data_ptr<const float>(gates_c);
+        const float* c_prev_ptr = get_data_ptr<const float>(c_prev_c);
+        const float* c_out_ptr = get_data_ptr<const float>(c_out_c);
         float* grad_gates_ptr = get_data_ptr<float>(grad_gates);
         float* grad_c_prev_ptr = get_data_ptr<float>(grad_c_prev);
 
@@ -322,12 +340,12 @@ auto lstm_cell_backward_kernel(
             }
         );
     }
-    else if (gates.dtype() == DType::Float64) {
-        const double* grad_h_ptr = get_data_ptr<const double>(grad_h);
-        const double* grad_c_ptr = get_data_ptr<const double>(grad_c);
-        const double* gates_ptr = get_data_ptr<const double>(gates);
-        const double* c_prev_ptr = get_data_ptr<const double>(c_prev);
-        const double* c_out_ptr = get_data_ptr<const double>(c_out);
+    else if (gates_c.dtype() == DType::Float64) {
+        const double* grad_h_ptr = get_data_ptr<const double>(grad_h_c);
+        const double* grad_c_ptr = get_data_ptr<const double>(grad_c_c);
+        const double* gates_ptr = get_data_ptr<const double>(gates_c);
+        const double* c_prev_ptr = get_data_ptr<const double>(c_prev_c);
+        const double* c_out_ptr = get_data_ptr<const double>(c_out_c);
         double* grad_gates_ptr = get_data_ptr<double>(grad_gates);
         double* grad_c_prev_ptr = get_data_ptr<double>(grad_c_prev);
 
@@ -387,12 +405,12 @@ auto lstm_cell_backward_kernel(
             }
         );
     }
-    else if (gates.dtype() == DType::BFloat16) {
-        const uint16_t* grad_h_ptr = get_data_ptr<const uint16_t>(grad_h);
-        const uint16_t* grad_c_ptr = get_data_ptr<const uint16_t>(grad_c);
-        const uint16_t* gates_ptr = get_data_ptr<const uint16_t>(gates);
-        const uint16_t* c_prev_ptr = get_data_ptr<const uint16_t>(c_prev);
-        const uint16_t* c_out_ptr = get_data_ptr<const uint16_t>(c_out);
+    else if (gates_c.dtype() == DType::BFloat16) {
+        const uint16_t* grad_h_ptr = get_data_ptr<const uint16_t>(grad_h_c);
+        const uint16_t* grad_c_ptr = get_data_ptr<const uint16_t>(grad_c_c);
+        const uint16_t* gates_ptr = get_data_ptr<const uint16_t>(gates_c);
+        const uint16_t* c_prev_ptr = get_data_ptr<const uint16_t>(c_prev_c);
+        const uint16_t* c_out_ptr = get_data_ptr<const uint16_t>(c_out_c);
         uint16_t* grad_gates_ptr = get_data_ptr<uint16_t>(grad_gates);
         uint16_t* grad_c_prev_ptr = get_data_ptr<uint16_t>(grad_c_prev);
 
@@ -456,6 +474,8 @@ auto lstm_cell_backward_kernel(
         throw std::runtime_error("lstm_cell_backward: only Float32, Float64, and BFloat16 supported");
     }
 
+    // Drain before the host reads the USM-shared grad_gates/grad_c_prev.
+    queue.wait_and_throw();
     return {grad_gates, grad_c_prev};
 }
 

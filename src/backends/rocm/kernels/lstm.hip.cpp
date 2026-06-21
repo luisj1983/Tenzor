@@ -481,11 +481,16 @@ extern "C" {
  * @return Pair of (h_out, c_out) tensors
  */
 auto lstm_cell_forward_kernel(
-    const Tensor& gates,
-    const Tensor& c_prev,
+    const Tensor& gates_in,
+    const Tensor& c_prev_in,
     int64_t batch_size,
     int64_t hidden_size,
     hipStream_t stream) -> std::pair<Tensor, Tensor> {
+
+    // Kernels index gates/c_prev with dense [batch*(4H)+...] offsets, so a
+    // non-contiguous view would be misread. Materialize contiguous copies.
+    Tensor gates  = gates_in.is_contiguous()  ? gates_in  : gates_in.contiguous();
+    Tensor c_prev = c_prev_in.is_contiguous() ? c_prev_in : c_prev_in.contiguous();
 
     std::vector<int64_t> output_shape = {batch_size, hidden_size};
     Tensor h_out(output_shape, gates.dtype(), gates.device());
@@ -537,14 +542,23 @@ auto lstm_cell_forward_kernel(
  * @brief LSTM cell backward wrapper for Tensor API
  */
 auto lstm_cell_backward_kernel(
-    const Tensor& grad_h,
-    const Tensor& grad_c,
-    const Tensor& gates,
-    const Tensor& c_prev,
-    const Tensor& c_out,
+    const Tensor& grad_h_in,
+    const Tensor& grad_c_in,
+    const Tensor& gates_in,
+    const Tensor& c_prev_in,
+    const Tensor& c_out_in,
     int64_t batch_size,
     int64_t hidden_size,
     hipStream_t stream) -> std::pair<Tensor, Tensor> {
+
+    // All inputs are read with dense offsets; materialize contiguous copies so
+    // strided views are not misread.
+    auto mc = [](const Tensor& t) { return t.is_contiguous() ? t : t.contiguous(); };
+    Tensor grad_h = mc(grad_h_in);
+    Tensor grad_c = mc(grad_c_in);
+    Tensor gates  = mc(gates_in);
+    Tensor c_prev = mc(c_prev_in);
+    Tensor c_out  = mc(c_out_in);
 
     std::vector<int64_t> gate_shape = {batch_size, 4 * hidden_size};
     std::vector<int64_t> state_shape = {batch_size, hidden_size};
@@ -685,8 +699,14 @@ auto lstm_forward_miopen(
             miopenFloat));
     }
 
-    // Create input/output tensor descriptors for each timestep
-    // MIOpen RNN API expects an array of tensor descriptors, one per timestep
+    // Create input/output tensor descriptors for each timestep.
+    // MIOpen RNN API expects an array of tensor descriptors, one per timestep.
+    // Hold them in RAII guards (vectors of MiopenTensorDescGuard) so any
+    // throwing MIOPEN_CHECK / HIP_CHECK between here and the end of the function
+    // destroys every descriptor created so far (the previous manual cleanup at
+    // the end leaked all of them on an exception mid-way).
+    std::vector<MiopenTensorDescGuard> x_desc_guards(seq_len);
+    std::vector<MiopenTensorDescGuard> y_desc_guards(seq_len);
     std::vector<miopenTensorDescriptor_t> x_descs(seq_len);
     std::vector<miopenTensorDescriptor_t> y_descs(seq_len);
 
@@ -696,23 +716,23 @@ auto lstm_forward_miopen(
     int out_strides[2] = {static_cast<int>(hidden), 1};
 
     for (int64_t t = 0; t < seq_len; ++t) {
-        MIOPEN_CHECK(miopenCreateTensorDescriptor(&x_descs[t]));
+        x_descs[t] = x_desc_guards[t].desc;
         MIOPEN_CHECK(miopenSetTensorDescriptor(x_descs[t], miopenFloat, 2, dims, strides));
-        MIOPEN_CHECK(miopenCreateTensorDescriptor(&y_descs[t]));
+        y_descs[t] = y_desc_guards[t].desc;
         MIOPEN_CHECK(miopenSetTensorDescriptor(y_descs[t], miopenFloat, 2, out_dims, out_strides));
     }
 
-    // Hidden state descriptors (num_layers * directions, batch, hidden)
-    miopenTensorDescriptor_t hx_desc, cx_desc, hy_desc, cy_desc;
+    // Hidden state descriptors (num_layers * directions, batch, hidden), RAII.
+    MiopenTensorDescGuard hx_desc_guard, cx_desc_guard, hy_desc_guard, cy_desc_guard;
+    miopenTensorDescriptor_t hx_desc = hx_desc_guard.desc;
+    miopenTensorDescriptor_t cx_desc = cx_desc_guard.desc;
+    miopenTensorDescriptor_t hy_desc = hy_desc_guard.desc;
+    miopenTensorDescriptor_t cy_desc = cy_desc_guard.desc;
     int h_dims[3] = {1, static_cast<int>(batch), static_cast<int>(hidden)};
     int h_strides[3] = {static_cast<int>(batch * hidden), static_cast<int>(hidden), 1};
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&hx_desc));
     MIOPEN_CHECK(miopenSetTensorDescriptor(hx_desc, miopenFloat, 3, h_dims, h_strides));
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&cx_desc));
     MIOPEN_CHECK(miopenSetTensorDescriptor(cx_desc, miopenFloat, 3, h_dims, h_strides));
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&hy_desc));
     MIOPEN_CHECK(miopenSetTensorDescriptor(hy_desc, miopenFloat, 3, h_dims, h_strides));
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&cy_desc));
     MIOPEN_CHECK(miopenSetTensorDescriptor(cy_desc, miopenFloat, 3, h_dims, h_strides));
 
     // Query and allocate weight space
@@ -783,22 +803,45 @@ auto lstm_forward_miopen(
     // buffers (HipBuffer RAII) are not freed mid-flight.
     HIP_CHECK(hipStreamSynchronize(stream));
 
-    // Cleanup per-timestep descriptors
-    for (int64_t t = 0; t < seq_len; ++t) {
-        miopenDestroyTensorDescriptor(x_descs[t]);
-        miopenDestroyTensorDescriptor(y_descs[t]);
-    }
-    miopenDestroyTensorDescriptor(hx_desc);
-    miopenDestroyTensorDescriptor(cx_desc);
-    miopenDestroyTensorDescriptor(hy_desc);
-    miopenDestroyTensorDescriptor(cy_desc);
-
+    // Per-timestep and hidden descriptors are freed by their RAII guards
+    // (x_desc_guards / y_desc_guards / h{x,y}_desc_guard / c{x,y}_desc_guard)
+    // on scope exit — including on any exception above.
     return {output, h_n, c_n};
 }
 
 #endif // USE_MIOPEN
 
+static auto lstm_forward_kernel_impl(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0,
+    const Tensor& c0,
+    hipStream_t stream) -> std::vector<Tensor>;
+
 auto lstm_forward_kernel(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0,
+    const Tensor& c0,
+    hipStream_t stream) -> std::vector<Tensor> {
+    // All rocBLAS GEMM leading dims and per-timestep slice offsets are derived
+    // from shape, not strides, so a non-contiguous view (strided h0, permuted
+    // input, narrowed weight) would be read as if dense and silently produce
+    // wrong results. Materialize contiguous copies before delegating. Empty
+    // optional states (numel()==0) are passed through unchanged.
+    auto ensure = [](const Tensor& t) -> Tensor {
+        if (t.numel() == 0) return t;
+        return t.is_contiguous() ? t : t.contiguous();
+    };
+    return lstm_forward_kernel_impl(ensure(input), ensure(W_ih), ensure(W_hh),
+                                    ensure(bias), ensure(h0), ensure(c0), stream);
+}
+
+static auto lstm_forward_kernel_impl(
     const Tensor& input,
     const Tensor& W_ih,
     const Tensor& W_hh,
@@ -1047,13 +1090,19 @@ auto lstm_forward_kernel(
 // ============================================================================
 
 auto lstm_multi_layer_forward_kernel(
-    const Tensor& input,
+    const Tensor& input_in,
     const std::vector<Tensor>& W_ih_list,
     const std::vector<Tensor>& W_hh_list,
     const std::vector<Tensor>& bias_list,
-    const Tensor& h0,    // (num_layers, batch, hidden)
-    const Tensor& c0,    // (num_layers, batch, hidden)
+    const Tensor& h0_in,    // (num_layers, batch, hidden)
+    const Tensor& c0_in,    // (num_layers, batch, hidden)
     hipStream_t stream) -> std::vector<Tensor> {
+
+    // h0/c0 are sliced per layer via raw byte offsets and `input` feeds the
+    // per-layer rocBLAS GEMMs, all assuming contiguous storage. Materialize.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor h0 = h0_in.is_contiguous() ? h0_in : h0_in.contiguous();
+    Tensor c0 = c0_in.is_contiguous() ? c0_in : c0_in.contiguous();
 
     int64_t num_layers = static_cast<int64_t>(W_ih_list.size());
     auto shape = input.shape();
@@ -1162,7 +1211,31 @@ __global__ void bilstm_concat_kernel(
     output[dst_base + hidden + h] = bwd_output[src_offset];
 }
 
+static auto bilstm_forward_kernel_impl(
+    const Tensor& input,
+    const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
+    const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
+    const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
+    const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd,
+    const Tensor& h0, const Tensor& c0, hipStream_t stream) -> std::vector<Tensor>;
+
 auto bilstm_forward_kernel(
+    const Tensor& input,
+    const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
+    const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
+    const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
+    const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd,
+    const Tensor& h0, const Tensor& c0, hipStream_t stream) -> std::vector<Tensor> {
+    // input/h0/c0/weights/biases are read with dense offsets (reverse_sequence,
+    // per-timestep slices, raw memcpy of h0/c0 halves), so non-contiguous views
+    // would be misread. Materialize contiguous copies before delegating.
+    auto mc = [](const Tensor& t) { return t.numel() == 0 ? t : (t.is_contiguous() ? t : t.contiguous()); };
+    return bilstm_forward_kernel_impl(mc(input), mc(W_ih_fwd), mc(W_hh_fwd),
+        mc(bias_ih_fwd), mc(bias_hh_fwd), mc(W_ih_bwd), mc(W_hh_bwd),
+        mc(bias_ih_bwd), mc(bias_hh_bwd), mc(h0), mc(c0), stream);
+}
+
+static auto bilstm_forward_kernel_impl(
     const Tensor& input,
     const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
     const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
@@ -1224,7 +1297,9 @@ auto bilstm_forward_kernel(
         HIP_CHECK(hipMemsetAsync(bias_fwd.data_ptr(), 0,
                                  total_bias * dtype_size(input.dtype()), stream));
         int block = 256;
-        int grid = (total_bias + block - 1) / block;
+        // get_num_blocks keeps the count 64-bit until the clamp and honors
+        // MAX_GRID_DIM_X, avoiding the int-narrowing wrap for large sequences.
+        unsigned int grid = get_num_blocks(total_bias, block);
         if (input.dtype() == DType::Float32) {
             if (bias_ih_fwd.numel() > 0)
                 hipLaunchKernelGGL(add_bias_kernel<float>,
@@ -1252,7 +1327,7 @@ auto bilstm_forward_kernel(
     Tensor input_rev({seq_len, batch, input_size}, input.dtype(), input.device());
     int64_t total_input = seq_len * batch * input_size;
     int block = 256;
-    int grid = (total_input + block - 1) / block;
+    unsigned int grid = get_num_blocks(total_input, block);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(reverse_sequence_kernel<float>,
@@ -1283,7 +1358,7 @@ auto bilstm_forward_kernel(
         bias_bwd = Tensor({total_bias}, input.dtype(), input.device());
         HIP_CHECK(hipMemsetAsync(bias_bwd.data_ptr(), 0,
                                  total_bias * dtype_size(input.dtype()), stream));
-        int bgrid = (total_bias + block - 1) / block;
+        unsigned int bgrid = get_num_blocks(total_bias, block);
         if (input.dtype() == DType::Float32) {
             if (bias_ih_bwd.numel() > 0)
                 hipLaunchKernelGGL(add_bias_kernel<float>,
@@ -1310,7 +1385,7 @@ auto bilstm_forward_kernel(
     // Reverse backward output
     Tensor bwd_output_rev({seq_len, batch, hidden}, input.dtype(), input.device());
     int64_t total_out = seq_len * batch * hidden;
-    grid = (total_out + block - 1) / block;
+    grid = get_num_blocks(total_out, block);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(reverse_sequence_kernel<float>,
@@ -1327,7 +1402,7 @@ auto bilstm_forward_kernel(
     // Concatenate forward and backward outputs: (seq_len, batch, 2*hidden)
     Tensor output({seq_len, batch, 2 * hidden}, input.dtype(), input.device());
     int64_t concat_total = seq_len * batch * hidden;
-    int concat_grid = (concat_total + block - 1) / block;
+    unsigned int concat_grid = get_num_blocks(concat_total, block);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(bilstm_concat_kernel<float>,

@@ -18,6 +18,8 @@
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <algorithm>
+#include <cstdint>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/cuda_config.hpp"
@@ -264,32 +266,43 @@ void cublas_batched_gemm_ex(
     int64_t ldb = N;
     int64_t ldc = N;
 
-    // Use cublasGemmStridedBatchedEx for batched Tensor Core operations
-    TENZOR_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_N,    // Don't transpose B
-        CUBLAS_OP_N,    // Don't transpose A
-        N,              // Rows of B^T
-        M,              // Cols of A^T
-        K,              // Inner dimension
-        alpha,
-        B,              // B matrix batch
-        cuda_dtype,
-        ldb,
-        stride_b,
-        A,              // A matrix batch
-        cuda_dtype,
-        lda,
-        stride_a,
-        beta,
-        C,              // C matrix batch
-        cuda_dtype,
-        ldc,
-        stride_c,
-        batch_size,
-        compute_type,
-        CUBLAS_GEMM_DEFAULT_TENSOR_OP
-    ));
+    // cublasGemmStridedBatchedEx takes an int batchCount. Chunk the (int64)
+    // batch into <= INT_MAX-sized pieces so a batch dimension larger than
+    // INT_MAX is computed correctly rather than silently truncated/sign-flipped.
+    const int64_t elem_size = static_cast<int64_t>(dtype_size(dtype));
+    constexpr int64_t kMaxBatch = 2147483647LL;  // INT_MAX
+    for (int64_t base = 0; base < batch_size; base += kMaxBatch) {
+        int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, batch_size - base));
+        const char* A_off = static_cast<const char*>(A) + base * stride_a * elem_size;
+        const char* B_off = static_cast<const char*>(B) + base * stride_b * elem_size;
+        char* C_off = static_cast<char*>(C) + base * stride_c * elem_size;
+        // Use cublasGemmStridedBatchedEx for batched Tensor Core operations
+        TENZOR_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
+            handle,
+            CUBLAS_OP_N,    // Don't transpose B
+            CUBLAS_OP_N,    // Don't transpose A
+            N,              // Rows of B^T
+            M,              // Cols of A^T
+            K,              // Inner dimension
+            alpha,
+            B_off,          // B matrix batch
+            cuda_dtype,
+            ldb,
+            stride_b,
+            A_off,          // A matrix batch
+            cuda_dtype,
+            lda,
+            stride_a,
+            beta,
+            C_off,          // C matrix batch
+            cuda_dtype,
+            ldc,
+            stride_c,
+            batch_chunk,
+            compute_type,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        ));
+    }
 }
 
 /**
@@ -361,20 +374,29 @@ void cublas_batched_gemm_scaled(
     int64_t ldb = N;
     int64_t ldc = N;
 
-    TENZOR_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        N, M, K,
-        alpha,
-        B, cuda_dtype, ldb, stride_b,
-        A, cuda_dtype, lda, stride_a,
-        beta,
-        C, cuda_dtype, ldc, stride_c,
-        batch_size,
-        compute_type,
-        CUBLAS_GEMM_DEFAULT_TENSOR_OP
-    ));
+    // Chunk the int64 batch into <= INT_MAX pieces (see cublas_batched_gemm_ex).
+    const int64_t elem_size = static_cast<int64_t>(dtype_size(dtype));
+    constexpr int64_t kMaxBatch = 2147483647LL;  // INT_MAX
+    for (int64_t base = 0; base < batch_size; base += kMaxBatch) {
+        int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, batch_size - base));
+        const char* A_off = static_cast<const char*>(A) + base * stride_a * elem_size;
+        const char* B_off = static_cast<const char*>(B) + base * stride_b * elem_size;
+        char* C_off = static_cast<char*>(C) + base * stride_c * elem_size;
+        TENZOR_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            N, M, K,
+            alpha,
+            B_off, cuda_dtype, ldb, stride_b,
+            A_off, cuda_dtype, lda, stride_a,
+            beta,
+            C_off, cuda_dtype, ldc, stride_c,
+            batch_chunk,
+            compute_type,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        ));
+    }
 }
 
 // ============================================================================
@@ -544,23 +566,35 @@ __global__ void bias_add_kernel_vec4(
     int64_t batch_size,
     int64_t out_features
 ) {
-    // Ensure out_features is divisible by 4 for vectorization
-    int64_t vec_features = out_features / 4;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total_vecs = batch_size * vec_features;
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
 
-    float4* output4 = reinterpret_cast<float4*>(output);
-    const float4* bias4 = reinterpret_cast<const float4*>(bias);
-
-    for (int64_t i = idx; i < total_vecs; i += blockDim.x * gridDim.x) {
-        int64_t col = i % vec_features;
-        float4 out_val = output4[i];
-        float4 bias_val = bias4[col];
-        out_val.x += bias_val.x;
-        out_val.y += bias_val.y;
-        out_val.z += bias_val.z;
-        out_val.w += bias_val.w;
-        output4[i] = out_val;
+    if (out_features % 4 == 0) {
+        // Fast path: every row begins on a 16-byte boundary, so the whole buffer
+        // is a contiguous array of float4. One float4 per work item.
+        int64_t vec_features = out_features / 4;
+        int64_t total_vecs = batch_size * vec_features;
+        float4* output4 = reinterpret_cast<float4*>(output);
+        const float4* bias4 = reinterpret_cast<const float4*>(bias);
+        for (int64_t i = idx; i < total_vecs; i += stride) {
+            int64_t col = i % vec_features;
+            float4 out_val = output4[i];
+            float4 bias_val = bias4[col];
+            out_val.x += bias_val.x;
+            out_val.y += bias_val.y;
+            out_val.z += bias_val.z;
+            out_val.w += bias_val.w;
+            output4[i] = out_val;
+        }
+    } else {
+        // out_features is not a multiple of 4: rows are not float4-aligned, so
+        // fall back to a fully scalar grid-stride add. Correctness no longer
+        // depends on the launch-site guard.
+        int64_t total = batch_size * out_features;
+        for (int64_t i = idx; i < total; i += stride) {
+            int64_t col = i % out_features;
+            output[i] += bias[col];
+        }
     }
 }
 
@@ -588,31 +622,34 @@ __global__ void bias_grad_reduce_kernel(
 ) {
     using Acc = typename AccumType<T>::type;
 
-    // Each block handles one output feature
-    int64_t feature_idx = blockIdx.x;
-    if (feature_idx >= out_features) return;
-
     __shared__ Acc shared[BLOCK_SIZE];
 
-    // Each thread accumulates multiple elements in higher precision
-    Acc sum = Acc(0);
-    for (int64_t i = threadIdx.x; i < batch_size; i += BLOCK_SIZE) {
-        sum += Acc(grad_output[i * out_features + feature_idx]);
-    }
-    shared[threadIdx.x] = sum;
-    __syncthreads();
-
-    // Parallel reduction within block
-    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) {
-            shared[threadIdx.x] += shared[threadIdx.x + stride];
+    // Each block handles one output feature; grid-stride over features so a
+    // feature count exceeding the launched grid (or the gridDim.x 2^31-1 cap) is
+    // still fully covered rather than silently leaving the tail unreduced.
+    for (int64_t feature_idx = blockIdx.x; feature_idx < out_features;
+         feature_idx += gridDim.x) {
+        // Each thread accumulates multiple elements in higher precision
+        Acc sum = Acc(0);
+        for (int64_t i = threadIdx.x; i < batch_size; i += BLOCK_SIZE) {
+            sum += Acc(grad_output[i * out_features + feature_idx]);
         }
+        shared[threadIdx.x] = sum;
         __syncthreads();
-    }
 
-    // Write result (convert back to output type)
-    if (threadIdx.x == 0) {
-        grad_bias[feature_idx] = T(shared[0]);
+        // Parallel reduction within block
+        for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+            if (threadIdx.x < stride) {
+                shared[threadIdx.x] += shared[threadIdx.x + stride];
+            }
+            __syncthreads();
+        }
+
+        // Write result (convert back to output type)
+        if (threadIdx.x == 0) {
+            grad_bias[feature_idx] = T(shared[0]);
+        }
+        __syncthreads();  // ensure shared[] reuse in the next feature is safe
     }
 }
 
@@ -997,7 +1034,7 @@ auto linear_backward_kernel(
         // Each block handles one output feature
         {
             constexpr int BLOCK_SIZE = 256;
-            int blocks = static_cast<int>(out_features);
+            int blocks = static_cast<int>(std::min<int64_t>(out_features, 2147483647LL));
             bias_grad_reduce_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_out_c.data<float>(),
                 grad_bias.data<float>(),
@@ -1048,7 +1085,7 @@ auto linear_backward_kernel(
         // grad_bias = sum(grad_output, dim=0) using efficient parallel reduction
         {
             constexpr int BLOCK_SIZE = 256;
-            int blocks = static_cast<int>(out_features);
+            int blocks = static_cast<int>(std::min<int64_t>(out_features, 2147483647LL));
             bias_grad_reduce_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_out_c.data<double>(),
                 grad_bias.data<double>(),
@@ -1109,7 +1146,7 @@ auto linear_backward_kernel(
         // grad_bias = sum(grad_output, dim=0)
         {
             constexpr int BLOCK_SIZE = 256;
-            int blocks = static_cast<int>(out_features);
+            int blocks = static_cast<int>(std::min<int64_t>(out_features, 2147483647LL));
             bias_grad_reduce_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_out_c.data_ptr()),
                 reinterpret_cast<__half*>(grad_bias.data_ptr()),
@@ -1170,7 +1207,7 @@ auto linear_backward_kernel(
         // grad_bias = sum(grad_output, dim=0)
         {
             constexpr int BLOCK_SIZE = 256;
-            int blocks = static_cast<int>(out_features);
+            int blocks = static_cast<int>(std::min<int64_t>(out_features, 2147483647LL));
             bias_grad_reduce_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(grad_out_c.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(grad_bias.data_ptr()),

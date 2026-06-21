@@ -48,6 +48,12 @@ static auto mps_transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1
     const int64_t ndim = input.ndim();
     if (dim0 < 0) dim0 += ndim;
     if (dim1 < 0) dim1 += ndim;
+    // Validate before indexing: this kernel is reachable directly via dispatch,
+    // not only through the validated Tensor::transpose() path. An out-of-range
+    // dim would be an OOB vector access on r_shape/r_strides.
+    if (dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim) {
+        throw std::runtime_error("mps transpose: dim out of range");
+    }
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
     auto& r_shape = result.mutable_shape();
@@ -59,13 +65,32 @@ static auto mps_transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1
 
 static auto mps_permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor {
     const int64_t ndim = input.ndim();
+    // Validate that dims is a permutation of [0, ndim) before indexing
+    // input.shape()[dims[i]] — reachable directly via dispatch.
+    if (static_cast<int64_t>(dims.size()) != ndim) {
+        throw std::runtime_error("mps permute: dims size must equal tensor rank");
+    }
+    std::vector<bool> seen(ndim, false);
+    std::vector<int64_t> ndims_resolved(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        int64_t d = dims[i];
+        if (d < 0) d += ndim;
+        if (d < 0 || d >= ndim) {
+            throw std::runtime_error("mps permute: dim out of range");
+        }
+        if (seen[d]) {
+            throw std::runtime_error("mps permute: duplicate dim in permutation");
+        }
+        seen[d] = true;
+        ndims_resolved[i] = d;
+    }
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
     std::vector<int64_t> new_shape(ndim);
     std::vector<int64_t> new_strides(ndim);
     for (int64_t i = 0; i < ndim; ++i) {
-        new_shape[i] = input.shape()[dims[i]];
-        new_strides[i] = input.strides()[dims[i]];
+        new_shape[i] = input.shape()[ndims_resolved[i]];
+        new_strides[i] = input.strides()[ndims_resolved[i]];
     }
     result.mutable_shape() = std::move(new_shape);
     result.mutable_strides() = std::move(new_strides);
@@ -305,6 +330,11 @@ Tensor mps_add_inplace_kernel(Tensor& a, const Tensor& b);
 Tensor mps_sub_inplace_kernel(Tensor& a, const Tensor& b);
 Tensor mps_mul_inplace_kernel(Tensor& a, const Tensor& b);
 Tensor mps_div_inplace_kernel(Tensor& a, const Tensor& b);
+Tensor& mps_relu_inplace_kernel(Tensor& a);
+Tensor& mps_sigmoid_inplace_kernel(Tensor& a);
+Tensor& mps_tanh_inplace_kernel(Tensor& a);
+Tensor& mps_gelu_inplace_kernel(Tensor& a);
+Tensor& mps_leaky_relu_inplace_kernel(Tensor& a, float negative_slope);
 Tensor mps_cast_kernel(const Tensor& input, DType target_dtype);
 std::vector<Tensor> mps_fused_sgd_step(const Tensor& param, const Tensor& grad,
                                          const Tensor& momentum_buf,
@@ -710,23 +740,59 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         return std::vector<Tensor>{mps_tanh_backward_kernel(inputs[0], inputs[1])};
     });
 
-    // In-place arithmetic — native Metal
-    table.register_kernel(OpId::AddInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor a = inputs[0];  // copy handle (shared storage — kernel writes in-place)
-        return std::vector<Tensor>{mps_add_inplace_kernel(a, inputs[1])};
-    });
-    table.register_kernel(OpId::SubInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor a = inputs[0];
-        return std::vector<Tensor>{mps_sub_inplace_kernel(a, inputs[1])};
-    });
-    table.register_kernel(OpId::MulInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor a = inputs[0];
-        return std::vector<Tensor>{mps_mul_inplace_kernel(a, inputs[1])};
-    });
-    table.register_kernel(OpId::DivInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor a = inputs[0];
-        return std::vector<Tensor>{mps_div_inplace_kernel(a, inputs[1])};
-    });
+    // In-place arithmetic — native Metal.
+    // These MUST be registered in the inplace_kernels[] array (via
+    // register_inplace_kernel), because ops::add_/sub_/mul_/div_ route through
+    // BackendDispatchTable::dispatch_inplace(), which only reads that array.
+    // Registering via register_kernel (multi-output kernels[]) leaves the
+    // inplace array empty and makes every in-place arithmetic op throw
+    // "not supported" on MPS. Signature: Tensor&(Tensor&, span, attrs).
+    table.register_inplace_kernel(OpId::AddInplace,
+        [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
+            mps_add_inplace_kernel(target, others[0]);  // writes into shared storage
+            return target;
+        });
+    table.register_inplace_kernel(OpId::SubInplace,
+        [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
+            mps_sub_inplace_kernel(target, others[0]);
+            return target;
+        });
+    table.register_inplace_kernel(OpId::MulInplace,
+        [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
+            mps_mul_inplace_kernel(target, others[0]);
+            return target;
+        });
+    table.register_inplace_kernel(OpId::DivInplace,
+        [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
+            mps_div_inplace_kernel(target, others[0]);
+            return target;
+        });
+
+    // In-place activations — also routed through dispatch_inplace(), so they
+    // MUST live in inplace_kernels[]. Previously registered via
+    // mps_accelerate_single (single_output_kernels[]), which made x.relu_()
+    // etc. throw "not supported" on MPS. Native Metal, on-device write-back.
+    table.register_inplace_kernel(OpId::ReLUInplace,
+        [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+            return mps_relu_inplace_kernel(target);
+        });
+    table.register_inplace_kernel(OpId::SigmoidInplace,
+        [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+            return mps_sigmoid_inplace_kernel(target);
+        });
+    table.register_inplace_kernel(OpId::TanhInplace,
+        [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+            return mps_tanh_inplace_kernel(target);
+        });
+    table.register_inplace_kernel(OpId::GeluInplace,
+        [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+            return mps_gelu_inplace_kernel(target);
+        });
+    table.register_inplace_kernel(OpId::LeakyReLUInplace,
+        [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+            return mps_leaky_relu_inplace_kernel(target, alpha);
+        });
 
     // Note: zeros_like / ones_like are library-level free functions in
     // tenzor::ops, not dispatch-level OpIds. Autograd code that needs
@@ -1921,7 +1987,6 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             return mps_gelu_kernel(inputs[0]);
         });
     mps_accelerate_single(OpId::GeluBackward);
-    mps_accelerate_single(OpId::GeluInplace);
     mps_accelerate_multi(OpId::Histogramdd);
     mps_accelerate_single(OpId::Hypot);
     mps_accelerate_single(OpId::I0e);
@@ -1937,7 +2002,6 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::IsReal);
     mps_accelerate_single(OpId::Lcm);
     mps_accelerate_single(OpId::Ldexp);
-    mps_accelerate_single(OpId::LeakyReLUInplace);
     mps_accelerate_single(OpId::LinalgCholeskySolve);
     mps_accelerate_single(OpId::LinalgHouseholder);
     mps_accelerate_multi(OpId::LinalgLDLFactor);
@@ -1980,7 +2044,6 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::Rad2Deg);
     mps_accelerate_single(OpId::Real);
     mps_accelerate_single(OpId::Reciprocal);
-    mps_accelerate_single(OpId::ReLUInplace);
     mps_accelerate_single(OpId::Remainder);
     mps_accelerate_single(OpId::Renorm);
     mps_accelerate_single(OpId::Round);
@@ -1989,7 +2052,6 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::Selu);
     mps_accelerate_single(OpId::SeluBackward);
     mps_accelerate_single(OpId::Sigmoid);
-    mps_accelerate_single(OpId::SigmoidInplace);
     mps_accelerate_single(OpId::Sign);
     mps_accelerate_single(OpId::Signbit);
     mps_accelerate_single(OpId::Sinh);
@@ -2005,7 +2067,6 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::Tan);
     mps_accelerate_single(OpId::Tanh);
     mps_accelerate_single(OpId::TanhActivation);
-    mps_accelerate_single(OpId::TanhInplace);
     mps_accelerate_single(OpId::TensorInv);
     mps_accelerate_single(OpId::TensorSolve);
     mps_accelerate_single(OpId::Trace);

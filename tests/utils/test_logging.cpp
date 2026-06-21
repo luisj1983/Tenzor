@@ -8,6 +8,7 @@
 #include <fstream>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include <unistd.h>  // getpid — audit-5 Y.33
 
 using namespace tenzor;
@@ -179,18 +180,29 @@ TEST_F(LoggingTest, MultipleLogCallsAppend) {
     logger.set_output_file(test_log_file_);
     logger.enable_console(false);
 
-    logger.info("Message 1");
-    logger.info("Message 2");
-    logger.info("Message 3");
+    logger.info("PayloadAlpha");
+    logger.info("PayloadBravo");
+    logger.info("PayloadCharlie");
 
     std::ifstream file(test_log_file_);
-    int line_count = 0;
+    std::vector<std::string> lines;
     std::string line;
     while (std::getline(file, line)) {
-        line_count++;
+        lines.push_back(line);
     }
 
-    EXPECT_EQ(line_count, 3);
+    // Each call produces exactly one line.
+    ASSERT_EQ(lines.size(), 3u);
+    // And critically: the three distinct payloads must appear, each on its own
+    // line, IN THE ORDER they were logged. A logger that dropped a message,
+    // reordered them, or wrote the same payload three times would pass a bare
+    // line-count check but fails here.
+    EXPECT_NE(lines[0].find("PayloadAlpha"), std::string::npos)
+        << "first line missing PayloadAlpha: " << lines[0];
+    EXPECT_NE(lines[1].find("PayloadBravo"), std::string::npos)
+        << "second line missing PayloadBravo: " << lines[1];
+    EXPECT_NE(lines[2].find("PayloadCharlie"), std::string::npos)
+        << "third line missing PayloadCharlie: " << lines[2];
 }
 
 // Test 9: Fatal log level

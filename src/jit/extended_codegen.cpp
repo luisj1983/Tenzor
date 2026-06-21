@@ -6,6 +6,7 @@
 #include "tenzor/jit/extended_codegen.hpp"
 #include "tenzor/jit/codegen.hpp"
 #include "tenzor/ops/math.hpp"   // tenzor::matmul for the GEMM-epilogue fusion
+#include <iomanip>
 #include <sstream>
 #include <algorithm>
 #include <cstring>
@@ -90,6 +91,19 @@ auto ExtendedKernelCodegen::compute_type(DType dtype) -> std::string {
 
 auto ExtendedKernelCodegen::literal_suffix(DType dtype) -> std::string {
     return (dtype == DType::Float64) ? "" : "f";
+}
+
+auto ExtendedKernelCodegen::fmt_scalar(double v, DType dtype) -> std::string {
+    std::ostringstream o;
+    o << std::setprecision(std::numeric_limits<double>::max_digits10) << v;
+    std::string body = o.str();
+    // Ensure a valid floating-literal body: a whole number prints as "2", and
+    // appending the 'f' suffix would yield the invalid literal "2f". Give it a
+    // decimal point unless it already has one, an exponent, or is inf/nan.
+    if (body.find_first_of(".eEni") == std::string::npos) {
+        body += ".0";
+    }
+    return body + literal_suffix(dtype);
 }
 
 auto ExtendedKernelCodegen::fn_for(const std::string& base, DType dtype) -> std::string {
@@ -205,7 +219,7 @@ extern "C" __global__ void fused_reduction_kernel(
             case ElemOp::Exp:    ss << "        val = " << exp_fn << "(val);\n"; break;
             case ElemOp::Neg:    ss << "        val = -val;\n"; break;
             case ElemOp::MulScalar:
-                ss << "        val = val * " << op.scalar << F << ";\n"; break;
+                ss << "        val = val * " << fmt_scalar(op.scalar, group.dtype) << ";\n"; break;
             default: break;
         }
     }
@@ -249,9 +263,9 @@ extern "C" __global__ void fused_reduction_kernel(
             case ElemOp::Sqrt:       ss << "        result = " << sqrt_fn << "(result);\n"; break;
             case ElemOp::Reciprocal: ss << "        result = 1.0" << F << " / result;\n"; break;
             case ElemOp::MulScalar:
-                ss << "        result = result * " << op.scalar << F << ";\n"; break;
+                ss << "        result = result * " << fmt_scalar(op.scalar, group.dtype) << ";\n"; break;
             case ElemOp::AddScalar:
-                ss << "        result = result + " << op.scalar << F << ";\n"; break;
+                ss << "        result = result + " << fmt_scalar(op.scalar, group.dtype) << ";\n"; break;
             default: break;
         }
     }

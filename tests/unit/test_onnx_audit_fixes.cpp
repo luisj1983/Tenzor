@@ -509,3 +509,134 @@ TEST(ONNXAuditFixes, ImporterClearsExternalDataDirOnBytesEntry) {
     fs::remove(proto_path);
     fs::remove(data_path);
 }
+
+// =========================================================================
+// SECURITY: per-axis Conv/Pool attribute vectors must be length-validated
+// before being indexed, or a crafted model triggers an out-of-bounds
+// std::vector::operator[] read. We hand-build malformed ModelProtos here.
+// =========================================================================
+#ifdef TENZOR_HAS_ONNX_PROTOBUF
+#include "onnx.pb.h"
+
+namespace {
+// Serialize a single-node graph whose op carries the given INTS attribute(s)
+// to a byte buffer the importer can ingest. The weight initializer fixes the
+// spatial rank the importer infers (rank-4 weight => spatial_dims == 2).
+std::vector<uint8_t> serialize_model(const tenzor_onnx::ModelProto& m) {
+    std::string s;
+    m.SerializeToString(&s);
+    return std::vector<uint8_t>(s.begin(), s.end());
+}
+
+// Add a rank-4 Float32 weight initializer named `name` with the given shape.
+void add_weight_initializer(tenzor_onnx::GraphProto* g, const std::string& name,
+                            std::vector<int64_t> shape) {
+    auto* init = g->add_initializer();
+    init->set_name(name);
+    init->set_data_type(tenzor_onnx::TensorProto::FLOAT);
+    int64_t numel = 1;
+    for (auto d : shape) { init->add_dims(d); numel *= d; }
+    std::string raw(static_cast<size_t>(numel) * sizeof(float), '\0');
+    init->set_raw_data(raw);
+}
+
+void add_ints_attr(tenzor_onnx::NodeProto* n, const std::string& name,
+                   std::vector<int64_t> vals) {
+    auto* a = n->add_attribute();
+    a->set_name(name);
+    a->set_type(tenzor_onnx::AttributeProto::INTS);
+    for (auto v : vals) a->add_ints(v);
+}
+}  // namespace
+
+TEST(ONNXAuditFixes, ConvRejectsShortStridesAttribute) {
+    // 2-D conv (rank-4 weight) but strides has only ONE entry. Pre-fix the
+    // importer read strides[1] past the end (UB); post-fix it must throw.
+    tenzor_onnx::ModelProto m;
+    m.set_ir_version(7);
+    auto* op = m.add_opset_import();
+    op->set_domain("");
+    op->set_version(18);
+    auto* g = m.mutable_graph();
+    g->set_name("malformed_conv");
+
+    auto* node = g->add_node();
+    node->set_op_type("Conv");
+    node->add_input("x");
+    node->add_input("w");
+    node->add_output("y");
+    add_ints_attr(node, "strides", {1});          // too short: needs 2
+    add_weight_initializer(g, "w", {4, 4, 3, 3}); // spatial_dims == 2
+
+    ONNXImporter importer;
+    EXPECT_THROW(importer.import_from_bytes(serialize_model(m)),
+                 std::runtime_error)
+        << "Conv with a 1-entry strides attribute on a rank-4 weight must be "
+           "rejected, not indexed out of bounds";
+}
+
+TEST(ONNXAuditFixes, ConvRejectsShortDilationsAttribute) {
+    tenzor_onnx::ModelProto m;
+    m.set_ir_version(7);
+    auto* op = m.add_opset_import();
+    op->set_domain("");
+    op->set_version(18);
+    auto* g = m.mutable_graph();
+    auto* node = g->add_node();
+    node->set_op_type("Conv");
+    node->add_input("x");
+    node->add_input("w");
+    node->add_output("y");
+    add_ints_attr(node, "dilations", {1});        // too short: needs 2
+    add_weight_initializer(g, "w", {4, 4, 3, 3});
+
+    ONNXImporter importer;
+    EXPECT_THROW(importer.import_from_bytes(serialize_model(m)),
+                 std::runtime_error);
+}
+
+TEST(ONNXAuditFixes, ConvTransposeRejectsShortKernelShape) {
+    // kernel_shape from get_ints() has NO size default, so a 1-entry value on a
+    // rank-4 weight would be indexed [0],[1] out of bounds.
+    tenzor_onnx::ModelProto m;
+    m.set_ir_version(7);
+    auto* op = m.add_opset_import();
+    op->set_domain("");
+    op->set_version(18);
+    auto* g = m.mutable_graph();
+    auto* node = g->add_node();
+    node->set_op_type("ConvTranspose");
+    node->add_input("x");
+    node->add_input("w");
+    node->add_output("y");
+    add_ints_attr(node, "kernel_shape", {3});     // too short: needs 2
+    add_weight_initializer(g, "w", {4, 4, 3, 3}); // [in, out/groups, kH, kW]
+
+    ONNXImporter importer;
+    EXPECT_THROW(importer.import_from_bytes(serialize_model(m)),
+                 std::runtime_error);
+}
+
+TEST(ONNXAuditFixes, MaxPoolRejectsShortStridesAttribute) {
+    // 2-D MaxPool: kernel_shape has 2 entries but strides has 1, so strides[1]
+    // would read past the end.
+    tenzor_onnx::ModelProto m;
+    m.set_ir_version(7);
+    auto* op = m.add_opset_import();
+    op->set_domain("");
+    op->set_version(18);
+    auto* g = m.mutable_graph();
+    auto* node = g->add_node();
+    node->set_op_type("MaxPool");
+    node->add_input("x");
+    node->add_output("y");
+    add_ints_attr(node, "kernel_shape", {2, 2});
+    add_ints_attr(node, "strides", {1});          // too short: needs 2
+
+    ONNXImporter importer;
+    EXPECT_THROW(importer.import_from_bytes(serialize_model(m)),
+                 std::runtime_error)
+        << "MaxPool with a 1-entry strides attribute on a 2-D kernel must be "
+           "rejected, not indexed out of bounds";
+}
+#endif  // TENZOR_HAS_ONNX_PROTOBUF

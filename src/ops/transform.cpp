@@ -16,6 +16,19 @@
 
 namespace tenzor {
 
+namespace {
+// Checked int64 multiply: throws on overflow instead of silently wrapping
+// negative (which would feed a corrupt extent into zeros()/reshape()).
+inline int64_t checked_mul_i64(int64_t a, int64_t b, const char* op) {
+    if (a != 0 && b != 0 &&
+        (a > std::numeric_limits<int64_t>::max() / b ||
+         a < std::numeric_limits<int64_t>::min() / b)) {
+        throw std::overflow_error(std::string(op) + ": output extent overflows int64_t");
+    }
+    return a * b;
+}
+}  // namespace
+
 // Helper function to convert shape vector to comma-separated string
 static auto shape_to_string(const std::vector<int64_t>& shape) -> std::string {
     std::ostringstream oss;
@@ -464,10 +477,13 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
         out_shape[i] = padded_shape[i] * padded_reps[i];
     }
 
-    // For non-CPU devices, use dispatcher
+    // For non-CPU devices, use dispatcher. Serialize the right-aligned
+    // padded_reps (not the raw reps) so the backend kernel sees exactly the
+    // same per-dimension repetition counts the CPU path uses — otherwise
+    // CPU/GPU diverge when reps.size() != ndim (the right-alignment rule).
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs.set(AttrKey::Reps, shape_to_string(reps));
+        attrs.set(AttrKey::Reps, shape_to_string(padded_reps));
         std::vector<Tensor> inputs = {input};
         return dispatch(OpId::Tile, inputs, attrs)[0];
     }
@@ -787,6 +803,12 @@ auto triangular_op(const Tensor& input, int64_t diagonal, Func&& should_keep) ->
     auto shape = cont.shape();
     int64_t rows = shape[input.ndim() - 2];
     int64_t cols = shape[input.ndim() - 1];
+    // A zero-size matrix dimension makes the per-batch element count zero, so
+    // batch_size = numel / (rows*cols) would divide by zero. The result is
+    // already the correctly-shaped zero tensor; return it directly.
+    if (rows == 0 || cols == 0) {
+        return result;
+    }
     int64_t batch_size = cont.numel() / (rows * cols);
     auto elem_size = dtype_size(input.dtype());
 
@@ -1075,7 +1097,7 @@ auto repeat_interleave(const Tensor& input, int64_t repeats,
 
     // Build output shape
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
-    out_shape[actual_dim] = dim_size * repeats;
+    out_shape[actual_dim] = checked_mul_i64(dim_size, repeats, "repeat_interleave");
 
     if (out_shape[actual_dim] == 0) {
         return zeros(out_shape, src.dtype(), src.device());
@@ -1319,7 +1341,11 @@ auto pixel_shuffle(const Tensor& input, int64_t upscale_factor) -> Tensor {
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     int64_t r = upscale_factor;
-    int64_t r2 = r * r;
+    if (r <= 0) {
+        throw std::runtime_error("pixel_shuffle: upscale_factor must be positive, got " +
+                                 std::to_string(r));
+    }
+    int64_t r2 = checked_mul_i64(r, r, "pixel_shuffle");
     int64_t C_r2 = shape[ndim - 3];
     int64_t H = shape[ndim - 2];
     int64_t W = shape[ndim - 1];
@@ -1357,8 +1383,8 @@ auto pixel_shuffle(const Tensor& input, int64_t upscale_factor) -> Tensor {
     std::vector<int64_t> out_shape;
     for (int64_t i = 0; i < ndim - 3; ++i) out_shape.push_back(shape[i]);
     out_shape.push_back(C);
-    out_shape.push_back(H * r);
-    out_shape.push_back(W * r);
+    out_shape.push_back(checked_mul_i64(H, r, "pixel_shuffle"));
+    out_shape.push_back(checked_mul_i64(W, r, "pixel_shuffle"));
 
     return reshape(permuted.contiguous(), out_shape);
 }

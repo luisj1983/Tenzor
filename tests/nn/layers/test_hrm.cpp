@@ -19,6 +19,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "../../grad_flow_helpers.hpp"  // EXPECT_GRAD_FLOWS
 #include <vector>
 #include <chrono>
 #include <cmath>
@@ -415,18 +416,30 @@ TEST_F(HRMTest, HRMGradientFlow) {
 
     auto output = model.forward(x);
 
-    // Sum and backward
-    auto loss = tenzor::sum(output.tensor());
-    Variable loss_var(loss, true);
+    // Backward through the INTACT Variable graph (no .tensor() re-wrap, which
+    // would sever grad_fn and make backward a silent no-op).
+    auto loss = tenzor::sum(output);
+    loss.backward();
 
-    // Check that backward doesn't throw
-    EXPECT_NO_THROW({
-        loss_var.backward();
-    });
+    // With a single high cycle the approximate-gradient path still propagates
+    // through the final cycle to the input, so x MUST receive a non-zero grad.
+    EXPECT_GRAD_FLOWS(x);
 
-    // With a single cycle, gradients should flow to output layers at minimum
-    // Note: With approximate gradients, not all parameters get gradients
-    // This test verifies the backward pass completes without error
+    // At least one model parameter must also receive a non-zero gradient
+    // (the output/final-cycle layers). A fully-severed backward would leave
+    // every parameter grad empty/zero.
+    bool any_param_grad = false;
+    for (auto& p : model.parameters()) {
+        if (p->grad().has_value() && p->grad()->numel() > 0) {
+            auto g = p->grad()->cpu().to(DType::Float64);
+            if (tenzor::max(tenzor::abs(g)).item<double>() > 0.0) {
+                any_param_grad = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(any_param_grad)
+        << "no HRM parameter received a gradient — backward severed?";
 }
 
 TEST_F(HRMTest, HRMForwardStats) {
@@ -489,26 +502,60 @@ TEST_F(HRMTest, HRMWithACT) {
 // ============================================================================
 
 TEST_F(HRMTest, DeepSupervisionLoss) {
-    // Create fake outputs
+    // Create fake outputs that all hold IDENTICAL values (independent clones,
+    // each its own leaf Variable). Identical values make every per-output MSE
+    // term numerically equal, so the ratio of gradient magnitudes across
+    // outputs is EXACTLY the geometric weighting ratio — letting us assert the
+    // weighting tightly rather than approximately.
+    Tensor base = randn({2, 8, 10}, DType::Float32, Device::cpu());
     std::vector<Variable> outputs;
     for (int i = 0; i < 4; ++i) {
-        Tensor t = randn({2, 8, 10}, DType::Float32, Device::cpu());
-        outputs.push_back(Variable(t, true));
+        outputs.push_back(Variable(base.clone(), true));
     }
 
     // Create targets - use randn since we're just testing the loss mechanism
     Tensor targets_data = randn({2, 8, 10}, DType::Float32, Device::cpu());
     Variable targets(targets_data, false);
 
-    // Define loss function (simplified MSE for testing)
+    // Define loss function using AUTOGRAD ops on Variables so the grad_fn
+    // chain back to each output survives (the previous version subtracted raw
+    // .tensor()s and re-wrapped, severing the graph — backward was a no-op).
     auto loss_fn = [](const Variable& pred, const Variable& target) -> Variable {
-        auto diff = pred.tensor() - target.tensor();
-        return Variable(tenzor::mean(diff * diff), true);
+        auto diff = pred - target;        // Variable operator-
+        return tenzor::mean(diff * diff); // Variable mean of Variable square
     };
 
-    auto loss = hrm_deep_supervision_loss(outputs, targets, loss_fn, 0.5);
+    const double weight_decay = 0.5;
+    auto loss = hrm_deep_supervision_loss(outputs, targets, loss_fn, weight_decay);
 
     EXPECT_GT(loss.tensor().numel(), 0);
+
+    // The loss is sum_i (w_i / W) * mean((out_i - target)^2) with
+    // w_i = (1/weight_decay)^i. Backprop must reach EVERY output, and the
+    // gradient magnitude must follow the geometric weighting: later outputs
+    // (larger w_i) receive proportionally larger gradients.
+    loss.backward();
+
+    std::vector<double> grad_max(outputs.size(), 0.0);
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        ASSERT_TRUE(outputs[i].grad().has_value())
+            << "deep-supervision backward did not reach output " << i;
+        auto g = outputs[i].grad()->cpu().to(DType::Float64);
+        grad_max[i] = tenzor::max(tenzor::abs(g)).item<double>();
+        EXPECT_GT(grad_max[i], 0.0)
+            << "output " << i << " gradient is identically zero (severed graph?)";
+    }
+
+    // Consecutive weights differ by exactly 1/weight_decay == 2.0. Because the
+    // outputs are identical, the per-output MSE derivatives are identical too,
+    // so the gradient-magnitude ratio equals the weight ratio exactly.
+    const double ratio = 1.0 / weight_decay;  // 2.0
+    for (size_t i = 1; i < outputs.size(); ++i) {
+        double observed = grad_max[i] / grad_max[i - 1];
+        EXPECT_NEAR(observed, ratio, 1e-3)
+            << "output " << i << " vs " << (i - 1)
+            << ": gradient ratio should equal the weighting ratio";
+    }
 }
 
 // ============================================================================
@@ -551,13 +598,28 @@ TEST_P(HRMMultiBackendTest, GradientComputation) {
     Variable x(input, true);
 
     auto output = model.forward(x);
-    auto loss = tenzor::mean(output.tensor());
-    Variable loss_var(loss, true);
+    // Backward through the intact Variable graph (no .tensor() re-wrap).
+    auto loss = tenzor::mean(output);
+    loss.backward();
 
-    // Backward should work on all backends
-    EXPECT_NO_THROW({
-        loss_var.backward();
-    });
+    // With the fixture default n_high_cycles=2 the approximate-gradient detach
+    // means the input does NOT receive a gradient through the recurrence (only
+    // the final, differentiable cycle does). Assert the meaningful invariant on
+    // every backend: model parameters receive real, non-zero gradients — a
+    // severed/zeroed backward (merely "not throwing") fails this.
+    bool any_param_grad = false;
+    for (auto& p : model.parameters()) {
+        if (p->grad().has_value() && p->grad()->numel() > 0) {
+            auto g = p->grad()->cpu().to(DType::Float64);
+            if (tenzor::max(tenzor::abs(g)).item<double>() > 0.0) {
+                any_param_grad = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(any_param_grad)
+        << "no HRM parameter received a gradient on backend " << backend_name_
+        << " — severed final-cycle graph?";
 }
 
 TEST_P(HRMMultiBackendTest, LargerModel) {
@@ -731,13 +793,30 @@ TEST_F(HRMTest, MemoryEfficiencyApproximateGradient) {
     Variable x(input, true);
 
     auto output = model.forward(x);
-    auto loss = tenzor::mean(output.tensor());
-    Variable loss_var(loss, true);
+    // Backward through the intact Variable graph (no .tensor() re-wrap).
+    auto loss = tenzor::mean(output);
+    loss.backward();
 
-    // Should complete without memory issues
-    EXPECT_NO_THROW({
-        loss_var.backward();
-    });
+    // Approximate-gradient semantics: with n_high_cycles > 1 every cycle but
+    // the last is DETACHED for O(1) memory, so a gradient does NOT reach the
+    // input through the recurrence (the final cycle connects to a detached
+    // prior state). What MUST hold is that the final cycle is differentiable:
+    // its parameters receive real, non-zero gradients. A severed/zeroed
+    // backward (the bug this test now guards) leaves every parameter grad
+    // empty/zero and fails here.
+    bool any_param_grad = false;
+    for (auto& p : model.parameters()) {
+        if (p->grad().has_value() && p->grad()->numel() > 0) {
+            auto g = p->grad()->cpu().to(DType::Float64);
+            if (tenzor::max(tenzor::abs(g)).item<double>() > 0.0) {
+                any_param_grad = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(any_param_grad)
+        << "no HRM parameter received a gradient after backward — the "
+           "approximate-gradient recurrence severed the final-cycle graph";
 }
 
 // ============================================================================

@@ -119,26 +119,34 @@ __global__ void cast_i64_to_i32(const int64_t* __restrict__ src,
 // ---------------------------------------------------------------------------
 __global__ void widen_f16_to_f32(const __half* __restrict__ src,
                                   float* __restrict__ dst, int64_t n) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = __half2float(src[i]);
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < n; i += stride)
+        dst[i] = __half2float(src[i]);
 }
 
 __global__ void widen_bf16_to_f32(const __nv_bfloat16* __restrict__ src,
                                    float* __restrict__ dst, int64_t n) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = __bfloat162float(src[i]);
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < n; i += stride)
+        dst[i] = __bfloat162float(src[i]);
 }
 
 __global__ void narrow_f32_to_f16(const float* __restrict__ src,
                                    __half* __restrict__ dst, int64_t n) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = __float2half(src[i]);
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < n; i += stride)
+        dst[i] = __float2half(src[i]);
 }
 
 __global__ void narrow_f32_to_bf16(const float* __restrict__ src,
                                     __nv_bfloat16* __restrict__ dst, int64_t n) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = __float2bfloat16(src[i]);
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < n; i += stride)
+        dst[i] = __float2bfloat16(src[i]);
 }
 
 /// Widen a F16/BF16 GPU tensor to a freshly-allocated F32 tensor, with all
@@ -154,7 +162,9 @@ Tensor widen_to_f32_async(const Tensor& src, cudaStream_t stream) {
         TENZOR_CUDA_CHECK(cudaMallocAsync(&d_buf, n * sizeof(float), stream));
     }
     const int threads = 256;
-    const unsigned blocks = static_cast<unsigned>((n + threads - 1) / threads);
+    const int64_t blocks64 = (n + threads - 1) / threads;
+    const unsigned blocks = static_cast<unsigned>(
+        blocks64 > 2147483647LL ? 2147483647LL : blocks64);
 
     if (src.dtype() == DType::Float16) {
         if (n > 0) {
@@ -197,7 +207,9 @@ Tensor narrow_from_f32_async(const Tensor& src_f32, DType target,
         TENZOR_CUDA_CHECK(cudaMallocAsync(&d_buf, n * elem_size, stream));
     }
     const int threads = 256;
-    const unsigned blocks = static_cast<unsigned>((n + threads - 1) / threads);
+    const int64_t blocks64 = (n + threads - 1) / threads;
+    const unsigned blocks = static_cast<unsigned>(
+        blocks64 > 2147483647LL ? 2147483647LL : blocks64);
 
     if (target == DType::Float16) {
         if (n > 0) {
@@ -315,6 +327,20 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream =
         return SparseTensor::sparse_csr(
             crow_indices, col_idx, values,
             std::vector<int64_t>{nrows, ncols});
+    }
+
+    // Everything past the COO branch must already be CSR: the callers
+    // (spmm/spmv/spgemm/trsv) read .crow_indices()/.col_indices() and hand them
+    // to cusparseCreateCsr as an M+1-length row-pointer array. A CSC tensor's
+    // compressed array is ccol (ncols+1 column pointers), so passing it through
+    // as if it were CSR feeds cuSPARSE a malformed/wrong-length descriptor
+    // (out-of-bounds reads, garbage output). Reject any non-CSR layout loudly
+    // rather than silently corrupting results.
+    if (sp.layout() != SparseLayout::CSR) {
+        throw std::runtime_error(
+            "cuda_sparse: ensure_csr_on_gpu received an unsupported sparse "
+            "layout (only COO and CSR are accepted; convert CSC/BSR to CSR or "
+            "COO before the CUDA sparse op)");
     }
     return sp;
 }
@@ -1309,17 +1335,28 @@ __global__ void csr_sparse_add_kernel(
     T* __restrict__ out_ptr,
     int64_t nrows, int64_t ncols)
 {
-    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (row >= nrows) return;
-
-    int64_t row_start = crow_ptr[row];
-    int64_t row_end = crow_ptr[row + 1];
-    for (int64_t j = row_start; j < row_end; ++j) {
-        out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+    // Grid-stride over rows so a launch whose grid is clamped (compute_grid_size
+    // caps gridDim at the device limit / 2^31-1 blocks) still covers every row
+    // for nrows > gridDim*blockDim. A plain one-row-per-thread + early-return
+    // would silently drop the row tail at extreme nrows.
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < nrows; row += stride) {
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+        }
     }
 }
 
 Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
+    // Make the operands' CUDA device current so ensure_csr_on_gpu, the
+    // zeros/clone allocations and the scatter-add launch all target the
+    // correct GPU on a multi-GPU host. Matches the other cuSPARSE entry points
+    // in this TU (cuda_spmm_kernel etc.). Restored on scope exit.
+    CudaDeviceGuard dev_guard(dense.device().type == Device::Type::CUDA
+                              ? dense.device().index : Device::cuda().index);
     auto sp_shape = sparse.shape();
     if (sp_shape.size() != 2 || dense.ndim() != 2) {
         throw std::runtime_error("cuda_sparse_add: both inputs must be 2D");
@@ -1348,7 +1385,12 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    unsigned blocks = static_cast<unsigned>((M + threads - 1) / threads);
+    // Clamp the grid to the 2^31-1 block limit; the kernel grid-strides over the
+    // remaining rows, so M > gridDim*threads is still fully covered (instead of
+    // the unsigned truncation silently wrapping the launch dim at extreme M).
+    const int64_t blocks64_add = (M + threads - 1) / threads;
+    unsigned blocks = static_cast<unsigned>(
+        blocks64_add > 2147483647LL ? 2147483647LL : blocks64_add);
 
     if (dtype == DType::Float32) {
         csr_sparse_add_kernel<float><<<blocks, threads>>>(
@@ -1374,6 +1416,13 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
             + std::string(dtype_name(dtype)));
     }
     CUDA_CHECK_SPARSE(cudaGetLastError());
+
+    // The scatter-add runs on the default stream (stream 0); synchronize before
+    // returning so a caller that reads `result` on a different (non-default)
+    // stream is correctly ordered against the in-flight add — matching the
+    // trailing cudaStreamSynchronize in the other cuSPARSE entry points in this
+    // TU. (The F16/BF16 path already syncs implicitly via result_f32.to(dtype).)
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(0));
 
     return result;
 }
@@ -1423,16 +1472,19 @@ __global__ void csr_spmv_kernel(
     T* __restrict__ y_ptr,
     int64_t nrows)
 {
-    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (row >= nrows) return;
-
-    T sum = static_cast<T>(0);
-    int64_t row_start = crow_ptr[row];
-    int64_t row_end = crow_ptr[row + 1];
-    for (int64_t j = row_start; j < row_end; ++j) {
-        sum += val_ptr[j] * x_ptr[col_ptr[j]];
+    // Grid-stride over rows (see csr_sparse_add_kernel): covers all rows even
+    // when the grid is clamped for nrows > gridDim*blockDim.
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < nrows; row += stride) {
+        T sum = static_cast<T>(0);
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            sum += val_ptr[j] * x_ptr[col_ptr[j]];
+        }
+        y_ptr[row] = sum;
     }
-    y_ptr[row] = sum;
 }
 
 // CSR SpMM kernel: one thread per output element (row, col)
@@ -1445,18 +1497,23 @@ __global__ void csr_spmm_kernel(
     T* __restrict__ c_ptr,
     int64_t nrows, int64_t ncols_b)
 {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t row = idx / ncols_b;
-    int64_t col = idx % ncols_b;
-    if (row >= nrows) return;
-
-    T sum = static_cast<T>(0);
-    int64_t row_start = crow_ptr[row];
-    int64_t row_end = crow_ptr[row + 1];
-    for (int64_t j = row_start; j < row_end; ++j) {
-        sum += val_ptr[j] * b_ptr[col_ptr[j] * ncols_b + col];
+    // Grid-stride over the (row,col) output element space so a clamped grid
+    // covers every output for nrows*ncols_b > gridDim*blockDim (the total can
+    // exceed 2^31 well before nrows alone does).
+    const int64_t total = nrows * ncols_b;
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += stride) {
+        int64_t row = idx / ncols_b;
+        int64_t col = idx % ncols_b;
+        T sum = static_cast<T>(0);
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            sum += val_ptr[j] * b_ptr[col_ptr[j] * ncols_b + col];
+        }
+        c_ptr[row * ncols_b + col] = sum;
     }
-    c_ptr[row * ncols_b + col] = sum;
 }
 
 /// Ensure SparseTensor is in CSR format on CUDA device.
@@ -1501,7 +1558,11 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
 
     int threads = 256;
     int64_t total = M * N;
-    unsigned blocks = static_cast<unsigned>((total + threads - 1) / threads);
+    // Clamp to the 2^31-1 block limit; the kernel grid-strides over the (row,col)
+    // output space, so total > gridDim*threads is still fully covered.
+    const int64_t blocks64_spmm = (total + threads - 1) / threads;
+    unsigned blocks = static_cast<unsigned>(
+        blocks64_spmm > 2147483647LL ? 2147483647LL : blocks64_spmm);
 
     if (dtype == DType::Float32) {
         csr_spmm_kernel<float><<<blocks, threads>>>(
@@ -1547,7 +1608,11 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    unsigned blocks = static_cast<unsigned>((M + threads - 1) / threads);
+    // Clamp to the 2^31-1 block limit; the kernel grid-strides over rows, so
+    // M > gridDim*threads is still fully covered.
+    const int64_t blocks64_spmv = (M + threads - 1) / threads;
+    unsigned blocks = static_cast<unsigned>(
+        blocks64_spmv > 2147483647LL ? 2147483647LL : blocks64_spmv);
 
     if (dtype == DType::Float32) {
         csr_spmv_kernel<float><<<blocks, threads>>>(
@@ -1580,17 +1645,28 @@ __global__ void csr_sparse_add_kernel(
     T* __restrict__ out_ptr,
     int64_t nrows, int64_t ncols)
 {
-    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (row >= nrows) return;
-
-    int64_t row_start = crow_ptr[row];
-    int64_t row_end = crow_ptr[row + 1];
-    for (int64_t j = row_start; j < row_end; ++j) {
-        out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+    // Grid-stride over rows so a launch whose grid is clamped (compute_grid_size
+    // caps gridDim at the device limit / 2^31-1 blocks) still covers every row
+    // for nrows > gridDim*blockDim. A plain one-row-per-thread + early-return
+    // would silently drop the row tail at extreme nrows.
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < nrows; row += stride) {
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+        }
     }
 }
 
 Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
+    // Make the operands' CUDA device current so ensure_csr_on_gpu, the
+    // zeros/clone allocations and the scatter-add launch all target the
+    // correct GPU on a multi-GPU host. Matches the other cuSPARSE entry points
+    // in this TU (cuda_spmm_kernel etc.). Restored on scope exit.
+    CudaDeviceGuard dev_guard(dense.device().type == Device::Type::CUDA
+                              ? dense.device().index : Device::cuda().index);
     auto sp_shape = sparse.shape();
     if (sp_shape.size() != 2 || dense.ndim() != 2) {
         throw std::runtime_error("cuda_sparse_add: both inputs must be 2D");
@@ -1625,7 +1701,12 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    unsigned blocks = static_cast<unsigned>((M + threads - 1) / threads);
+    // Clamp the grid to the 2^31-1 block limit; the kernel grid-strides over the
+    // remaining rows, so M > gridDim*threads is still fully covered (instead of
+    // the unsigned truncation silently wrapping the launch dim at extreme M).
+    const int64_t blocks64_add = (M + threads - 1) / threads;
+    unsigned blocks = static_cast<unsigned>(
+        blocks64_add > 2147483647LL ? 2147483647LL : blocks64_add);
 
     if (dtype == DType::Float32) {
         csr_sparse_add_kernel<float><<<blocks, threads>>>(

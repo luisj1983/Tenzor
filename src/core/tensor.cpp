@@ -17,6 +17,7 @@
 #include "tenzor/core/checked_math.hpp"
 #include <numeric>
 #include <algorithm>
+#include <ranges>
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -329,7 +330,17 @@ auto Tensor::dequantize() const -> Tensor {
         int64_t ndim = static_cast<int64_t>(shp.size());
         int64_t axis = q_per_channel_axis();
         if (axis < 0) axis += ndim;
-        int64_t axis_size = (axis >= 0 && axis < ndim) ? shp[axis] : 1;
+        if (axis < 0 || axis >= ndim) {
+            throw std::runtime_error(
+                "dequantize: per-channel quantization axis is out of range for "
+                "the tensor's current shape (metadata not remapped after a view op)");
+        }
+        int64_t axis_size = shp[axis];
+        if (static_cast<size_t>(axis_size) != scales.size()) {
+            throw std::runtime_error(
+                "dequantize: per-channel scales size does not match shape[axis]; "
+                "per-channel metadata is inconsistent with the tensor shape");
+        }
         int64_t inner = 1;
         for (int64_t d = axis + 1; d < ndim; ++d) inner *= shp[d];
         for (size_t i = 0; i < n; ++i) {
@@ -464,10 +475,21 @@ auto may_alias(const Tensor& a, const Tensor& b) -> bool {
     // Uninitialized tensors never alias.
     if (!a.impl() || !b.impl()) return false;
 
-    // Same Tensor object (same impl): treat as non-aliasing. Most in-place
-    // kernels handle x.op_(x) correctly; this avoids false positives on the
-    // common idiom while still catching view/slice aliasing.
-    if (a.impl().get() == b.impl().get()) return false;
+    // Same impl pointer with identical geometry (offset/shape/strides): this is
+    // the x.op_(x) idiom (or a shallow copy `y = x` of the exact same view).
+    // Most in-place kernels handle full self-overlap correctly, so treat it as
+    // non-aliasing. We deliberately do NOT short-circuit on shared impl alone:
+    // a view op (transpose/permute/slice) builds the result via the TensorImpl
+    // copy ctor, giving a DIFFERENT-geometry tensor that still reports the same
+    // impl pointer. Such a partial-overlap view must fall through to the
+    // byte-span test below, or a geometry-changing in-place kernel could be
+    // fooled into reading/writing overlapping memory undetected.
+    if (a.impl().get() == b.impl().get()
+        && a.offset() == b.offset()
+        && std::ranges::equal(a.shape(), b.shape())
+        && std::ranges::equal(a.strides(), b.strides())) {
+        return false;
+    }
 
     // Different storage: definitely no alias.
     const auto& sa = a.storage();
@@ -588,9 +610,9 @@ auto Tensor::data() -> T* {
             if (impl_->shape[d] > 0) {
                 int64_t extent = checked_mul(impl_->shape[d] - 1, impl_->strides[d]);
                 if (extent >= 0) {
-                    max_offset += extent;
+                    max_offset = checked_add(max_offset, extent);
                 } else {
-                    min_offset += extent;
+                    min_offset = checked_add(min_offset, extent);
                 }
             }
         }
@@ -638,9 +660,9 @@ auto Tensor::data() const -> const T* {
             if (impl_->shape[d] > 0) {
                 int64_t extent = checked_mul(impl_->shape[d] - 1, impl_->strides[d]);
                 if (extent >= 0) {
-                    max_offset += extent;
+                    max_offset = checked_add(max_offset, extent);
                 } else {
-                    min_offset += extent;
+                    min_offset = checked_add(min_offset, extent);
                 }
             }
         }
@@ -785,7 +807,9 @@ auto Tensor::to(Device device) const -> Tensor {
     result.impl_->requires_grad = cont.impl_->requires_grad;
 
     // Copy data using backend
-    const size_t size_bytes = cont.numel() * cont.dtype_size();
+    const size_t size_bytes = static_cast<size_t>(checked_mul(
+        static_cast<int64_t>(cont.numel()),
+        static_cast<int64_t>(cont.dtype_size())));
 
     // Determine copy kind
     CopyKind copy_kind;
@@ -1041,7 +1065,11 @@ auto Tensor::to(DType dtype) const -> Tensor {
                 case DType::FP8_E5M2: convert_elements.template operator()<SrcT, FP8_E5M2>(); break; \
                 case DType::FP8_E4M3FNUZ: convert_elements.template operator()<SrcT, FP8_E4M3FNUZ>(); break; \
                 case DType::FP8_E5M2FNUZ: convert_elements.template operator()<SrcT, FP8_E5M2FNUZ>(); break; \
-                default: break; \
+                default: \
+                    throw std::runtime_error( \
+                        std::string("Tensor::to: unsupported destination dtype for cast (src=") \
+                        + std::string(dtype_name(src_dtype)) + ", dst=" \
+                        + std::string(dtype_name(dtype)) + ")"); \
             } \
             break; \
         }
@@ -1070,7 +1098,10 @@ auto Tensor::to(DType dtype) const -> Tensor {
         // Quantized source/dest pairs are rejected at the top of Tensor::to(DType)
         // so no case for QInt8/QUInt8/QInt4x2 is reachable here.
         default:
-            break;
+            throw std::runtime_error(
+                std::string("Tensor::to: unsupported source dtype for cast (src=")
+                + std::string(dtype_name(src_dtype)) + ", dst="
+                + std::string(dtype_name(dtype)) + ")");
     }
 
     #undef DISPATCH_SRC_DTYPE
@@ -1102,7 +1133,9 @@ auto Tensor::clone() const -> Tensor {
     result.impl_->requires_grad = impl_->requires_grad;
 
     // Copy data from contiguous source
-    const size_t size_bytes = src.numel() * src.dtype_size();
+    const size_t size_bytes = static_cast<size_t>(checked_mul(
+        static_cast<int64_t>(src.numel()),
+        static_cast<int64_t>(src.dtype_size())));
 
     if (impl_->device.type == Device::Type::CPU) {
         // CPU copy
@@ -1665,6 +1698,13 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
         result.impl_ = make_intrusive<TensorImpl>(*impl_);
         std::swap(result.impl_->shape[0], result.impl_->shape[1]);
         std::swap(result.impl_->strides[0], result.impl_->strides[1]);
+        // Per-channel quantization axis tracks the channel dimension; remap it
+        // so it still points at the channel after the swap (else dequantize()
+        // reads scales/zero_points OOB against the reordered shape).
+        if (result.impl_->q_scales_.has_value()) {
+            if (result.impl_->q_axis_ == dim0) result.impl_->q_axis_ = dim1;
+            else if (result.impl_->q_axis_ == dim1) result.impl_->q_axis_ = dim0;
+        }
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
         return result;
@@ -1675,6 +1715,10 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
     result.impl_ = make_intrusive<TensorImpl>(*impl_);
     std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
     std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
+    if (result.impl_->q_scales_.has_value()) {
+        if (result.impl_->q_axis_ == dim0) result.impl_->q_axis_ = dim1;
+        else if (result.impl_->q_axis_ == dim1) result.impl_->q_axis_ = dim0;
+    }
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
@@ -1722,6 +1766,15 @@ auto Tensor::permute(std::vector<int64_t> dims) const -> Tensor {
 
     result.impl_->shape = std::move(new_shape);
     result.impl_->strides = std::move(new_strides);
+    // Remap the per-channel quantization axis to its new position so
+    // dequantize() keeps indexing scales/zero_points correctly. The channel
+    // dim that was at old q_axis_ is now at the position i where dims[i]==old.
+    if (result.impl_->q_scales_.has_value()) {
+        int64_t old_axis = result.impl_->q_axis_;
+        for (int64_t i = 0; i < ndims; ++i) {
+            if (dims[i] == old_axis) { result.impl_->q_axis_ = i; break; }
+        }
+    }
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
@@ -1823,13 +1876,23 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
     result.impl_->shape.insert(result.impl_->shape.begin() + dim, 1);
 
     // Stride for the inserted size-1 dim. Its value is addressing-irrelevant
-    // (the axis is never indexed past 0), but it must match the contiguous
-    // layout so a logically-contiguous tensor keeps reporting is_contiguous().
-    // The contiguity-consistent value is strides[dim] * shape[dim] (the "outer"
-    // stride at the insertion point); using strides[dim] alone made an unsqueeze
-    // at dim 0 (or any non-trailing position) report non-contiguous.
-    int64_t new_stride =
-        (dim < ndims) ? (impl_->strides[dim] * impl_->shape[dim]) : 1;
+    // (the axis is never indexed past 0). Two cases:
+    //  - Contiguous parent: use strides[dim] * shape[dim] (the "outer" stride at
+    //    the insertion point) so the logically-contiguous tensor keeps reporting
+    //    is_contiguous(). (strides[dim] alone made unsqueeze at dim 0 — or any
+    //    non-trailing position — report non-contiguous.)
+    //  - Non-contiguous parent: strides[dim]*shape[dim] is NOT the geometric
+    //    outer stride and would hand a stride-reading consumer (as_strided,
+    //    manual stride inspection) an arbitrary value. The parent is already
+    //    non-contiguous so contiguity reporting is unaffected; use the
+    //    geometrically meaningful stride of the axis at the insertion point
+    //    (matching PyTorch: stride of the dim pushed right, or 1 when trailing).
+    int64_t new_stride;
+    if (impl_->is_contiguous()) {
+        new_stride = (dim < ndims) ? (impl_->strides[dim] * impl_->shape[dim]) : 1;
+    } else {
+        new_stride = (dim < ndims) ? impl_->strides[dim] : 1;
+    }
     result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
@@ -1980,7 +2043,8 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
     result.impl_->shape[dim] = new_dim_size;
 
     // Update offset to start at the correct position
-    result.impl_->offset += start * impl_->strides[dim];
+    result.impl_->offset = checked_add(
+        result.impl_->offset, checked_mul(start, impl_->strides[dim]));
 
     // Update stride if step != 1
     if (step != 1) {

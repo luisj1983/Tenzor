@@ -73,7 +73,23 @@ void fill_mask_f32(float* out,
                     uint32_t seed_low,
                     uint64_t offset) {
     const float keep_scale = (p < 1.0f) ? 1.0f / (1.0f - p) : 0.0f;
+    // The Philox counter words are 32-bit and must match the device kernels
+    // bit-for-bit (the seed/offset tensors are replayed in the backward). The
+    // host and device paths therefore both truncate the per-element index to
+    // uint32. Guard against silent counter aliasing (loss of mask
+    // independence) when any addressing dimension exceeds 2^32.
+    constexpr int64_t kU32Limit = static_cast<int64_t>(1) << 32;
+    auto require_fits_u32 = [](int64_t v, const char* what) {
+        if (v >= kU32Limit) {
+            throw std::invalid_argument(
+                std::string("philox_dropout: ") + what +
+                " exceeds 2^32; Philox counter words would alias");
+        }
+    };
     if (bh_dim > 0 && sq_dim > 0 && sk_dim > 0 && bh_dim * sq_dim * sk_dim == total) {
+        require_fits_u32(bh_dim, "BH dimension");
+        require_fits_u32(sq_dim, "Sq dimension");
+        require_fits_u32(sk_dim, "Sk dimension");
         // Attention-shape Philox addressing.
         for (int64_t bh = 0; bh < bh_dim; ++bh) {
             for (int64_t qi = 0; qi < sq_dim; ++qi) {
@@ -90,6 +106,7 @@ void fill_mask_f32(float* out,
         }
     } else {
         // Generic linear addressing fallback.
+        require_fits_u32(total, "element count");
         for (int64_t i = 0; i < total; ++i) {
             uint32_t c0 = static_cast<uint32_t>(i);
             uint32_t c3 = static_cast<uint32_t>(offset & 0xFFFFFFFFu);

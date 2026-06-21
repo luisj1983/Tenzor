@@ -748,6 +748,11 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     Tensor grad_input(std::vector<int64_t>(grad_output.shape().begin(), grad_output.shape().end()),
                       grad_output.dtype(), grad_output.device());
 
+    // Empty tensor: get_num_blocks(0) == 0 and HIP rejects a zero-block grid
+    // with "invalid configuration argument" (forward dropout_kernel guards the
+    // same way). Return the empty grad_input instead of crashing.
+    if (n == 0) return grad_input;
+
     float scale = 1.0f / (1.0f - p);
     int num_blocks = get_num_blocks(n);
 

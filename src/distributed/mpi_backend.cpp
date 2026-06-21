@@ -401,10 +401,29 @@ auto MPIBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output,
         );
 
         for (int i = 0; i < world_size_; ++i) {
+            // Validate each chunk matches the per-rank output exactly before
+            // copying. A smaller input would cause an out-of-bounds read; a
+            // larger one would be silently truncated. (The NCCL scatter path
+            // performs the same check.)
+            if (tensors[i].numel() != output.numel()) {
+                throw std::invalid_argument(
+                    "scatter: tensors[" + std::to_string(i) + "] numel " +
+                    std::to_string(tensors[i].numel()) +
+                    " does not match output numel " +
+                    std::to_string(output.numel()));
+            }
+            if (tensors[i].dtype() != output.dtype()) {
+                throw std::invalid_argument(
+                    "scatter: tensors[" + std::to_string(i) +
+                    "] dtype does not match output dtype");
+            }
             Tensor src_cpu = tensors[i];
             if (src_cpu.device().type != Device::Type::CPU) {
                 src_cpu = src_cpu.to(Device::cpu());
             }
+            // .to(cpu()) preserves strides; ensure contiguous before the flat
+            // memcpy so a non-contiguous source is not misread.
+            src_cpu = src_cpu.contiguous();
             std::memcpy(
                 static_cast<char*>(send_buf.data_ptr()) +
                     i * output.numel() * output.element_size(),
@@ -458,7 +477,29 @@ auto MPIBackend::reduce_scatter(const std::vector<Tensor>& tensors,
             cpu_tensors.push_back(t);
         }
     }
+    // Validate dtype of every chunk before concatenation: cat() would otherwise
+    // either throw obscurely or coerce, and MPI requires a uniform datatype.
+    for (size_t i = 0; i < cpu_tensors.size(); ++i) {
+        if (cpu_tensors[i].dtype() != output.dtype()) {
+            throw std::invalid_argument(
+                "reduce_scatter: input tensor dtype does not match output dtype");
+        }
+    }
+
     Tensor send_buf = cat(cpu_tensors, 0);
+
+    // MPI_Reduce_scatter_block requires the send buffer to hold exactly
+    // output.numel() * world_size elements. Validate the caller's contract
+    // explicitly instead of letting MPI perform an out-of-bounds read.
+    // (The NCCL reduce_scatter path performs the same check.)
+    if (send_buf.numel() != output.numel() * world_size_) {
+        throw std::invalid_argument(
+            "reduce_scatter: concatenated input numel " +
+            std::to_string(send_buf.numel()) +
+            " must equal output numel * world_size (" +
+            std::to_string(output.numel()) + " * " +
+            std::to_string(world_size_) + ")");
+    }
 
     Tensor recv_host_buf;
     void* recv_ptr = get_recv_ptr(output, recv_host_buf);
@@ -658,9 +699,15 @@ auto MPIBackend::get_recv_ptr(Tensor& tensor, Tensor& host_buf) -> void* {
         return host_buf.data_ptr();
     }
 
-    // Allocate host buffer for receiving; caller must copy back after MPI call
-    auto shape = tensor.shape();
-    host_buf = empty({shape.begin(), shape.end()}, tensor.dtype(), Device::cpu());
+    // Non-CUDA-aware MPI: stage through host memory. The receive buffer must be
+    // initialized with the device tensor's CURRENT values, not left uninitialized.
+    // The in-place collectives (all_reduce/reduce with MPI_IN_PLACE) read each
+    // rank's local contribution FROM this same buffer; an uninitialized empty()
+    // buffer would make the local rank contribute garbage to the reduction.
+    // Copying device->host here is also correct for the overwrite-only paths
+    // (broadcast root, scatter/gather recv) — the staged values are simply
+    // overwritten by MPI before copy_back_if_staged writes them back.
+    host_buf = tensor.to(Device::cpu()).contiguous();
     return host_buf.data_ptr();
 }
 

@@ -23,6 +23,7 @@
 #include <tenzor/nn/optim/sgd.hpp>
 #include <tenzor/nn/module.hpp>
 #include <tenzor/nn/activations/activations.hpp>
+#include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include <memory>
@@ -56,14 +57,13 @@ public:
         auto w2 = parameters_.at("w2");
         auto b2 = parameters_.at("b2");
 
-        // x @ w1 + b1
-        auto h = matmul(x.tensor(), w1->tensor()) + b1->tensor();
-        // relu(h)
-        auto h_relu = Variable(h, true);
-        h_relu = relu(h_relu);
-        // h @ w2 + b2
-        auto out = matmul(h_relu.tensor(), w2->tensor()) + b2->tensor();
-        return Variable(out, x.requires_grad());
+        // Build a REAL autograd graph through the parameters so loss.backward()
+        // populates each parameter gradient (raw-tensor ops + re-wrapping would
+        // sever grad_fn and force tests to fake gradients with set_grad()).
+        auto h = matmul(x, *w1) + *b1;
+        auto h_relu = nn::relu(h);
+        auto out = matmul(h_relu, *w2) + *b2;
+        return out;
     }
 };
 
@@ -184,14 +184,8 @@ TEST_F(ZeROStage3Test, ConstructorWithValidConfig) {
     config.world_size = 1;
     config.rank = 0;
 
-    // NOTE: ZeROStage3Optimizer not yet implemented
-    // This test verifies the intended API
     EXPECT_NO_THROW({
-        // When Stage 3 is implemented:
-        // ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
-
-        // For now, verify Stage 2 works as baseline
-        ZeROStage2Optimizer optimizer(std::make_unique<Adam>(create_test_params(100), 0.001), config);
+        ZeROStage3Optimizer optimizer(std::make_unique<Adam>(create_test_params(100), 0.001), config);
     });
 }
 
@@ -205,8 +199,7 @@ TEST_F(ZeROStage3Test, ConstructorWithMultipleRanks) {
 
     // Stage 3 should support multiple ranks for parameter partitioning
     EXPECT_NO_THROW({
-        // ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
-        ZeROStage2Optimizer optimizer(std::make_unique<Adam>(create_test_params(100), 0.001), config);
+        ZeROStage3Optimizer optimizer(std::make_unique<Adam>(create_test_params(100), 0.001), config);
     });
 }
 
@@ -220,7 +213,7 @@ TEST_F(ZeROStage3Test, ConstructorValidatesConfig) {
     config.partition_threshold = 1024;
 
     EXPECT_NO_THROW({
-        ZeROStage2Optimizer optimizer(std::make_unique<Adam>(create_test_params(100), 0.001), config);
+        ZeROStage3Optimizer optimizer(std::make_unique<Adam>(create_test_params(100), 0.001), config);
     });
 }
 
@@ -233,7 +226,7 @@ TEST_F(ZeROStage3Test, ConstructorWithInvalidRank) {
     config.rank = 5;  // Invalid: rank >= world_size
 
     EXPECT_THROW({
-        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
     }, std::invalid_argument);
 }
 
@@ -241,7 +234,7 @@ TEST_F(ZeROStage3Test, ConstructorWithNullOptimizer) {
     Stage3Config config = default_stage3_config;
 
     EXPECT_THROW({
-        ZeROStage2Optimizer optimizer(nullptr, config);
+        ZeROStage3Optimizer optimizer(nullptr, config);
     }, std::invalid_argument);
 }
 
@@ -258,7 +251,7 @@ TEST_F(ZeROStage3Test, ParameterPartitioningBasic) {
     config.world_size = 1;
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // In single rank mode, all parameters are local
     EXPECT_EQ(optimizer.local_param_count(), 100);
@@ -273,7 +266,7 @@ TEST_F(ZeROStage3Test, ParameterPartitioningMultipleRanks) {
     config.world_size = 4;
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Rank 0 should own ~25 parameters (100/4)
     size_t local_count = optimizer.local_param_count();
@@ -294,7 +287,7 @@ TEST_F(ZeROStage3Test, ParameterPartitioningUnevenSizes) {
     config.world_size = 2;
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Rank 0 should own approximately half the parameters
     EXPECT_GT(optimizer.local_param_count(), 0);
@@ -315,7 +308,7 @@ TEST_F(ZeROStage3Test, ParameterPartitioningSharedParameters) {
     config.world_size = 1;
 
     EXPECT_NO_THROW({
-        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
@@ -326,7 +319,7 @@ TEST_F(ZeROStage3Test, ParameterPartitioningEmptyModel) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     EXPECT_EQ(optimizer.local_param_count(), 0);
 }
@@ -336,24 +329,37 @@ TEST_F(ZeROStage3Test, ParameterPartitioningEmptyModel) {
 // ============================================================================
 
 TEST_F(ZeROStage3Test, GatherParameterSingleRank) {
-    // Test gathering parameter in single rank mode (should be no-op)
-    auto params = create_test_params(50, {64, 64});
+    // In single-rank mode gather reconstructs the full parameter (which equals
+    // the local partition, since one rank owns everything). Drive the REAL
+    // gather_parameter path through a registered model and assert the gathered
+    // tensor has the full element count and matches the original values.
+    auto model = create_multilayer_model(4, 16);
+    auto params = model->parameters();
+    ASSERT_FALSE(params.empty());
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
     Stage3Config config = default_stage3_config;
     config.world_size = 1;
+    config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_model(*model);
 
-    // In single rank, gather is essentially a no-op
-    // Parameters remain unchanged
-    auto original_size = params[0]->tensor().numel();
+    Tensor* p0 = &params[0]->tensor();
+    const int64_t full_numel = p0->numel();
+    auto original = p0->clone();
 
-    // Simulate gather operation (in real implementation):
-    // auto gathered = optimizer.gather_parameter(params[0].get());
-    // EXPECT_EQ(gathered.numel(), original_size);
+    Tensor gathered = optimizer.gather_parameter(p0);
+    EXPECT_EQ(gathered.numel(), full_numel)
+        << "single-rank gather must reconstruct the full parameter";
+    auto diff = tenzor::max(tenzor::abs(
+        (gathered.to(DType::Float64) - original.to(DType::Float64))
+            .reshape({full_numel}))).item<double>();
+    EXPECT_LT(diff, 1e-6)
+        << "single-rank gather must return the original parameter values";
 
-    EXPECT_EQ(params[0]->tensor().numel(), original_size);
+    optimizer.free_gathered_parameter(p0);
+    optimizer.unregister_model();
 }
 
 TEST_F(ZeROStage3Test, GatherParameterMultipleRanks) {
@@ -365,7 +371,7 @@ TEST_F(ZeROStage3Test, GatherParameterMultipleRanks) {
     config.world_size = 4;
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // After partitioning, each rank has 1/4 of parameters
     // Gathering should reconstruct full parameter
@@ -384,7 +390,7 @@ TEST_F(ZeROStage3Test, GatherParameterWithPrefetch) {
     Stage3Config config = default_stage3_config;
     config.prefetch_depth = 2;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Prefetch should improve gather performance
     // In real implementation with timing:
@@ -405,7 +411,7 @@ TEST_F(ZeROStage3Test, FreeParameterWithRefCounting) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // In real implementation with ref counting:
     // optimizer.gather_parameter(params[0].get());  // ref_count = 1
@@ -426,35 +432,45 @@ TEST_F(ZeROStage3Test, FreeParameterShared) {
     Stage3Config config = default_stage3_config;
 
     EXPECT_NO_THROW({
-        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
 TEST_F(ZeROStage3Test, GatherScatterRoundtrip) {
-    // Test that gather followed by scatter restores original state
-    auto params = create_test_params(30);
+    // gather → free (scatter back to partition) must restore the original
+    // parameter values. Drive the REAL gather/free path through a registered
+    // model in single-rank mode (so the full param is recoverable for an exact
+    // value comparison) and assert the round-trip is lossless.
+    auto model = create_multilayer_model(4, 16);
+    auto params = model->parameters();
+    ASSERT_FALSE(params.empty());
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
     Stage3Config config = default_stage3_config;
-    config.world_size = 2;
+    config.world_size = 1;
     config.rank = 0;
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_model(*model);
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    Tensor* p0 = &params[0]->tensor();
+    const int64_t full_numel = p0->numel();
+    auto original = p0->clone();
 
-    // Save original data
-    auto original_data = params[0]->tensor().clone();
+    Tensor gathered = optimizer.gather_parameter(p0);
+    ASSERT_EQ(gathered.numel(), full_numel);
+    optimizer.free_gathered_parameter(p0);
 
-    // In real implementation:
-    // auto gathered = optimizer.gather_parameter(params[0].get());
-    // optimizer.free_gathered_parameter(params[0].get());
-    // Partitioned data should match original local partition
+    // After gather + free, the live parameter (or the cached gather buffer) must
+    // still represent the original values bit-for-bit.
+    Tensor re_gathered = optimizer.gather_parameter(p0);
+    auto diff = tenzor::max(tenzor::abs(
+        (re_gathered.to(DType::Float64) - original.to(DType::Float64))
+            .reshape({full_numel}))).item<double>();
+    EXPECT_LT(diff, 1e-6)
+        << "gather → free → gather must restore the original parameter values";
 
-    // Convert spans to vectors for comparison
-    auto current_shape = params[0]->tensor().shape();
-    auto original_shape = original_data.shape();
-    std::vector<int64_t> current_shape_vec(current_shape.begin(), current_shape.end());
-    std::vector<int64_t> original_shape_vec(original_shape.begin(), original_shape.end());
-    EXPECT_EQ(current_shape_vec, original_shape_vec);
+    optimizer.free_gathered_parameter(p0);
+    optimizer.unregister_model();
 }
 
 // ============================================================================
@@ -469,7 +485,7 @@ TEST_F(ZeROStage3Test, PrefetchSingleParameter) {
     Stage3Config config = default_stage3_config;
     config.prefetch_depth = 1;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // In real implementation:
     // std::vector<Tensor*> prefetch_params = {params[0].get()};
@@ -496,7 +512,7 @@ TEST_F(ZeROStage3Test, PrefetchMultipleParameters) {
     Stage3Config config = default_stage3_config;
     config.prefetch_depth = 4;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // In real implementation:
     // std::vector<Tensor*> prefetch_params;
@@ -524,7 +540,7 @@ TEST_F(ZeROStage3Test, PrefetchPriorityOrdering) {
     Stage3Config config = default_stage3_config;
     config.prefetch_depth = 3;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // In real implementation with priority:
     // optimizer.prefetch_parameters({params[10].get()}, /* priority */ 3);
@@ -551,7 +567,7 @@ TEST_F(ZeROStage3Test, PrefetchMemoryBudget) {
     Stage3Config config = default_stage3_config;
     config.max_cached_params = 5;  // Limit cache size
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // In real implementation:
     // Cache should not exceed max_cached_params
@@ -581,7 +597,7 @@ TEST_F(ZeROStage3Test, ForwardWithGather) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Forward pass should automatically gather parameters
     auto input = Variable(randn({4, 128}, DType::Float32, Device::cpu()), true);
@@ -601,22 +617,23 @@ TEST_F(ZeROStage3Test, BackwardWithScatter) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     auto input = Variable(randn({4, 128}, DType::Float32, Device::cpu()), true);
     auto output = model->forward(input);
-    auto loss = Variable(mean(output.tensor()), true);
+    auto loss = sum(output);
 
-    EXPECT_NO_THROW({
-        loss.backward();
-
-        // Manually attach gradients for testing
-        for (auto& param : params) {
-            if (!param->has_grad()) {
-                param->set_grad(ones_like(param->tensor()));
-            }
-        }
-    });
+    // Real backward over the autograd graph must populate every parameter's
+    // gradient (no manual set_grad fill), so the scatter path is genuinely
+    // exercised on real gradients.
+    ASSERT_NO_THROW(loss.backward());
+    for (const auto& param : params) {
+        EXPECT_TRUE(param->has_grad())
+            << "backward did not populate a parameter gradient";
+        auto g = param->grad().value().to(DType::Float64).cpu();
+        EXPECT_GT(tenzor::max(tenzor::abs(g)).item<double>(), 0.0)
+            << "parameter gradient is identically zero after backward";
+    }
 }
 
 TEST_F(ZeROStage3Test, ForwardBackwardFullTraining) {
@@ -627,7 +644,7 @@ TEST_F(ZeROStage3Test, ForwardBackwardFullTraining) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Complete training step
     auto input = Variable(randn({4, 128}, DType::Float32, Device::cpu()), true);
@@ -658,7 +675,7 @@ TEST_F(ZeROStage3Test, ForwardBackwardMultipleLayers) {
     Stage3Config config = default_stage3_config;
     config.prefetch_depth = 2;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     auto input = Variable(randn({4, 64}, DType::Float32, Device::cpu()), true);
     auto output = model->forward(input);
@@ -688,7 +705,7 @@ TEST_F(ZeROStage3Test, ForwardBackwardWithPrefetch) {
     config.prefetch_depth = 3;
     config.overlap_comm_compute = true;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     auto input = Variable(randn({4, 64}, DType::Float32, Device::cpu()), true);
 
@@ -716,7 +733,7 @@ TEST_F(ZeROStage3Test, MemoryReduction) {
     config.world_size = 4;
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     auto stats = optimizer.get_memory_stats();
 
@@ -733,7 +750,7 @@ TEST_F(ZeROStage3Test, MemoryStatsReporting) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     optimizer.step();
@@ -757,7 +774,7 @@ TEST_F(ZeROStage3Test, MemoryPressureHandling) {
     Stage3Config config = default_stage3_config;
     config.max_cached_params = 5;  // Limited cache
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Should handle memory pressure gracefully
     attach_gradients(params);
@@ -784,7 +801,7 @@ TEST_F(ZeROStage3Test, CPUOffloadEnabled) {
     config.offload_params_to_cpu = true;
     config.offload_to_cpu = true;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     EXPECT_TRUE(optimizer.is_cpu_offload_enabled());
 }
@@ -799,7 +816,7 @@ TEST_F(ZeROStage3Test, CPUOffloadWithPrefetch) {
     config.offload_to_cpu = true;
     config.prefetch_depth = 2;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
 
@@ -817,7 +834,7 @@ TEST_F(ZeROStage3Test, CPUOffloadMemoryLocation) {
     config.offload_params_to_cpu = true;
     config.offload_to_cpu = true;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     optimizer.step();
@@ -839,7 +856,7 @@ TEST_F(ZeROStage3Test, StateDictSaveLoad) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     optimizer.step();
@@ -851,7 +868,7 @@ TEST_F(ZeROStage3Test, StateDictSaveLoad) {
     // Load into new optimizer
     auto params2 = create_test_params(20);
     auto base_optimizer2 = std::make_unique<Adam>(params2, 0.001);
-    ZeROStage2Optimizer optimizer2(std::move(base_optimizer2), config);
+    ZeROStage3Optimizer optimizer2(std::move(base_optimizer2), config);
 
     EXPECT_NO_THROW({
         optimizer2.load_state_dict(state);
@@ -859,25 +876,44 @@ TEST_F(ZeROStage3Test, StateDictSaveLoad) {
 }
 
 TEST_F(ZeROStage3Test, StateDictContainsPartitionInfo) {
-    // Test that state dict contains partition information
-    auto params = create_test_params(50);
+    // Stage 3 state_dict must carry the Stage-3 marker and per-parameter
+    // partition offset/size for every registered parameter. Register a real
+    // model so param_states_ is populated, then assert the partition info is
+    // actually serialized (the substituted Stage-2 optimizer never produced
+    // these keys).
+    auto model = create_multilayer_model(4, 16);
+    auto params = model->parameters();
+    ASSERT_FALSE(params.empty());
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
     Stage3Config config = default_stage3_config;
-    config.world_size = 4;
+    config.world_size = 1;
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_model(*model);
 
     auto state = optimizer.state_dict();
 
-    // Should contain rank and world_size metadata
-    EXPECT_TRUE(state.count("rank") > 0);
-    EXPECT_TRUE(state.count("world_size") > 0);
+    // Stage-3 marker present and equal to 3.
+    ASSERT_TRUE(state.count("stage3_stage") > 0)
+        << "Stage 3 state_dict must contain the stage marker";
+    EXPECT_EQ(state.at("stage3_stage").data<int32_t>()[0], 3);
 
-    // In real Stage 3 implementation, should also contain:
-    // EXPECT_TRUE(state.count("partition_offset") > 0);
-    // EXPECT_TRUE(state.count("partition_size") > 0);
+    // Per-parameter partition info present for all registered params.
+    ASSERT_TRUE(state.count("stage3_num_params") > 0);
+    const int64_t n = state.at("stage3_num_params").data<int64_t>()[0];
+    EXPECT_EQ(static_cast<size_t>(n), params.size())
+        << "partition info must be recorded for every registered parameter";
+    for (int64_t i = 0; i < n; ++i) {
+        const std::string prefix = "stage3_param_" + std::to_string(i) + "_";
+        EXPECT_TRUE(state.count(prefix + "partition_offset") > 0)
+            << "missing partition_offset for param " << i;
+        EXPECT_TRUE(state.count(prefix + "partition_size") > 0)
+            << "missing partition_size for param " << i;
+    }
+
+    optimizer.unregister_model();
 }
 
 TEST_F(ZeROStage3Test, CheckpointCompatibility) {
@@ -889,7 +925,7 @@ TEST_F(ZeROStage3Test, CheckpointCompatibility) {
     config.world_size = 1;  // Single process mode (no distributed init needed)
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     optimizer.step();
@@ -921,7 +957,7 @@ TEST_F(ZeROStage3Test, EdgeCaseSingleParameter) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     EXPECT_NO_THROW({
@@ -938,7 +974,7 @@ TEST_F(ZeROStage3Test, EdgeCaseEmptyGradients) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Don't attach gradients - should handle gracefully
     EXPECT_NO_THROW({
@@ -960,7 +996,7 @@ TEST_F(ZeROStage3Test, EdgeCaseSharedParameters) {
     Stage3Config config = default_stage3_config;
 
     EXPECT_NO_THROW({
-        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
@@ -973,7 +1009,7 @@ TEST_F(ZeROStage3Test, EdgeCaseWorldSizeOne) {
     config.world_size = 1;
     config.rank = 0;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
 
@@ -993,7 +1029,7 @@ TEST_F(ZeROStage3Test, EdgeCaseLargeParameters) {
     Stage3Config config = default_stage3_config;
     config.partition_threshold = 1024;  // Small threshold to ensure partitioning
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     auto before = params[0]->tensor().clone();
@@ -1017,7 +1053,7 @@ TEST_F(ZeROStage3Test, MultipleStepsConsistency) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Run 10 training steps
     auto before_first = params[0]->tensor().clone();
@@ -1046,7 +1082,7 @@ TEST_F(ZeROStage3Test, ParameterCacheHitRate) {
     config.cache_params_across_passes = true;
     config.max_cached_params = 20;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     auto input = Variable(randn({4, 64}, DType::Float32, Device::cpu()), true);
     auto output = model->forward(input);
@@ -1069,7 +1105,7 @@ TEST_F(ZeROStage3Test, CommunicationOverlap) {
     config.overlap_comm_compute = true;
     config.prefetch_depth = 3;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     auto input = Variable(randn({4, 64}, DType::Float32, Device::cpu()), true);
 
@@ -1088,7 +1124,7 @@ TEST_F(ZeROStage3Test, GradientAccumulation) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Accumulate gradients over 4 steps
     for (int i = 0; i < 4; ++i) {
@@ -1121,7 +1157,7 @@ TEST_F(ZeROStage3Test, DifferentOptimizerTypes) {
     {
         auto sgd = std::make_unique<SGD>(create_test_params(30), 0.01);
         Stage3Config config = default_stage3_config;
-        ZeROStage2Optimizer optimizer(std::move(sgd), config);
+        ZeROStage3Optimizer optimizer(std::move(sgd), config);
 
         auto test_params = create_test_params(30);
         attach_gradients(test_params);
@@ -1135,7 +1171,7 @@ TEST_F(ZeROStage3Test, DifferentOptimizerTypes) {
     {
         auto adam = std::make_unique<Adam>(create_test_params(30), 0.001);
         Stage3Config config = default_stage3_config;
-        ZeROStage2Optimizer optimizer(std::move(adam), config);
+        ZeROStage3Optimizer optimizer(std::move(adam), config);
 
         auto test_params = create_test_params(30);
         attach_gradients(test_params);
@@ -1155,7 +1191,7 @@ TEST_F(ZeROStage3Test, PartitionAlignment) {
     config.partition_alignment = 256;
 
     EXPECT_NO_THROW({
-        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
@@ -1183,7 +1219,7 @@ TEST_F(ZeROStage3Test, SmallParameterThreshold) {
     config.partition_threshold = 1024;
 
     EXPECT_NO_THROW({
-        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
@@ -1194,7 +1230,7 @@ TEST_F(ZeROStage3Test, ConcurrentParameterAccess) {
 
     Stage3Config config = default_stage3_config;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     // Simulate concurrent access (in real implementation with threads)
     attach_gradients(params);
@@ -1218,7 +1254,7 @@ TEST_F(ZeROStage3Test, PerformanceDegradation) {
     config.prefetch_depth = 2;
     config.overlap_comm_compute = true;
 
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), config);
 
     auto input = Variable(randn({8, 128}, DType::Float32, Device::cpu()), true);
 

@@ -179,9 +179,23 @@ TEST_P(SpecialMathParity, Erf_Composition) {
         return erf(erfinv(inputs[0]));
     }, {x}, device, 1e-3f, 1e-4f, "Erf_Composition");
 
-    // Also verify the identity holds on CPU: erf(erfinv(x)) should be close to x
+    // Verify the identity holds on CPU: erf(erfinv(x)) should be close to x.
     auto roundtrip = erf(erfinv(x));
     EXPECT_TENSORS_CLOSE(roundtrip, x, 1e-3f, 1e-4f);
+
+    // Anchor against KNOWN erf values so a compensating erf/erfinv pair that
+    // satisfies the round-trip but is individually wrong cannot pass:
+    //   erf(0) = 0, erf(1) = 0.8427007929, erf(-1) = -0.8427007929,
+    //   erf(2) = 0.9953222650.
+    auto anchors = full({4}, 0.0, DType::Float32, Device::cpu());
+    float* ad = anchors.data<float>();
+    ad[0] = 0.0f; ad[1] = 1.0f; ad[2] = -1.0f; ad[3] = 2.0f;
+    auto erf_anchor = erf(anchors.to(device)).cpu();
+    const float* ea = erf_anchor.data<float>();
+    EXPECT_NEAR(ea[0], 0.0f,            1e-5f);
+    EXPECT_NEAR(ea[1], 0.8427007929f,  1e-4f);
+    EXPECT_NEAR(ea[2], -0.8427007929f, 1e-4f);
+    EXPECT_NEAR(ea[3], 0.9953222650f,  1e-4f);
 }
 
 TEST_P(SpecialMathParity, Lgamma_vs_Gamma) {
@@ -197,6 +211,20 @@ TEST_P(SpecialMathParity, Lgamma_vs_Gamma) {
     auto lgamma_result = lgamma(x);
     auto log_gamma_result = log(gamma(x));
     EXPECT_TENSORS_CLOSE(lgamma_result, log_gamma_result, 1e-3f, 1e-4f);
+
+    // Anchor against KNOWN lgamma values so a lgamma/gamma pair that is wrong
+    // in a mutually-consistent way cannot pass:
+    //   lgamma(1) = 0, lgamma(2) = 0, lgamma(3) = log(2) = 0.6931471806,
+    //   lgamma(0.5) = 0.5*ln(pi) = 0.5723649429.
+    auto anchors = full({4}, 0.0, DType::Float32, Device::cpu());
+    float* ad = anchors.data<float>();
+    ad[0] = 1.0f; ad[1] = 2.0f; ad[2] = 3.0f; ad[3] = 0.5f;
+    auto lg_anchor = lgamma(anchors.to(device)).cpu();
+    const float* la = lg_anchor.data<float>();
+    EXPECT_NEAR(la[0], 0.0f,           1e-5f);
+    EXPECT_NEAR(la[1], 0.0f,           1e-5f);
+    EXPECT_NEAR(la[2], 0.6931471806f,  1e-4f);
+    EXPECT_NEAR(la[3], 0.5723649429f,  1e-4f);
 }
 
 // ============================================================================

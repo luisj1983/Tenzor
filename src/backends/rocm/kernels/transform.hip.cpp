@@ -13,9 +13,15 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace tenzor {
 namespace rocm {
+
+// Sentinel meaning "squeeze every size-1 axis". A distinct value (NOT -1) is
+// required so a legitimate negative axis like squeeze(-1)/squeeze(-2) is not
+// silently misinterpreted as squeeze-all. Matches the CPU/OneAPI reference.
+static constexpr int64_t SQUEEZE_ALL = std::numeric_limits<int64_t>::min();
 
 // Helper class to access Tensor private members from HIP kernels.
 // Routes through TensorAccessor which is a friend of Tensor.
@@ -268,6 +274,16 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
 
 auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, hipStream_t stream) -> Tensor {
     // Transpose just swaps dimensions in metadata
+    const int64_t ndim = input.ndim();
+    // Normalize negative dims (the dispatcher passes dim0/dim1 through
+    // unmodified, so the kernel owns normalization here, matching the sibling
+    // flip/roll/split/chunk kernels in this file).
+    if (dim0 < 0) dim0 += ndim;
+    if (dim1 < 0) dim1 += ndim;
+    if (dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim) {
+        throw std::out_of_range("transpose ROCm: dimension out of range");
+    }
+
     Tensor result;
     HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
     auto& r_shape = result.mutable_shape();
@@ -291,8 +307,15 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, hipSt
     std::vector<int64_t> new_strides(ndim);
 
     for (int64_t i = 0; i < ndim; ++i) {
-        new_shape[i] = input.shape()[dims[i]];
-        new_strides[i] = input.strides()[dims[i]];
+        // Normalize negative axis: permute([-1, ...]) is the common idiom and
+        // the dispatcher passes dims through unmodified.
+        int64_t d = dims[i];
+        if (d < 0) d += ndim;
+        if (d < 0 || d >= ndim) {
+            throw std::out_of_range("permute ROCm: dimension out of range");
+        }
+        new_shape[i] = input.shape()[d];
+        new_strides[i] = input.strides()[d];
     }
 
     result.mutable_shape() = std::move(new_shape);
@@ -309,8 +332,19 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Ten
     Tensor result;
     HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
 
-    if (dim >= 0) {
-        // Squeeze specific dimension
+    if (dim != SQUEEZE_ALL) {
+        // Squeeze a specific dimension. Normalize negatives and validate range
+        // and that the axis is actually size 1 (mirrors the CPU reference and
+        // Tensor::squeeze). A real squeeze(-1) is distinct from squeeze-all.
+        const int64_t ndim = input.ndim();
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::out_of_range("squeeze ROCm: dimension out of range");
+        }
+        // PyTorch leaves a non-size-1 axis untouched.
+        if (input.shape()[dim] != 1) {
+            return result;
+        }
         auto& r_shape = result.mutable_shape();
         auto& r_strides = result.mutable_strides();
         r_shape.erase(r_shape.begin() + dim);
@@ -1785,6 +1819,16 @@ __global__ void cast_kernel_impl(const SrcT* input, DstT* output, int64_t n) {
     }
 }
 
+// Dedicated any-source -> BFloat16 cast using round-to-nearest-even, instead of
+// the value-truncating hip_bfloat16(float) constructor. Matches the FP8->bf16
+// cast kernels in this file and the CPU/CUDA reference, which round.
+template<typename SrcT>
+__global__ void cast_to_bf16_kernel(const SrcT* input, hip_bfloat16* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        output[idx] = tenzor::rocm::f32_to_bf16_rne(static_cast<float>(input[idx]));
+    }
+}
+
 // Specialization for __half source
 // For floating-point targets we route NaN/±Inf through explicit Float32 bit
 // patterns so the IEEE special values survive round-trips regardless of how
@@ -1881,7 +1925,7 @@ static Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_
                 src, reinterpret_cast<__half*>(result.data<Float16>()), n);
             break;
         case DType::BFloat16:
-            hipLaunchKernelGGL((cast_kernel_impl<SrcT, hip_bfloat16>),
+            hipLaunchKernelGGL((cast_to_bf16_kernel<SrcT>),
                 dim3(num_blocks), dim3(block_size), 0, stream,
                 src, reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
             break;

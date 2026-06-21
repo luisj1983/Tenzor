@@ -41,7 +41,7 @@ protected:
                                float rtol = 1e-5f, float atol = 1e-7f) {
         auto backend_grad_cpu = backend_grad.to(Device::cpu());
         device.synchronize();
-        expectTensorNear(cpu_grad, backend_grad_cpu, atol);
+        expectTensorNear(cpu_grad, backend_grad_cpu, rtol, atol);
     }
 
     void testUnaryGradient(
@@ -229,6 +229,46 @@ TEST_P(GradNNParityTest, MaxPool2dBackward) {
     compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-4f);
 }
 
+// Regression for the Vulkan MaxPool2d Float16 backward bug: the f16 backward
+// shaders wrote F32 atomics into an F16-sized (2-byte/elem) grad_input buffer
+// (OOB + corrupted adjacent halves), so the half-precision input gradient came
+// back as garbage. The fix accumulates into a packed-F16 buffer via CAS,
+// mirroring avg_pool2d_backward_f16. Exercises that path on every backend.
+TEST_P(GradNNParityTest, MaxPool2dBackward_Half) {
+    for (DType dt : {DType::Float16, DType::BFloat16}) {
+        nn::MaxPool2d pool(2);
+        // Use distinct, exactly-representable integer values (0..71) so the F16
+        // argmax matches the F32 reference (no half-precision ties that would
+        // route the unit gradient to a different in-window element). With the
+        // OOB/garbage bug present the grad came back as garbage (large/NaN
+        // values, lost mass); with the fix it is a clean 0/1 indicator matching
+        // CPU exactly.
+        auto input_data = arange(0.0, 72.0, 1.0, DType::Float32, Device::cpu())
+                              .reshape({1, 2, 6, 6});
+
+        auto x_cpu = Variable(input_data.clone(), true);
+        auto out_cpu = pool.forward(x_cpu);
+        auto loss_cpu = tenzor::sum(out_cpu);
+        loss_cpu.backward();
+        auto grad_cpu = x_cpu.grad().value();
+
+        if (device.type == Device::Type::CPU) {
+            EXPECT_GRAD_FLOWS(x_cpu);
+            continue;
+        }
+
+        auto x_dev = Variable(input_data.to(dt).to(device), true);
+        auto out_dev = pool.forward(x_dev);
+        auto loss_dev = tenzor::sum(out_dev);
+        loss_dev.backward();
+        device.synchronize();
+
+        ASSERT_TRUE(x_dev.has_grad()) << dtype_name(dt);
+        auto grad_dev_f32 = x_dev.grad().value().to(DType::Float32).to(Device::cpu());
+        compareGradientWithCPU(grad_cpu, grad_dev_f32, 5e-2f, 5e-2f);
+    }
+}
+
 TEST_P(GradNNParityTest, AvgPool2dBackward) {
     nn::AvgPool2d pool(2);
     auto input_data = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
@@ -322,6 +362,68 @@ TEST_P(GradNNParityTest, LayerNormBackward) {
 
     ASSERT_TRUE(x_dev.has_grad());
     compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
+}
+
+// Regression for the FP16/BF16/FP64 LayerNorm backward grad_weight/grad_bias
+// bug: the half/double cudnn_layer_norm_backward kernels reduced grad_weight /
+// grad_bias with a cross-lane __shfl_down that summed DIFFERENT feature indices
+// and only lane 0 stored, so every feature handled by a non-zero lane received
+// ZERO grad_weight/grad_bias. The FP32 kernel was fixed to per-thread atomicAdd;
+// the half/double kernels were not. This compares grad_weight AND grad_bias of a
+// non-trivial-norm-size LayerNorm against the CPU Float32 reference for each of
+// Float16, BFloat16, Float64. With the bug present, most grad_weight/grad_bias
+// entries are 0 -> large divergence even at loose half tolerances.
+TEST_P(GradNNParityTest, LayerNormBackward_WeightBias_HalfDouble) {
+    if (device.type == Device::Type::CPU) GTEST_SKIP() << "device == CPU";
+    // norm_size = 40 > warpSize so the broken shfl reduction drops features
+    // 1..31 within each warp; pick a non-multiple-of-32 to also catch the
+    // partial-warp undefined-shfl case.
+    const int64_t F = 40;
+    auto input_data  = randn({6, F}, DType::Float32, Device::cpu());
+    auto weight_data = randn({F},    DType::Float32, Device::cpu());
+    auto bias_data   = randn({F},    DType::Float32, Device::cpu());
+    auto gout_data   = randn({6, F}, DType::Float32, Device::cpu());
+
+    // CPU Float32 ground truth for grad_weight / grad_bias.
+    nn::LayerNorm ln_cpu({F});
+    auto cpu_params = ln_cpu.parameters();
+    cpu_params[0]->tensor() = weight_data.clone();  // weight
+    cpu_params[1]->tensor() = bias_data.clone();    // bias
+    ln_cpu.to(Device::cpu());
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto out_cpu = ln_cpu.forward(x_cpu);
+    // Weight the output by a fixed grad so grad_weight/grad_bias are non-trivial.
+    auto loss_cpu = tenzor::sum(out_cpu * Variable(gout_data.clone(), false));
+    loss_cpu.backward();
+    auto gw_cpu = cpu_params[0]->grad().value();
+    auto gb_cpu = cpu_params[1]->grad().value();
+
+    for (DType dt : {DType::Float16, DType::BFloat16, DType::Float64}) {
+        SCOPED_TRACE(::testing::Message() << "dtype=" << static_cast<int>(dt));
+        nn::LayerNorm ln_dev({F});
+        auto dev_params = ln_dev.parameters();
+        dev_params[0]->tensor() = weight_data.clone();
+        dev_params[1]->tensor() = bias_data.clone();
+        ln_dev.to(device);
+        ln_dev.to(dt);
+
+        auto x_dev = Variable(input_data.to(device).to(dt), true);
+        auto out_dev = ln_dev.forward(x_dev);
+        auto loss_dev = tenzor::sum(out_dev * Variable(gout_data.to(device).to(dt), false));
+        loss_dev.backward();
+        device.synchronize();
+
+        ASSERT_TRUE(dev_params[0]->has_grad());
+        ASSERT_TRUE(dev_params[1]->has_grad());
+        // grad_weight / grad_bias back to Float32 for comparison.
+        auto gw_dev = dev_params[0]->grad().value().to(Device::cpu()).to(DType::Float32);
+        auto gb_dev = dev_params[1]->grad().value().to(Device::cpu()).to(DType::Float32);
+        // Half precision: loose tol; the bug produces ~0 so any non-tiny tol catches it.
+        float rtol = (dt == DType::Float64) ? 1e-5f : 2e-2f;
+        float atol = (dt == DType::Float64) ? 1e-6f : 3e-2f;
+        expectTensorNear(gw_cpu, gw_dev, rtol, atol);
+        expectTensorNear(gb_cpu, gb_dev, rtol, atol);
+    }
 }
 
 TEST_P(GradNNParityTest, GroupNormBackward) {

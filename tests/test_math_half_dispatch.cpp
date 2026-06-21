@@ -726,6 +726,79 @@ TEST_P(MathHalfDispatch, PairwiseDistanceFloat16ApproxFloat32) {
     EXPECT_LT(half_to_float_max_abs_err(r16, r32), 5e-3f);
 }
 
+// ----------------------------------------------------------------------------
+// Regression: BFloat16 must be accepted by the unary/binary math wrappers that
+// previously dispatched only Float32/Float64/Float16 and threw on BF16 on the
+// ROCm backend (CPU already supported it). Verify no throw + correct dtype +
+// match the Float32 reference within BF16 tolerance.
+// ----------------------------------------------------------------------------
+namespace {
+void check_bf16_unary_matches_f32(const tenzor::Device& device,
+                                  Tensor (*op)(const Tensor&), float value) {
+    auto xb = make_half<BFloat16>({4}, value, DType::BFloat16, device);
+    Tensor yb;
+    EXPECT_NO_THROW({ yb = op(xb); });
+    EXPECT_EQ(yb.dtype(), DType::BFloat16);
+    auto yf = op(xb.to(DType::Float32));
+    // BF16 has ~2-3 decimal digits; widen and compare loosely.
+    auto diff = tenzor::abs(yb.to(DType::Float32).to(tenzor::Device::cpu()) -
+                            yf.to(DType::Float32).to(tenzor::Device::cpu()));
+    EXPECT_LT(tenzor::max(diff).item<float>(), 0.1f);
+}
+}  // namespace
+
+TEST_P(MathHalfDispatch, SqrtAcceptsBFloat16)   { check_bf16_unary_matches_f32(device, tenzor::sqrt, 0.7f); }
+TEST_P(MathHalfDispatch, ExpAcceptsBFloat16)    { check_bf16_unary_matches_f32(device, tenzor::exp, 0.5f); }
+TEST_P(MathHalfDispatch, LogAcceptsBFloat16)    { check_bf16_unary_matches_f32(device, tenzor::log, 0.7f); }
+TEST_P(MathHalfDispatch, SinAcceptsBFloat16)    { check_bf16_unary_matches_f32(device, tenzor::sin, 0.5f); }
+TEST_P(MathHalfDispatch, CosAcceptsBFloat16)    { check_bf16_unary_matches_f32(device, tenzor::cos, 0.5f); }
+TEST_P(MathHalfDispatch, ErfAcceptsBFloat16)    { check_bf16_unary_matches_f32(device, tenzor::erf, 0.5f); }
+TEST_P(MathHalfDispatch, RsqrtAcceptsBFloat16)  { check_bf16_unary_matches_f32(device, tenzor::rsqrt, 0.7f); }
+TEST_P(MathHalfDispatch, SquareAcceptsBFloat16) { check_bf16_unary_matches_f32(device, tenzor::square, 0.5f); }
+TEST_P(MathHalfDispatch, Log2AcceptsBFloat16)   { check_bf16_unary_matches_f32(device, tenzor::log2, 0.7f); }
+TEST_P(MathHalfDispatch, Exp2AcceptsBFloat16)   { check_bf16_unary_matches_f32(device, tenzor::exp2, 0.5f); }
+
+TEST_P(MathHalfDispatch, HypotAcceptsBFloat16) {
+    auto a = make_half<BFloat16>({4}, 0.5f, DType::BFloat16, device);
+    auto b = make_half<BFloat16>({4}, 1.0f, DType::BFloat16, device);
+    Tensor y;
+    EXPECT_NO_THROW({ y = tenzor::hypot(a, b); });
+    EXPECT_EQ(y.dtype(), DType::BFloat16);
+}
+
+TEST_P(MathHalfDispatch, Atan2AcceptsBFloat16) {
+    auto a = make_half<BFloat16>({4}, 0.5f, DType::BFloat16, device);
+    auto b = make_half<BFloat16>({4}, 1.0f, DType::BFloat16, device);
+    Tensor y;
+    EXPECT_NO_THROW({ y = tenzor::atan2(a, b); });
+    EXPECT_EQ(y.dtype(), DType::BFloat16);
+}
+
+// isnan/isinf/isfinite must detect special values in a BFloat16 tensor (the
+// ROCm kernels previously had no BF16 branch and reported all-false / all-true).
+TEST_P(MathHalfDispatch, IsNanInfFiniteBFloat16) {
+    auto t = Tensor({3}, DType::BFloat16, tenzor::Device::cpu());
+    auto* d = t.data<BFloat16>();
+    d[0] = BFloat16(std::numeric_limits<float>::quiet_NaN());
+    d[1] = BFloat16(std::numeric_limits<float>::infinity());
+    d[2] = BFloat16(1.5f);
+    auto tb = t.to(device);
+
+    auto nan_mask = tenzor::isnan(tb).to(tenzor::Device::cpu());
+    auto inf_mask = tenzor::isinf(tb).to(tenzor::Device::cpu());
+    auto fin_mask = tenzor::isfinite(tb).to(tenzor::Device::cpu());
+    const auto* nanb = static_cast<const uint8_t*>(nan_mask.data_ptr());
+    const auto* infb = static_cast<const uint8_t*>(inf_mask.data_ptr());
+    const auto* finb = static_cast<const uint8_t*>(fin_mask.data_ptr());
+    EXPECT_NE(nanb[0], 0);  // NaN -> isnan true
+    EXPECT_EQ(nanb[2], 0);
+    EXPECT_NE(infb[1], 0);  // Inf -> isinf true
+    EXPECT_EQ(infb[2], 0);
+    EXPECT_EQ(finb[0], 0);  // NaN -> not finite
+    EXPECT_EQ(finb[1], 0);  // Inf -> not finite
+    EXPECT_NE(finb[2], 0);  // 1.5 -> finite
+}
+
 INSTANTIATE_BACKEND_TESTS(MathHalfDispatch);
 
 }  // namespace

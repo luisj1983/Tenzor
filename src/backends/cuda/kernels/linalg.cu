@@ -382,8 +382,9 @@ __global__ void eig_hqr2_kernel(
     T* __restrict__ wr_g, T* __restrict__ wi_g,
     T* __restrict__ vg, int n, long long nbatch)
 {
-    long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (b >= nbatch) return;
+    long long _grid_stride = static_cast<long long>(gridDim.x) * blockDim.x;
+    for (long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         b < nbatch; b += _grid_stride) {
     T* H = Hg + b * n * n;
     T* Z = Zg + b * n * n;
     T* wr = wr_g + b * n;
@@ -590,6 +591,7 @@ __global__ void eig_hqr2_kernel(
             nrm = ::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i) Z[i*n+k]/=nrm;
         }
     }
+    }  // grid-stride loop over batch
 }
 
 // ----------------------------------------------------------------------------
@@ -1551,7 +1553,8 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     auto work = A.contiguous().clone();
     auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
     int eblock = 256;
-    int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);
+    int64_t egrid64 = (nbatch + eblock - 1) / eblock;
+    unsigned egrid = static_cast<unsigned>(egrid64 > 2147483647LL ? 2147483647LL : egrid64);
     if (A.dtype() == DType::Float32) {
         eig_hqr2_kernel<float><<<egrid, eblock, 0, stream>>>(
             work.data<float>(), V.data<float>(), WR.data<float>(), WI.data<float>(),
@@ -2606,13 +2609,12 @@ __global__ void lu_kernel(
     for (int idx = tid; idx < n * n; idx += num_threads) {
         batch_data[idx] = A[idx];
     }
-    if (tid == 0 && info_out) {
-        // Store sign in info if no singularity was detected
-        // We abuse a negative info to store the sign: 0 means positive sign, -1 means negative
-        if (info_out[batch_idx] == 0) {
-            info_out[batch_idx] = sign > 0 ? 0 : -1;
-        }
-    }
+    // info_out is a pure LAPACK-style singularity flag: 0 == success,
+    // k+1 == zero pivot at minor k (set above). The permutation sign is NOT
+    // stored here — every consumer (det) recomputes it from the pivot array
+    // (lu_det_kernel: piv[i] != i+1), so overloading info with the sign only
+    // created a fragile tri-state. `sign` is computed for clarity but unused.
+    (void)sign;
 }
 
 // ============================================================================
@@ -2624,19 +2626,20 @@ __global__ void lu_det_kernel(
     const T* __restrict__ lu_data,
     const int* __restrict__ pivots,
     T* __restrict__ det_out,
-    int n, int nbatch)
+    int n, int64_t nbatch)
 {
-    int b = blockIdx.x * blockDim.x + threadIdx.x;
-    if (b >= nbatch) return;
-
-    const T* mat = lu_data + b * n * n;
-    const int* piv = pivots + b * n;
-    T d = T(1);
-    for (int i = 0; i < n; i++) {
-        d *= mat[i * n + i];
-        if (piv[i] != i + 1) d = -d;
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t b = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         b < nbatch; b += stride) {
+        const T* mat = lu_data + b * n * n;
+        const int* piv = pivots + b * n;
+        T d = T(1);
+        for (int i = 0; i < n; i++) {
+            d *= mat[i * n + i];
+            if (piv[i] != i + 1) d = -d;
+        }
+        det_out[b] = d;
     }
-    det_out[b] = d;
 }
 
 // ============================================================================
@@ -3585,8 +3588,9 @@ __global__ void eig_hqr2_kernel(
     T* __restrict__ wr_g, T* __restrict__ wi_g,
     T* __restrict__ vg, int n, long long nbatch)
 {
-    long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (b >= nbatch) return;
+    long long _grid_stride = static_cast<long long>(gridDim.x) * blockDim.x;
+    for (long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         b < nbatch; b += _grid_stride) {
     T* H = Hg + b * n * n;
     T* Z = Zg + b * n * n;
     T* wr = wr_g + b * n;
@@ -3793,6 +3797,7 @@ __global__ void eig_hqr2_kernel(
             nrm = ::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i) Z[i*n+k]/=nrm;
         }
     }
+    }  // grid-stride loop over batch
 }
 
 
@@ -3843,7 +3848,9 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         CUDA_CHECK_LINALG(cudaGetLastError());
 
         int det_threads = 256;
-        int det_blocks = (nbatch + det_threads - 1) / det_threads;
+        int64_t det_blocks64 = (nbatch + det_threads - 1) / det_threads;
+        unsigned det_blocks = static_cast<unsigned>(
+            det_blocks64 > 2147483647LL ? 2147483647LL : det_blocks64);
         lu_det_kernel<float><<<det_blocks, det_threads, 0, stream>>>(
             work.data<float>(), d_pivots, result.data<float>(), n, nbatch);
         CUDA_CHECK_LINALG(cudaGetLastError());
@@ -3857,7 +3864,9 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         CUDA_CHECK_LINALG(cudaGetLastError());
 
         int det_threads = 256;
-        int det_blocks = (nbatch + det_threads - 1) / det_threads;
+        int64_t det_blocks64 = (nbatch + det_threads - 1) / det_threads;
+        unsigned det_blocks = static_cast<unsigned>(
+            det_blocks64 > 2147483647LL ? 2147483647LL : det_blocks64);
         lu_det_kernel<double><<<det_blocks, det_threads, 0, stream>>>(
             work.data<double>(), d_pivots, result.data<double>(), n, nbatch);
         CUDA_CHECK_LINALG(cudaGetLastError());
@@ -3874,10 +3883,10 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
     validate_linalg_dtype(A, "inv");
     if (A.dtype() == DType::Float16) {
-        return linalg_inv_kernel(A.to(DType::Float32), stream);
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::Float16);
     }
     if (A.dtype() == DType::BFloat16) {
-        return linalg_inv_kernel(A.to(DType::Float32), stream);
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::BFloat16);
     }
 
     auto work = A.contiguous().clone();
@@ -4200,7 +4209,8 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
 
     auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
     int eblock = 256;
-    int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);
+    int64_t egrid64 = (nbatch + eblock - 1) / eblock;
+    unsigned egrid = static_cast<unsigned>(egrid64 > 2147483647LL ? 2147483647LL : egrid64);
     if (A.dtype() == DType::Float32) {
         eig_hqr2_kernel<float><<<egrid, eblock, 0, stream>>>(
             work.data<float>(), V.data<float>(), WR.data<float>(), WI.data<float>(),

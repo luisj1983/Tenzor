@@ -15,6 +15,7 @@
 #pragma once
 
 #include "tenzor/backends/cpu/simd.hpp"
+#include <atomic>
 #include <cstddef>
 #include <string>
 
@@ -77,8 +78,12 @@ struct SIMDDispatch {
     UnaryOpF64 neg_f64;
     UnaryOpF64 abs_f64;
 
-    // Initialization flag
-    bool initialized;
+    // Initialization flag. Atomic with acquire/release ordering: the lazy
+    // first-use check in SimdTrait::apply reads it without holding init_mutex,
+    // so a plain bool would be a data race (UB) and could observe
+    // initialized==true with a half-written function-pointer table. init/reinit
+    // store it last with release; readers load it with acquire.
+    std::atomic<bool> initialized;
 
     // Active ISA level string (set during init, useful for testing)
     const char* simd_level;

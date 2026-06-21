@@ -162,6 +162,47 @@ TEST_P(Conv3dMultiDTypeTest, ZeroInputProducesBiasOnly) {
     }
 }
 
+// Regression: Conv3d Float16 over a large reduction dimension K =
+// C_in * kD*kH*kW must accumulate in Float32, not FP16. The ROCm Float16 path
+// previously called rocblas_hgemm (FP16 accumulate), which overflows past 65504
+// and loses precision over large K; it is now upcast to Float32 at entry. With
+// C_in=32, k=3 -> K = 32*27 = 864 accumulated terms, FP16 accumulation would
+// diverge sharply from the CPU Float32 reference.
+TEST_P(Conv3dMultiDTypeTest, Float16LargeKMatchesFloat32Reference) {
+    if (dtype() != DType::Float16) GTEST_SKIP() << "Float16-specific regression";
+
+    nn::Conv3d conv(/*in=*/32, /*out=*/4, /*kernel=*/3, /*stride=*/1, /*padding=*/1,
+                    /*dilation=*/1, /*groups=*/1, /*bias=*/false);
+    convert_model(conv);
+    auto params = conv.parameters();
+    ASSERT_FALSE(params.empty());
+    // Small constant weight so the exact per-output sum (~K * w * x) stays well
+    // inside Float16 range but is sensitive to accumulation precision.
+    params[0]->tensor().fill_(0.01);
+
+    auto input = tenzor::ones({1, 32, 4, 4, 4}, dtype(), device());
+    Variable input_var(input, false);
+    auto out = conv.forward(input_var);
+    expectAllFinite(out.tensor());
+
+    // CPU Float32 reference with the same (upcast) weights.
+    nn::Conv3d conv_cpu(32, 4, 3, 1, 1, 1, 1, false);
+    conv_cpu.parameters()[0]->tensor().fill_(0.01);
+    auto in_cpu = tenzor::ones({1, 32, 4, 4, 4}, DType::Float32, Device::cpu());
+    Variable in_cpu_var(in_cpu, false);
+    auto ref = conv_cpu.forward(in_cpu_var);
+
+    auto got = out.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto exp = ref.tensor().to(DType::Float32).contiguous();
+    auto* g = got.data<float>();
+    auto* e = exp.data<float>();
+    // FP16 inputs/weights quantize, but with F32 accumulation the result tracks
+    // the reference closely. FP16 accumulation would drift far beyond this.
+    for (int64_t i = 0; i < got.numel(); ++i) {
+        EXPECT_NEAR(g[i], e[i], 0.05f) << "index " << i;
+    }
+}
+
 // ============================================================================
 // Instantiation
 // ============================================================================

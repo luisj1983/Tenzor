@@ -983,6 +983,40 @@ private:
 };
 
 /**
+ * @brief Whether forward ops should retain their input Variables (with grad_fn)
+ *        in saved_variables_, so a subsequent create_graph backward can build a
+ *        correct second-order graph THROUGH saved intermediates.
+ *
+ * Off by default: retaining input Variables in every forward op would keep the
+ * forward graph alive until backward, a memory regression for ordinary first-
+ * order training. hvp()/hessian()/jacobian()/jvp() opt in for the duration of
+ * the user `func` they evaluate, so exact forward-over-reverse / double-backward
+ * works without taxing the common path.
+ *
+ * @return true if higher-order graph retention is active on this thread.
+ */
+auto higher_order_graph_retention_enabled() -> bool;
+
+/**
+ * @brief Set higher-order graph retention state (thread-local).
+ */
+auto set_higher_order_graph_retention(bool enabled) -> void;
+
+/**
+ * @brief RAII guard enabling higher-order graph retention for its scope.
+ */
+class HigherOrderGraphRetentionGuard {
+public:
+    HigherOrderGraphRetentionGuard();
+    ~HigherOrderGraphRetentionGuard();
+    HigherOrderGraphRetentionGuard(const HigherOrderGraphRetentionGuard&) = delete;
+    HigherOrderGraphRetentionGuard& operator=(const HigherOrderGraphRetentionGuard&) = delete;
+
+private:
+    bool prev_state_;
+};
+
+/**
  * @brief Set global gradient computation state.
  *
  * @param enabled Whether to enable gradient computation

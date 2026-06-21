@@ -188,39 +188,51 @@ public:
 
     /// Execute the graph to materialize a specific node.
     ///
-    /// Thread-safe: a graph-level lock serialises execute()/flush() so each
-    /// node is computed at most once. Without it, two threads calling
-    /// materialize() on LazyTensors sharing this graph could both observe
-    /// !is_materialized() (a check-then-act TOCTOU window — the per-node
-    /// materialize_mutex_ only guards the optional, not the compute) and both
-    /// run execute_node() on the same node, wasting work and, for
-    /// non-deterministic kernels, caching whichever result landed last.
+    /// Thread-safe via PER-NODE locking, not a graph-level lock: at-most-once
+    /// execution is enforced by LazyNode::materialize_with() (the compute mutex
+    /// lives on the LazyNode itself). That node-owned lock is shared across every
+    /// LazyGraph that references the node, which is what makes the post-merge
+    /// case correct — after merge_graphs() appends operand B's nodes into base A
+    /// in place, the same LazyNode objects are reachable from two distinct graphs
+    /// and a graph-wide lock would let two graphs lock DIFFERENT mutexes and both
+    /// run the shared node's kernel. Disjoint nodes may still compute
+    /// concurrently. (Do NOT reintroduce a graph-level execute lock.)
     auto execute(const std::shared_ptr<LazyNode>& target) -> Tensor;
 
     /// Run every unrealised node in topological order. Result is bit-identical
     /// to invoking the same ops eagerly (modulo non-determinism in the kernels
-    /// themselves). Serialised against execute() via the graph-level lock.
+    /// themselves). At-most-once execution is enforced per node via
+    /// LazyNode::materialize_with (same model as execute()), not a graph lock.
+    ///
+    /// Forwards to the canonical graph: if this graph was the non-returned
+    /// operand of a merge_graphs() call its own nodes_ is stale, so flushing it
+    /// directly would skip every node added after the merge. Following the
+    /// canonical pointer flushes the complete merged graph instead.
     void flush();
 
-    /// Get all nodes in topological order.
-    auto nodes() const -> const std::vector<std::shared_ptr<LazyNode>>& { return nodes_; }
+    /// Get all nodes in topological order. Forwards to the canonical graph so a
+    /// post-merge non-canonical operand reports the full merged node set rather
+    /// than its own stale snapshot.
+    auto nodes() const -> const std::vector<std::shared_ptr<LazyNode>>& {
+        const LazyGraph* c = canonical();
+        return c->nodes_;
+    }
 
-    /// Get number of nodes.
-    auto size() const -> size_t { return nodes_.size(); }
+    /// Get number of nodes (of the canonical graph).
+    auto size() const -> size_t { return nodes().size(); }
 
     /// Combine two lazy subgraphs into a single materialisation context and
     /// return the canonical graph to use going forward.
     ///
-    /// IMPORTANT (staleness contract): this appends the smaller graph's nodes
-    /// into the larger one IN PLACE (an O(N) optimisation over allocating a
-    /// fresh union at every chaining step) and returns that enlarged base. The
-    /// other operand's LazyGraph object is left untouched, so LazyTensors that
-    /// still reference it will see a graph that does NOT contain the newly
-    /// added op nodes. Only the returned graph is canonical. materialize()
-    /// remains correct because it traverses shared_ptr node edges, not nodes_
-    /// membership; but size()/nodes()/flush() on a non-returned operand graph
-    /// may observe an incomplete view. Because of the in-place mutation, merge
-    /// is order-dependent and not thread-safe; callers must merge on a single
+    /// This appends the smaller graph's nodes into the larger one IN PLACE (an
+    /// O(N) optimisation over allocating a fresh union at every chaining step)
+    /// and returns that enlarged base. The other operand's LazyGraph object is
+    /// left holding its pre-merge nodes_, BUT it is given a canonical_ pointer to
+    /// the base; flush()/nodes()/size() follow that pointer, so introspecting a
+    /// non-returned operand now reports the full merged graph instead of a stale
+    /// view. materialize() was always correct (it traverses shared_ptr node
+    /// edges, not nodes_ membership). Because of the in-place mutation, merge is
+    /// order-dependent and not thread-safe; callers must merge on a single
     /// thread (typically the recording thread).
     static auto merge_graphs(const std::shared_ptr<LazyGraph>& a,
                              const std::shared_ptr<LazyGraph>& b)
@@ -229,9 +241,25 @@ public:
 private:
     std::vector<std::shared_ptr<LazyNode>> nodes_;
 
-    /// Serialises execute()/flush() so each node is computed at most once even
-    /// under concurrent materialize() on LazyTensors sharing this graph.
-    std::mutex execute_mutex_;
+    /// Set by merge_graphs() on the non-returned operand to point at the base
+    /// (canonical) graph that absorbed its nodes. weak_ptr so a discarded
+    /// operand graph does not keep the canonical graph (and its nodes) alive.
+    /// Empty/expired on a graph that has never been the loser of a merge.
+    std::weak_ptr<LazyGraph> canonical_;
+
+    /// Resolve the canonical graph by following canonical_ until it is empty or
+    /// expired (a chain of merges collapses to the final base). Returns `this`
+    /// when there is no live canonical override.
+    auto canonical() const -> const LazyGraph* {
+        const LazyGraph* g = this;
+        // Bounded by merge depth; each hop strictly advances to the absorbing
+        // base, and bases never point back, so this terminates.
+        while (auto next = g->canonical_.lock()) {
+            if (next.get() == g) break;  // defensive: self-reference
+            g = next.get();
+        }
+        return g;
+    }
 
     /// Execute a single node given materialized inputs.
     auto execute_node(const std::shared_ptr<LazyNode>& node) -> Tensor;

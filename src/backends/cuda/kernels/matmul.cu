@@ -12,6 +12,7 @@
 #include <string>
 #include <limits>
 #include <climits>
+#include <algorithm>
 
 #ifdef TENZOR_HAS_CUBLAS
 #include <cublas_v2.h>
@@ -1182,24 +1183,30 @@ void batched_matmul_cublas_f32(
     const float beta = 0.0f;
 
     // Use cublasGemmStridedBatchedEx for Tensor Core acceleration
-    // This enables TF32 on Ampere+ GPUs for ~2x speedup over cublasSgemmStridedBatched
-    cublasStatus_t status = cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_N,        // B not transposed (for row-major trick)
-        CUBLAS_OP_N,        // A not transposed
-        N, M, K,            // Dimensions (swapped for row-major)
-        &alpha,
-        B, CUDA_R_32F, N, stride_b,   // B matrix
-        A, CUDA_R_32F, K, stride_a,   // A matrix
-        &beta,
-        C, CUDA_R_32F, N, stride_c,   // C matrix
-        batch_size,
-        matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
-        CUBLAS_GEMM_DEFAULT           // Let cuBLAS pick best algorithm
-    );
+    // This enables TF32 on Ampere+ GPUs for ~2x speedup over cublasSgemmStridedBatched.
+    // batchCount is int; chunk the int64 batch into <= INT_MAX pieces so a batch
+    // dimension larger than INT_MAX is computed correctly, not silently truncated.
+    constexpr int64_t kMaxBatch = 2147483647LL;  // INT_MAX
+    for (int64_t base = 0; base < batch_size; base += kMaxBatch) {
+        int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, batch_size - base));
+        cublasStatus_t status = cublasGemmStridedBatchedEx(
+            handle,
+            CUBLAS_OP_N,        // B not transposed (for row-major trick)
+            CUBLAS_OP_N,        // A not transposed
+            N, M, K,            // Dimensions (swapped for row-major)
+            &alpha,
+            B + base * stride_b, CUDA_R_32F, N, stride_b,   // B matrix
+            A + base * stride_a, CUDA_R_32F, K, stride_a,   // A matrix
+            &beta,
+            C + base * stride_c, CUDA_R_32F, N, stride_c,   // C matrix
+            batch_chunk,
+            matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT           // Let cuBLAS pick best algorithm
+        );
 
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error("cuBLAS batched GemmEx failed with status: " + std::to_string(status));
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS batched GemmEx failed with status: " + std::to_string(status));
+        }
     }
 }
 
@@ -1214,21 +1221,26 @@ void batched_matmul_cublas_f64(
     const double alpha = 1.0;
     const double beta = 0.0;
 
-    cublasStatus_t status = cublasDgemmStridedBatched(
-        handle,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        N, M, K,
-        &alpha,
-        B, N, stride_b,
-        A, K, stride_a,
-        &beta,
-        C, N, stride_c,
-        batch_size
-    );
+    // batchCount is int; chunk the int64 batch into <= INT_MAX pieces.
+    constexpr int64_t kMaxBatch = 2147483647LL;  // INT_MAX
+    for (int64_t base = 0; base < batch_size; base += kMaxBatch) {
+        int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, batch_size - base));
+        cublasStatus_t status = cublasDgemmStridedBatched(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            N, M, K,
+            &alpha,
+            B + base * stride_b, N, stride_b,
+            A + base * stride_a, K, stride_a,
+            &beta,
+            C + base * stride_c, N, stride_c,
+            batch_chunk
+        );
 
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error("cuBLAS batched DGEMM failed");
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS batched DGEMM failed");
+        }
     }
 }
 
@@ -1281,24 +1293,29 @@ void batched_matmul_cublas_bf16(
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
-    // Use cublasGemmStridedBatchedEx with BF16 input/output and FP32 compute
-    cublasStatus_t status = cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_N,        // B not transposed (for row-major trick)
-        CUBLAS_OP_N,        // A not transposed
-        N, M, K,            // Dimensions (swapped for row-major)
-        &alpha,
-        B, CUDA_R_16BF, N, stride_b,   // B matrix
-        A, CUDA_R_16BF, K, stride_a,   // A matrix
-        &beta,
-        C, CUDA_R_16BF, N, stride_c,   // C matrix
-        batch_size,
-        CUBLAS_COMPUTE_32F,           // Compute in FP32 for numerical stability
-        CUBLAS_GEMM_DEFAULT
-    );
+    // Use cublasGemmStridedBatchedEx with BF16 input/output and FP32 compute.
+    // batchCount is int; chunk the int64 batch into <= INT_MAX pieces.
+    constexpr int64_t kMaxBatch = 2147483647LL;  // INT_MAX
+    for (int64_t base = 0; base < batch_size; base += kMaxBatch) {
+        int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, batch_size - base));
+        cublasStatus_t status = cublasGemmStridedBatchedEx(
+            handle,
+            CUBLAS_OP_N,        // B not transposed (for row-major trick)
+            CUBLAS_OP_N,        // A not transposed
+            N, M, K,            // Dimensions (swapped for row-major)
+            &alpha,
+            B + base * stride_b, CUDA_R_16BF, N, stride_b,   // B matrix
+            A + base * stride_a, CUDA_R_16BF, K, stride_a,   // A matrix
+            &beta,
+            C + base * stride_c, CUDA_R_16BF, N, stride_c,   // C matrix
+            batch_chunk,
+            CUBLAS_COMPUTE_32F,           // Compute in FP32 for numerical stability
+            CUBLAS_GEMM_DEFAULT
+        );
 
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error("cuBLAS batched GemmEx (BF16) failed with status: " + std::to_string(status));
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS batched GemmEx (BF16) failed with status: " + std::to_string(status));
+        }
     }
 }
 
@@ -1356,24 +1373,29 @@ void batched_matmul_cublas_f16(
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
-    // Use cublasGemmStridedBatchedEx with FP16 input/output and FP32 compute
-    cublasStatus_t status = cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_N,        // B not transposed (for row-major trick)
-        CUBLAS_OP_N,        // A not transposed
-        N, M, K,            // Dimensions (swapped for row-major)
-        &alpha,
-        B, CUDA_R_16F, N, stride_b,   // B matrix
-        A, CUDA_R_16F, K, stride_a,   // A matrix
-        &beta,
-        C, CUDA_R_16F, N, stride_c,   // C matrix
-        batch_size,
-        CUBLAS_COMPUTE_32F,           // Compute in FP32 for numerical stability
-        CUBLAS_GEMM_DEFAULT
-    );
+    // Use cublasGemmStridedBatchedEx with FP16 input/output and FP32 compute.
+    // batchCount is int; chunk the int64 batch into <= INT_MAX pieces.
+    constexpr int64_t kMaxBatch = 2147483647LL;  // INT_MAX
+    for (int64_t base = 0; base < batch_size; base += kMaxBatch) {
+        int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, batch_size - base));
+        cublasStatus_t status = cublasGemmStridedBatchedEx(
+            handle,
+            CUBLAS_OP_N,        // B not transposed (for row-major trick)
+            CUBLAS_OP_N,        // A not transposed
+            N, M, K,            // Dimensions (swapped for row-major)
+            &alpha,
+            B + base * stride_b, CUDA_R_16F, N, stride_b,   // B matrix
+            A + base * stride_a, CUDA_R_16F, K, stride_a,   // A matrix
+            &beta,
+            C + base * stride_c, CUDA_R_16F, N, stride_c,   // C matrix
+            batch_chunk,
+            CUBLAS_COMPUTE_32F,           // Compute in FP32 for numerical stability
+            CUBLAS_GEMM_DEFAULT
+        );
 
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error("cuBLAS batched GemmEx (FP16) failed with status: " + std::to_string(status));
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS batched GemmEx (FP16) failed with status: " + std::to_string(status));
+        }
     }
 
     // Saturate output: clamp ±Inf to ±65504 to prevent NaN propagation
@@ -1699,29 +1721,37 @@ void batched_matmul_f32(
     // Select architecture-appropriate tile sizes
     int dev = 0; cudaGetDevice(&dev);
     auto tc = get_tile_config(dev);
-    if (tc.tile_m == 16) {
-        dim3 block(16, 16);
-        dim3 grid((N + 15) / 16, (M + 15) / 16, batch_size);
-        batched_matmul_tiled_f32_kernel<16, 16, 16>
-            <<<grid, block, 0, stream>>>(
-                A, B, C, batch_size, M, N, K,
-                stride_a, stride_b, stride_c);
-    } else if (tc.tile_k == 32) {
-        dim3 block(32, 32);
-        dim3 grid((N + 31) / 32, (M + 31) / 32, batch_size);
-        batched_matmul_tiled_f32_kernel<32, 32, 32>
-            <<<grid, block, 0, stream>>>(
-                A, B, C, batch_size, M, N, K,
-                stride_a, stride_b, stride_c);
-    } else {
-        dim3 block(TILE_SIZE, TILE_SIZE);
-        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-                  (M + TILE_SIZE - 1) / TILE_SIZE,
-                  batch_size);
-        batched_matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
-            <<<grid, block, 0, stream>>>(
-                A, B, C, batch_size, M, N, K,
-                stride_a, stride_b, stride_c);
+    // gridDim.z is capped at 65535; chunk the batch and offset base pointers.
+    constexpr int64_t kMaxGridZ = 65535;
+    for (int64_t bb = 0; bb < batch_size; bb += kMaxGridZ) {
+        int z = static_cast<int>(std::min<int64_t>(kMaxGridZ, batch_size - bb));
+        const float* Ab = A + bb * stride_a;
+        const float* Bb = B + bb * stride_b;
+        float* Cb = C + bb * stride_c;
+        if (tc.tile_m == 16) {
+            dim3 block(16, 16);
+            dim3 grid((N + 15) / 16, (M + 15) / 16, z);
+            batched_matmul_tiled_f32_kernel<16, 16, 16>
+                <<<grid, block, 0, stream>>>(
+                    Ab, Bb, Cb, z, M, N, K,
+                    stride_a, stride_b, stride_c);
+        } else if (tc.tile_k == 32) {
+            dim3 block(32, 32);
+            dim3 grid((N + 31) / 32, (M + 31) / 32, z);
+            batched_matmul_tiled_f32_kernel<32, 32, 32>
+                <<<grid, block, 0, stream>>>(
+                    Ab, Bb, Cb, z, M, N, K,
+                    stride_a, stride_b, stride_c);
+        } else {
+            dim3 block(TILE_SIZE, TILE_SIZE);
+            dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                      (M + TILE_SIZE - 1) / TILE_SIZE,
+                      z);
+            batched_matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+                <<<grid, block, 0, stream>>>(
+                    Ab, Bb, Cb, z, M, N, K,
+                    stride_a, stride_b, stride_c);
+        }
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -1747,29 +1777,37 @@ void batched_matmul_f64(
     // Select architecture-appropriate tile sizes
     int dev = 0; cudaGetDevice(&dev);
     auto tc = get_tile_config(dev);
-    if (tc.tile_m == 16) {
-        dim3 block(16, 16);
-        dim3 grid((N + 15) / 16, (M + 15) / 16, batch_size);
-        batched_matmul_tiled_f64_kernel<16, 16, 16>
-            <<<grid, block, 0, stream>>>(
-                A, B, C, batch_size, M, N, K,
-                stride_a, stride_b, stride_c);
-    } else if (tc.tile_k == 32) {
-        dim3 block(32, 32);
-        dim3 grid((N + 31) / 32, (M + 31) / 32, batch_size);
-        batched_matmul_tiled_f64_kernel<32, 32, 32>
-            <<<grid, block, 0, stream>>>(
-                A, B, C, batch_size, M, N, K,
-                stride_a, stride_b, stride_c);
-    } else {
-        dim3 block(TILE_SIZE, TILE_SIZE);
-        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-                  (M + TILE_SIZE - 1) / TILE_SIZE,
-                  batch_size);
-        batched_matmul_tiled_f64_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
-            <<<grid, block, 0, stream>>>(
-                A, B, C, batch_size, M, N, K,
-                stride_a, stride_b, stride_c);
+    // gridDim.z is capped at 65535; chunk the batch and offset base pointers.
+    constexpr int64_t kMaxGridZ = 65535;
+    for (int64_t bb = 0; bb < batch_size; bb += kMaxGridZ) {
+        int z = static_cast<int>(std::min<int64_t>(kMaxGridZ, batch_size - bb));
+        const double* Ab = A + bb * stride_a;
+        const double* Bb = B + bb * stride_b;
+        double* Cb = C + bb * stride_c;
+        if (tc.tile_m == 16) {
+            dim3 block(16, 16);
+            dim3 grid((N + 15) / 16, (M + 15) / 16, z);
+            batched_matmul_tiled_f64_kernel<16, 16, 16>
+                <<<grid, block, 0, stream>>>(
+                    Ab, Bb, Cb, z, M, N, K,
+                    stride_a, stride_b, stride_c);
+        } else if (tc.tile_k == 32) {
+            dim3 block(32, 32);
+            dim3 grid((N + 31) / 32, (M + 31) / 32, z);
+            batched_matmul_tiled_f64_kernel<32, 32, 32>
+                <<<grid, block, 0, stream>>>(
+                    Ab, Bb, Cb, z, M, N, K,
+                    stride_a, stride_b, stride_c);
+        } else {
+            dim3 block(TILE_SIZE, TILE_SIZE);
+            dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                      (M + TILE_SIZE - 1) / TILE_SIZE,
+                      z);
+            batched_matmul_tiled_f64_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+                <<<grid, block, 0, stream>>>(
+                    Ab, Bb, Cb, z, M, N, K,
+                    stride_a, stride_b, stride_c);
+        }
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -1806,16 +1844,22 @@ void batched_matmul_f16(
 
     if (use_tensor_cores) {
         // Use Tensor Cores for optimal performance
-        // 1 warp (32 threads) per block, each warp computes one 16x16 tile
+        // 1 warp (32 threads) per block, each warp computes one 16x16 tile.
+        // gridDim.z is capped at 65535, so chunk the batch over grid.z.
         dim3 block(32, 1);  // 1 warp per block (32 threads)
-        dim3 grid((N + WMMA_N - 1) / WMMA_N,
-                  (M + WMMA_M - 1) / WMMA_M,
-                  batch_size);
+        constexpr int64_t kMaxGridZ = 65535;
+        for (int64_t bb = 0; bb < batch_size; bb += kMaxGridZ) {
+            int z = static_cast<int>(std::min<int64_t>(kMaxGridZ, batch_size - bb));
+            dim3 grid((N + WMMA_N - 1) / WMMA_N,
+                      (M + WMMA_M - 1) / WMMA_M,
+                      z);
 
-        batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
-            A, B, C, batch_size, M, N, K,
-            stride_a, stride_b, stride_c);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
+            batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
+                A + bb * stride_a, B + bb * stride_b, C + bb * stride_c,
+                z, M, N, K,
+                stride_a, stride_b, stride_c);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
     } else if (M >= WMMA_M && N >= WMMA_N && K >= WMMA_K && padding_overhead_ok(M, N, K)) {
         // Dimensions are large enough for Tensor Cores but not aligned.
         // Pad to multiples of 16 to enable TC acceleration when overhead is acceptable.
@@ -1856,16 +1900,22 @@ void batched_matmul_f16(
                 cudaMemcpyDeviceToDevice, stream));
         }
 
-        // Run batched Tensor Core kernel on padded matrices
+        // Run batched Tensor Core kernel on padded matrices. gridDim.z is capped
+        // at 65535, so chunk the batch over grid.z with offset base pointers.
         dim3 block(32, 1);
-        dim3 grid((Np + WMMA_N - 1) / WMMA_N,
-                  (Mp + WMMA_M - 1) / WMMA_M,
-                  batch_size);
+        constexpr int64_t kMaxGridZ = 65535;
+        for (int64_t bb = 0; bb < batch_size; bb += kMaxGridZ) {
+            int z = static_cast<int>(std::min<int64_t>(kMaxGridZ, batch_size - bb));
+            dim3 grid((Np + WMMA_N - 1) / WMMA_N,
+                      (Mp + WMMA_M - 1) / WMMA_M,
+                      z);
 
-        batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
-            A_pad, B_pad, C_pad, batch_size, Mp, Np, Kp,
-            stride_a_pad, stride_b_pad, stride_c_pad);
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
+            batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
+                A_pad + bb * stride_a_pad, B_pad + bb * stride_b_pad,
+                C_pad + bb * stride_c_pad, z, Mp, Np, Kp,
+                stride_a_pad, stride_b_pad, stride_c_pad);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
 
         // Copy results back: extract top-left M x N from each batch element
         for (int64_t b = 0; b < batch_size; ++b) {
@@ -1879,19 +1929,24 @@ void batched_matmul_f16(
         // CudaAsyncBuffer RAII handles cleanup automatically
     } else {
         // Batched tiled F16 kernel using blockIdx.z for batch indexing
-        // (either too small for TC or padding overhead too high)
+        // (either too small for TC or padding overhead too high). gridDim.z is
+        // capped at 65535, so chunk the batch and advance the base pointers.
         dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
-        dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
-                  (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
-                  batch_size);
+        constexpr int64_t kMaxGridZ = 65535;
+        for (int64_t bb = 0; bb < batch_size; bb += kMaxGridZ) {
+            int z = static_cast<int>(std::min<int64_t>(kMaxGridZ, batch_size - bb));
+            dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
+                      (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
+                      z);
 
-        batched_matmul_tiled_f16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_F16>
-            <<<grid, block, 0, stream>>>(
-                A, B, C,
-                M, N, K,
-                K, N, N,  // lda, ldb, ldc for row-major
-                stride_a, stride_b, stride_c);
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            batched_matmul_tiled_f16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_F16>
+                <<<grid, block, 0, stream>>>(
+                    A + bb * stride_a, B + bb * stride_b, C + bb * stride_c,
+                    M, N, K,
+                    K, N, N,  // lda, ldb, ldc for row-major
+                    stride_a, stride_b, stride_c);
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -1915,18 +1970,23 @@ void batched_matmul_bf16(
     batched_matmul_cublas_bf16(A, B, C, batch_size, M, N, K,
                                 stride_a, stride_b, stride_c, stream);
 #else
-    // Fallback to custom batched kernel when cuBLAS is not available
+    // Fallback to custom batched kernel when cuBLAS is not available.
+    // gridDim.z is capped at 65535; chunk the batch and offset base pointers.
     dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
-    dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
-              (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
-              batch_size);
+    constexpr int64_t kMaxGridZ = 65535;
+    for (int64_t bb = 0; bb < batch_size; bb += kMaxGridZ) {
+        int z = static_cast<int>(std::min<int64_t>(kMaxGridZ, batch_size - bb));
+        dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
+                  (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
+                  z);
 
-    batched_matmul_tiled_bf16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_F16>
-        <<<grid, block, 0, stream>>>(
-            A, B, C,
-            M, N, K,
-            K, N, N,  // lda, ldb, ldc for row-major
-            stride_a, stride_b, stride_c);
+        batched_matmul_tiled_bf16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_F16>
+            <<<grid, block, 0, stream>>>(
+                A + bb * stride_a, B + bb * stride_b, C + bb * stride_c,
+                M, N, K,
+                K, N, N,  // lda, ldb, ldc for row-major
+                stride_a, stride_b, stride_c);
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 #endif
@@ -2565,41 +2625,50 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
 #ifdef TENZOR_HAS_CUBLAS
     cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
+    // batchCount is int; chunk the int64 batch B into <= INT_MAX pieces so a
+    // batch dimension larger than INT_MAX is computed correctly, not truncated.
+    constexpr int64_t kMaxBatch = 2147483647LL;  // INT_MAX
     if (batch1.dtype() == DType::Float32) {
         float alpha_f = static_cast<float>(alpha);
         float beta_f = static_cast<float>(beta);
-        cublasStatus_t status = cublasGemmStridedBatchedEx(
-            handle,
-            CUBLAS_OP_N, CUBLAS_OP_N,
-            N, M, K,
-            &alpha_f,
-            b2_cont.data<float>(), CUDA_R_32F, N, stride_b,
-            b1_cont.data<float>(), CUDA_R_32F, K, stride_a,
-            &beta_f,
-            output.data<float>(), CUDA_R_32F, N, stride_c,
-            B,
-            matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
-            CUBLAS_GEMM_DEFAULT
-        );
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("cuBLAS baddbmm batched GemmEx failed: " + std::to_string(status));
+        for (int64_t base = 0; base < B; base += kMaxBatch) {
+            int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, B - base));
+            cublasStatus_t status = cublasGemmStridedBatchedEx(
+                handle,
+                CUBLAS_OP_N, CUBLAS_OP_N,
+                N, M, K,
+                &alpha_f,
+                b2_cont.data<float>() + base * stride_b, CUDA_R_32F, N, stride_b,
+                b1_cont.data<float>() + base * stride_a, CUDA_R_32F, K, stride_a,
+                &beta_f,
+                output.data<float>() + base * stride_c, CUDA_R_32F, N, stride_c,
+                batch_chunk,
+                matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+                CUBLAS_GEMM_DEFAULT
+            );
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                throw std::runtime_error("cuBLAS baddbmm batched GemmEx failed: " + std::to_string(status));
+            }
         }
     } else if (batch1.dtype() == DType::Float64) {
         double alpha_d = alpha;
         double beta_d = beta;
-        cublasStatus_t status = cublasDgemmStridedBatched(
-            handle,
-            CUBLAS_OP_N, CUBLAS_OP_N,
-            N, M, K,
-            &alpha_d,
-            b2_cont.data<double>(), N, stride_b,
-            b1_cont.data<double>(), K, stride_a,
-            &beta_d,
-            output.data<double>(), N, stride_c,
-            B
-        );
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("cuBLAS baddbmm batched DGEMM failed");
+        for (int64_t base = 0; base < B; base += kMaxBatch) {
+            int batch_chunk = static_cast<int>(std::min<int64_t>(kMaxBatch, B - base));
+            cublasStatus_t status = cublasDgemmStridedBatched(
+                handle,
+                CUBLAS_OP_N, CUBLAS_OP_N,
+                N, M, K,
+                &alpha_d,
+                b2_cont.data<double>() + base * stride_b, N, stride_b,
+                b1_cont.data<double>() + base * stride_a, K, stride_a,
+                &beta_d,
+                output.data<double>() + base * stride_c, N, stride_c,
+                batch_chunk
+            );
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                throw std::runtime_error("cuBLAS baddbmm batched DGEMM failed");
+            }
         }
     } else {
         throw std::runtime_error("baddbmm: unsupported dtype on CUDA");

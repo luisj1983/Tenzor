@@ -2860,6 +2860,25 @@ __global__ void rrelu_train_kernel_f32(const float* input, float* output, int64_
     }
 }
 
+// Type-generic RReLU training kernel: the Philox uniform is computed in float
+// (slope precision is not the concern) but the multiply happens in T, so a
+// Float64 model gets the defining per-element random negative slope instead of
+// silently falling back to the deterministic eval-mode midpoint.
+template<typename T>
+__global__ void rrelu_train_kernel(const T* input, T* output, int64_t n,
+                                   float lower, float upper, unsigned long long seed) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        if (x >= T(0)) {
+            output[idx] = x;
+        } else {
+            float u = rrelu_philox_uniform(seed, idx);
+            T slope = static_cast<T>(lower + u * (upper - lower));
+            output[idx] = slope * x;
+        }
+    }
+}
+
 // RReLU backward
 template<typename T>
 __global__ void rrelu_backward_kernel_impl(const T* grad, const T* input, T* output,
@@ -2900,20 +2919,23 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
     float mid = (lower + upper) / 2.0f;
     int num_blocks = get_num_blocks(n);
 
+    // Seed from the library's global RNG so manual_seed is honored / RReLU is
+    // reproducible. Fold in a process-wide monotonic counter with SplitMix64
+    // mixing so two invocations within the same clock tick cannot collide,
+    // matching the CUDA RReLU implementation.
+    auto make_rrelu_seed = []() -> unsigned long long {
+        static std::atomic<uint64_t> rrelu_call_counter{0};
+        uint64_t mix = rrelu_call_counter.fetch_add(1, std::memory_order_relaxed);
+        mix = (mix + 0x9E3779B97F4A7C15ULL);
+        mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
+        mix = mix ^ (mix >> 31);
+        return static_cast<unsigned long long>(::tenzor::get_global_seed() ^ mix);
+    };
+
     if (input.dtype() == DType::Float32) {
         if (training) {
-            // Seed from the library's global RNG so manual_seed is honored /
-            // RReLU is reproducible. Fold in a process-wide monotonic counter
-            // with SplitMix64 mixing so two invocations within the same clock
-            // tick cannot collide, matching the CUDA RReLU implementation.
-            static std::atomic<uint64_t> rrelu_call_counter{0};
-            uint64_t mix = rrelu_call_counter.fetch_add(1, std::memory_order_relaxed);
-            mix = (mix + 0x9E3779B97F4A7C15ULL);
-            mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
-            mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
-            mix = mix ^ (mix >> 31);
-            unsigned long long seed =
-                static_cast<unsigned long long>(::tenzor::get_global_seed() ^ mix);
+            unsigned long long seed = make_rrelu_seed();
             hipLaunchKernelGGL(rrelu_train_kernel_f32, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                               input.data<float>(), result.data<float>(), n, lower, upper, seed);
         } else {
@@ -2922,10 +2944,12 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
         }
     } else if (input.dtype() == DType::Float64) {
         if (training) {
-            // For Float64 in training, use eval-mode midpoint (no Float64 PCG kernel)
-            double mid_d = static_cast<double>(mid);
-            hipLaunchKernelGGL(rrelu_eval_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                              input.data<double>(), result.data<double>(), n, mid_d);
+            // Native Float64 stochastic slope (the Philox uniform is computed in
+            // float, the slope*x multiply in double) — RReLU training must apply
+            // a per-element random negative slope, not the deterministic midpoint.
+            unsigned long long seed = make_rrelu_seed();
+            hipLaunchKernelGGL(rrelu_train_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              input.data<double>(), result.data<double>(), n, lower, upper, seed);
         } else {
             double mid_d = static_cast<double>(mid);
             hipLaunchKernelGGL(rrelu_eval_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,

@@ -107,7 +107,7 @@ auto argmin(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Te
 
 auto argsort(const Tensor& input, int64_t dim, bool descending) -> Tensor {
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, normalize_reduce_dim(dim, static_cast<int64_t>(input.shape().size()), "argsort"));
     attrs.set(AttrKey::Descending, descending);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ArgSort, inputs, attrs)[0];
@@ -505,7 +505,7 @@ auto quantile(const Tensor& input, double q, std::optional<int64_t> dim,
     auto [prepared, d] = prepare_flatten_reduce(input, dim, "quantile");
     std::array<Tensor, 1> inputs = {prepared};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Alpha, q);  // reuse Alpha for the quantile value
+    attrs.set(AttrKey::Q, q);  // dedicated quantile key (avoids generic Alpha bleed)
     attrs.set(AttrKey::Dim, d);
     attrs.set(AttrKey::Keepdim, keepdim);
     return dispatch<OpId::Quantile>(inputs, attrs)[0];
@@ -519,7 +519,7 @@ auto nanquantile(const Tensor& input, double q, std::optional<int64_t> dim,
     auto [prepared, d] = prepare_flatten_reduce(input, dim, "nanquantile");
     std::array<Tensor, 1> inputs = {prepared};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Alpha, q);
+    attrs.set(AttrKey::Q, q);  // dedicated quantile key (avoids generic Alpha bleed)
     attrs.set(AttrKey::Dim, d);
     attrs.set(AttrKey::Keepdim, keepdim);
     return dispatch<OpId::Nanquantile>(inputs, attrs)[0];
@@ -539,10 +539,11 @@ auto histc(const Tensor& input, int64_t bins, double min_val, double max_val) ->
     }
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::N, bins);
-    attrs.set(AttrKey::Start, static_cast<int64_t>(0));  // reuse for min/max
-    attrs.set(AttrKey::Alpha, min_val);
-    attrs.set(AttrKey::Beta, max_val);
+    // Use the dedicated histogram keys (shared with OpId::Histogram) rather than
+    // the generic N (FFT length) / Alpha / Beta keys, to avoid cross-op bleed.
+    attrs.set(AttrKey::NumBins, bins);
+    attrs.set(AttrKey::Min, min_val);
+    attrs.set(AttrKey::Max, max_val);
     return dispatch<OpId::Histc>(inputs, attrs)[0];
 }
 
@@ -551,7 +552,7 @@ auto unique_consecutive(const Tensor& input, bool return_inverse, bool return_co
     -> std::tuple<Tensor, Tensor, Tensor> {
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(dim.value(), static_cast<int64_t>(input.shape().size()), "unique_consecutive"));
     attrs.set(AttrKey::Keepdim, return_inverse);  // reuse for return_inverse flag
     auto results = dispatch<OpId::UniqueConsecutive>(inputs, attrs);
     // results[0] = unique values, results[1] = inverse indices, results[2] = counts
@@ -641,7 +642,7 @@ auto trapezoid(const Tensor& y, const Tensor& x, int64_t dim) -> Tensor {
     auto xc = x.contiguous();
     std::array<Tensor, 2> inputs = {yc, xc};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, normalize_reduce_dim(dim, static_cast<int64_t>(y.ndim()), "trapezoid"));
     return dispatch(OpId::Trapezoid, inputs, attrs)[0];
 }
 
@@ -652,7 +653,7 @@ auto trapezoid(const Tensor& y, double dx, int64_t dim) -> Tensor {
     auto yc = y.contiguous();
     std::array<Tensor, 1> inputs = {yc};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, normalize_reduce_dim(dim, static_cast<int64_t>(y.ndim()), "trapezoid"));
     attrs.set(AttrKey::Dx, dx);
     return dispatch(OpId::Trapezoid, inputs, attrs)[0];
 }
@@ -665,7 +666,7 @@ auto cumulative_trapezoid(const Tensor& y, const Tensor& x, int64_t dim) -> Tens
     auto xc = x.contiguous();
     std::array<Tensor, 2> inputs = {yc, xc};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, normalize_reduce_dim(dim, static_cast<int64_t>(y.ndim()), "cumulative_trapezoid"));
     return dispatch(OpId::CumulativeTrapezoid, inputs, attrs)[0];
 }
 
@@ -676,7 +677,7 @@ auto cumulative_trapezoid(const Tensor& y, double dx, int64_t dim) -> Tensor {
     auto yc = y.contiguous();
     std::array<Tensor, 1> inputs = {yc};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, normalize_reduce_dim(dim, static_cast<int64_t>(y.ndim()), "cumulative_trapezoid"));
     attrs.set(AttrKey::Dx, dx);
     return dispatch(OpId::CumulativeTrapezoid, inputs, attrs)[0];
 }
@@ -688,7 +689,7 @@ auto gradient(const Tensor& input, int64_t dim, double spacing) -> Tensor {
     auto ic = input.contiguous();
     std::array<Tensor, 1> inputs = {ic};
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, normalize_reduce_dim(dim, static_cast<int64_t>(input.ndim()), "gradient"));
     attrs.set(AttrKey::Spacing, spacing);
     return dispatch(OpId::NumericalGradient, inputs, attrs)[0];
 }
@@ -745,7 +746,7 @@ auto segment_reduce(const Tensor& data, const Tensor& offsets,
     auto offsets_cont = offsets.to(DType::Int64).contiguous();
 
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Dim, axis);
+    attrs.set(AttrKey::Dim, normalize_reduce_dim(axis, static_cast<int64_t>(data_cont.ndim()), "segment_reduce"));
     attrs.set(AttrKey::Reduction, reduce);
     std::vector<Tensor> inputs = {data_cont, offsets_cont};
     return dispatch(OpId::SegmentReduce, inputs, attrs)[0];

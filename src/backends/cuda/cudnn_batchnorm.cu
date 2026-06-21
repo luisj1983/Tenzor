@@ -17,6 +17,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <algorithm>
+#include <cstdint>
 #include <vector>
 
 namespace tenzor {
@@ -49,6 +51,32 @@ __global__ void f32_to_bfloat16_kernel(const float* src, __nv_bfloat16* dst, int
     int64_t stride = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += stride) {
         dst[i] = __float2bfloat16(src[i]);
+    }
+}
+
+// cuDNN documents that the BN epsilon must be >= CUDNN_BN_MIN_EPSILON (1e-5 on
+// most versions); a smaller value makes cudnnBatchNormalization*() return
+// CUDNN_STATUS_BAD_PARAM. The custom CUDA BN kernels and the CPU/ROCm reference
+// accept any eps > 0, so without this clamp a model configured with e.g.
+// eps=1e-6 (a legal PyTorch value) trains fine on every other backend but
+// throws the moment the cuDNN fused path is selected. Clamp to keep parity,
+// matching PyTorch's own cuDNN BN wrapper.
+static inline double clamp_bn_epsilon(double epsilon) {
+    return epsilon < CUDNN_BN_MIN_EPSILON ? CUDNN_BN_MIN_EPSILON : epsilon;
+}
+
+// The three cuDNN BN entry points are wired to the 4D BatchNorm2d ops and build
+// an NCHW descriptor from shape[0..3]. Validate the rank (and channel count)
+// up front so a mis-routed 2D/3D tensor produces a clear message instead of an
+// out-of-range shape read inside descriptor setup.
+static inline void validate_bn2d_input(const Tensor& input, const Tensor& gamma) {
+    if (input.ndim() != 4) {
+        throw std::runtime_error(
+            "cuDNN BatchNorm2d expects a 4D NCHW input");
+    }
+    if (gamma.numel() != input.shape()[1]) {
+        throw std::runtime_error(
+            "cuDNN BatchNorm2d: scale/bias length must equal the channel count");
     }
 }
 
@@ -87,6 +115,8 @@ auto cudnn_batchnorm2d_forward_inference(
     }
 
     // Extract dimensions (NCHW format)
+    validate_bn2d_input(input, gamma);
+    epsilon = static_cast<float>(clamp_bn_epsilon(epsilon));
     auto shape = input.shape();
     int N = static_cast<int>(shape[0]);
     int C = static_cast<int>(shape[1]);
@@ -271,6 +301,8 @@ auto cudnn_batchnorm2d_forward_training(
         CuDNNHandle::set_stream(stream);
     }
 
+    validate_bn2d_input(input, gamma);
+    epsilon = static_cast<float>(clamp_bn_epsilon(epsilon));
     auto shape = input.shape();
     int N = static_cast<int>(shape[0]);
     int C = static_cast<int>(shape[1]);
@@ -394,7 +426,7 @@ auto cudnn_batchnorm2d_forward_training(
         // Copy updated running stats directly from FP32 to FP16 — no intermediate tensors
         int64_t stat_n = running_mean.numel();
         int block = 256;
-        int grid = (stat_n + block - 1) / block;
+        int grid = static_cast<int>(std::min<int64_t>((stat_n + block - 1) / block, 65535));
         f32_to_half_kernel<<<grid, block, 0, stream>>>(
             running_mean_f32.data<float>(),
             reinterpret_cast<__half*>(running_mean.data_ptr()),
@@ -447,7 +479,7 @@ auto cudnn_batchnorm2d_forward_training(
         // Copy updated running stats directly from FP32 to BF16 — no intermediate tensors
         int64_t stat_n = running_mean.numel();
         int block = 256;
-        int grid = (stat_n + block - 1) / block;
+        int grid = static_cast<int>(std::min<int64_t>((stat_n + block - 1) / block, 65535));
         f32_to_bfloat16_kernel<<<grid, block, 0, stream>>>(
             running_mean_f32.data<float>(),
             reinterpret_cast<__nv_bfloat16*>(running_mean.data_ptr()),
@@ -503,6 +535,8 @@ auto cudnn_batchnorm2d_backward(
         CuDNNHandle::set_stream(stream);
     }
 
+    validate_bn2d_input(input, gamma);
+    epsilon = static_cast<float>(clamp_bn_epsilon(epsilon));
     auto shape = input.shape();
     int N = static_cast<int>(shape[0]);
     int C = static_cast<int>(shape[1]);

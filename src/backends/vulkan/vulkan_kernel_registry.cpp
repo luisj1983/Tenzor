@@ -4158,7 +4158,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Quantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return get_vulkan_backend()->dispatchQuantile(inputs[0], q, dim, keepdim);
@@ -4166,7 +4166,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Nanquantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return get_vulkan_backend()->dispatchNanquantile(inputs[0], q, dim, keepdim);
@@ -4180,9 +4180,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Histc,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t bins = attrs.get_int(AttrKey::N, 100);
-            double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
-            double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+            int64_t bins = attrs.get_int(AttrKey::NumBins, 100);
+            double min_val = attrs.get_float(AttrKey::Min, 0.0);
+            double max_val = attrs.get_float(AttrKey::Max, 0.0);
             return get_vulkan_backend()->dispatchHistc(inputs[0], bins, min_val, max_val);
         });
 

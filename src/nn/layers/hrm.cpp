@@ -796,20 +796,6 @@ auto HRM::apply_lecun_init_to_module(Module* module) -> void {
     }
 }
 
-auto HRM::apply_output_activation(const Variable& logits) -> Variable {
-    if (config_.num_classes <= 0) {
-        // No output projection, return as-is
-        return logits;
-    }
-
-    if (config_.use_stablemax) {
-        return stablemax(logits, -1, config_.stablemax_eps);
-    } else {
-        // Standard softmax
-        return nn::softmax(logits, -1);
-    }
-}
-
 auto HRM::init_states(const Variable& x)
     -> std::pair<Variable, Variable> {
     // Initialize H and L states
@@ -951,14 +937,25 @@ auto HRM::forward_with_aux(const Variable& input, const Tensor& mask)
             }
         }
 
-        // CRITICAL: Detach hidden states for approximate gradient (O(1) memory)
-        // This prevents gradient flow through the recurrence
-        h_state = h_state.detach();
-        l_state = l_state.detach();
+        // CRITICAL: Detach hidden states for approximate gradient (O(1) memory).
+        // The HRM 1-step approximate gradient backpropagates ONLY through the
+        // final cycle: every earlier cycle is detached so the recurrence graph
+        // stays O(1) in depth. We must NOT detach after the LAST cycle, however
+        // — the post-loop `final_output = run_h_cycle(h_state, l_state)` runs on
+        // these states, and detaching them here would sever the graph from the
+        // final output all the way back to the input/init-projection, leaving
+        // x.grad() empty and only a no-op backward. Detach only between cycles
+        // (when another iteration — or the final fresh run_h_cycle — will follow
+        // a still-detached state); the last iteration's states retain their
+        // graph so the final cycle is differentiable w.r.t. inputs and params.
+        if (n + 1 < config_.n_high_cycles) {
+            h_state = h_state.detach();
+            l_state = l_state.detach();
 
-        // Re-enable gradient tracking for next iteration
-        h_state.set_requires_grad(true);
-        l_state.set_requires_grad(true);
+            // Re-enable gradient tracking for next iteration
+            h_state.set_requires_grad(true);
+            l_state.set_requires_grad(true);
+        }
     }
 
     // Update statistics

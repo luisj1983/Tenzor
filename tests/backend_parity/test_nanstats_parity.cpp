@@ -59,7 +59,7 @@ TEST_P(NanStatsParity, NanVar_AlongDim) {
     auto x = randn({4, 16}, DType::Float32, Device::cpu());
     test_operation_parity_single([](const std::vector<Tensor>& in) {
         return nanvar(in[0], /*dim=*/1, /*keepdim=*/false, /*correction=*/1);
-    }, {x}, device, /*rtol=*/3e-2f, /*atol=*/3e-1f, "NanVar_Dim_NoNaN");
+    }, {x}, device, /*rtol=*/3e-2f, /*atol=*/5e-2f, "NanVar_Dim_NoNaN");
 }
 
 TEST_P(NanStatsParity, NanStd_ReduceAll) {

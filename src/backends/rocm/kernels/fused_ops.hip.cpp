@@ -322,10 +322,12 @@ __global__ void fused_softmax_cross_entropy_kernel(
     // Shared memory for reduction
     __shared__ T shared_data[BLOCK_SIZE];
 
-    // Find max (for numerical stability)
+    // Find max (for numerical stability). Use the type-generic fmax/exp/log so
+    // a Float64 instantiation computes in double instead of silently truncating
+    // through the float-only fmaxf/expf/logf.
     T max_val = std::numeric_limits<T>::lowest();
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        max_val = fmaxf(max_val, row[i]);
+        max_val = fmax(max_val, row[i]);
     }
 
     // Block-wide max reduction
@@ -334,7 +336,7 @@ __global__ void fused_softmax_cross_entropy_kernel(
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) {
-            shared_data[threadIdx.x] = fmaxf(shared_data[threadIdx.x], shared_data[threadIdx.x + s]);
+            shared_data[threadIdx.x] = fmax(shared_data[threadIdx.x], shared_data[threadIdx.x + s]);
         }
         __syncthreads();
     }
@@ -345,7 +347,7 @@ __global__ void fused_softmax_cross_entropy_kernel(
     // Compute sum(exp(x - max))
     T sum_exp = 0;
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        sum_exp += expf(row[i] - global_max);
+        sum_exp += exp(row[i] - global_max);
     }
 
     shared_data[threadIdx.x] = sum_exp;
@@ -360,7 +362,7 @@ __global__ void fused_softmax_cross_entropy_kernel(
 
     // Compute loss
     if (threadIdx.x == 0) {
-        T log_sum_exp = logf(shared_data[0]) + global_max;
+        T log_sum_exp = log(shared_data[0]) + global_max;
         losses[b] = log_sum_exp - row[target];
     }
 }
@@ -370,10 +372,14 @@ auto fused_softmax_cross_entropy_hip(
     const Tensor& targets,
     const std::string& reduction
 ) -> Tensor {
-    // Non-Float32: upcast to Float32, compute (loss stays Float32)
-    if (logits.dtype() != DType::Float32) {
+    // Float16/BFloat16: widen to Float32, compute, return loss in the input
+    // dtype. Float64 is computed NATIVELY (the kernel is now type-generic) so a
+    // Float64 cross-entropy keeps full double precision instead of silently
+    // collapsing to a Float32 loss, matching the LayerNorm Float64 fix.
+    if (logits.dtype() == DType::Float16 || logits.dtype() == DType::BFloat16) {
+        const DType orig = logits.dtype();
         auto logits_f32 = logits.to(DType::Float32);
-        return fused_softmax_cross_entropy_hip(logits_f32, targets, reduction);
+        return fused_softmax_cross_entropy_hip(logits_f32, targets, reduction).to(orig);
     }
 
     int64_t batch_size = logits.shape()[0];
@@ -394,8 +400,18 @@ auto fused_softmax_cross_entropy_hip(
             batch_size,
             num_classes
         );
+    } else if (logits.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(fused_softmax_cross_entropy_kernel<double, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            logits.data<double>(),
+            targets.data<int64_t>(),
+            losses.data<double>(),
+            batch_size,
+            num_classes
+        );
     } else {
-        throw std::runtime_error("fused_softmax_cross_entropy_hip: Only Float32 supported");
+        throw std::runtime_error("fused_softmax_cross_entropy_hip: only Float32/Float64/Float16/BFloat16 supported");
     }
 
     HIP_CHECK(hipGetLastError());

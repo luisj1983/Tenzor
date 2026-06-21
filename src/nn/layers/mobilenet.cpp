@@ -106,9 +106,10 @@ auto SqueezeExcitation::forward_impl(const Variable& input) -> Variable {
     x = fc1_->forward(x);
     x = act_->forward(x);
 
-    // Second FC + sigmoid
+    // Second FC + sigmoid. Use the stateless functional sigmoid instead of
+    // constructing/destroying a throwaway nn::Sigmoid module every forward.
     x = fc2_->forward(x);
-    x = nn::Sigmoid().forward(x);
+    x = sigmoid(x);
 
     // Expand back to (N, C, 1, 1) for broadcasting
     x = x.reshape({batch, channels, 1, 1});

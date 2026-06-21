@@ -167,6 +167,30 @@ def _all_gather_two_ranks(rank, world_size, tz_local):
     return [float(t[0].item()) for t in gathered]
 
 
+def _all_gather_large_deadlock(rank, world_size, tz_local):
+    # Deadlock-free all_gather regression: each rank contributes a large
+    # (~2 MiB) tensor. The old implementation issued ALL blocking send_tensor
+    # to every peer and ONLY THEN all recv_tensor; once the aggregate in-flight
+    # data exceeded the kernel socket buffers, every rank blocked in its send
+    # loop before reaching its recv loop → full-mesh TCP deadlock (the worker
+    # would hang and the test harness would time out). The ordered pairwise
+    # exchange fix lets this complete. We also verify full-content correctness,
+    # not just element [0], so a misordered/partial gather is caught too.
+    n = 512 * 1024  # 512K float32 = 2 MiB per rank
+    local = tz_local.full([n], float(rank + 1))
+    placeholder = [tz_local.zeros([n]) for _ in range(world_size)]
+    pg = tz_local.distributed.get_process_group()
+    gathered = pg.all_gather(local, placeholder)
+    # gathered[r] must be entirely (r+1): check first and last element of each.
+    ok = True
+    for r in range(world_size):
+        expected = float(r + 1)
+        if (float(gathered[r][0].item()) != expected or
+                float(gathered[r][n - 1].item()) != expected):
+            ok = False
+    return ok
+
+
 # --- Tests ------------------------------------------------------------------
 
 
@@ -220,3 +244,17 @@ def test_all_gather_concatenates_two_ranks():
     for rank, values in results.items():
         assert values == pytest.approx([1.0, 2.0]), \
             f"rank {rank} saw {values}, expected [1.0, 2.0]"
+
+
+@skip_no_distributed
+@skip_no_spawn
+def test_all_gather_large_no_deadlock():
+    # Regression for the full-mesh all-send-then-all-recv deadlock: a large
+    # per-rank payload that exceeds socket buffers. A regression would hang and
+    # be caught by the per-run timeout in _run(); a correct run returns True on
+    # both ranks with full-content correctness.
+    results = _run("_all_gather_large_deadlock", world_size=2, timeout=60)
+    assert len(results) == 2, f"expected 2 ranks to report, got {results}"
+    for rank, ok in results.items():
+        assert ok is True, \
+            f"rank {rank} large all_gather mismatch/incomplete (got {ok})"

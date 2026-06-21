@@ -93,6 +93,16 @@ auto VulkanBackend::dispatchSpecialMathUnary(const Tensor& input, uint32_t opcod
     const void* buffer_out = output.data_ptr();
     size_t buffer_size_in  = input.numel()  * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+        // special_math_unary_f16/_bf16 bind packed 32-bit words and read/write
+        // whole words at pair_idx=(numel-1)/2; round both ranges up to
+        // ((numel+1)/2)*4 so the tail word of an odd-numel tensor stays in-bounds
+        // (the dispatch below already uses packed work items).
+        size_t pairs_in  = (static_cast<size_t>(input.numel())  + 1) / 2;
+        size_t pairs_out = (static_cast<size_t>(output.numel()) + 1) / 2;
+        buffer_size_in  = pairs_in  * sizeof(uint32_t);
+        buffer_size_out = pairs_out * sizeof(uint32_t);
+    }
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},

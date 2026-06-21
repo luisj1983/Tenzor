@@ -19,6 +19,7 @@
 #include <tenzor/nn/optim/sgd.hpp>
 #include <tenzor/nn/module.hpp>
 #include <tenzor/nn/activations/activations.hpp>
+#include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include <memory>
@@ -50,14 +51,18 @@ public:
         auto w2 = parameters_.at("w2");
         auto b2 = parameters_.at("b2");
 
+        // Build a REAL autograd graph through the parameters so that
+        // loss.backward() populates each parameter's gradient (and the Stage 2
+        // backward hooks actually fire). Using raw-tensor ops + Variable(...)
+        // re-wrapping (as a prior version did) severs grad_fn and forces tests
+        // to fake gradients with set_grad() — defeating hook coverage.
         // x @ w1 + b1
-        auto h = matmul(x.tensor(), w1->tensor()) + b1->tensor();
+        auto h = matmul(x, *w1) + *b1;
         // relu(h)
-        auto h_relu = Variable(h, true);
-        h_relu = relu(h_relu);
+        auto h_relu = nn::relu(h);
         // h @ w2 + b2
-        auto out = matmul(h_relu.tensor(), w2->tensor()) + b2->tensor();
-        return Variable(out, x.requires_grad());
+        auto out = matmul(h_relu, *w2) + *b2;
+        return out;
     }
 };
 
@@ -122,7 +127,7 @@ protected:
         }
     }
 
-    ZeROStage1Config default_config;
+    ZeROStage2Config default_config;
 };
 
 // ============================================================================
@@ -133,18 +138,12 @@ TEST_F(ZeROStage2Test, ConstructorWithValidConfig) {
     auto params = create_test_params(100);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.world_size = 1;
     config.rank = 0;
 
-    // NOTE: ZeROStage2Optimizer not yet implemented
-    // This test is aspirational - tests the intended API
     EXPECT_NO_THROW({
-        // When Stage 2 is implemented, this should work:
-        // ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
-
-        // For now, verify Stage 1 works as baseline
-        ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
@@ -152,14 +151,13 @@ TEST_F(ZeROStage2Test, ConstructorWithMultipleRanks) {
     auto params = create_test_params(100);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.world_size = 4;
     config.rank = 0;
 
     // Stage 2 should support multiple ranks for gradient partitioning
     EXPECT_NO_THROW({
-        // ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
-        ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
@@ -167,12 +165,12 @@ TEST_F(ZeROStage2Test, ConstructorValidatesBucketSize) {
     auto params = create_test_params(100);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
 
     // Stage 2 should have configurable bucket size for gradient bucketing
     // For now, just verify basic construction works
     EXPECT_NO_THROW({
-        ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     });
 }
 
@@ -180,20 +178,20 @@ TEST_F(ZeROStage2Test, ConstructorWithInvalidRank) {
     auto params = create_test_params(10);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.world_size = 4;
     config.rank = 5;  // Invalid: rank >= world_size
 
     EXPECT_THROW({
-        ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+        ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     }, std::invalid_argument);
 }
 
 TEST_F(ZeROStage2Test, ConstructorWithNullOptimizer) {
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
 
     EXPECT_THROW({
-        ZeROStage1Optimizer optimizer(nullptr, config);
+        ZeROStage2Optimizer optimizer(nullptr, config);
     }, std::invalid_argument);
 }
 
@@ -206,8 +204,17 @@ TEST_F(ZeROStage2Test, GradientBucketingWithDefaultSize) {
     auto params = create_test_params(100, {64, 64});  // 100 params of 64x64
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+
+    // Stage 2 buckets gradients at construction when gradient_bucketing is on
+    // (the default). With 100 parameters there must be at least one bucket, and
+    // the buckets must cover real bytes.
+    auto bucket_stats = optimizer.get_bucket_stats();
+    EXPECT_GT(bucket_stats.num_buckets, 0u)
+        << "Stage 2 with gradient_bucketing must create gradient buckets";
+    EXPECT_GT(bucket_stats.max_bucket_size, 0u)
+        << "gradient buckets must span non-zero bytes";
 
     // Attach gradients
     attach_gradients(params);
@@ -226,10 +233,25 @@ TEST_F(ZeROStage2Test, GradientBucketingWithCustomSize) {
     auto params = create_test_params(50, {128, 128});
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    // Stage 2 should support: config.gradient_bucket_size_mb = 25;
+    // A small bucket size must split the 50 128x128 (64KB each) gradients into
+    // more buckets than a single huge bucket would. This pins the
+    // gradient_bucket_size config to a real effect on bucketing.
+    ZeROStage2Config small_cfg = default_config;
+    small_cfg.gradient_bucket_size = 128 * 1024;  // 128KB → ~2 params/bucket
+    auto small_opt = std::make_unique<Adam>(create_test_params(50, {128, 128}), 0.001);
+    ZeROStage2Optimizer small_optimizer(std::move(small_opt), small_cfg);
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config big_cfg = default_config;
+    big_cfg.gradient_bucket_size = 256 * 1024 * 1024;  // 256MB → all in one bucket
+    auto big_opt = std::make_unique<Adam>(create_test_params(50, {128, 128}), 0.001);
+    ZeROStage2Optimizer big_optimizer(std::move(big_opt), big_cfg);
+
+    EXPECT_GT(small_optimizer.get_bucket_stats().num_buckets,
+              big_optimizer.get_bucket_stats().num_buckets)
+        << "a smaller gradient_bucket_size must produce more gradient buckets";
+
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     attach_gradients(params);
 
     auto before = params[0]->tensor().clone();
@@ -244,8 +266,8 @@ TEST_F(ZeROStage2Test, GradientBucketingWithSmallParameters) {
     auto params = create_test_params(1000, {8, 8});  // 1000 tiny params
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     auto before = params[0]->tensor().clone();
@@ -260,8 +282,8 @@ TEST_F(ZeROStage2Test, GradientBucketingWithLargeParameters) {
     auto params = create_test_params(5, {512, 512});  // 5 large params
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     auto before = params[0]->tensor().clone();
@@ -280,8 +302,8 @@ TEST_F(ZeROStage2Test, GradientBucketingWithMixedSizes) {
     params.push_back(std::make_shared<Variable>(ones({512, 256}, DType::Float32, Device::cpu()), true));
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     auto before = params[0]->tensor().clone();
@@ -300,11 +322,11 @@ TEST_F(ZeROStage2Test, ReduceScatterGradientsSingleRank) {
     auto params = create_test_params(50);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.world_size = 1;
     config.rank = 0;
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     attach_gradients(params);
 
     // Should complete without communication, and must update the parameters.
@@ -326,13 +348,22 @@ TEST_F(ZeROStage2Test, ReduceScatterGradientsCorrectSum) {
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.world_size = 1;  // Single process - no actual reduce-scatter
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
-    // In multi-rank mode, each rank would receive sum of gradients for its partition.
-    // params[0] has a non-zero gradient (value i+1 == 1), so it must change.
+    // Stage 2 reduce-scatter is driven by backward hooks; registering them must
+    // succeed and flip the registered flag (a Stage-2-specific surface that the
+    // old Stage-1 substitution never exercised).
+    optimizer.register_backward_hooks();
+    EXPECT_TRUE(optimizer.hooks_registered())
+        << "register_backward_hooks() must mark hooks registered";
+
+    // In single-rank mode reduce-scatter is the identity (sum over one rank),
+    // so the per-partition gradient equals the input. params[0] has gradient 1,
+    // so the base Adam update must move it. (True multi-rank summation is not
+    // reachable in a single process — see test_zero_stage1_distributed.)
     auto before = params[0]->tensor().clone();
     optimizer.step();
     auto after = params[0]->tensor();
@@ -345,17 +376,29 @@ TEST_F(ZeROStage2Test, ReduceScatterGradientsPartitioning) {
     auto params = create_test_params(100, {64, 64});
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.world_size = 1;
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
-    attach_gradients(params);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
-    // After reduce-scatter, each rank should only have its partition of gradients
+    // Stage 2 must have bucketed the 100 gradients for reduce-scatter at
+    // construction (a Stage-2-specific surface).
+    EXPECT_GT(optimizer.get_bucket_stats().num_buckets, 0u);
+
+    attach_gradients(params);
     EXPECT_NO_THROW(optimizer.step());
 
-    // Verify local partition size
+    // Single rank owns its whole partition (= all 100 params).
     EXPECT_EQ(optimizer.local_param_count(), 100);
+
+    // A multi-rank optimizer must partition: rank 0 of 4 owns a strict subset.
+    auto multi = std::make_unique<Adam>(create_test_params(100, {64, 64}), 0.001);
+    ZeROStage2Config cfg4 = default_config;
+    cfg4.world_size = 4;
+    cfg4.rank = 0;
+    ZeROStage2Optimizer optimizer4(std::move(multi), cfg4);
+    EXPECT_LT(optimizer4.local_param_count(), 100)
+        << "4-way reduce-scatter must give rank 0 only its partition";
 }
 
 TEST_F(ZeROStage2Test, ReduceScatterGradientsMemoryFreed) {
@@ -363,8 +406,8 @@ TEST_F(ZeROStage2Test, ReduceScatterGradientsMemoryFreed) {
     auto params = create_test_params(100);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
 
@@ -393,16 +436,33 @@ TEST_F(ZeROStage2Test, BackwardHooksRegisteredOnConstruction) {
     auto params = model->parameters();
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
-    // Hooks should be registered automatically
-    // Verify by running forward + backward
-    auto input = Variable(randn({4, 128}, DType::Float32, Device::cpu()), true);
+    // Register the reduce-scatter backward hooks and verify the flag flips —
+    // this is the construction-time surface the test is named for.
+    optimizer.register_backward_hooks();
+    EXPECT_TRUE(optimizer.hooks_registered())
+        << "Stage 2 must mark backward hooks as registered";
+
+    // Run a real forward → loss → backward through the autograd graph and
+    // confirm the parameters actually receive gradients (the hooks fire on a
+    // genuine grad_fn chain — not a faked set_grad()).
+    // SimpleTestModule initialises w1=ones, so the hidden pre-activation is
+    // h[i,j] = sum_k x[i,k] (identical across units). A random input whose row
+    // sums all happen to be negative would make relu(h) all-zero and leave w1/b1
+    // with zero gradient — a degenerate, RNG-ordering-dependent flake (the test
+    // asserts EVERY parameter receives a gradient). Use a strictly positive input
+    // so relu is always active and the grad-flow invariant is exercised
+    // deterministically regardless of global RNG state / test ordering.
+    auto input = Variable(tenzor::abs(randn({4, 128}, DType::Float32, Device::cpu())) + 0.5f, true);
     auto output = model->forward(input);
-    auto loss = Variable(mean(output.tensor()), true);
-
+    auto loss = sum(output);
     EXPECT_NO_THROW(loss.backward());
+    for (const auto& param : params) {
+        EXPECT_TRUE(param->has_grad())
+            << "backward did not populate a parameter gradient";
+    }
 }
 
 TEST_F(ZeROStage2Test, BackwardHooksTriggeredDuringBackward) {
@@ -410,29 +470,33 @@ TEST_F(ZeROStage2Test, BackwardHooksTriggeredDuringBackward) {
     auto params = model->parameters();
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_backward_hooks();
 
-    // Run training step
-    auto input = Variable(randn({4, 128}, DType::Float32, Device::cpu()), true);
+    // Run a real training step. backward() over the autograd graph must
+    // populate every parameter's gradient — no manual set_grad() fill, so the
+    // assertion genuinely verifies the hook/backward path produced gradients.
+    // SimpleTestModule initialises w1=ones, so the hidden pre-activation is
+    // h[i,j] = sum_k x[i,k] (identical across units). A random input whose row
+    // sums all happen to be negative would make relu(h) all-zero and leave w1/b1
+    // with zero gradient — a degenerate, RNG-ordering-dependent flake (the test
+    // asserts EVERY parameter receives a gradient). Use a strictly positive input
+    // so relu is always active and the grad-flow invariant is exercised
+    // deterministically regardless of global RNG state / test ordering.
+    auto input = Variable(tenzor::abs(randn({4, 128}, DType::Float32, Device::cpu())) + 0.5f, true);
     auto output = model->forward(input);
-    auto loss = Variable(mean(output.tensor()), true);
+    auto loss = sum(output);
 
     loss.backward();
 
-    // Manually attach gradients (simulating what autograd would do)
-    // In production, autograd will set these during backward pass
-    for (auto& param : params) {
-        if (!param->has_grad()) {
-            auto grad = ones_like(param->tensor());
-            param->set_grad(grad);
-        }
-    }
-
-    // Backward hooks should have triggered
-    // Verify gradients exist
     for (const auto& param : params) {
-        EXPECT_TRUE(param->has_grad());
+        EXPECT_TRUE(param->has_grad())
+            << "backward did not populate a parameter gradient via the graph";
+        // Gradient must be genuinely non-zero, not a zero placeholder.
+        auto g = param->grad().value().to(DType::Float64).cpu();
+        EXPECT_GT(tenzor::max(tenzor::abs(g)).item<double>(), 0.0)
+            << "parameter gradient is identically zero after backward";
     }
 }
 
@@ -445,27 +509,30 @@ TEST_F(ZeROStage2Test, BackwardHooksWithMultipleLayers) {
     EXPECT_EQ(params.size(), 4);
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+    optimizer.register_backward_hooks();
 
-    // All parameters should get gradients through hooks
-    auto input = Variable(randn({4, 128}, DType::Float32, Device::cpu()), true);
+    // All parameters across both layers must receive gradients through the real
+    // autograd graph (no manual fill), so a layer the hooks miss fails here.
+    // SimpleTestModule initialises w1=ones, so the hidden pre-activation is
+    // h[i,j] = sum_k x[i,k] (identical across units). A random input whose row
+    // sums all happen to be negative would make relu(h) all-zero and leave w1/b1
+    // with zero gradient — a degenerate, RNG-ordering-dependent flake (the test
+    // asserts EVERY parameter receives a gradient). Use a strictly positive input
+    // so relu is always active and the grad-flow invariant is exercised
+    // deterministically regardless of global RNG state / test ordering.
+    auto input = Variable(tenzor::abs(randn({4, 128}, DType::Float32, Device::cpu())) + 0.5f, true);
     auto output = model->forward(input);
-    auto loss = Variable(mean(output.tensor()), true);
+    auto loss = sum(output);
     loss.backward();
 
-    // Manually attach gradients (simulating what autograd would do)
-    // In production, autograd will set these during backward pass
-    for (auto& param : params) {
-        if (!param->has_grad()) {
-            auto grad = ones_like(param->tensor());
-            param->set_grad(grad);
-        }
-    }
-
-    // Verify all parameters have gradients
     for (const auto& param : params) {
-        EXPECT_TRUE(param->has_grad());
+        EXPECT_TRUE(param->has_grad())
+            << "a layer's parameter did not receive a gradient";
+        auto g = param->grad().value().to(DType::Float64).cpu();
+        EXPECT_GT(tenzor::max(tenzor::abs(g)).item<double>(), 0.0)
+            << "parameter gradient is identically zero after backward";
     }
 }
 
@@ -474,8 +541,8 @@ TEST_F(ZeROStage2Test, BackwardHooksWithEmptyModel) {
     std::vector<std::shared_ptr<Variable>> empty_params;
     auto base_optimizer = std::make_unique<Adam>(empty_params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Should handle empty model gracefully
     EXPECT_NO_THROW(optimizer.step());
@@ -486,24 +553,34 @@ TEST_F(ZeROStage2Test, BackwardHooksWithEmptyModel) {
 // ============================================================================
 
 TEST_F(ZeROStage2Test, MemoryReduction8xVerification) {
-    // Stage 2 should provide 8x memory reduction vs baseline
-    // (4x from optimizer states + 2x from gradients)
-    auto params = create_test_params(100, {256, 256});
-    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+    // Stage 2 partitions optimizer states AND gradients across ranks, so the
+    // per-rank local parameter count must shrink ~world_size× relative to
+    // single-rank. Verify the actual partitioning reduction (not just ">0").
+    constexpr int total = 100;
 
-    ZeROStage1Config config = default_config;
-    config.world_size = 1;  // For multi-rank, divide by world_size
+    auto single = std::make_unique<Adam>(create_test_params(total, {256, 256}), 0.001);
+    ZeROStage2Config cfg1 = default_config;
+    cfg1.world_size = 1;
+    cfg1.rank = 0;
+    ZeROStage2Optimizer opt1(std::move(single), cfg1);
+    auto stats1 = opt1.get_memory_stats();
+    EXPECT_EQ(stats1.num_local_parameters, total)
+        << "single rank must own all parameters";
+    EXPECT_GT(stats1.gpu_optimizer_memory + stats1.cpu_optimizer_memory, 0);
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    auto multi = std::make_unique<Adam>(create_test_params(total, {256, 256}), 0.001);
+    ZeROStage2Config cfg8 = default_config;
+    cfg8.world_size = 8;
+    cfg8.rank = 0;
+    ZeROStage2Optimizer opt8(std::move(multi), cfg8);
+    auto stats8 = opt8.get_memory_stats();
 
-    auto stats = optimizer.get_memory_stats();
-
-    // Verify memory allocation is reasonable
-    EXPECT_GT(stats.num_parameters, 0);
-    EXPECT_GT(stats.gpu_optimizer_memory + stats.cpu_optimizer_memory, 0);
-
-    // In single-rank mode, all memory is local
-    EXPECT_EQ(stats.num_local_parameters, stats.num_parameters);
+    // Rank 0 of 8 must own ~1/8 of the parameters — a real reduction, not all.
+    EXPECT_LT(stats8.num_local_parameters, stats1.num_local_parameters)
+        << "8-way partitioning must reduce the per-rank local parameter count";
+    EXPECT_LE(stats8.num_local_parameters, total / 8 + 2)
+        << "rank 0 of 8 should own ~12-13 of 100 parameters";
+    EXPECT_GT(stats8.num_local_parameters, 0);
 }
 
 TEST_F(ZeROStage2Test, MemoryReductionOptimizerStates) {
@@ -511,8 +588,8 @@ TEST_F(ZeROStage2Test, MemoryReductionOptimizerStates) {
     auto params = create_test_params(50, {128, 128});
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     optimizer.step();  // Initialize optimizer states
@@ -533,8 +610,8 @@ TEST_F(ZeROStage2Test, MemoryReductionGradients) {
     auto params = create_test_params(100, {64, 64});
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
 
@@ -555,11 +632,11 @@ TEST_F(ZeROStage2Test, MemoryReductionScalingWithRanks) {
     // Single rank baseline
     {
         auto opt1 = std::make_unique<Adam>(create_test_params(100), 0.001);
-        ZeROStage1Config config1 = default_config;
+        ZeROStage2Config config1 = default_config;
         config1.world_size = 1;
         config1.rank = 0;
 
-        ZeROStage1Optimizer optimizer1(std::move(opt1), config1);
+        ZeROStage2Optimizer optimizer1(std::move(opt1), config1);
         auto stats1 = optimizer1.get_memory_stats();
 
         // All parameters local in single rank
@@ -570,11 +647,11 @@ TEST_F(ZeROStage2Test, MemoryReductionScalingWithRanks) {
     // Note: Can't actually test multi-rank in single process, but verify config
     {
         auto opt4 = std::make_unique<Adam>(create_test_params(100), 0.001);
-        ZeROStage1Config config4 = default_config;
+        ZeROStage2Config config4 = default_config;
         config4.world_size = 4;
         config4.rank = 0;
 
-        ZeROStage1Optimizer optimizer4(std::move(opt4), config4);
+        ZeROStage2Optimizer optimizer4(std::move(opt4), config4);
         auto stats4 = optimizer4.get_memory_stats();
 
         // Rank 0 should own ~25 parameters (100/4)
@@ -591,10 +668,10 @@ TEST_F(ZeROStage2Test, CPUOffloadGradientsEnabled) {
     auto params = create_test_params(50);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.offload_to_cpu = true;
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     EXPECT_TRUE(optimizer.is_cpu_offload_enabled());
 }
@@ -603,10 +680,10 @@ TEST_F(ZeROStage2Test, CPUOffloadGradientsDisabled) {
     auto params = create_test_params(50);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.offload_to_cpu = false;
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     EXPECT_FALSE(optimizer.is_cpu_offload_enabled());
 }
@@ -615,10 +692,10 @@ TEST_F(ZeROStage2Test, CPUOffloadGradientsMemoryLocation) {
     auto params = create_test_params(50);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.offload_to_cpu = true;
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     attach_gradients(params);
     optimizer.step();
 
@@ -643,11 +720,11 @@ TEST_F(ZeROStage2Test, CPUOffloadFromGPU) {
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.offload_to_cpu = true;
     config.cpu_offload_threshold = 1024;
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Attach gradients on GPU
     for (auto& param : params) {
@@ -665,12 +742,12 @@ TEST_F(ZeROStage2Test, CPUOffloadGradientsThreshold) {
     auto params = create_test_params(10, {8, 8});  // Small params
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.offload_to_cpu = true;
     config.cpu_offload_threshold = 1024 * 1024;  // 1MB threshold
 
     // Small params below threshold should not be offloaded
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
     attach_gradients(params);
     optimizer.step();
 
@@ -686,8 +763,8 @@ TEST_F(ZeROStage2Test, EdgeCaseEmptyGradients) {
     auto params = create_test_params(10);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Don't attach gradients - step should handle gracefully
     EXPECT_NO_THROW(optimizer.step());
@@ -698,8 +775,8 @@ TEST_F(ZeROStage2Test, EdgeCaseSingleParameter) {
     auto params = create_test_params(1, {256, 256});
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     EXPECT_NO_THROW(optimizer.step());
@@ -712,8 +789,8 @@ TEST_F(ZeROStage2Test, EdgeCaseSparseGradients) {
     auto params = create_test_params(10);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Only attach gradients to half the parameters
     for (size_t i = 0; i < params.size(); i += 2) {
@@ -734,8 +811,8 @@ TEST_F(ZeROStage2Test, EdgeCaseZeroGradients) {
     auto params = create_test_params(10);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Attach zero gradients
     for (auto& param : params) {
@@ -751,8 +828,8 @@ TEST_F(ZeROStage2Test, EdgeCaseVeryLargeGradients) {
     auto params = create_test_params(5, {64, 64});
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Attach large gradients
     for (auto& param : params) {
@@ -778,8 +855,8 @@ TEST_F(ZeROStage2Test, EdgeCaseMixedGradientSizes) {
     params.push_back(std::make_shared<Variable>(ones({256, 128}, DType::Float32, Device::cpu()), true));
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     auto before = params[0]->tensor().clone();
@@ -794,8 +871,8 @@ TEST_F(ZeROStage2Test, EdgeCaseMultipleSteps) {
     auto params = create_test_params(20);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Run multiple steps; each step has non-zero gradients so the parameters
     // must move every iteration.
@@ -815,8 +892,8 @@ TEST_F(ZeROStage2Test, EdgeCaseZeroGradAfterStep) {
     auto params = create_test_params(10);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     optimizer.step();
@@ -844,8 +921,8 @@ TEST_F(ZeROStage2Test, StateDictSaveLoad) {
     auto params = create_test_params(20);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Config config = default_config;
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
     optimizer.step();  // Initialize optimizer states
@@ -857,7 +934,7 @@ TEST_F(ZeROStage2Test, StateDictSaveLoad) {
     // Load state into new optimizer
     auto params2 = create_test_params(20);
     auto base_optimizer2 = std::make_unique<Adam>(params2, 0.001);
-    ZeROStage1Optimizer optimizer2(std::move(base_optimizer2), config);
+    ZeROStage2Optimizer optimizer2(std::move(base_optimizer2), config);
 
     EXPECT_NO_THROW(optimizer2.load_state_dict(state));
 }
@@ -866,11 +943,11 @@ TEST_F(ZeROStage2Test, StateDictContainsRankInfo) {
     auto params = create_test_params(10);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
-    ZeROStage1Config config = default_config;
+    ZeROStage2Config config = default_config;
     config.world_size = 4;
     config.rank = 0;
 
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     auto state = optimizer.state_dict();
 

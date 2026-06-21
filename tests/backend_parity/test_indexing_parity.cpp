@@ -9,7 +9,9 @@
  */
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <iostream>
+#include <vector>
 #include <tenzor/tenzor.hpp>
 #include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
@@ -226,14 +228,50 @@ TEST_P(IndexingParity, Nonzero) {
             EXPECT_EQ(ref_cpu.shape()[0], result_cpu.shape()[0])
                 << "Nonzero count mismatch on " << backend_name(backend);
 
-            // Sort each row lexicographically by sorting on dim 0
-            // (nonzero returns N x ndim indices)
+            // nonzero returns an (N x ndim) matrix of index tuples. The row
+            // ORDER can differ across backends, but the SET of index tuples
+            // must be identical. Sorting each column independently (sort on
+            // dim 0) breaks the tuple association — rows sharing a leading
+            // index are not tie-broken on the trailing index, so a reordering
+            // bug can hide and valid-but-differently-ordered outputs can
+            // falsely mismatch. Instead sort whole rows lexicographically by
+            // their flattened linear index, then compare the reordered
+            // tuple-matrices element-for-element (indices are exact integers).
+            ASSERT_EQ(ref_cpu.shape()[0], result_cpu.shape()[0]);
             if (ref_cpu.numel() > 0 && result_cpu.numel() > 0) {
-                auto [ref_s_v, ref_si] = sort(Variable(ref_cpu, false), 0);
-                auto ref_s = ref_s_v.tensor();
-                auto [res_s_v, res_si] = sort(Variable(result_cpu, false), 0);
-                auto res_s = res_s_v.tensor();
-                EXPECT_TENSORS_CLOSE(ref_s, res_s, 0.0f, 0.0f);
+                ASSERT_EQ(ref_cpu.shape().size(), 2u);
+                ASSERT_EQ(ref_cpu.shape()[1], result_cpu.shape()[1]);
+                const int64_t rows = ref_cpu.shape()[0];
+                const int64_t ndim = ref_cpu.shape()[1];
+
+                auto lex_sorted_rows = [rows, ndim](const Tensor& idx_in) {
+                    // nonzero indices are integer-valued; read them as int64.
+                    auto idx = idx_in.to(DType::Int64).contiguous();
+                    const int64_t* d = idx.data<int64_t>();
+                    std::vector<int64_t> order(rows);
+                    for (int64_t r = 0; r < rows; ++r) order[r] = r;
+                    std::sort(order.begin(), order.end(),
+                              [&](int64_t a, int64_t b) {
+                                  for (int64_t c = 0; c < ndim; ++c) {
+                                      int64_t va = d[a * ndim + c];
+                                      int64_t vb = d[b * ndim + c];
+                                      if (va != vb) return va < vb;
+                                  }
+                                  return false;
+                              });
+                    std::vector<int64_t> flat;
+                    flat.reserve(rows * ndim);
+                    for (int64_t r = 0; r < rows; ++r)
+                        for (int64_t c = 0; c < ndim; ++c)
+                            flat.push_back(d[order[r] * ndim + c]);
+                    return flat;
+                };
+
+                auto ref_sorted = lex_sorted_rows(ref_cpu);
+                auto res_sorted = lex_sorted_rows(result_cpu);
+                EXPECT_EQ(ref_sorted, res_sorted)
+                    << "Nonzero index-tuple set/order mismatch on "
+                    << backend_name(backend);
             }
         } catch (const std::exception& e) {
             ADD_FAILURE() << "Nonzero failed on " << backend_name(backend)

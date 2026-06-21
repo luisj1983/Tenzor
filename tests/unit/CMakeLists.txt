@@ -306,7 +306,31 @@ target_link_libraries(test_onnx_export PRIVATE tenzor_core GTest::gtest_main)
 # validation, BatchNorm training_mode, external_data).
 add_executable(test_onnx_audit_fixes test_onnx_audit_fixes.cpp)
 target_link_libraries(test_onnx_audit_fixes PRIVATE tenzor_core GTest::gtest_main)
+# Security regressions hand-build malformed ModelProtos directly, so the test
+# needs the generated protobuf header + libprotobuf (guarded by the same
+# TENZOR_HAS_ONNX_PROTOBUF flag the importer uses).
+find_package(Protobuf QUIET)
+if(Protobuf_FOUND)
+    target_include_directories(test_onnx_audit_fixes PRIVATE
+        ${CMAKE_BINARY_DIR}/generated/onnx_proto)
+    target_link_libraries(test_onnx_audit_fixes PRIVATE protobuf::libprotobuf)
+    # Newer protobuf splits CHECK-op helpers into Abseil; the generated headers
+    # we compile here can pull them in. Link absl if present so the test
+    # executable resolves those symbols (tenzor_core links the .pb.cc itself).
+    find_package(absl QUIET)
+    if(absl_FOUND)
+        target_link_libraries(test_onnx_audit_fixes PRIVATE
+            absl::log_internal_check_op absl::log_internal_message)
+    endif()
+    target_compile_definitions(test_onnx_audit_fixes PRIVATE TENZOR_HAS_ONNX_PROTOBUF)
+endif()
 tenzor_discover_tests(test_onnx_audit_fixes LABELS "unit;onnx" DISCOVERY_TIMEOUT 60)
+
+# Dataset parser hardening regressions (MNIST truncated header, ImageFolder
+# symlink containment).
+add_executable(test_dataset_hardening test_dataset_hardening.cpp)
+target_link_libraries(test_dataset_hardening PRIVATE tenzor_core GTest::gtest)
+tenzor_discover_tests(test_dataset_hardening LABELS "unit;data" DISCOVERY_TIMEOUT 60)
 
 # Inf-D: ONNX exporter coverage (every forward OpId has a mapping; extended
 # DTypes — BF16/FP8/INT4 — emit the right ONNX type codes).

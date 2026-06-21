@@ -34,6 +34,11 @@ HubConfig::HubConfig()
     , connection_timeout(30)
     , max_retries(3)
     , show_progress(true)
+    // Per-file download cap (8 GiB) so a malicious/misconfigured mirror cannot
+    // stream an unbounded body and fill the cache directory (disk-exhaustion
+    // DoS). max_cache_size is only enforced AFTER a download completes, so it
+    // never bounds a single in-flight transfer. 0 disables the cap.
+    , max_download_size(static_cast<size_t>(8) * 1024 * 1024 * 1024)
 {}
 
 // ============================================================================
@@ -58,11 +63,27 @@ public:
         curl_global_cleanup();
     }
 
+    // Sink for a download: the output stream plus a hard byte budget so a
+    // chunked response (no Content-Length, so CURLOPT_MAXFILESIZE cannot fire)
+    // still cannot stream past the configured limit and fill the disk.
+    struct WriteSink {
+        std::ofstream* file;
+        size_t written = 0;
+        size_t budget = 0;  // 0 = unlimited
+    };
+
     // CURL write callback
     static size_t write_callback(void* ptr, size_t size, size_t nmemb, void* userdata) {
-        auto* file = static_cast<std::ofstream*>(userdata);
-        file->write(static_cast<char*>(ptr), size * nmemb);
-        return size * nmemb;
+        auto* sink = static_cast<WriteSink*>(userdata);
+        const size_t n = size * nmemb;
+        if (sink->budget > 0 && sink->written + n > sink->budget) {
+            // Returning a short count signals an error to libcurl, aborting the
+            // transfer cleanly before the budget is exceeded.
+            return 0;
+        }
+        sink->file->write(static_cast<char*>(ptr), static_cast<std::streamsize>(n));
+        sink->written += n;
+        return n;
     }
 
     // CURL progress callback
@@ -144,14 +165,45 @@ public:
             throw std::runtime_error("Failed to open output file: " + dest_path);
         }
 
+        // Total bytes already on disk (resume) count against the budget.
+        WriteSink sink{&outfile, start_offset, config.max_download_size};
+
         // Setup CURL options
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outfile);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.connection_timeout);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        // Restrict the allowed protocol set. download_weights permits exactly
+        // https:// (remote) and file:// (local cache/test fixtures); anything
+        // else (scp://, ftp://, dict://, gopher://, ...) is an SSRF/local-read
+        // vector and is rejected here. Crucially, REDIRECT targets are limited
+        // to http/https ONLY: a remote mirror must never be able to redirect
+        // into file:// (or any other scheme), which would turn a 30x response
+        // into an arbitrary local-file read.
+#if defined(CURLOPT_PROTOCOLS_STR)
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https,file");
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS,
+                         CURLPROTO_HTTP | CURLPROTO_HTTPS | CURLPROTO_FILE);
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,
+                         CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
+        // Bound redirect chains so a mirror cannot loop the client indefinitely.
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+        // Per-file size cap: abort the transfer if the server advertises (or
+        // streams past) the configured byte budget, rather than filling the
+        // cache disk. 0 disables the cap.
+        if (config.max_download_size > 0) {
+            curl_off_t budget =
+                static_cast<curl_off_t>(config.max_download_size > start_offset
+                                            ? config.max_download_size - start_offset
+                                            : 0);
+            curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, budget);
+        }
 
         // Resume support
         if (start_offset > 0) {
@@ -200,7 +252,8 @@ public:
                         curl_easy_cleanup(curl);
                         throw std::runtime_error("Failed to reopen output file: " + dest_path);
                     }
-                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outfile);
+                    sink.written = 0;  // file truncated to zero; reset budget counter
+                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
                     continue;  // re-download cleanly without resume
                 }
             }
@@ -231,7 +284,8 @@ public:
                     curl_easy_cleanup(curl);
                     throw std::runtime_error("Failed to reopen output file for retry: " + dest_path);
                 }
-                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outfile);
+                sink.written = start_offset;  // truncated back to start_offset
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
             }
         }
 
@@ -327,8 +381,12 @@ public:
         }
         fs::path cache_root = fs::weakly_canonical(fs::path(config.cache_dir));
         fs::path resolved = fs::weakly_canonical(cache_root / (model_name + ".pt"));
-        const std::string root = cache_root.string();
-        if (resolved.string().compare(0, root.size(), root) != 0) {
+        // Containment check with a real path-component boundary: a raw string
+        // prefix compare would also accept a sibling like "<root>-evil/..."
+        // (no separator after the prefix). lexically_relative yields a path that
+        // begins with ".." exactly when `resolved` is not under `cache_root`.
+        const fs::path rel = resolved.lexically_relative(cache_root);
+        if (rel.empty() || *rel.begin() == "..") {
             throw std::runtime_error("ModelHub: model name escapes the cache directory");
         }
         return resolved.string();
@@ -421,6 +479,40 @@ std::string ModelHub::download_weights(
     ensure_initialized();
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // SECURITY: download_weights fetches attacker-controllable bytes and feeds
+    // them to a deserializer (load_pretrained_weights). Two integrity gates,
+    // enforced when verify_checksums is on (the default):
+    //
+    //   1. Transport: refuse plaintext HTTP. A MITM on http:// can swap the
+    //      payload entirely; require TLS (https://). A local file:// URL is
+    //      permitted (no network, used by the cache/test paths).
+    //   2. Content: refuse to proceed with NO expected SHA256. Previously an
+    //      empty checksum merely logged a warning and accepted whatever bytes
+    //      arrived; that is the supply-chain hole. With verification enabled,
+    //      an unverifiable download is a hard error, not a warning.
+    //
+    // Callers that genuinely want unverified downloads must explicitly
+    // construct the hub with verify_checksums=false (an informed opt-out).
+    if (impl_->config.verify_checksums) {
+        const bool is_https = url.rfind("https://", 0) == 0;
+        const bool is_file  = url.rfind("file://", 0) == 0;
+        if (!is_https && !is_file) {
+            throw std::runtime_error(
+                "ModelHub: refusing to download '" + model_name +
+                "' over a non-HTTPS URL with checksum verification enabled "
+                "(URL: " + url + "). Use an https:// URL, or disable "
+                "verify_checksums to explicitly accept unverified transport.");
+        }
+        if (expected_sha256.empty()) {
+            throw std::runtime_error(
+                "ModelHub: refusing to download '" + model_name +
+                "' with no expected SHA256 checksum while verify_checksums is "
+                "enabled. The downloaded bytes are deserialized, so an "
+                "unverified blob is a supply-chain risk. Supply expected_sha256, "
+                "or disable verify_checksums to explicitly opt out.");
+        }
+    }
+
     // Check if already cached
     std::string cache_path = impl_->get_cache_path(model_name);
 
@@ -468,14 +560,13 @@ std::string ModelHub::download_weights(
             fs::remove(temp_path);
             throw std::runtime_error("Checksum verification failed for " + model_name);
         }
-    } else if (expected_sha256.empty() && impl_->config.verify_checksums) {
-        // Make the integrity downgrade VISIBLE instead of silent: e.g. the
-        // safetensors-mirror path passes no checksum, so those weights were
-        // accepted with zero verification while the .pt path enforced sha256.
+    } else if (!impl_->config.verify_checksums) {
+        // Verification explicitly disabled by the caller — still make the
+        // integrity downgrade VISIBLE rather than silent.
         TENZOR_LOG_WARN(
-            "ModelHub: '{}' downloaded WITHOUT checksum verification (no expected "
-            "sha256 registered for this URL: {}). Transport TLS still applies, but "
-            "a compromised/typo'd mirror would not be detected.",
+            "ModelHub: '{}' downloaded with verify_checksums=false (no integrity "
+            "check applied to URL: {}). A compromised/typo'd mirror would not be "
+            "detected.",
             model_name, url);
     }
 
@@ -570,7 +661,12 @@ std::string ModelHub::download_pretrained_safetensors(
         // Use a different cache key (".safetensors" suffix) so the legacy
         // .pth cache doesn't collide with the safetensors download.
         std::string st_key = model_name + ".safetensors";
-        return download_weights(st_key, info.safetensors_url, /*sha256=*/"",
+        // Pass the SafeTensors mirror's own pinned checksum. When it is empty
+        // (no checksum registered yet) and verify_checksums is on, the gate in
+        // download_weights refuses the unverifiable download rather than
+        // silently accepting attacker-controllable bytes.
+        return download_weights(st_key, info.safetensors_url,
+                                 info.safetensors_sha256,
                                  show_progress, progress_callback);
     }
     // Fall through to legacy .pth URL — the caller will get H2's actionable
@@ -1043,9 +1139,10 @@ static void initialize_default_registry(std::unordered_map<std::string, ModelWei
     // file will be filled in at build/release time by
     // `tools/check_pretrained_weights.py`, which downloads each entry and
     // records the observed SHA256.  Until the build pipeline ships those
-    // checksums, `download_weights` skips checksum verification for any
-    // entry whose `sha256` is empty (this is existing behaviour, see the
-    // `expected_sha256.empty()` short-circuits in `download_weights`).
+    // checksums, an entry with an empty checksum is UNVERIFIABLE: with the
+    // default `verify_checksums=true`, `download_weights` REFUSES to download
+    // it (see the hard error on `expected_sha256.empty()` there) rather than
+    // accepting attacker-controllable bytes.
     //
     // Entries that previously had neither a working safetensors mirror nor a
     // verifiable .pth (vgg*, deeplab*, fcn_*, faster_rcnn, mask_rcnn,

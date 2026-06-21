@@ -108,6 +108,13 @@ inline __m256 exp_avx2(__m256 x) {
     // NaN back into the result before returning.
     __m256 exp_nan_mask = _mm256_cmp_ps(x, x, _CMP_UNORD_Q);
 
+    // Overflow: std::exp(x) returns +inf for x greater than ~88.7228. The clamp
+    // below would instead pin those inputs to a finite plateau, disagreeing with
+    // the scalar tail (which uses std::exp). Capture the overflow lanes now and
+    // blend +inf back in after reconstruction so the SIMD body matches libm.
+    __m256 exp_overflow_thresh = _mm256_set1_ps(88.72283935546875f);
+    __m256 exp_overflow_mask = _mm256_cmp_ps(x, exp_overflow_thresh, _CMP_GT_OQ);
+
     // Clamp to avoid overflow/underflow
     __m256 max_val = _mm256_set1_ps(88.3762626647949f);
     __m256 min_val = _mm256_set1_ps(-88.3762626647949f);
@@ -150,6 +157,9 @@ inline __m256 exp_avx2(__m256 x) {
     __m256 scale = _mm256_castsi256_ps(_mm256_add_epi32(ki, _mm256_set1_epi32(0x3f800000)));
 
     __m256 exp_res = _mm256_mul_ps(p, scale);
+    // Blend +inf for the overflow lanes (x > 88.7228), matching std::exp.
+    __m256 exp_inf_val = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+    exp_res = _mm256_blendv_ps(exp_res, exp_inf_val, exp_overflow_mask);
     __m256 exp_nan_val = _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN());
     return _mm256_blendv_ps(exp_res, exp_nan_val, exp_nan_mask);
 }
@@ -325,6 +335,11 @@ inline __m512 exp_avx512(__m512 x) {
     // Preserve NaN across the clamp (see exp_avx2).
     __mmask16 exp_nan_mask = _mm512_cmp_ps_mask(x, x, _CMP_UNORD_Q);
 
+    // Overflow: std::exp returns +inf for x > ~88.7228 (see exp_avx2). Capture
+    // those lanes before the clamp so we can blend +inf back in, matching libm.
+    __mmask16 exp_overflow_mask =
+        _mm512_cmp_ps_mask(x, _mm512_set1_ps(88.72283935546875f), _CMP_GT_OQ);
+
     // Clamp
     __m512 max_val = _mm512_set1_ps(88.3762626647949f);
     __m512 min_val = _mm512_set1_ps(-88.3762626647949f);
@@ -350,6 +365,9 @@ inline __m512 exp_avx512(__m512 x) {
     __m512 scale = _mm512_castsi512_ps(_mm512_add_epi32(ki, _mm512_set1_epi32(0x3f800000)));
 
     __m512 exp_res = _mm512_mul_ps(p, scale);
+    // Blend +inf for the overflow lanes (x > 88.7228), matching std::exp.
+    exp_res = _mm512_mask_blend_ps(exp_overflow_mask, exp_res,
+                                   _mm512_set1_ps(std::numeric_limits<float>::infinity()));
     __m512 exp_nan_val = _mm512_set1_ps(std::numeric_limits<float>::quiet_NaN());
     return _mm512_mask_blend_ps(exp_nan_mask, exp_res, exp_nan_val);
 }

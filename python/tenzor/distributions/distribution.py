@@ -87,12 +87,15 @@ def _to_tensor(x: ScalarOrArray, dtype=None) -> Tensor:
     if isinstance(x, Tensor):
         return x
     if isinstance(x, np.ndarray):
-        # Coerce numpy → float32 by default to stay aligned with the
-        # tenzor compute path.
-        arr = x.astype(np.float32, copy=False) if target == _dtype.float32 else x
-        return Tensor.from_numpy(arr)
+        # Build a float32 tensor (the default tenzor compute dtype), then cast
+        # to the requested target so a non-float32 ``dtype`` is honoured for
+        # numpy inputs just like the scalar path.
+        arr = x.astype(np.float32, copy=False)
+        t = Tensor.from_numpy(arr)
+        return t if target == _dtype.float32 else t.to(target)
     if isinstance(x, (list, tuple)):
-        return Tensor.from_numpy(np.asarray(x, dtype=np.float32))
+        t = Tensor.from_numpy(np.asarray(x, dtype=np.float32))
+        return t if target == _dtype.float32 else t.to(target)
     # Scalar.
     import tenzor as _tz
     return _tz.full([], float(x), target)

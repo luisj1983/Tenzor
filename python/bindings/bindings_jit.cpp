@@ -295,7 +295,14 @@ void register_jit(py::module_& m) {
              "the tracer itself; exposed for tests and advanced debugging.")
         .def_static("get_instance", &tenzor::jit::Tracer::get_instance,
              py::return_value_policy::reference,
-             "Get thread-local tracer instance");
+             "Get the calling thread's tracer instance.\n"
+             "\n"
+             "SAME-THREAD ONLY. The returned object is a non-owning view of a\n"
+             "thread_local Tracer that is destroyed when the owning thread\n"
+             "exits. Do NOT stash it and use it from another thread or after\n"
+             "the originating thread terminates (e.g. across an executor /\n"
+             "worker-pool boundary) — that dereferences a destroyed object.\n"
+             "Call get_instance() again on each thread that needs the tracer.");
 
     py::class_<tenzor::jit::TracingGuard>(jit, "TracingGuard",
         "RAII guard for tracing scope")

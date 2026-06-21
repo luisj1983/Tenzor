@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 #include "int4_utils.hpp"
 
@@ -48,6 +49,19 @@ inline void fused_qlinear_dequant(
     const int64_t KN = K * N;
     if (KN <= 0 || M <= 0) {
         return;
+    }
+
+    // QInt4x2 weights are packed per output row along the contraction dim K:
+    // each row of K nibbles occupies (K + 1) / 2 bytes, and an odd K leaves the
+    // high nibble of that row's last byte as zero padding (see the QInt4x2
+    // packer in core/tensor.cpp). This kernel unpacks the weight buffer as a
+    // single flat K*N nibble stream, which is only byte-aligned with that
+    // per-row layout when K is even; an odd K desynchronises every row after the
+    // first and silently returns wrong results. Reject it, matching
+    // quantized_linear_int4_kernel.
+    if (K % 2 != 0) {
+        throw std::invalid_argument(
+            "fused_qlinear_dequant: K (in_features) must be even for INT4 packing");
     }
 
     // Pre-unpack the INT4 weight matrix into an int8 buffer [K x N] exactly

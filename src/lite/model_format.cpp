@@ -523,11 +523,26 @@ auto TZLiteReader::load_full(const void* data, size_t size) -> LoadedModel {
     // valid in-file offset past the node table.
     const size_t tlv_start = static_cast<size_t>(header.weight_data_offset);
     if (tlv_start < size) {
-        // Reposition cursor — `weight_data_offset` is authoritative, the
-        // node-table length we just computed is sanity-only.
+        // The TLV table must begin at or after the end of the node table we
+        // just parsed (`offset` is the cursor position after
+        // deserialise_node_table). A crafted weight_data_offset pointing into
+        // (or before) the node-table region would otherwise reinterpret
+        // node-record bytes as a section table — a self-inconsistent graph.
+        if (tlv_start < offset) {
+            throw std::runtime_error(
+                "TZLiteReader: weight_data_offset overlaps the node table");
+        }
+        // Reposition cursor — `weight_data_offset` is authoritative for the
+        // start of the TLV table.
         offset = tlv_start;
         uint32_t section_count = 0;
         read_pod(buffer, size, offset, section_count);
+        // Reject a section_count that cannot possibly fit in the remaining
+        // payload (each section is at least u32 tag + u64 size = 12 bytes),
+        // matching the defensive check_element_count guard used for every
+        // other count in this reader.
+        check_element_count(section_count, sizeof(uint32_t) + sizeof(uint64_t),
+                            size, offset, "TLV sections");
         for (uint32_t s = 0; s < section_count; ++s) {
             uint32_t tag = 0;
             uint64_t section_size = 0;

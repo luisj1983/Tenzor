@@ -311,6 +311,8 @@ TEST_P(MaxPool2dTest, GradientCheckSmall) {
     pool.to(device);
     auto input = Variable(randn({1, 1, 4, 4}, DType::Float32, device), true);
 
+    // loss = sum(pool(x)) so d_loss/d_out is identically 1; the numerical path
+    // only reads .tensor(), so the severed-grad_fn rewrap is harmless there.
     auto loss_fn = [&pool](Variable& inp) -> Variable {
         auto out = pool.forward(inp);
         auto loss_tensor = sum(out.tensor());
@@ -318,12 +320,17 @@ TEST_P(MaxPool2dTest, GradientCheckSmall) {
     };
 
     auto numerical_grad = numerical_gradient(loss_fn, input, device, 1e-3f);
-    auto loss = loss_fn(input);
-    loss.backward();
 
-    if (input.grad().has_value()) {
-        EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
-    }
+    // Analytic path: backprop through the INTACT Variable graph (no .tensor()
+    // rewrap). Seed with ones because d(sum(out))/d(out) == 1 everywhere.
+    auto output = pool.forward(input);
+    auto out_shape = output.shape();
+    std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
+    output.backward(ones(out_shape_vec, DType::Float32, device));
+
+    ASSERT_TRUE(input.grad().has_value())
+        << "MaxPool2d backward produced no gradient for input";
+    EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
 }
 
 // ============================
@@ -522,12 +529,17 @@ TEST_P(AvgPool2dTest, GradientCheckSmall) {
     };
 
     auto numerical_grad = numerical_gradient(loss_fn, input, device, 1e-3f);
-    auto loss = loss_fn(input);
-    loss.backward();
 
-    if (input.grad().has_value()) {
-        EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
-    }
+    // Analytic path: backprop through the INTACT Variable graph (no .tensor()
+    // rewrap). Seed with ones because d(sum(out))/d(out) == 1 everywhere.
+    auto output = pool.forward(input);
+    auto out_shape = output.shape();
+    std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
+    output.backward(ones(out_shape_vec, DType::Float32, device));
+
+    ASSERT_TRUE(input.grad().has_value())
+        << "AvgPool2d backward produced no gradient for input";
+    EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
 }
 
 // ============================
@@ -662,12 +674,17 @@ TEST_P(AdaptiveAvgPool2dTest, GradientCheckSmall) {
     };
 
     auto numerical_grad = numerical_gradient(loss_fn, input, device, 1e-3f);
-    auto loss = loss_fn(input);
-    loss.backward();
 
-    if (input.grad().has_value()) {
-        EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
-    }
+    // Analytic path: backprop through the INTACT Variable graph (no .tensor()
+    // rewrap). Seed with ones because d(sum(out))/d(out) == 1 everywhere.
+    auto output = pool.forward(input);
+    auto out_shape = output.shape();
+    std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
+    output.backward(ones(out_shape_vec, DType::Float32, device));
+
+    ASSERT_TRUE(input.grad().has_value())
+        << "AdaptiveAvgPool2d backward produced no gradient for input";
+    EXPECT_TRUE(tensors_close(*input.grad(), numerical_grad, 1e-3f, 1e-3f));
 }
 
 // ============================

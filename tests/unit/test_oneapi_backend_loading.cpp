@@ -35,8 +35,19 @@ protected:
             return;
         }
 
-        // Try to get the create_backend symbol
-        using CreateBackendFunc = std::unique_ptr<Backend>(*)();
+        // Try to get the create_backend symbol.
+        //
+        // IMPORTANT: the exported `extern "C" Backend* create_backend()` returns
+        // a RAW `Backend*` (see backend.hpp: `using BackendFactory = Backend*(*)()`
+        // and oneapi_backend.cpp). Declaring it here as returning
+        // `std::unique_ptr<Backend>` is an ABI mismatch: a function returning a
+        // non-trivial unique_ptr uses the hidden-sret calling convention (return
+        // slot pointer in RDI) while the real factory returns the pointer in RAX.
+        // Calling through the wrong signature constructed `backend_` from garbage
+        // → wild pointer → SIGSEGV on `backend_->name()` and `free(): invalid
+        // pointer` / stack-smashing when the bogus unique_ptr later destructs.
+        // Use the correct raw-pointer signature and adopt it into the unique_ptr.
+        using CreateBackendFunc = Backend* (*)();
         auto create_backend = reinterpret_cast<CreateBackendFunc>(
             dlsym(handle_, "create_backend")
         );
@@ -53,7 +64,7 @@ protected:
         // so a throw here is a genuine factory/construction bug in the OneAPI
         // backend — let it propagate and fail the test rather than burying it
         // as "not available". TearDown() closes handle_ on the failure path.
-        backend_ = create_backend();
+        backend_.reset(create_backend());
         backend_created_ = true;
     }
 

@@ -30,11 +30,14 @@ struct QuantizedConv2dKernelInt8 {};
  * @return Quantized int8 tensor
  */
 auto quantize_kernel(
-    const Tensor& input,
+    const Tensor& input_in,
     float scale,
     int32_t zero_point,
     sycl::queue& queue
 ) -> Tensor {
+    // The kernel indexes input by flat position, so a non-contiguous view must be
+    // materialized contiguous first.
+    const Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   DType::Int8, input.device());
 
@@ -58,6 +61,9 @@ auto quantize_kernel(
         throw std::runtime_error("quantize: only Float32 input supported");
     }
 
+    // Drain before the host reads the USM-shared output (and before the local
+    // contiguous input copy is freed); the parallel_for is async.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -76,11 +82,13 @@ auto quantize_kernel(
  * @return Dequantized float tensor
  */
 auto dequantize_kernel(
-    const Tensor& input,
+    const Tensor& input_in,
     float scale,
     int32_t zero_point,
     sycl::queue& queue
 ) -> Tensor {
+    // Indexes input by flat position; materialize a non-contiguous view.
+    const Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   DType::Float32, input.device());
 
@@ -102,6 +110,7 @@ auto dequantize_kernel(
         throw std::runtime_error("dequantize: only Int8 input supported");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -128,9 +137,9 @@ auto dequantize_kernel(
  * @return Output tensor (dequantized to float)
  */
 auto quantized_linear_kernel(
-    const Tensor& input,
-    const Tensor& weight,
-    const Tensor* bias,
+    const Tensor& input_in,
+    const Tensor& weight_in,
+    const Tensor* bias_in,
     float input_scale,
     int32_t input_zero_point,
     float weight_scale,
@@ -139,6 +148,16 @@ auto quantized_linear_kernel(
     int32_t output_zero_point,
     sycl::queue& queue
 ) -> Tensor {
+    // The kernel reads input/weight/bias with shape-derived flat offsets, so all
+    // must be contiguous or it reads at wrong physical positions.
+    const Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor weight = weight_in.is_contiguous() ? weight_in : weight_in.contiguous();
+    Tensor bias_cont;
+    const Tensor* bias = bias_in;
+    if (bias_in && !bias_in->is_contiguous()) {
+        bias_cont = bias_in->contiguous();
+        bias = &bias_cont;
+    }
     auto input_shape = input.shape();
     int64_t batch_size = 1;
     for (size_t i = 0; i < input_shape.size() - 1; ++i) {
@@ -199,6 +218,7 @@ auto quantized_linear_kernel(
         throw std::runtime_error("quantized_linear: requires Int8 input and weight");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -224,9 +244,9 @@ auto quantized_linear_kernel(
  * @return Output tensor (dequantized to float)
  */
 auto quantized_conv2d_kernel(
-    const Tensor& input,
-    const Tensor& weight,
-    const Tensor* bias,
+    const Tensor& input_in,
+    const Tensor& weight_in,
+    const Tensor* bias_in,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
@@ -237,6 +257,16 @@ auto quantized_conv2d_kernel(
     int32_t weight_zero_point,
     sycl::queue& queue
 ) -> Tensor {
+    // The kernel reads input/weight/bias via shape-derived NCHW offsets, so all
+    // must be contiguous.
+    const Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor weight = weight_in.is_contiguous() ? weight_in : weight_in.contiguous();
+    Tensor bias_cont;
+    const Tensor* bias = bias_in;
+    if (bias_in && !bias_in->is_contiguous()) {
+        bias_cont = bias_in->contiguous();
+        bias = &bias_cont;
+    }
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -323,6 +353,7 @@ auto quantized_conv2d_kernel(
         throw std::runtime_error("quantized_conv2d: requires Int8 input and weight");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 

@@ -16,6 +16,62 @@
 namespace tenzor {
 namespace torch_interop {
 
+namespace {
+
+// Checked cudaMemcpy: every transfer in both directions must validate its
+// return code. A failed copy (invalid pointer, unregistered host memory, OOM,
+// wrong device context) otherwise leaves the destination populated with
+// uninitialised/garbage memory and execution proceeds as if it succeeded — the
+// failure resurfaces later as wrong results or an unrelated async error. Throw
+// a typed DeviceException so the caller sees the real cause at the copy site.
+inline void checked_cuda_memcpy(void* dst, const void* src, size_t bytes,
+                                cudaMemcpyKind kind, const char* where) {
+    cudaError_t err = cudaMemcpy(dst, src, bytes, kind);
+    if (err != cudaSuccess) {
+        throw ::tenzor::DeviceException(
+            std::string("torch_interop: cudaMemcpy failed in ") + where +
+            ": " + cudaGetErrorString(err));
+    }
+}
+
+// RAII guard that sets the active CUDA device for the duration of a copy and
+// restores the previous device on scope exit. A plain cudaMemcpy assumes the
+// current device matches the buffers' device; for multi-GPU torch interop
+// (Tenzor source on cuda:1 while the active context is cuda:0) that assumption
+// is false and a Device-to-Device copy fails (or peer-copies incorrectly).
+struct CudaDeviceGuard {
+    int previous_ = -1;
+    bool active_ = false;
+    explicit CudaDeviceGuard(int target) {
+        if (target < 0) return;
+        cudaError_t err = cudaGetDevice(&previous_);
+        if (err != cudaSuccess) {
+            throw ::tenzor::DeviceException(
+                std::string("torch_interop: cudaGetDevice failed: ") +
+                cudaGetErrorString(err));
+        }
+        if (previous_ != target) {
+            err = cudaSetDevice(target);
+            if (err != cudaSuccess) {
+                throw ::tenzor::DeviceException(
+                    std::string("torch_interop: cudaSetDevice(") +
+                    std::to_string(target) +
+                    ") failed: " + cudaGetErrorString(err));
+            }
+            active_ = true;
+        }
+    }
+    ~CudaDeviceGuard() {
+        if (active_ && previous_ >= 0) {
+            cudaSetDevice(previous_);  // best-effort restore
+        }
+    }
+    CudaDeviceGuard(const CudaDeviceGuard&) = delete;
+    CudaDeviceGuard& operator=(const CudaDeviceGuard&) = delete;
+};
+
+} // anonymous namespace
+
 auto can_zero_copy_to_torch(const Tensor& tensor) -> bool {
     // Zero-copy requires:
     // 1. Contiguous memory layout
@@ -260,10 +316,17 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
             else if (src_is_cuda && !dst_is_cuda)  kind = cudaMemcpyDeviceToHost;
             else if (!src_is_cuda && dst_is_cuda)  kind = cudaMemcpyHostToDevice;
             else                                    kind = cudaMemcpyHostToHost;
-            cudaMemcpy(torch_tensor.data_ptr(),
+            // Set the active CUDA device to match the source (or destination)
+            // device so a plain cudaMemcpy addresses the correct context;
+            // otherwise a multi-GPU D2D/D2H copy can fail or read garbage.
+            const int cuda_dev = src_is_cuda
+                ? contiguous_tensor.device().index
+                : (dst_is_cuda ? torch_device.index() : -1);
+            CudaDeviceGuard dev_guard(cuda_dev);
+            checked_cuda_memcpy(torch_tensor.data_ptr(),
                       contiguous_tensor.data_ptr(),
                       contiguous_tensor.numel() * dtype_size(dtype),
-                      kind);
+                      kind, "tensor_to_torch (cuda copy)");
         } else {
             // 6th-audit Fix #3: non-CPU non-CUDA source (ROCm / MPS /
             // OneAPI / Vulkan). PyTorch's C++ side doesn't expose a
@@ -277,8 +340,10 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
             if (torch_device.is_cpu()) {
                 std::memcpy(torch_tensor.data_ptr(), host.data_ptr(), bytes);
             } else if (torch_device.is_cuda()) {
-                cudaMemcpy(torch_tensor.data_ptr(), host.data_ptr(),
-                           bytes, cudaMemcpyHostToDevice);
+                CudaDeviceGuard dev_guard(torch_device.index());
+                checked_cuda_memcpy(torch_tensor.data_ptr(), host.data_ptr(),
+                           bytes, cudaMemcpyHostToDevice,
+                           "tensor_to_torch (host bounce -> cuda)");
             } else {
                 throw ::tenzor::DeviceException(
                     "tensor_to_torch: unsupported PyTorch target device for "
@@ -287,7 +352,16 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
         }
     }
 
-    // Set requires_grad if requested
+    // Set requires_grad if requested.
+    //
+    // ALIASING CAVEAT (zero-copy path): when this torch tensor was produced via
+    // the zero-copy torch::from_blob branch it ALIASES Tenzor storage. Marking
+    // such an aliasing leaf requires_grad=true means a later in-place Tenzor
+    // mutation of the same storage silently changes a value PyTorch is
+    // differentiating against (wrong gradients, no error) — the same footgun as
+    // numpy.from_numpy(requires_grad=True). The source Tenzor storage must NOT
+    // be mutated in place for the lifetime of a requires_grad torch view; force
+    // a copy on the Tenzor side first if you need to mutate it.
     if (requires_grad) {
         torch_tensor.requires_grad_(true);
     }
@@ -375,8 +449,10 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
     if (device.type == Device::Type::CPU) {
         Tensor tensor(shape, dtype, Device::cpu());
         if (src_is_cuda) {
-            cudaMemcpy(tensor.data_ptr(), contiguous_torch.data_ptr(),
-                       bytes, cudaMemcpyDeviceToHost);
+            CudaDeviceGuard dev_guard(contiguous_torch.device().index());
+            checked_cuda_memcpy(tensor.data_ptr(), contiguous_torch.data_ptr(),
+                       bytes, cudaMemcpyDeviceToHost,
+                       "tensor_from_torch (cuda -> cpu)");
         } else {
             std::memcpy(tensor.data_ptr(), contiguous_torch.data_ptr(), bytes);
         }
@@ -385,8 +461,12 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
 
     if (device.type == Device::Type::CUDA) {
         Tensor tensor(shape, dtype, device);
-        cudaMemcpy(tensor.data_ptr(), contiguous_torch.data_ptr(), bytes,
-                   src_is_cuda ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice);
+        // Address the destination CUDA device (matches `device.index`); for a
+        // D2D copy the source device must be reachable from it.
+        CudaDeviceGuard dev_guard(device.index);
+        checked_cuda_memcpy(tensor.data_ptr(), contiguous_torch.data_ptr(), bytes,
+                   src_is_cuda ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice,
+                   "tensor_from_torch (-> cuda)");
         return tensor;
     }
 
@@ -402,17 +482,40 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
 }
 
 auto variable_to_torch(const Variable& variable) -> torch::autograd::Variable {
-    // Convert data tensor
+    // VALUE-ONLY / DETACH SEMANTICS (symmetric with variable_from_torch).
+    // This bridge transfers tensor VALUES and the requires_grad flag across the
+    // framework boundary; it does NOT translate the Tenzor autograd graph
+    // (grad_fn / computation history) into PyTorch's. A non-leaf Tenzor
+    // Variable therefore becomes a torch LEAF: a subsequent torch backward
+    // cannot reach the Tenzor-side inputs. Cross-framework graph stitching is
+    // not supported (see torch_interop.hpp / the COMPLEX note in the review).
+    // We DO carry the requires_grad flag and any accumulated .grad() so a
+    // grad-bearing Variable round-trips with its gradient intact — matching
+    // variable_from_torch, which previously was asymmetric (it copied .grad()
+    // while this direction silently dropped it).
     auto torch_tensor = tensor_to_torch(variable.tensor(), variable.requires_grad());
 
-    // Convert to Variable
     torch::autograd::Variable torch_var(torch_tensor);
+
+    // Carry the existing gradient across (symmetric with variable_from_torch).
+    if (variable.requires_grad() && variable.grad().has_value()) {
+        torch_var.mutable_grad() = tensor_to_torch(variable.grad().value());
+    }
 
     return torch_var;
 }
 
 auto variable_from_torch(const torch::autograd::Variable& torch_variable) -> Variable {
-    // Convert data tensor
+    // VALUE-ONLY / DETACH SEMANTICS. We import the data VALUES and the
+    // requires_grad flag (plus any accumulated .grad()), but the upstream
+    // PyTorch computation graph (torch_variable.grad_fn) is NOT translated into
+    // Tenzor's autograd graph. A torch tensor that is the output of a
+    // differentiable op (requires_grad==true, grad_fn!=nullptr) becomes a
+    // Tenzor LEAF Variable: calling .backward() on the Tenzor side computes
+    // nothing for the original torch inputs. Cross-framework graph stitching is
+    // out of scope (see the COMPLEX note in the review). Callers needing
+    // gradients to flow back into torch parameters must keep the computation on
+    // one side of the boundary.
     Tensor data = tensor_from_torch(torch_variable);
 
     // Create Variable with gradient tracking
@@ -432,7 +535,12 @@ auto sync_gradients(Variable& tenzor_var,
                    torch::autograd::Variable& torch_var,
                    bool tenzor_to_torch) -> void {
     if (tenzor_to_torch) {
-        // Copy Tenzor gradient to PyTorch
+        // Copy Tenzor gradient to PyTorch. SNAPSHOT semantics: this REPLACES
+        // torch_var.grad with a fresh copy of the current Tenzor gradient — it
+        // is a one-shot snapshot, not live shared storage. After the next torch
+        // backward writes a new .grad, the two buffers diverge; call
+        // sync_gradients again to re-snapshot. (It does not accumulate into an
+        // existing torch grad.)
         if (tenzor_var.grad().has_value()) {
             auto grad_tensor = tensor_to_torch(tenzor_var.grad().value());
             torch_var.mutable_grad() = grad_tensor;

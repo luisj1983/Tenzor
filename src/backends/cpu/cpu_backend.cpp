@@ -9,6 +9,7 @@
 #include <fstream>
 #include <string>
 #include <cstdlib>
+#include <cstdio>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -40,12 +41,33 @@ static void pin_tbb_libs() {
     // during __cxa_finalize. Without this, libtbb's __TBB_InitOnce destructor
     // calls cache_aligned_deallocate through a scalable_free weak symbol that
     // becomes NULL after tbbmalloc cleanup.
-    const char* libs[] = {
-        "libtbbmalloc.so.2", "libtbbmalloc_debug.so.2",
-        "libtbb.so.12", "libtbb_debug.so.12",
+    // Primary (release) libs come first; the *_debug variants are legitimately
+    // absent on most systems, so their dlopen failure is not noteworthy. We only
+    // warn if NEITHER primary lib could be pinned — in that case the exit-time
+    // scalable_free segfault this pin exists to prevent can still occur.
+    struct LibSpec { const char* name; bool primary; };
+    const LibSpec libs[] = {
+        {"libtbbmalloc.so.2", true},  {"libtbbmalloc_debug.so.2", false},
+        {"libtbb.so.12", true},       {"libtbb_debug.so.12", false},
     };
-    for (const char* lib : libs) {
-        dlopen(lib, RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+    bool any_primary_pinned = false;
+    bool any_primary_attempted = false;
+    for (const auto& lib : libs) {
+        void* h = dlopen(lib.name, RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+        if (lib.primary) {
+            any_primary_attempted = true;
+            if (h != nullptr) {
+                any_primary_pinned = true;
+            }
+        }
+    }
+    if (any_primary_attempted && !any_primary_pinned) {
+        // dlopen returned NULL for every primary TBB lib. Surface it: if TBB is
+        // actually the active allocator, the exit-time segfault is not prevented.
+        std::fprintf(stderr,
+            "[tenzor] warning: could not pin any TBB runtime library "
+            "(libtbbmalloc.so.2 / libtbb.so.12); if TBB is the active allocator, "
+            "an exit-time segfault in scalable_free may occur.\n");
     }
 }
 #endif
@@ -103,11 +125,11 @@ public:
         info.name = "CPU";
         info.vendor = "System";
 
-        // Get number of hardware threads
-        info.compute_units = std::thread::hardware_concurrency();
-        if (info.compute_units == 0) {
-            info.compute_units = 1;  // Fallback
-        }
+        // Report the configured OMP thread count (honors TENZOR_NUM_THREADS /
+        // OMP_NUM_THREADS), not raw hardware_concurrency, so compute_units
+        // matches the parallelism the backend actually uses. get_configured_threads()
+        // returns >=1 even before configure_omp_threads() has run.
+        info.compute_units = tenzor::backends::cpu::get_configured_threads();
 
         // CPU always supports FP64 and usually FP16 via software
         info.supports_fp64 = true;

@@ -39,6 +39,20 @@ add_executable(test_extended_codegen test_extended_codegen.cpp)
 target_link_libraries(test_extended_codegen PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_extended_codegen LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+# Security hardening: compile_script parser (recursion/length/unroll caps) and
+# GraphReader deserializer (magic/version/bounded-count) must reject malformed
+# or untrusted input cleanly instead of crashing / OOM / OOB.
+add_executable(test_jit_hardening test_jit_hardening.cpp)
+target_link_libraries(test_jit_hardening PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_hardening LABELS "jit" DISCOVERY_TIMEOUT 60)
+
+# CUDA-graph replay must copy fresh inputs into the captured buffers
+# (device-to-device) instead of re-running over stale capture-time data.
+# Skips when no CUDA device is present (GPU-only path).
+add_executable(test_cuda_graph_replay test_cuda_graph_replay.cpp)
+target_link_libraries(test_cuda_graph_replay PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_cuda_graph_replay LABELS "jit" DISCOVERY_TIMEOUT 60)
+
 add_executable(test_compile test_compile.cpp)
 target_link_libraries(test_compile PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_compile LABELS "jit" DISCOVERY_TIMEOUT 60)

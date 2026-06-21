@@ -337,6 +337,13 @@ enum class AttrKey : uint16_t {
     Blank,                 // CTC blank class index (default 0)
     ZeroInfinity,          // CTC: clamp infinite losses (and their grads) to zero (default false)
 
+    // quantile/nanquantile parameter
+    Q,                     // Quantile value in [0, 1]
+
+    // Optimizer: first momentum step (PyTorch initialises buf = grad with NO
+    // dampening on the first step; subsequent steps apply dampening).
+    FirstStep,
+
     // Sentinel
     _Count
 };

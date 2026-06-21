@@ -139,11 +139,25 @@ TEST_P(TrigOperationParity, Tan) {
 
 TEST_P(TrigOperationParity, PythagoreanIdentity) {
 
-    auto a = generate_uniform_tensor({32, 32}, -100.0f, 100.0f, DType::Float32, Device::cpu(), 49);
+    // Keep arguments in a range where Float32 sin/cos are accurate so the
+    // identity sin^2+cos^2 == 1 holds tightly; the point is to compare to the
+    // KNOWN CONSTANT 1.0, not to a (possibly equally-wrong) CPU self-reference.
+    auto a = generate_uniform_tensor({32, 32}, -6.28f, 6.28f, DType::Float32, Device::cpu(), 49);
 
-    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+    auto identity = [](const std::vector<Tensor>& inputs) {
         return sin(inputs[0]) * sin(inputs[0]) + cos(inputs[0]) * cos(inputs[0]);
-    }, {a}, device, 1e-5f, 1e-7f, "PythagoreanIdentity");
+    };
+
+    // Direct correctness check against the constant 1.0 on the target backend.
+    // A backend consistently returning e.g. 0.97 (which would still match a CPU
+    // self-reference) fails here.
+    auto target_input = a.to(device);
+    auto target_id = identity({target_input}).cpu();
+    auto ones_ref = full({32, 32}, 1.0, DType::Float32, Device::cpu());
+    EXPECT_TRUE(tensors_close(target_id, ones_ref, 1e-4f, 1e-4f))
+        << "sin^2+cos^2 deviates from 1.0 on " << backend_name(device);
+
+    test_operation_parity_single(identity, {a}, device, 1e-5f, 1e-7f, "PythagoreanIdentity");
 }
 
 // Phase 6-followup #27: gradient parity for trig/hyperbolic functions.

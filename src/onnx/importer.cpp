@@ -33,6 +33,7 @@
 #include "../../include/tenzor/ops/linalg.hpp"   // custom-domain linalg re-import
 #include <array>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <algorithm>
 #include <iostream>
@@ -642,6 +643,16 @@ auto ONNXImporter::parse_model(const std::vector<uint8_t>& bytes) -> ONNXModelDa
     } _scope(external_data_dir_);
 
     tenzor_onnx::ModelProto proto;
+    // ParseFromArray takes the byte count as `int`. Narrowing a >= 2 GB buffer
+    // would wrap to a negative/truncated length: 2-4 GB yields a confusing
+    // "not valid ONNX" failure and >4 GB silently parses only a truncated
+    // prefix (dropping later initializers/nodes). Reject up front rather than
+    // mis-parse a large but legitimate model.
+    if (bytes.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "ONNXImporter::parse_model: model too large for in-memory protobuf "
+            "parse (exceeds INT_MAX bytes); use external_data for large weights");
+    }
     if (!proto.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
         throw std::runtime_error(
             "ONNXImporter::parse_model: failed to deserialize ModelProto — "
@@ -1354,6 +1365,21 @@ auto pads_are_symmetric(const std::vector<int64_t>& pads, size_t ndim) -> bool {
     }
     return true;
 }
+
+// Validate that a per-axis attribute vector (strides/dilations/kernel_shape/
+// output_padding) has EXACTLY the expected number of entries before any axis
+// is indexed. ONNXAttribute::get_ints returns the attacker-supplied vector
+// verbatim whenever the attribute is present (the size-correct default is used
+// only when absent), so a crafted model declaring e.g. strides=[1] on a 2-D
+// conv would otherwise drive an out-of-bounds std::vector::operator[] read.
+inline void require_axis_count(const std::vector<int64_t>& v, size_t expected,
+                               const char* op, const char* attr) {
+    if (v.size() != expected) {
+        throw std::runtime_error(std::string("ONNX ") + op + ": " + attr +
+                                 " attribute has " + std::to_string(v.size()) +
+                                 " entries, expected " + std::to_string(expected));
+    }
+}
 }  // namespace
 
 auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
@@ -1387,6 +1413,13 @@ auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<n
     auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints(default_pads);
     auto dilations = node.get_attr("dilations").value_or(ONNXAttribute{}).get_ints(default_ones);
     int64_t groups = node.get_attr("group").value_or(ONNXAttribute{}).get_int(1);
+
+    // Reject per-axis attribute vectors of the wrong length before any axis is
+    // indexed below (kernel_shape[i]/strides[i]/dilations[i]). pads is checked
+    // separately (it must be spatial_dims*2).
+    require_axis_count(kernel_shape, spatial_dims, "Conv", "kernel_shape");
+    require_axis_count(strides, spatial_dims, "Conv", "strides");
+    require_axis_count(dilations, spatial_dims, "Conv", "dilations");
 
     // auto_pad: Wave Inf-C1.
     //   NOTSET                  → use `pads` as-is.
@@ -1546,6 +1579,15 @@ auto ONNXImporter::convert_conv_transpose(const ONNXImportNode& node)
     auto output_padding = node.get_attr("output_padding")
                               .value_or(ONNXAttribute{}).get_ints(default_zeros);
     int64_t groups = node.get_attr("group").value_or(ONNXAttribute{}).get_int(1);
+
+    // Reject per-axis attribute vectors of the wrong length before any axis is
+    // indexed (kernel_shape[i]/strides[i]/dilations[i]/output_padding[i]).
+    // kernel_shape from get_ints() has no size default, so it is the most
+    // dangerous; validate all four against spatial_dims.
+    require_axis_count(kernel_shape, spatial_dims, "ConvTranspose", "kernel_shape");
+    require_axis_count(strides, spatial_dims, "ConvTranspose", "strides");
+    require_axis_count(dilations, spatial_dims, "ConvTranspose", "dilations");
+    require_axis_count(output_padding, spatial_dims, "ConvTranspose", "output_padding");
 
     // Wave Inf-C1: auto_pad — NOTSET/VALID/SAME_UPPER/SAME_LOWER all supported.
     // For ConvTranspose with SAME_*, the ONNX spec computes total_pad such that
@@ -2282,6 +2324,12 @@ auto ONNXImporter::convert_maxpool(const ONNXImportNode& node) -> std::shared_pt
         auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
         bool ceil_mode = node.get_attr("ceil_mode").value_or(ONNXAttribute{}).get_int(0) != 0;
 
+        // strides[0],strides[1] are indexed below; a present-but-short attribute
+        // (e.g. strides=[1]) would otherwise read past the end.
+        if (strides.size() != 2) {
+            throw std::runtime_error("ONNX MaxPool2d: 'strides' must have 2 entries, got " +
+                                     std::to_string(strides.size()));
+        }
         if (pads.size() != 4) {
             throw std::runtime_error("ONNX MaxPool2d: 'pads' must have 4 entries "
                                      "[begin_h, begin_w, end_h, end_w]");
@@ -2319,6 +2367,12 @@ auto ONNXImporter::convert_avgpool(const ONNXImportNode& node) -> std::shared_pt
         bool count_include_pad =
             node.get_attr("count_include_pad").value_or(ONNXAttribute{}).get_int(0) != 0;
 
+        // strides[0],strides[1] are indexed below; a present-but-short attribute
+        // (e.g. strides=[1]) would otherwise read past the end.
+        if (strides.size() != 2) {
+            throw std::runtime_error("ONNX AvgPool2d: 'strides' must have 2 entries, got " +
+                                     std::to_string(strides.size()));
+        }
         if (pads.size() != 4) {
             throw std::runtime_error("ONNX AvgPool2d: 'pads' must have 4 entries "
                                      "[begin_h, begin_w, end_h, end_w]");

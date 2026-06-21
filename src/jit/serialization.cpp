@@ -340,6 +340,17 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
         // "value not computed" error instead of a clear deserialization
         // failure here.
         uint64_t num_inputs = read_uint64();
+        // Each per-node list/attr entry begins with at least an 8-byte
+        // string-length or value header. Bound every declared per-node count
+        // against the remaining file length before its loop, mirroring the
+        // section-level readers (read_values/read_io_lists/read_constants).
+        // Without this a crafted count (e.g. 2^63) can spin the loop body or
+        // pre-size structures past the file's reach before a per-element read
+        // throws.
+        if (num_inputs > remaining_bytes() / sizeof(uint64_t)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: num_inputs exceeds remaining file");
+        }
         for (uint64_t i = 0; i < num_inputs; ++i) {
             std::string input_id = read_string();
             auto value = graph.get_value(input_id);
@@ -354,6 +365,10 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
 
         // Read outputs — same rule.
         uint64_t num_outputs = read_uint64();
+        if (num_outputs > remaining_bytes() / sizeof(uint64_t)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: num_outputs exceeds remaining file");
+        }
         for (uint64_t i = 0; i < num_outputs; ++i) {
             std::string output_id = read_string();
             auto value = graph.get_value(output_id);
@@ -367,8 +382,13 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
             node->add_output(value);
         }
 
-        // Read attributes
+        // Read attributes. Each attr entry is (string name header + a value),
+        // i.e. at least 8 bytes; bound every count against the remaining file.
         uint64_t num_float_attrs = read_uint64();
+        if (num_float_attrs > remaining_bytes() / sizeof(uint64_t)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: num_float_attrs exceeds remaining file");
+        }
         for (uint64_t i = 0; i < num_float_attrs; ++i) {
             std::string attr_name = read_string();
             float val = read_float();
@@ -376,6 +396,10 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
         }
 
         uint64_t num_int_attrs = read_uint64();
+        if (num_int_attrs > remaining_bytes() / sizeof(uint64_t)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: num_int_attrs exceeds remaining file");
+        }
         for (uint64_t i = 0; i < num_int_attrs; ++i) {
             std::string attr_name = read_string();
             int64_t val = read_int64();
@@ -383,6 +407,10 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
         }
 
         uint64_t num_vec_attrs = read_uint64();
+        if (num_vec_attrs > remaining_bytes() / sizeof(uint64_t)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: num_vec_attrs exceeds remaining file");
+        }
         for (uint64_t i = 0; i < num_vec_attrs; ++i) {
             std::string attr_name = read_string();
             std::vector<int64_t> val = read_int64_vector();
@@ -390,6 +418,10 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
         }
 
         uint64_t num_bool_attrs = read_uint64();
+        if (num_bool_attrs > remaining_bytes() / sizeof(uint64_t)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: num_bool_attrs exceeds remaining file");
+        }
         for (uint64_t i = 0; i < num_bool_attrs; ++i) {
             std::string attr_name = read_string();
             bool val = read_bool();
@@ -397,6 +429,10 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
         }
 
         uint64_t num_tensor_attrs = read_uint64();
+        if (num_tensor_attrs > remaining_bytes() / sizeof(uint64_t)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: num_tensor_attrs exceeds remaining file");
+        }
         for (uint64_t i = 0; i < num_tensor_attrs; ++i) {
             std::string attr_name = read_string();
             Tensor val = read_tensor();

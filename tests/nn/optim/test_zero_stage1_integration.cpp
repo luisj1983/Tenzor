@@ -568,13 +568,13 @@ TEST_F(ZeROIntegrationTest, GradientAccumulation) {
         optimizer.zero_grad();
     }
 
-    // Training with gradient accumulation should not diverge or produce NaN
-    // Note: With random data, loss may not always decrease, but shouldn't explode
+    // The synthetic labels are LEARNABLE (input-mean bucket), so over 50 update
+    // steps the loss must genuinely DECREASE — not merely "fail to double".
     EXPECT_FALSE(std::isnan(losses.back())) << "Gradient accumulation produced NaN";
     EXPECT_FALSE(std::isinf(losses.back())) << "Gradient accumulation produced Inf";
-    EXPECT_LT(losses.back(), losses.front() * 2.0f)
-        << "Gradient accumulation caused divergence (initial: " << losses.front()
-        << ", final: " << losses.back() << ")";
+    EXPECT_LT(losses.back(), losses.front())
+        << "Gradient accumulation did not reduce loss on a learnable task "
+           "(initial: " << losses.front() << ", final: " << losses.back() << ")";
 }
 
 // ============================================================================
@@ -644,13 +644,26 @@ TEST_F(ZeROIntegrationTest, TinyModel) {
         optimizer.step();
     }
 
-    // With random data and tiny model, loss may not always decrease
-    // Test that training doesn't produce NaN or diverge catastrophically
+    // Labels are learnable (input-mean bucket), so even this tiny model must
+    // reduce the loss over 50 steps — assert a REAL decrease. Each step draws a
+    // fresh random batch, so a single front-vs-back loss comparison is dominated
+    // by per-batch noise (it can tick up by chance even while the model learns).
+    // Average the first vs last window of losses to measure the genuine
+    // downward trend instead of comparing two noisy samples.
     EXPECT_FALSE(std::isnan(losses.back())) << "Tiny model produced NaN";
     EXPECT_FALSE(std::isinf(losses.back())) << "Tiny model produced Inf";
-    EXPECT_LT(losses.back(), losses.front() * 2.0f)
-        << "Tiny model diverged (initial: " << losses.front()
-        << ", final: " << losses.back() << ")";
+    constexpr int kWindow = 10;
+    double early = 0.0, late = 0.0;
+    for (int i = 0; i < kWindow; ++i) {
+        early += losses[i];
+        late  += losses[losses.size() - 1 - i];
+    }
+    early /= kWindow;
+    late  /= kWindow;
+    EXPECT_LT(late, early)
+        << "Tiny model did not reduce loss on a learnable task (mean of first "
+        << kWindow << ": " << early << ", mean of last " << kWindow << ": "
+        << late << ")";
 }
 
 TEST_F(ZeROIntegrationTest, LargeModel) {
@@ -725,18 +738,29 @@ TEST_F(ZeROIntegrationTest, ReproducibleTraining) {
     float initial_loss = losses.front();
     float final_loss = losses.back();
 
-    // Allow some variance but loss shouldn't explode
+    // Learnable labels → loss must genuinely decrease over 50 steps.
     EXPECT_FALSE(std::isnan(final_loss)) << "Loss became NaN";
     EXPECT_FALSE(std::isinf(final_loss)) << "Loss became infinite";
-    EXPECT_LT(final_loss, initial_loss * 2.0f)
-        << "Loss diverged too much (initial: " << initial_loss
-        << ", final: " << final_loss << ")";
+    EXPECT_LT(final_loss, initial_loss)
+        << "Training did not reduce loss on a learnable task (initial: "
+        << initial_loss << ", final: " << final_loss << ")";
 
-    // Verify checkpoint reproducibility instead
+    // Checkpoint reproducibility: saving the SAME optimizer state twice must be
+    // bit-for-bit identical — same keys AND same tensor VALUES (size equality
+    // alone would pass even if a buffer were re-randomized between saves).
     auto state1 = optimizer.state_dict();
     auto state2 = optimizer.state_dict();
-
-    // State dict should be consistent when saved twice
-    EXPECT_EQ(state1.size(), state2.size())
+    ASSERT_EQ(state1.size(), state2.size())
         << "State dict size changed between saves";
+    for (const auto& [key, t1] : state1) {
+        ASSERT_TRUE(state2.count(key) > 0) << "key missing in second save: " << key;
+        const Tensor& t2 = state2.at(key);
+        ASSERT_EQ(t1.numel(), t2.numel()) << "numel changed for key " << key;
+        auto a = t1.to(DType::Float64).cpu();
+        auto b = t2.to(DType::Float64).cpu();
+        double max_diff = tenzor::max(tenzor::abs(
+            (a - b).reshape({t1.numel()}))).item<double>();
+        EXPECT_EQ(max_diff, 0.0)
+            << "state_dict value for '" << key << "' changed between two saves";
+    }
 }

@@ -84,13 +84,36 @@ TEST_P(Phase5MathParity, Ldexp) {
 // Predicate ops (return Bool tensor)
 // ----------------------------------------------------------------------------
 
-TEST_P(Phase5MathParity, IsReal_Float) {
-    // For real-valued tensors, isreal() is uniformly true. This test
-    // anchors that the kernel returns the right shape/dtype/value pattern.
-    auto x = randn({4, 8}, DType::Float32, Device::cpu());
+TEST_P(Phase5MathParity, IsReal_Complex) {
+    // isreal() on a COMPLEX tensor must return true exactly where the imaginary
+    // part is zero and false elsewhere. Testing on all-real input gives zero
+    // signal (all-true vs all-true). Build a complex tensor with a known
+    // imaginary pattern and assert the resulting bool pattern against the known
+    // truth — not against a (possibly equally-wrong) CPU self-reference.
+    const int64_t n = 8;
+    auto real = full({n}, 1.0, DType::Float32, Device::cpu());
+    auto imag = full({n}, 0.0, DType::Float32, Device::cpu());
+    float* imag_data = imag.data<float>();
+    // Even indices: imag == 0 -> real -> isreal true.
+    // Odd indices : imag != 0 -> not real -> isreal false.
+    for (int64_t i = 1; i < n; i += 2) imag_data[i] = static_cast<float>(i);
+    auto x = tenzor::complex(real, imag);
+
+    // Direct correctness check on the target backend against the known pattern.
+    auto target_x = x.to(device);
+    auto result = isreal(target_x).cpu();
+    ASSERT_EQ(result.numel(), n);
+    auto result_bool = result.to(DType::Float32);  // bool -> {0,1} for inspection
+    const float* rb = result_bool.data<float>();
+    for (int64_t i = 0; i < n; ++i) {
+        bool expected = (i % 2 == 0);  // even -> real -> true
+        EXPECT_EQ(rb[i] != 0.0f, expected)
+            << "isreal mismatch at index " << i << " on " << backend_name(device);
+    }
+
     test_operation_parity_single([](const std::vector<Tensor>& in) {
         return isreal(in[0]);
-    }, {x}, device, 0.0f, 0.0f, "IsReal_F32");
+    }, {x}, device, 0.0f, 0.0f, "IsReal_Complex");
 }
 
 TEST_P(Phase5MathParity, IsPosInf_AndNegInf) {

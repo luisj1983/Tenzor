@@ -7,6 +7,8 @@
 #include <tenzor/utils/benchmark.hpp>
 #include <thread>
 #include <chrono>
+#include <cmath>
+#include <vector>
 
 using namespace tenzor::benchmark;
 
@@ -24,9 +26,15 @@ TEST_F(BenchmarkTest, TimerBasic) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     double elapsed = timer.stop();
 
-    // Should be approximately 10ms (0.01s), but allow some variance
-    EXPECT_GE(elapsed, 0.008);  // At least 8ms
-    EXPECT_LE(elapsed, 0.050);  // At most 50ms (generous for CI)
+    // We slept 10ms, so the timer must report AT LEAST ~10ms (lower bound is a
+    // real correctness check: a broken timer that reports near-zero fails).
+    // There is deliberately NO upper bound: under a loaded CI scheduler the
+    // sleep can be preempted for tens or hundreds of ms, and an upper bound
+    // there only causes flaky failures without testing anything about the
+    // timer's correctness. We also assert the timer is sane (finite, > 0).
+    EXPECT_GE(elapsed, 0.008);  // At least 8ms (allows minor sleep undershoot)
+    EXPECT_GT(elapsed, 0.0);
+    EXPECT_TRUE(std::isfinite(elapsed));
 }
 
 // Test 2: Timer elapsed without stopping
@@ -94,24 +102,46 @@ TEST_F(BenchmarkTest, BenchmarkWithSetupTeardown) {
     EXPECT_EQ(result.stats.num_runs, 5);
 }
 
-// Test 5: BenchmarkStats percentiles
+// Test 5: BenchmarkStats percentiles — exact, deterministic math.
+//
+// The previous version drove timings with unseeded rand()%100, so on a fast
+// machine the measured durations could collapse to the timer resolution and
+// the percentile ordering (>=) passed trivially without exercising distinct
+// percentiles. Here we feed a KNOWN synthetic timing vector (1..100 seconds)
+// straight into compute_stats and assert the percentile/interpolation math
+// against independently-computed reference values.
 TEST_F(BenchmarkTest, BenchmarkStatsPercentiles) {
-    Benchmark bench("PercentilesTest", 0, 100);
+    // sorted samples: 1.0, 2.0, ..., 100.0  (N = 100)
+    std::vector<double> times;
+    times.reserve(100);
+    for (int i = 1; i <= 100; ++i) {
+        times.push_back(static_cast<double>(i));
+    }
 
-    auto result = bench.run([]() {
-        // Variable work to get different timings
-        volatile int x = 0;
-        for (int i = 0; i < (rand() % 100 + 50); ++i) {
-            x += i;
-        }
-    });
+    auto stats = Benchmark::compute_stats(times);
 
-    // Verify percentile ordering
-    EXPECT_GE(result.stats.median, result.stats.min);
-    EXPECT_LE(result.stats.median, result.stats.max);
-    EXPECT_GE(result.stats.p95, result.stats.median);
-    EXPECT_GE(result.stats.p99, result.stats.p95);
-    EXPECT_LE(result.stats.p99, result.stats.max);
+    ASSERT_EQ(stats.num_runs, 100u);
+    EXPECT_DOUBLE_EQ(stats.min, 1.0);
+    EXPECT_DOUBLE_EQ(stats.max, 100.0);
+    EXPECT_DOUBLE_EQ(stats.mean, 50.5);          // (1+...+100)/100
+    EXPECT_DOUBLE_EQ(stats.median, 50.5);        // (sorted[49]+sorted[50])/2
+
+    // Linear-interpolated percentiles (rank = p*(N-1)):
+    //   p95: rank = 0.95*99 = 94.05 -> 95*0.95 + 96*0.05 = 95.05
+    //   p99: rank = 0.99*99 = 98.01 -> 99*0.99 + 100*0.01 = 99.01
+    EXPECT_NEAR(stats.p95, 95.05, 1e-9);
+    EXPECT_NEAR(stats.p99, 99.01, 1e-9);
+
+    // The percentiles must be genuinely DISTINCT and strictly ordered — the
+    // exact-value checks above already enforce this, but assert it explicitly
+    // so a future collapse (p95 == p99) is caught by name.
+    EXPECT_LT(stats.min, stats.median);
+    EXPECT_LT(stats.median, stats.p95);
+    EXPECT_LT(stats.p95, stats.p99);
+    EXPECT_LT(stats.p99, stats.max);
+
+    // std_dev of 1..100 (population) = sqrt(sum((i-50.5)^2)/100) ≈ 28.8661
+    EXPECT_NEAR(stats.std_dev, 28.86607004772212, 1e-6);
 }
 
 // Test 6: BenchmarkStats standard deviation

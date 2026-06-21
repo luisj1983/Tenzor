@@ -1149,6 +1149,51 @@ TEST_P(InPlaceOpsTest, InPlaceDivision) {
     EXPECT_FLOAT_EQ(data[0], 4.0f) << "Failed on " << device.to_string();
 }
 
+// Regression (CPU): in-place integer division by zero must throw a catchable
+// exception, mirroring the out-of-place div() guard. Previously the Int32/Int64
+// in-place path did a bare `a /= b` with no zero check, so an integer 0 divisor
+// triggered a SIGFPE that hard-crashed the process instead of throwing.
+TEST_P(InPlaceOpsTest, InPlaceIntegerDivisionByZeroThrows) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "CPU-specific integer divide-by-zero guard";
+    }
+
+    // Int32, same-shape path.
+    {
+        auto a = full({4}, 12.0, DType::Int32, device);
+        auto b = full({4}, 3.0, DType::Int32, device);
+        b.data<int32_t>()[2] = 0;  // introduce a zero divisor
+        EXPECT_THROW(div_(a, b), std::runtime_error)
+            << "Int32 same-shape in-place div by zero must throw";
+    }
+
+    // Int64, same-shape path.
+    {
+        auto a = full({4}, 12.0, DType::Int64, device);
+        auto b = full({4}, 3.0, DType::Int64, device);
+        b.data<int64_t>()[0] = 0;
+        EXPECT_THROW(div_(a, b), std::runtime_error)
+            << "Int64 same-shape in-place div by zero must throw";
+    }
+
+    // Int32 broadcast path (scalar zero divisor broadcast over a).
+    {
+        auto a = full({4}, 12.0, DType::Int32, device);
+        auto b = full({1}, 0.0, DType::Int32, device);
+        EXPECT_THROW(div_(a, b), std::runtime_error)
+            << "Int32 broadcast in-place div by zero must throw";
+    }
+
+    // A non-zero integer divisor must still succeed and compute correctly.
+    {
+        auto a = full({4}, 12.0, DType::Int32, device);
+        auto b = full({4}, 4.0, DType::Int32, device);
+        EXPECT_NO_THROW(div_(a, b));
+        auto a_cpu = a.to(Device::cpu());
+        EXPECT_EQ(a_cpu.data<int32_t>()[0], 3) << "Failed on " << device.to_string();
+    }
+}
+
 //==============================================================================
 // Edge Cases and Special Values Tests
 //==============================================================================
@@ -1210,6 +1255,28 @@ TEST_P(EdgeCaseOpsTest, MatMulVectorMatrix) {
 
     auto result_cpu = result.to(Device::cpu());
     EXPECT_FLOAT_EQ(result_cpu.data<float>()[0], 3.0f) << "Failed on " << device.to_string();
+
+    // BFloat16 1D×2D with N (contraction) > K (output width). This is the
+    // configuration that previously triggered a heap overflow + wrong product
+    // in the MKL BF16 path (output buffer was sized to the contraction dim and
+    // the GEMM dims were swapped). Asymmetric column values so a wrong
+    // contraction can't coincidentally pass. v(4) @ m(4x2) = [10, 100].
+    {
+        auto vf = ones({4}, DType::Float32, Device::cpu());
+        auto vd = vf.data<float>();
+        vd[0] = 1.0f; vd[1] = 2.0f; vd[2] = 3.0f; vd[3] = 4.0f;  // sum = 10
+        auto mf = ones({4, 2}, DType::Float32, Device::cpu());
+        auto md = mf.data<float>();
+        for (int i = 0; i < 4; ++i) { md[i * 2 + 0] = 1.0f; md[i * 2 + 1] = 10.0f; }
+        auto vb = vf.to(DType::BFloat16).to(device);
+        auto mb = mf.to(DType::BFloat16).to(device);
+        auto rb = matmul(vb, mb);
+        ASSERT_EQ(rb.shape().size(), 1u) << "Failed on " << device.to_string();
+        EXPECT_EQ(rb.shape()[0], 2) << "Failed on " << device.to_string();
+        auto rb_cpu = rb.to(DType::Float32).to(Device::cpu());
+        EXPECT_FLOAT_EQ(rb_cpu.data<float>()[0], 10.0f) << "Failed on " << device.to_string();
+        EXPECT_FLOAT_EQ(rb_cpu.data<float>()[1], 100.0f) << "Failed on " << device.to_string();
+    }
 }
 
 TEST_P(EdgeCaseOpsTest, SpecialMathValues) {

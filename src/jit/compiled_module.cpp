@@ -10,6 +10,8 @@
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/jit/serialization.hpp"
 #include "../../include/tenzor/core/device.hpp"
+#include "../../include/tenzor/backend/loader.hpp"   // backend_registry()/get_backend()
+#include "../../include/tenzor/backend/backend.hpp"  // Backend::copy / CopyKind
 #include <algorithm>
 #include <stdexcept>
 
@@ -91,6 +93,12 @@ auto CompiledModule::compute_shape_key(const std::vector<Variable>& inputs) -> s
 }
 
 auto CompiledModule::forward(const Variable& input) -> Variable {
+    // Serialise the whole call: forward() reassigns graph_, inserts into
+    // shape_cache_, and overwrites traced_device_/traced_dtype_ on the retrace
+    // paths, and graph_->forward() must not run on a graph another thread is
+    // swapping out. Without this a module shared across inference threads races.
+    std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
+
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
     }
@@ -114,8 +122,8 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
     // different device or dtype than the incoming input, retrace using the
     // actual input. Cached by shape-key (which now encodes device+dtype).
     if (source_module_ &&
-        (input.tensor().device().type != traced_device_.type ||
-         input.tensor().dtype()       != traced_dtype_)) {
+        (input.tensor().device() != traced_device_ ||
+         input.tensor().dtype()  != traced_dtype_)) {
         auto key = compute_shape_key(input);
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
@@ -166,6 +174,10 @@ auto CompiledModule::forward(const Tensor& input) -> Variable {
 }
 
 auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector<Variable> {
+    // Serialise: same mutable state (graph_, shape_cache_, traced_*) as the
+    // single-input overload. See that overload for rationale.
+    std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
+
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
     }
@@ -193,8 +205,8 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     // inputs[0] (the example_input used for tracing); cached by shape-key
     // (which encodes device+dtype).
     if (source_module_ && !inputs.empty() &&
-        (inputs[0].tensor().device().type != traced_device_.type ||
-         inputs[0].tensor().dtype()       != traced_dtype_)) {
+        (inputs[0].tensor().device() != traced_device_ ||
+         inputs[0].tensor().dtype()  != traced_dtype_)) {
         auto key = compute_shape_key(inputs);
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
@@ -356,6 +368,11 @@ private:
 // ============================================================================
 
 auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> void {
+    // Guard cuda_graph_/captured_shapes_ against concurrent forward()/replay on
+    // a shared module. Recursive mutex so the invalidate_cuda_graph() call below
+    // (which re-locks) does not self-deadlock.
+    std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
+
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
     }
@@ -401,17 +418,40 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
         captured_shapes_.emplace_back(s.begin(), s.end());
     }
 
-    // Wrap inputs as Variables for the graph forward pass
-    std::vector<Variable> vars;
-    vars.reserve(sample_inputs.size());
+    // Retain the EXACT input buffers the captured graph will hard-code so that
+    // replay() can copy fresh inputs into them (device-to-device) instead of
+    // re-running over stale capture-time data. We force each captured input
+    // contiguous and remember it; the same Tensor objects are wrapped into the
+    // Variables fed to forward(), so the graph captures these very buffers.
+    captured_inputs_.clear();
+    captured_inputs_.reserve(sample_inputs.size());
     for (auto& t : sample_inputs) {
+        captured_inputs_.push_back(t.contiguous());
+    }
+
+    // Wrap the RETAINED contiguous inputs as Variables for the capture forward
+    // pass — capturing the buffers we hold in captured_inputs_, which replay
+    // then overwrites with fresh data.
+    std::vector<Variable> vars;
+    vars.reserve(captured_inputs_.size());
+    for (auto& t : captured_inputs_) {
         vars.emplace_back(t, false);
     }
 
-    // Capture: all GPU work submitted between begin/end is recorded
+    // Capture: all GPU work submitted between begin/end is recorded. Retain the
+    // output Variables' tensors: their device storage IS the buffer the captured
+    // graph's terminal nodes write into, so after a replay() these tensors hold
+    // the FRESH results. Exposing them via replay_cuda_graph_outputs() makes the
+    // replay path usable (and verifiable) — without this the caller has no way
+    // to read a replay's output.
+    captured_outputs_.clear();
     cuda_graph_->begin_capture();
     try {
-        graph_->forward(vars);
+        auto out_vars = graph_->forward(vars);
+        captured_outputs_.reserve(out_vars.size());
+        for (auto& ov : out_vars) {
+            captured_outputs_.push_back(ov.tensor());
+        }
     } catch (...) {
         // If forward fails during capture, we must still end capture to
         // leave the stream in a valid state. The graph will be unusable.
@@ -422,12 +462,21 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
         }
         cuda_graph_.reset();
         captured_shapes_.clear();
+        captured_inputs_.clear();
+        captured_outputs_.clear();
         throw;
     }
     cuda_graph_->end_capture();
 }
 
+auto CompiledModule::replay_cuda_graph_outputs() const -> std::vector<Tensor> {
+    std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
+    return captured_outputs_;
+}
+
 auto CompiledModule::replay_cuda_graph(std::vector<Tensor>& inputs) -> bool {
+    std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
+
     if (!cuda_graph_ || !cuda_graph_->is_ready()) {
         return false;
     }
@@ -451,13 +500,76 @@ auto CompiledModule::replay_cuda_graph(std::vector<Tensor>& inputs) -> bool {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Copy fresh inputs into the captured buffers (device-to-device).
+    //
+    // A captured CUDA/HIP graph re-runs verbatim over the device pointers it
+    // recorded at capture time (captured_inputs_) — it has no API to rebind
+    // inputs. Without this copy-in, replay() ignores `inputs` entirely and
+    // returns the stale capture-time result whenever the caller passes a
+    // different (or mutated) input tensor. The shape check above is necessary
+    // but NOT sufficient; we must actually move the new data into the captured
+    // buffers before replaying.
+    //
+    // captured_inputs_[i] is contiguous (forced at capture). We make each fresh
+    // input contiguous + dtype/device-matched, then issue a flat
+    // DeviceToDevice copy through the backend's copy primitive
+    // (cudaMemcpyAsync / hipMemcpyAsync under the hood). The copy is enqueued on
+    // the default stream, which the captured graph's replay also uses, so the
+    // copy is ordered before the replayed kernels read the buffers.
+    // ------------------------------------------------------------------
+    if (captured_inputs_.size() != inputs.size()) {
+        // capture/replay invariant violated — refuse rather than read stale data
+        throw std::runtime_error(
+            "CUDA graph replay: captured input count (" +
+            std::to_string(captured_inputs_.size()) +
+            ") does not match replay input count (" +
+            std::to_string(inputs.size()) + ")");
+    }
+
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        Tensor& dst = captured_inputs_[i];
+        // Match dtype/device to the captured buffer, then force contiguous so a
+        // flat byte copy is valid. (.to() is a no-op when already matching;
+        // .contiguous() is a no-op when already contiguous.)
+        Tensor src = inputs[i];
+        if (src.dtype() != dst.dtype()) {
+            throw std::runtime_error(
+                "CUDA graph replay: input " + std::to_string(i) +
+                " dtype mismatch with captured buffer");
+        }
+        if (src.device() != dst.device()) {
+            src = src.to(dst.device());
+        }
+        src = src.contiguous();
+
+        const size_t bytes =
+            static_cast<size_t>(dst.numel()) * dst.dtype_size();
+        if (bytes == 0) {
+            continue;
+        }
+
+        auto* backend = backend_registry().get_backend(dst.device().type);
+        if (backend == nullptr) {
+            throw std::runtime_error(
+                "CUDA graph replay: no backend available for device " +
+                dst.device().to_string());
+        }
+        // Both buffers live on the GPU; this is a device-to-device transfer.
+        backend->copy(dst.data_ptr(), src.data_ptr(), bytes,
+                      CopyKind::DeviceToDevice);
+    }
+
     cuda_graph_->replay();
     return true;
 }
 
 auto CompiledModule::invalidate_cuda_graph() -> void {
+    std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
     cuda_graph_.reset();
     captured_shapes_.clear();
+    captured_inputs_.clear();
+    captured_outputs_.clear();
 }
 
 auto CompiledModule::has_cuda_graph() const -> bool {

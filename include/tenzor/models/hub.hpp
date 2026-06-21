@@ -36,6 +36,7 @@ struct HubConfig {
     int connection_timeout;         // Connection timeout in seconds
     int max_retries;                // Maximum number of download retries
     bool show_progress;             // Whether to show progress by default
+    size_t max_download_size;       // Per-file download cap in bytes (0 = unlimited)
 
     HubConfig();
 };
@@ -57,6 +58,11 @@ struct ModelWeightInfo {
     // (PyTorch .pth) currently throws an actionable error because the
     // pickle parser is H2-followup.
     std::string safetensors_url;    // Optional SafeTensors mirror (HuggingFace)
+    std::string safetensors_sha256; // Expected SHA256 of the SafeTensors mirror
+                                    // (distinct bytes from the .pth, so a
+                                    // distinct checksum). Empty => unverifiable:
+                                    // download_weights refuses it when
+                                    // verify_checksums is on (the default).
 };
 
 /**

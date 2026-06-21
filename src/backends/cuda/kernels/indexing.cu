@@ -564,6 +564,37 @@ auto scatter_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_o
         throw std::invalid_argument("scatter: tensor rank exceeds supported maximum");
     }
 
+    // PyTorch/CPU shape contract: index and src must share shape, and
+    // index.size(d) <= input.size(d) for every non-scatter axis d. Without
+    // these, the per-dim decode below produces an output_offset past
+    // output.numel() (OOB device write) or reads src[idx] past its allocation
+    // (OOB device read). The CPU reference enforces both; mirror them here.
+    {
+        auto idx_shape = index.shape();
+        auto src_shape = src.shape();
+        bool same_shape = idx_shape.size() == src_shape.size();
+        for (size_t d = 0; same_shape && d < idx_shape.size(); ++d)
+            same_shape = idx_shape[d] == src_shape[d];
+        if (!same_shape) {
+            throw std::invalid_argument("scatter: index and src must have the same shape");
+        }
+        if (static_cast<int64_t>(idx_shape.size()) != ndim) {
+            throw std::invalid_argument(
+                "scatter: input and index must have same number of dimensions");
+        }
+        auto in_shape = input.shape();
+        for (int64_t d = 0; d < ndim; ++d) {
+            if (d == dim) continue;
+            if (idx_shape[d] > in_shape[d]) {
+                throw std::out_of_range(
+                    "scatter: index.size(" + std::to_string(d) + ")=" +
+                    std::to_string(idx_shape[d]) + " exceeds self.size(" +
+                    std::to_string(d) + ")=" + std::to_string(in_shape[d]) +
+                    " (index extent must be <= input extent on non-scatter dims)");
+            }
+        }
+    }
+
     // Output has the same shape as input
     std::vector<int64_t> output_shape(input.shape().begin(), input.shape().end());
     Tensor output(output_shape, input.dtype(), input.device());
@@ -967,6 +998,36 @@ auto scatter_add_kernel(const Tensor& input_orig, int64_t dim, const Tensor& ind
     }
     if (ndim > MAX_SCATTER_DIMS) {
         throw std::invalid_argument("scatter_add: tensor rank exceeds supported maximum");
+    }
+
+    // PyTorch/CPU shape contract: index and src must share shape, and
+    // index.size(d) <= input.size(d) for every non-scatter axis d (otherwise
+    // the per-dim decode produces an OOB output_offset for the atomicAdd write
+    // and reads src[idx] past its allocation). Mirror the CPU reference.
+    {
+        auto idx_shape = index.shape();
+        auto src_shape = src.shape();
+        bool same_shape = idx_shape.size() == src_shape.size();
+        for (size_t d = 0; same_shape && d < idx_shape.size(); ++d)
+            same_shape = idx_shape[d] == src_shape[d];
+        if (!same_shape) {
+            throw std::invalid_argument("scatter_add: index and src must have the same shape");
+        }
+        if (static_cast<int64_t>(idx_shape.size()) != ndim) {
+            throw std::invalid_argument(
+                "scatter_add: input and index must have same number of dimensions");
+        }
+        auto in_shape = input.shape();
+        for (int64_t d = 0; d < ndim; ++d) {
+            if (d == dim) continue;
+            if (idx_shape[d] > in_shape[d]) {
+                throw std::out_of_range(
+                    "scatter_add: index.size(" + std::to_string(d) + ")=" +
+                    std::to_string(idx_shape[d]) + " exceeds self.size(" +
+                    std::to_string(d) + ")=" + std::to_string(in_shape[d]) +
+                    " (index extent must be <= input extent on non-scatter dims)");
+            }
+        }
     }
 
     std::vector<int64_t> output_shape(input.shape().begin(), input.shape().end());
@@ -2222,7 +2283,13 @@ __global__ void take_kernel_impl(
     }
 }
 
-auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream) -> Tensor {
+auto take_kernel(const Tensor& input_orig, const Tensor& indices, cudaStream_t stream) -> Tensor {
+    // take() indexes the tensor as if flattened in logical (row-major
+    // contiguous) order, but the kernel reads input.data<T>() — the physical
+    // buffer. A non-contiguous input (transposed/sliced/permuted view) maps the
+    // logical flat index onto the wrong physical element, diverging from CPU
+    // (which materializes input.contiguous() at indexing.cpp:225). Contiguify.
+    Tensor input = input_orig.contiguous();
     int64_t input_size = input.numel();
     int64_t indices_size = indices.numel();
 
@@ -2576,13 +2643,26 @@ __global__ void put_kernel_impl<__nv_bfloat16>(
     }
 }
 
-auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
+auto put_kernel(Tensor& input, const Tensor& indices_orig, const Tensor& source_orig,
                 bool accumulate, cudaStream_t stream) -> Tensor {
     Tensor output = input.clone();
-    int64_t num_indices = indices.numel();
+    int64_t num_indices = indices_orig.numel();
     int64_t total_size = input.numel();
 
     if (num_indices == 0) return output;
+
+    // PyTorch's Tensor.put_ requires source to hold at least as many elements
+    // as indices; the kernel reads source[idx] for idx in [0, num_indices), so
+    // a smaller source is an out-of-bounds device read. The CPU reference throws
+    // here (indexing.cpp:1289-1293). Source/indices are read in flat order, so a
+    // non-contiguous view would be read with the wrong layout — contiguify both.
+    if (source_orig.numel() < num_indices) {
+        throw std::out_of_range(
+            "put: source has fewer elements (" + std::to_string(source_orig.numel()) +
+            ") than indices (" + std::to_string(num_indices) + ")");
+    }
+    Tensor indices = indices_orig.contiguous();
+    Tensor source = source_orig.contiguous();
 
     int blocks = get_num_blocks(num_indices);
 
@@ -3232,8 +3312,19 @@ __global__ void mask_to_int64_kernel(const bool* __restrict__ mask, int64_t* __r
     if (i < n) out[i] = mask[i] ? 1 : 0;
 }
 
-auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
-                           const Tensor& source, cudaStream_t stream) -> Tensor {
+auto masked_scatter_kernel(const Tensor& input_orig, const Tensor& mask_orig,
+                           const Tensor& source_orig, cudaStream_t stream) -> Tensor {
+    // The mask is read as a flat bool* of length numel; a non-Bool mask
+    // (UInt8/Int/Float) reinterpreted as bool* reads the wrong byte stride and
+    // selects the wrong elements, so cast it to Bool+contiguous first, matching
+    // masked_fill_kernel / masked_select_kernel and the CPU reference. The
+    // source is read in flat order, so it must be contiguous too; input is read
+    // flat as the passthrough, so contiguify it as well.
+    Tensor input = input_orig.contiguous();
+    Tensor mask = (mask_orig.dtype() == DType::Bool && mask_orig.is_contiguous())
+        ? mask_orig : mask_orig.to(DType::Bool).contiguous();
+    Tensor source = source_orig.contiguous();
+
     int64_t numel = input.numel();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
@@ -3259,6 +3350,31 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
         backend::CachedMemoryGuard d_temp_guard(temp_bytes);
         d_temp = d_temp_guard.get();
         cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
+    }
+
+    // PyTorch requires source to hold at least mask.sum() elements; the write
+    // kernel reads source[prefix_sum[i]] up to source[num_true-1]. Without this
+    // check an undersized source is read out-of-bounds. num_true = exclusive
+    // prefix of the last element + that element's own mask bit.
+    {
+        backend::CachedMemoryGuard d_total_guard(sizeof(int64_t));
+        int64_t* d_total = static_cast<int64_t*>(d_total_guard.get());
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        cub::DeviceReduce::Sum(d_temp, temp_bytes, d_int_mask, d_total, numel, stream);
+        backend::CachedMemoryGuard d_temp_guard(temp_bytes);
+        d_temp = d_temp_guard.get();
+        cub::DeviceReduce::Sum(d_temp, temp_bytes, d_int_mask, d_total, numel, stream);
+        int64_t num_true = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&num_true, d_total, sizeof(int64_t),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (source.numel() < num_true) {
+            throw std::out_of_range(
+                "masked_scatter: source has fewer elements (" +
+                std::to_string(source.numel()) + ") than mask true count (" +
+                std::to_string(num_true) + ")");
+        }
     }
 
     const bool* d_mask = mask.data<bool>();

@@ -1,15 +1,17 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#extension GL_EXT_shader_atomic_float : require
 
 // Max Pooling 2D Backward Pass for Float16
-// Gradient flows only to max element, recomputes max indices in shader
-// Uses float32 grad_input buffer for atomic accumulation
+// Gradient flows only to max element, recomputes max indices in shader.
+// grad_input is a PACKED-F16 buffer (2 bytes/elem). A float32 atomicAdd into it
+// would write 4 bytes per element index — out of bounds for the upper half of
+// the tensor and corrupting adjacent packed halves. We accumulate into the
+// packed-F16 buffer via a CAS loop, mirroring avg_pool2d_backward_f16.comp.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed F16 (N, C, H_out, W_out)
 layout(binding = 1) buffer Input { uint input_data[]; };         // Packed F16 (N, C, H, W)
-layout(binding = 2) buffer GradInput { float grad_input[]; };    // Float32 for atomicAdd (N, C, H, W)
+layout(binding = 2) buffer GradInput { uint grad_input[]; };     // Packed F16, CAS-accumulated (N, C, H, W)
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;          // Total output gradient elements (N * C * H_out * W_out)
@@ -41,6 +43,28 @@ float readF16Input(uint idx) {
     uint packed = input_data[word_idx];
     vec2 pair = unpackHalf2x16(packed);
     return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+// Atomically add an F16 value to a packed F16 buffer element via a CAS loop on
+// the enclosing uint32 word (no native F16 atomicAdd). Same pattern as
+// avg_pool2d_backward_f16.comp::atomicAddF16.
+void atomicAddF16(uint flat_idx, float add_val) {
+    uint word_idx = flat_idx / 2u;
+    uint half_idx = flat_idx % 2u;
+    uint mask = 0xFFFFu << (half_idx * 16u);
+
+    uint old_val = grad_input[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        uint bits = (expected >> (half_idx * 16u)) & 0xFFFFu;
+        float current = unpackHalf2x16(bits | (bits << 16u)).x;
+        float updated = current + add_val;
+        uint new_bits = packHalf2x16(vec2(updated, 0.0)).x & 0xFFFFu;
+        new_val = (expected & ~mask) | (new_bits << (half_idx * 16u));
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
 }
 
 void main() {
@@ -108,7 +132,7 @@ void main() {
                       uint(max_h) * params.in_width +
                       uint(max_w);
 
-        // Atomically add gradient (float32 buffer for atomic safety)
-        atomicAdd(grad_input[max_idx], grad_out);
+        // Atomically add gradient into the packed-F16 buffer via CAS.
+        atomicAddF16(max_idx, grad_out);
     }
 }

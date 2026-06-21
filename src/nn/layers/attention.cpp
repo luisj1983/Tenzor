@@ -754,6 +754,18 @@ auto MultiheadAttention::forward(const Variable& query,
 
     // Return attention weights based on need_weights flag
     if (need_weights) {
+        // add_bias_kv / add_zero_attn appended num_appended_keys extra key
+        // columns (last dim of attn_weights). PyTorch trims these synthetic
+        // columns from the returned weights so the shape stays (N, H, L, S)
+        // against the user's original key length S, rather than the widened
+        // S + num_appended_keys. Without trimming, a caller indexing the
+        // weights against the original S misaligns or reads out of bounds.
+        if (num_appended_keys > 0) {
+            const auto aw_shape = attn_weights.shape();
+            const int64_t last_dim = static_cast<int64_t>(aw_shape.size()) - 1;
+            const int64_t orig_len = aw_shape[last_dim] - num_appended_keys;
+            attn_weights = tenzor::slice(attn_weights, last_dim, 0, orig_len);
+        }
         return {output, attn_weights};
     } else {
         // Create empty Variable with no shape when weights not needed

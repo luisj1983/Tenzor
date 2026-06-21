@@ -24,11 +24,16 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return static_cast<int>(blocks);
 }
 
-// Numerically stable sigmoid: clamp input to [-20, 20] to prevent exp overflow
+// Logistic sigmoid. The CPU reference (rnn_kernels.cpp) and gru.cu use the
+// unclamped form 1/(1+exp(-x)); we match it exactly here so saturated gates and
+// their gradients (sigma*(1-sigma)) agree across backends. IEEE handles the
+// extremes gracefully: exp(-x) -> +inf for very negative x yields sigma -> 0,
+// and exp(-x) -> 0 for very positive x yields sigma -> 1. (A previous clamp to
+// [-20,20] forced the gradient to exactly 0 outside that range, diverging from
+// the CPU/ROCm parity reference.)
 template<typename T>
 __device__ __forceinline__ T stable_sigmoid(T x) {
-    T clamped = max(T(-20), min(T(20), x));
-    return T(1) / (T(1) + exp(-clamped));
+    return T(1) / (T(1) + exp(-x));
 }
 
 // ==================================================================

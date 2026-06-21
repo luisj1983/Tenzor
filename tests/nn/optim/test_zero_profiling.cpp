@@ -401,12 +401,19 @@ TEST_F(ZeROProfilingTest, BandwidthCalculation) {
     // Get stats
     auto stats = optimizer.get_profiling_stats();
 
-    // For single rank, there should be minimal communication
-    // But if communication time > 0, bandwidth should be calculated
-    if (stats.communication_time_ms > 0 && stats.transferred_bytes > 0) {
-        EXPECT_GT(stats.effective_bandwidth_mbps, 0.0);
+    // Single rank with no process group performs NO inter-rank communication,
+    // so the profiler must report a zero communication state — assert that
+    // explicitly rather than skipping the body (the previous `if` was always
+    // false here and verified nothing).
+    EXPECT_EQ(stats.transferred_bytes, 0u)
+        << "single-rank (no process group) must transfer zero bytes";
+    EXPECT_DOUBLE_EQ(stats.communication_time_ms, 0.0)
+        << "single-rank must record zero communication time";
+    EXPECT_DOUBLE_EQ(stats.effective_bandwidth_mbps, 0.0)
+        << "with no communication, effective bandwidth must be 0, not garbage";
 
-        // Verify bandwidth calculation is correct
+    // The bandwidth formula must hold whenever communication is non-zero.
+    if (stats.communication_time_ms > 0 && stats.transferred_bytes > 0) {
         double expected_bandwidth = (stats.transferred_bytes / (1024.0 * 1024.0)) /
                                    (stats.communication_time_ms / 1000.0);
         EXPECT_NEAR(stats.effective_bandwidth_mbps, expected_bandwidth, 0.01);
@@ -439,12 +446,18 @@ TEST_F(ZeROProfilingTest, OverlapRatioCalculation) {
     // Get stats
     auto stats = optimizer.get_profiling_stats();
 
-    // Overlap ratio should be between 0 and 1
+    // Overlap ratio is always a valid fraction.
     EXPECT_GE(stats.comm_compute_overlap_ratio, 0.0);
     EXPECT_LE(stats.comm_compute_overlap_ratio, 1.0);
 
-    // For ZeRO Stage 3, even single-process has gather/scatter operations
-    // so communication time is typically non-zero and overlap can occur
+    // Stage 1 single-rank (no process group) performs no all-reduce, so there
+    // is no communication to overlap: the ratio must be exactly 0 and the
+    // communication time must be 0. Asserting the concrete single-rank state
+    // turns this from a trivially-true [0,1] bound into a real check.
+    EXPECT_DOUBLE_EQ(stats.communication_time_ms, 0.0)
+        << "single-rank must record zero communication time";
+    EXPECT_DOUBLE_EQ(stats.comm_compute_overlap_ratio, 0.0)
+        << "with no communication there is nothing to overlap (ratio must be 0)";
 }
 
 /**

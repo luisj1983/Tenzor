@@ -162,7 +162,7 @@ auto log(const Variable& input) -> Variable {
     // Save input tensor for backward pass
     grad_fn->save_for_backward({input.tensor()});
     // GG.1: keep the input Variable for higher-order autograd.
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
 
@@ -203,7 +203,7 @@ auto exp(const Variable& input) -> Variable {
     // GG.1: save the input Variable so backward_with_variables can
     // recompute the output on the live graph (the saved output Tensor
     // can't carry grad_fn back through this same Function — cycle).
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
 
@@ -278,7 +278,7 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
     // GG.1: save input as Variable; backward_with_variables recomputes the
     // softmax on the live graph (the saved output Tensor would create a
     // grad_fn cycle if wrapped with requires_grad=true).
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
 
@@ -323,7 +323,7 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
     grad_fn->save_for_backward({result_tensor});
     // GG.1: save input as Variable; backward_with_variables recomputes the
     // log_softmax on the live graph.
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
 
@@ -358,7 +358,7 @@ auto abs(const Variable& input) -> Variable {
     // Save input tensor for backward pass
     grad_fn->save_for_backward({input.tensor()});
     // GG.1: keep input Variable for higher-order autograd.
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
 
@@ -394,7 +394,7 @@ auto clamp(const Variable& input, double min, double max) -> Variable {
     // Save input tensor for backward pass
     grad_fn->save_for_backward({input.tensor()});
     // GG.1: keep input Variable for higher-order autograd.
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
 
@@ -1093,7 +1093,7 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     grad_fn->save_for_backward({a_tensor, b_tensor});
 
     // When create_graph is active, also save Variables to preserve graph connections
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({a, b});
     }
 
@@ -1170,7 +1170,7 @@ auto unary_autograd(const Variable& input, TensorOp&& tensor_op) -> Variable {
     // walk the upstream graph for higher-order autograd. Without this, the
     // Backward's `backward_with_variables` rewraps `saved_tensors_[0]` as
     // a fresh `Variable(t, false)` and severs the chain.
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
     grad_fn->set_next_functions({input.grad_fn()});
@@ -1196,7 +1196,7 @@ auto unary_autograd_save_output(const Variable& input, TensorOp&& tensor_op) -> 
     auto result = tensor_op(input.tensor());
     auto grad_fn = std::make_shared<BackwardT>();
     grad_fn->save_for_backward({result});
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
     grad_fn->set_next_functions({input.grad_fn()});
@@ -1220,7 +1220,7 @@ auto unary_autograd_with_param(const Variable& input, Scalar param, TensorOp&& t
     grad_fn->save_for_backward({input.tensor(), param_tensor});
     // GG.1: save only the input as a Variable; the scalar parameter is a
     // constant (does not participate in the adjoint's autograd graph).
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
     grad_fn->set_next_functions({input.grad_fn()});
@@ -1617,7 +1617,7 @@ auto atan2(const Variable& y, const Variable& x) -> Variable {
     grad_fn->input_shape_x_ = std::vector<int64_t>(x.shape().begin(), x.shape().end());
     grad_fn->save_for_backward({y.tensor(), x.tensor()});
     // GG.1: keep input Variables for higher-order autograd through atan2.
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({y, x});
     }
     grad_fn->set_next_functions({y.grad_fn(), x.grad_fn()});
@@ -1736,7 +1736,7 @@ auto logsumexp(const Variable& input, int64_t dim, bool keepdim) -> Variable {
     // GG.1: keep input Variable; backward_with_variables recomputes lse on
     // the live graph (saved output Tensor cannot carry grad_fn back through
     // this Function without forming a cycle).
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
     grad_fn->set_next_functions({input.grad_fn()});
@@ -1772,6 +1772,13 @@ auto expand(const Variable& input, const std::vector<int64_t>& shape) -> Variabl
     }
     auto result = tenzor::expand(input.tensor(), shape);
     auto grad_fn = std::make_shared<ExpandBackward>();
+    // Record the target (expanded) shape so the JVP walker can expand the input
+    // tangent correctly (saved_attributes -> AttrKey::Shape). Use the result's
+    // actual shape (handles -1 / broadcast-inferred dims in `shape`).
+    {
+        const auto& rsh = result.shape();
+        grad_fn->target_shape_.assign(rsh.begin(), rsh.end());
+    }
     // Save original shape as tensor for backward
     const auto& sh = input.tensor().shape();
     auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
@@ -2527,7 +2534,7 @@ auto cumprod(const Variable& input, int64_t dim) -> Variable {
     grad_fn->save_for_backward({input.tensor(), result});
     // GG.1: keep input Variable; backward_with_variables recomputes cumprod
     // on the live graph.
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({input});
     }
     grad_fn->set_next_functions({input.grad_fn()});
@@ -2829,11 +2836,14 @@ auto dispatch_custom_op(CustomOpId id,
     std::vector<std::shared_ptr<Function>> next_funcs;
     std::vector<Variable> input_vars;
     next_funcs.reserve(inputs.size());
+    input_vars.reserve(inputs.size());
     for (const auto& v : inputs) {
         next_funcs.push_back(v.grad_fn());
-        if (v.requires_grad()) {
-            input_vars.push_back(v);
-        }
+        // Push every input unconditionally so input_vars stays positionally
+        // aligned with the fixed-order grad vector a registered backward
+        // returns (one grad per input) and with next_funcs. The engine skips
+        // non-requires_grad slots itself.
+        input_vars.push_back(v);
     }
     grad_fn->set_next_functions(std::move(next_funcs));
     grad_fn->set_input_variables(std::move(input_vars));
@@ -2862,9 +2872,10 @@ auto logaddexp(const Variable& a, const Variable& b) -> Variable {
     std::vector<std::shared_ptr<Function>> next_funcs = {a.grad_fn(), b.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (a.requires_grad()) input_vars.push_back(a);
-    if (b.requires_grad()) input_vars.push_back(b);
+    // Push BOTH inputs unconditionally so positional alignment with the
+    // fixed-order grad vector returned by backward() and with next_functions
+    // is preserved; the engine skips non-requires_grad slots itself.
+    std::vector<Variable> input_vars = {a, b};
     grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
@@ -2887,9 +2898,10 @@ auto logaddexp2(const Variable& a, const Variable& b) -> Variable {
     std::vector<std::shared_ptr<Function>> next_funcs = {a.grad_fn(), b.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (a.requires_grad()) input_vars.push_back(a);
-    if (b.requires_grad()) input_vars.push_back(b);
+    // Push BOTH inputs unconditionally so positional alignment with the
+    // fixed-order grad vector returned by backward() and with next_functions
+    // is preserved; the engine skips non-requires_grad slots itself.
+    std::vector<Variable> input_vars = {a, b};
     grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
@@ -2912,9 +2924,9 @@ auto xlogy(const Variable& x, const Variable& y) -> Variable {
     std::vector<std::shared_ptr<Function>> next_funcs = {x.grad_fn(), y.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (x.requires_grad()) input_vars.push_back(x);
-    if (y.requires_grad()) input_vars.push_back(y);
+    // Push BOTH inputs unconditionally to preserve positional alignment with
+    // the fixed-order backward() grad vector and next_functions.
+    std::vector<Variable> input_vars = {x, y};
     grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
@@ -3037,9 +3049,9 @@ auto cosine_similarity(const Variable& x1, const Variable& x2,
     std::vector<std::shared_ptr<Function>> next_funcs = {x1.grad_fn(), x2.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (x1.requires_grad()) input_vars.push_back(x1);
-    if (x2.requires_grad()) input_vars.push_back(x2);
+    // Push BOTH inputs unconditionally to preserve positional alignment with
+    // the fixed-order backward() grad vector and next_functions.
+    std::vector<Variable> input_vars = {x1, x2};
     grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
@@ -3139,9 +3151,9 @@ auto householder_product(const Variable& input, const Variable& tau) -> Variable
     std::vector<std::shared_ptr<Function>> next_funcs = {input.grad_fn(), tau.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (input.requires_grad()) input_vars.push_back(input);
-    if (tau.requires_grad()) input_vars.push_back(tau);
+    // Push BOTH inputs unconditionally to preserve positional alignment with
+    // the fixed-order backward() grad vector and next_functions.
+    std::vector<Variable> input_vars = {input, tau};
     grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
@@ -3179,9 +3191,9 @@ auto tensorsolve(const Variable& A, const Variable& B) -> Variable {
     std::vector<std::shared_ptr<Function>> next_funcs = {A.grad_fn(), B.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (A.requires_grad()) input_vars.push_back(A);
-    if (B.requires_grad()) input_vars.push_back(B);
+    // Push BOTH inputs unconditionally to preserve positional alignment with
+    // the fixed-order backward() grad vector and next_functions.
+    std::vector<Variable> input_vars = {A, B};
     grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
@@ -3237,9 +3249,10 @@ auto vecdot(const Variable& a, const Variable& b, int64_t dim) -> Variable {
     std::vector<std::shared_ptr<Function>> next_funcs = {a.grad_fn(), b.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
 
-    std::vector<Variable> input_vars;
-    if (a.requires_grad()) input_vars.push_back(a);
-    if (b.requires_grad()) input_vars.push_back(b);
+    // Push BOTH inputs unconditionally so positional alignment with the
+    // fixed-order grad vector returned by backward() and with next_functions
+    // is preserved; the engine skips non-requires_grad slots itself.
+    std::vector<Variable> input_vars = {a, b};
     grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
@@ -4775,7 +4788,7 @@ auto gumbel_softmax(const Variable& logits, double tau, bool hard, int64_t dim)
     auto grad_fn = std::make_shared<GumbelSoftmaxBackward>(tau, hard, dim);
     // Save y_soft for the STE backward.
     grad_fn->save_for_backward({y_soft});
-    if (is_creating_graph()) {
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
         grad_fn->save_variables_for_backward({Variable(y_soft, false)});
     }
     grad_fn->set_next_functions({logits.grad_fn()});

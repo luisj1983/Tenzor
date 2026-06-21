@@ -19,8 +19,24 @@ ImageFolder::ImageFolder(const std::string& root_dir,
         throw std::runtime_error("ImageFolder: root directory does not exist: " + root_dir);
     }
 
-    // Collect class directories sorted alphabetically
+    // Resolve the canonical root once so every collected path can be verified
+    // to stay under it. On an attacker-controlled dataset (e.g. an extracted
+    // tarball) a symlink could otherwise point a "class dir" or "image file"
+    // outside the tree (../../etc/..., a device node, or a FIFO) and the
+    // is_directory()/is_regular_file() checks — which resolve THROUGH symlinks
+    // — would happily follow it. We skip symlinked entries and also confirm
+    // containment defensively.
+    const fs::path canonical_root = fs::weakly_canonical(fs::path(root_dir));
+
+    auto stays_under_root = [&](const fs::path& p) -> bool {
+        const fs::path rel = fs::weakly_canonical(p).lexically_relative(canonical_root);
+        return !rel.empty() && *rel.begin() != "..";
+    };
+
+    // Collect class directories sorted alphabetically. Skip symlinks so a
+    // symlinked subdirectory cannot redirect enumeration outside the root.
     for (const auto& entry : fs::directory_iterator(root_dir)) {
+        if (fs::is_symlink(entry.symlink_status())) continue;
         if (entry.is_directory()) {
             class_names_.push_back(entry.path().filename().string());
         }
@@ -35,7 +51,13 @@ ImageFolder::ImageFolder(const std::string& root_dir,
     for (int64_t label = 0; label < static_cast<int64_t>(class_names_.size()); ++label) {
         fs::path class_dir = fs::path(root_dir) / class_names_[label];
         for (const auto& entry : fs::directory_iterator(class_dir)) {
+            // Skip symlinks: a symlink-to-regular-file would otherwise pass the
+            // is_regular_file() filter (which resolves through the link) and be
+            // decoded, enabling an out-of-tree read via the image decoder.
+            if (fs::is_symlink(entry.symlink_status())) continue;
             if (!entry.is_regular_file()) continue;
+            // Defense in depth: reject any path that escapes the dataset root.
+            if (!stays_under_root(entry.path())) continue;
             std::string ext = entry.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

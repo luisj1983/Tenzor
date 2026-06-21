@@ -22,11 +22,17 @@ find_program(GLSLC glslc HINTS
 )
 
 if(NOT GLSLC)
-    message(WARNING "glslc shader compiler not found. Shaders will not be compiled.")
-    message(WARNING "Please install Vulkan SDK or set VULKAN_SDK environment variable.")
-else()
-    message(STATUS "Found glslc: ${GLSLC}")
+    # glslc is mandatory: without it no .comp shader can be compiled to SPIR-V
+    # and no embedded_shaders.cpp is generated, so the backend .so would contain
+    # ZERO compute pipelines and every dispatch would hit an empty/null pipeline
+    # at runtime. Skip the backend entirely (mirrors the Vulkan_FOUND guard
+    # above) rather than shipping a half-built, non-functional library.
+    message(WARNING "glslc shader compiler not found. Vulkan backend will NOT be built "
+                    "(a shader-less Vulkan library is non-functional). Install the Vulkan "
+                    "SDK or set VULKAN_SDK to enable it.")
+    return()
 endif()
+message(STATUS "Found glslc: ${GLSLC}")
 
 # Compile GLSL shaders to SPIR-V
 set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/kernels)
@@ -225,8 +231,10 @@ if(TENZOR_USE_VMA)
     FetchContent_Declare(
         VulkanMemoryAllocator
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-        GIT_TAG v3.1.0
-        GIT_SHALLOW TRUE
+        # Pinned to the immutable commit of tag v3.1.0 (supply-chain hardening).
+        # GIT_SHALLOW is dropped: a shallow fetch can only target a ref tip, not
+        # an arbitrary commit SHA, so it is incompatible with commit pinning.
+        GIT_TAG 009ecd192c1289c7529bff248a16cfe896254816
     )
     FetchContent_MakeAvailable(VulkanMemoryAllocator)
     target_link_libraries(tenzor_backend_vulkan PRIVATE GPUOpen::VulkanMemoryAllocator)
@@ -237,7 +245,7 @@ else()
 endif()
 
 # C++20 standard
-target_compile_features(tenzor_backend_vulkan PRIVATE cxx_std_20)
+target_compile_features(tenzor_backend_vulkan PRIVATE cxx_std_23)
 
 # Set shader path for runtime
 target_compile_definitions(tenzor_backend_vulkan PRIVATE

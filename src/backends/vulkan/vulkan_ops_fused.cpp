@@ -85,14 +85,25 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
     };
     std::vector<size_t> sizes = {buf_size, buf_size};
 
+    // Kept alive across the dispatch below; used only for the no-momentum
+    // F16/BF16 dummy binding.
+    Tensor momentum_scratch;
     if (has_momentum) {
         bindings.push_back({2, inputs[2].data_ptr()});
         sizes.push_back(state_buf_size);
+    } else if (is_float16 || is_bfloat16) {
+        // audit-10 OO.5: the dummy binding must declare the SHADER's expected
+        // F32 momentum_buf layout (numel*4). Binding the packed-F16 param
+        // (~numel*2 bytes) under a numel*4 range declares bytes past the
+        // allocation end (validation error / MoltenVK fail). Allocate a small F32
+        // scratch that actually spans state_buf_size; the shader never reads
+        // binding 2 when has_momentum=0.
+        momentum_scratch = Tensor({static_cast<int64_t>(numel)}, DType::Float32, inputs[0].device());
+        bindings.push_back({2, momentum_scratch.data_ptr()});
+        sizes.push_back(state_buf_size);
     } else {
-        // audit-10 OO.5: dummy binding must declare the SHADER's expected
-        // layout (F32 momentum_buf for F16/BF16 master-weights path), not
-        // the param buffer's packed layout.  Otherwise the descriptor write
-        // lies about layout and strict validation layers / MoltenVK fail.
+        // F32/F64 param: state_buf_size == buf_size == the param buffer span, so
+        // reusing the param buffer for the inert binding is in-bounds.
         bindings.push_back({2, inputs[0].data_ptr()});
         sizes.push_back(state_buf_size);
     }

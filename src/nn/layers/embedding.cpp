@@ -1259,6 +1259,20 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings,
     const auto& emb_tensor = embeddings.tensor();
     auto emb_shape = emb_tensor.shape();
 
+    // aggregate_embeddings assumes a flat (num_indices, embedding_dim) layout:
+    // emb_shape[1] is read as the embedding dimension. A >2D embedding tensor
+    // (produced by a multi-dimensional index input) would make emb_shape[1] the
+    // second index axis, not the embedding dim, silently mis-indexing rows.
+    // EmbeddingBag's contract is a 1D index tensor (with offsets) or a 2D index
+    // tensor flattened by the caller, so the embedding output must be 2D here.
+    if (emb_shape.size() != 2) {
+        throw std::runtime_error(
+            "EmbeddingBag: expected a 2D (num_indices, embedding_dim) embedding "
+            "tensor, got rank " + std::to_string(emb_shape.size()) +
+            ". Index input must be 1D (with offsets) or a 2D bag tensor; "
+            "flatten higher-rank index inputs before calling.");
+    }
+
     int64_t total_elements = emb_shape[0];
     int64_t embedding_dim = emb_shape[1];
 

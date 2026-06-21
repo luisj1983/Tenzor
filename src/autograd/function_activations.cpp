@@ -156,9 +156,13 @@ auto EluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // Extract alpha value (dtype-aware; previously hard-coded Float32).
     double alpha_val = extract_scalar_param(alpha_tensor);
 
-    // mask = input > 0
+    // mask = input >= 0. Inclusive boundary: at exactly x==0 ELU takes the
+    // positive-branch derivative 1 (matching PyTorch and the forward output's
+    // right-derivative), so forward/backward/gradcheck agree on the boundary
+    // point for non-default alpha. The ELU value is identical on both branches
+    // at 0, so this does not change any output, only the x==0 subgradient.
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
-    auto mask = gt(input, zero_tensor);
+    auto mask = ge(input, zero_tensor);
 
     // positive path: gradient is 1
     auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
@@ -181,7 +185,9 @@ auto EluBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
-    auto mask = gt(input, zero_tensor);  // Tensor-level (non-differentiable)
+    // Inclusive boundary (x==0 -> positive branch, derivative 1); see the
+    // EluBackward::backward twin above.
+    auto mask = ge(input, zero_tensor);  // Tensor-level (non-differentiable)
 
     auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
 
@@ -213,9 +219,12 @@ auto SeluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     constexpr double lambda = 1.0507009873554804934193349852946;
     constexpr double alpha = 1.6732632423543772848170429916717;
 
-    // mask = input > 0
+    // mask = input >= 0. Inclusive boundary: at x==0 SELU takes the positive-
+    // branch derivative lambda (PyTorch convention / forward right-derivative);
+    // the SELU value is identical on both branches at 0, so only the x==0
+    // subgradient changes — forward/backward/gradcheck now agree there.
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
-    auto mask = gt(input, zero_tensor);
+    auto mask = ge(input, zero_tensor);
 
     // positive path: lambda
     auto pos_grad = full(shape_vec, lambda, input.dtype(), input.device());
@@ -236,7 +245,9 @@ auto SeluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     constexpr double alpha = 1.6732632423543772848170429916717;
 
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
-    auto mask = gt(input, zero_tensor);  // Non-differentiable mask
+    // Inclusive boundary (x==0 -> positive branch, derivative lambda); see the
+    // SeluBackward::backward twin above.
+    auto mask = ge(input, zero_tensor);  // Non-differentiable mask
 
     auto pos_grad_tensor = full(shape_vec, lambda, input.dtype(), input.device());
 

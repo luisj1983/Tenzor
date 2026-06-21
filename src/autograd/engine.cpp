@@ -331,6 +331,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // accumulator maps to avoid corrupting the outer call's state.
     auto saved_accumulators = std::move(grad_accumulators_);
     grad_accumulators_.clear();
+    auto saved_accumulators_var = std::move(grad_accumulators_var_);
+    grad_accumulators_var_.clear();
 
     // Topological sort from root
     // Use a local variable (not the instance cache) to be re-entrant safe.
@@ -371,6 +373,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
 
     // RAII guards for exception-safe cleanup
     ScopeGuard accum_guard{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
+    ScopeGuard accum_guard_var{[&]{ grad_accumulators_var_ = std::move(saved_accumulators_var); }};
     ScopeGuard cleanup_guard{[&]{ clear_gradients(); cleanup_graph(); }};
 
     // HH.4: track leaves that actually received an accumulation during this
@@ -384,6 +387,16 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // Seed root gradient into accumulator so the root function is handled
     // uniformly — no fragile "empty accumulators = root" assumption.
     accumulate_grad(root.grad_fn().get(), root.grad().value());
+    if (create_graph) {
+        // Seed the graph-carrying accumulator. requires_grad=true mirrors the
+        // legacy `Variable(g, true)` wrap so that downstream
+        // backward_with_variables products keep building grad_fn (a detached
+        // seed would make `grad * saved` non-requiring and sever the second-
+        // order graph). The seed itself is a leaf (no grad_fn), so forward-mode
+        // JVP / further differentiation correctly treat it as a constant.
+        accumulate_grad_var(root.grad_fn().get(),
+                            Variable(root.grad().value(), /*requires_grad=*/true));
+    }
 
     {
         // Execute backward in reverse topological order
@@ -442,11 +455,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     // Higher-order gradient path: use backward_with_variables
                     // which operates on Variables so the backward computation itself
                     // is tracked by autograd (enabling gradients of gradients).
-                    std::vector<Variable> var_grad_outputs;
-                    var_grad_outputs.reserve(grad_outputs.size());
-                    for (auto& g : grad_outputs) {
-                        var_grad_outputs.emplace_back(g, true);
-                    }
+                    std::vector<Variable> var_grad_outputs =
+                        build_var_grad_outputs(function.get(), grad_outputs);
 
                     var_input_grads = function->backward_with_variables(var_grad_outputs);
 
@@ -645,6 +655,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             for (size_t i = 0; i < next_funcs.size() && i < input_grads.size(); ++i) {
                 if (next_funcs[i]) {
                     accumulate_grad(next_funcs[i].get(), input_grads[i]);
+                    // Under create_graph, also forward the graph-carrying
+                    // gradient Variable so the downstream Function receives a
+                    // connected cotangent (keeps the second-order graph intact
+                    // across this edge). var_input_grads is index-aligned with
+                    // input_grads (both derived from the same backward call).
+                    if (create_graph && i < var_input_grads.size()) {
+                        accumulate_grad_var(next_funcs[i].get(), var_input_grads[i]);
+                    }
                 }
             }
 
@@ -772,6 +790,37 @@ auto BackwardEngine::accumulate_grad(Function* func, Tensor grad) -> void {
     grad_accumulators_[func->id()].push_back(std::move(grad));
 }
 
+auto BackwardEngine::accumulate_grad_var(Function* func, Variable grad) -> void {
+    grad_accumulators_var_[func->id()].push_back(std::move(grad));
+}
+
+auto BackwardEngine::build_var_grad_outputs(Function* func,
+                                            const std::vector<Tensor>& raw_grad_outputs)
+    -> std::vector<Variable> {
+    // Build the graph-carrying grad_outputs handed to backward_with_variables.
+    // Prefer the per-Function Variable accumulator (summed at the Variable
+    // level) so the second-order graph stays connected across this Function's
+    // input edge. Only when no Variable contribution was recorded do we fall
+    // back to a detached wrap of the raw total (defensive — should not happen
+    // for a reachable Function once the root var-accumulator is seeded).
+    std::vector<Variable> var_grad_outputs;
+    auto it = grad_accumulators_var_.find(func->id());
+    if (it != grad_accumulators_var_.end() && !it->second.empty()) {
+        const auto& var_grads = it->second;
+        Variable summed = var_grads[0];
+        for (size_t k = 1; k < var_grads.size(); ++k) {
+            summed = summed + var_grads[k];
+        }
+        var_grad_outputs.push_back(std::move(summed));
+    } else {
+        var_grad_outputs.reserve(raw_grad_outputs.size());
+        for (const auto& g : raw_grad_outputs) {
+            var_grad_outputs.emplace_back(g, true);
+        }
+    }
+    return var_grad_outputs;
+}
+
 auto BackwardEngine::get_accumulated_grads(Function* func) -> const std::vector<Tensor>& {
     static const std::vector<Tensor> empty;
     auto it = grad_accumulators_.find(func->id());
@@ -808,6 +857,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     auto saved_accumulators = std::move(grad_accumulators_);
     grad_accumulators_.clear();
     ScopeGuard accum_guard_multi{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
+    auto saved_accumulators_var_multi = std::move(grad_accumulators_var_);
+    grad_accumulators_var_.clear();
+    ScopeGuard accum_guard_var_multi{[&]{ grad_accumulators_var_ = std::move(saved_accumulators_var_multi); }};
 
     // Set the create_graph flag so backward functions know to use Variable ops.
     // Use RAII guard to ensure flag is restored even on exception. Same
@@ -913,6 +965,10 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         Variable* r = first_root_handle[key];
         if (r && r->grad_fn()) {
             accumulate_grad(r->grad_fn().get(), root_seeds[key]);
+            if (create_graph) {
+                accumulate_grad_var(r->grad_fn().get(),
+                                    Variable(root_seeds[key], /*requires_grad=*/true));
+            }
         }
     }
 
@@ -996,11 +1052,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 }
 
                 if (create_graph) {
-                    std::vector<Variable> var_grad_outputs;
-                    var_grad_outputs.reserve(grad_outputs.size());
-                    for (auto& g : grad_outputs) {
-                        var_grad_outputs.emplace_back(g, true);
-                    }
+                    std::vector<Variable> var_grad_outputs =
+                        build_var_grad_outputs(function.get(), grad_outputs);
 
                     var_input_grads = function->backward_with_variables(var_grad_outputs);
 
@@ -1154,6 +1207,14 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             for (size_t i = 0; i < next_funcs.size() && i < input_grads.size(); ++i) {
                 if (next_funcs[i]) {
                     accumulate_grad(next_funcs[i].get(), input_grads[i]);
+                    // Under create_graph, also forward the graph-carrying
+                    // gradient Variable so the downstream Function receives a
+                    // connected cotangent (keeps the second-order graph intact
+                    // across this edge). var_input_grads is index-aligned with
+                    // input_grads (both derived from the same backward call).
+                    if (create_graph && i < var_input_grads.size()) {
+                        accumulate_grad_var(next_funcs[i].get(), var_input_grads[i]);
+                    }
                 }
             }
 

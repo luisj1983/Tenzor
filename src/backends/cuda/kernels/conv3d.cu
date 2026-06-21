@@ -793,8 +793,17 @@ auto conv3d_forward_kernel(
     const int64_t pD = padding[0], pH = padding[1], pW = padding[2];
     const int64_t dD = dilation[0], dH = dilation[1], dW = dilation[2];
 
-    auto in_shape = input.shape();
-    auto w_shape  = weight.shape();
+    // The direct kernels index input/weight/bias with fully-contiguous NCDHW
+    // offset arithmetic, so a non-contiguous (permuted/sliced/channels-last)
+    // view would be read with the wrong strides. Materialize contiguous copies.
+    auto input_c  = input.contiguous();
+    auto weight_c = weight.contiguous();
+    Tensor bias_c;
+    const Tensor* bias_ptr = bias;
+    if (bias) { bias_c = bias->contiguous(); bias_ptr = &bias_c; }
+
+    auto in_shape = input_c.shape();
+    auto w_shape  = weight_c.shape();
     int64_t N    = in_shape[0];
     int64_t Cin  = in_shape[1];
     int64_t D    = in_shape[2];
@@ -810,31 +819,31 @@ auto conv3d_forward_kernel(
     int64_t oH = conv3d_out_dim(H, kH, sH, pH, dH);
     int64_t oW = conv3d_out_dim(W, kW, sW, pW, dW);
 
-    Tensor output({N, Cout, oD, oH, oW}, input.dtype(), input.device());
+    Tensor output({N, Cout, oD, oH, oW}, input_c.dtype(), input_c.device());
 
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32:
             // Upgrade the f32 accumulator to double, matching conv3d_backward.
             // The forward reduction sums Cin_per_g*kD*kH*kW MACs; a float
             // accumulator drifts O(sqrt(N)) ULPs and diverges from the CPU
             // reference past the cross-backend rtol=1e-3.
             launch_conv3d_forward<float, double>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cin_per_g,
                 kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         case DType::Float64:
             launch_conv3d_forward<double, double>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cin_per_g,
                 kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         case DType::Float16:
             launch_conv3d_forward<__half, float>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cin_per_g,
                 kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv3d_forward<__nv_bfloat16, float>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cin_per_g,
                 kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         default:
@@ -866,9 +875,16 @@ auto conv3d_backward_kernel(
     const int64_t pD = padding[0], pH = padding[1], pW = padding[2];
     const int64_t dD = dilation[0], dH = dilation[1], dW = dilation[2];
 
-    auto in_shape = input.shape();
-    auto w_shape  = weight.shape();
-    auto go_shape = grad_output.shape();
+    // The backward kernels index grad_output/input/weight with fully-contiguous
+    // NCDHW offset arithmetic; materialize contiguous copies so a non-contiguous
+    // view is not read with the wrong strides.
+    auto grad_output_c = grad_output.contiguous();
+    auto input_c       = input.contiguous();
+    auto weight_c      = weight.contiguous();
+
+    auto in_shape = input_c.shape();
+    auto w_shape  = weight_c.shape();
+    auto go_shape = grad_output_c.shape();
     int64_t N    = in_shape[0];
     int64_t Cin  = in_shape[1];
     int64_t D    = in_shape[2];
@@ -885,31 +901,31 @@ auto conv3d_backward_kernel(
 
     // Match cudnn_conv3d_backward: always allocate all three tensors. The
     // unrequested ones are returned uninitialized (caller discards them).
-    Tensor grad_input ({N, Cin, D, H, W},                  input.dtype(),  input.device());
-    Tensor grad_weight({Cout, Cin_per_g, kD, kH, kW},      weight.dtype(), weight.device());
-    Tensor grad_bias  ({Cout},                              weight.dtype(), weight.device());
+    Tensor grad_input ({N, Cin, D, H, W},                  input_c.dtype(),  input_c.device());
+    Tensor grad_weight({Cout, Cin_per_g, kD, kH, kW},      weight_c.dtype(), weight_c.device());
+    Tensor grad_bias  ({Cout},                              weight_c.dtype(), weight_c.device());
 
 #define TENZOR_CONV3D_BWD_DISPATCH(T_, ACC_)                                            \
     do {                                                                                 \
         if (compute_grad_input) {                                                        \
             launch_conv3d_backward_input<T_, ACC_>(                                      \
-                grad_output, weight, grad_input,                                         \
+                grad_output_c, weight_c, grad_input,                                     \
                 N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,                            \
                 oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);                  \
         }                                                                                \
         if (compute_grad_weight) {                                                       \
             launch_conv3d_backward_weight<T_, ACC_>(                                     \
-                grad_output, input, grad_weight,                                         \
+                grad_output_c, input_c, grad_weight,                                     \
                 N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,                            \
                 oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);                  \
         }                                                                                \
         if (compute_grad_bias) {                                                         \
             launch_conv3d_backward_bias<T_, ACC_>(                                       \
-                grad_output, grad_bias, N, Cout, oD, oH, oW, stream);                    \
+                grad_output_c, grad_bias, N, Cout, oD, oH, oW, stream);                  \
         }                                                                                \
     } while (0)
 
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         // Upgrade f32 accumulator to double. Each conv3d_backward_weight
         // thread sums thousands of grad_output*input pairs; a float
         // accumulator drifts by O(sqrt(N)) ULPs, which pushes the
@@ -943,8 +959,15 @@ auto conv_transpose3d_forward_kernel(
     if (groups == 0)  throw std::invalid_argument("ConvTranspose3d: groups cannot be zero");
     int64_t s = stride, p = padding, d = dilation;  // aliases for launch helpers
 
-    auto in_shape = input.shape();
-    auto w_shape  = weight.shape();
+    // Direct kernels index with contiguous NCDHW arithmetic — materialize copies.
+    auto input_c  = input.contiguous();
+    auto weight_c = weight.contiguous();
+    Tensor bias_c;
+    const Tensor* bias_ptr = bias;
+    if (bias) { bias_c = bias->contiguous(); bias_ptr = &bias_c; }
+
+    auto in_shape = input_c.shape();
+    auto w_shape  = weight_c.shape();
     int64_t N    = in_shape[0];
     int64_t Cin  = in_shape[1];
     int64_t D    = in_shape[2];
@@ -961,31 +984,31 @@ auto conv_transpose3d_forward_kernel(
     int64_t oH = conv_transpose3d_out_dim(H, kH, stride, padding, output_padding, dilation);
     int64_t oW = conv_transpose3d_out_dim(W, kW, stride, padding, output_padding, dilation);
 
-    Tensor output({N, Cout, oD, oH, oW}, input.dtype(), input.device());
+    Tensor output({N, Cout, oD, oH, oW}, input_c.dtype(), input_c.device());
 
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32:
             // Accumulate Float32 ConvTranspose3d in double, matching the Conv3d
             // decision (a float accumulator drifts O(sqrt(N)) ULPs over the
             // Cin_per_g*kD*kH*kW reduction and pushes the cross-backend rtol=1e-3
             // parity test over threshold).
             launch_conv_transpose3d_forward<float, double>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float64:
             launch_conv_transpose3d_forward<double, double>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float16:
             launch_conv_transpose3d_forward<__half, float>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv_transpose3d_forward<__nv_bfloat16, float>(
-                input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
+                input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         default:
@@ -1006,9 +1029,11 @@ auto conv_transpose3d_backward_input_kernel(
     cudaStream_t stream
 ) -> Tensor {
     int64_t s = stride, p = padding, d = dilation;  // aliases for launch helpers
+    auto grad_output_c = grad_output.contiguous();
+    auto weight_c      = weight.contiguous();
     auto in_shape = input.shape();
-    auto w_shape  = weight.shape();
-    auto go_shape = grad_output.shape();
+    auto w_shape  = weight_c.shape();
+    auto go_shape = grad_output_c.shape();
     int64_t N    = in_shape[0];
     int64_t Cin  = in_shape[1];
     int64_t D    = in_shape[2];
@@ -1029,22 +1054,22 @@ auto conv_transpose3d_backward_input_kernel(
         case DType::Float32:
             // Double accumulator for Float32 (cross-backend parity); see fwd note.
             launch_conv_transpose3d_backward_input<float, double>(
-                grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, weight_c, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float64:
             launch_conv_transpose3d_backward_input<double, double>(
-                grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, weight_c, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float16:
             launch_conv_transpose3d_backward_input<__half, float>(
-                grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, weight_c, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv_transpose3d_backward_input<__nv_bfloat16, float>(
-                grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, weight_c, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         default:
@@ -1061,9 +1086,11 @@ auto conv_transpose3d_backward_weight_kernel(
     cudaStream_t stream
 ) -> Tensor {
     int64_t s = stride, p = padding, d = dilation;  // aliases for launch helpers
-    auto in_shape = input.shape();
+    auto grad_output_c = grad_output.contiguous();
+    auto input_c       = input.contiguous();
+    auto in_shape = input_c.shape();
     auto w_shape  = weight.shape();
-    auto go_shape = grad_output.shape();
+    auto go_shape = grad_output_c.shape();
     int64_t N    = in_shape[0];
     int64_t Cin  = in_shape[1];
     int64_t D    = in_shape[2];
@@ -1078,28 +1105,28 @@ auto conv_transpose3d_backward_weight_kernel(
     int64_t oH = go_shape[3];
     int64_t oW = go_shape[4];
 
-    Tensor grad_weight({Cin, Cout_per_g, kD, kH, kW}, input.dtype(), input.device());
+    Tensor grad_weight({Cin, Cout_per_g, kD, kH, kW}, input_c.dtype(), input_c.device());
 
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32:
             // Double accumulator for Float32 (cross-backend parity); see fwd note.
             launch_conv_transpose3d_backward_weight<float, double>(
-                grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, input_c, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float64:
             launch_conv_transpose3d_backward_weight<double, double>(
-                grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, input_c, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::Float16:
             launch_conv_transpose3d_backward_weight<__half, float>(
-                grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, input_c, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv_transpose3d_backward_weight<__nv_bfloat16, float>(
-                grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
+                grad_output_c, input_c, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
         default:

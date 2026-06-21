@@ -567,6 +567,7 @@ namespace cuda {
         double weight_decay,
         double dampening,
         bool nesterov,
+        bool first_step,
         cudaStream_t stream
     ) -> void;
 
@@ -2618,6 +2619,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
         double dampening = attrs.get_float(AttrKey::Dampening, 0.0);
         bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
+        // PyTorch SGD: first momentum step initialises buf = grad (no dampening).
+        bool first_step = attrs.get_bool(AttrKey::FirstStep, false);
 
         // Cast away const for in-place modification (safe because we control the API)
         Tensor& param = const_cast<Tensor&>(inputs[0]);
@@ -2626,7 +2629,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
         cuda::fused_sgd_step_cuda(
             param, inputs[1], momentum_buffer,
-            lr, momentum, weight_decay, dampening, nesterov,
+            lr, momentum, weight_decay, dampening, nesterov, first_step,
             get_cuda_stream(attrs)
         );
         return std::vector<Tensor>{param};  // Return modified param
@@ -4781,6 +4784,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t dH = dilation_arr[0], dW = dilation_arr[1];
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
+        // The output-size formula below divides by sH / sW. A zero (or negative)
+        // stride would be an integer divide-by-zero / UB before the kernel ever
+        // runs, so reject it up front (mirrors the kernel's own defensive
+        // validation of `groups`).
+        if (sH < 1 || sW < 1) {
+            throw std::invalid_argument(
+                "QuantizedConv2d (CUDA): stride must be >= 1, got (" +
+                std::to_string(sH) + ", " + std::to_string(sW) + ")");
+        }
+
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
         int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
@@ -5506,7 +5519,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Quantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return cuda::quantile_kernel(inputs[0], q, dim, keepdim, get_cuda_stream(attrs));
@@ -5514,7 +5527,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Nanquantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return cuda::nanquantile_kernel(inputs[0], q, dim, keepdim, get_cuda_stream(attrs));
@@ -5528,9 +5541,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Histc,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t bins = attrs.get_int(AttrKey::N, 100);
-            double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
-            double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+            int64_t bins = attrs.get_int(AttrKey::NumBins, 100);
+            double min_val = attrs.get_float(AttrKey::Min, 0.0);
+            double max_val = attrs.get_float(AttrKey::Max, 0.0);
             return cuda::histc_kernel(inputs[0], bins, min_val, max_val, get_cuda_stream(attrs));
         });
 

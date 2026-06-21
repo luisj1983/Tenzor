@@ -1291,13 +1291,18 @@ __global__ void butterfly_stage_kernel(T* data, int64_t N, int64_t batch_size,
     int64_t k = flat % half;
     int64_t base_idx = group * stride;
 
-    constexpr T PI = static_cast<T>(3.14159265358979323846);
-    T angle = sign * static_cast<T>(2.0) * PI * static_cast<T>(k) / static_cast<T>(stride);
-    T w_re, w_im;
-    // Use sincos for efficiency; sincos is available as __sincosf/__sincos on device
-    // but cos/sin work fine and the compiler will typically fuse them.
-    w_re = cos(angle);
-    w_im = sin(angle);
+    // Compute the twiddle phase and sin/cos in double regardless of T so the
+    // Float32/Complex64 path does not accumulate phase error for large N. The
+    // Bluestein chirp (generate_chirp_kernel) already uses double for the same
+    // reason; the Cooley-Tukey butterfly was previously evaluated in element
+    // precision (float), which is measurably worse for large transforms.
+    constexpr double PI = 3.14159265358979323846;
+    double angle = static_cast<double>(sign) * 2.0 * PI
+                 * static_cast<double>(k) / static_cast<double>(stride);
+    double w_re_d, w_im_d;
+    sincos(angle, &w_im_d, &w_re_d);
+    T w_re = static_cast<T>(w_re_d);
+    T w_im = static_cast<T>(w_im_d);
 
     int64_t base = batch_idx * batch_stride;
     int64_t even_i = base_idx + k;

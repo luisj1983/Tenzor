@@ -552,19 +552,25 @@ auto fused_attention_oneapi_f64(
     if (Q.dtype() != DType::Float64 || K.dtype() != DType::Float64 || V.dtype() != DType::Float64) {
         throw std::runtime_error("fused_attention_oneapi_f64: requires Float64 inputs");
     }
-    const int64_t batch_heads = Q.shape()[0];
-    const int64_t seq_len_q   = Q.shape()[1];
-    const int64_t head_dim    = Q.shape()[2];
-    const int64_t seq_len_k   = K.shape()[1];
+    // The kernel indexes Q/K/V with hard-coded row-major (BH, S, D) flat math, so
+    // a non-contiguous 3D view (transpose/slice/permute) must be materialized
+    // contiguous first. The trailing queue.wait_and_throw() keeps these alive.
+    Tensor Qc = Q.is_contiguous() ? Q : Q.contiguous();
+    Tensor Kc = K.is_contiguous() ? K : K.contiguous();
+    Tensor Vc = V.is_contiguous() ? V : V.contiguous();
+    const int64_t batch_heads = Qc.shape()[0];
+    const int64_t seq_len_q   = Qc.shape()[1];
+    const int64_t head_dim    = Qc.shape()[2];
+    const int64_t seq_len_k   = Kc.shape()[1];
 
     Tensor output = make_zeros_f64({batch_heads, seq_len_q, head_dim},
                                     DType::Float64, Q.device(), queue);
     Tensor lse    = make_zeros_f64({batch_heads, seq_len_q},
                                     DType::Float32, Q.device(), queue);
 
-    const double* q_ptr = get_data_ptr<const double>(Q);
-    const double* k_ptr = get_data_ptr<const double>(K);
-    const double* v_ptr = get_data_ptr<const double>(V);
+    const double* q_ptr = get_data_ptr<const double>(Qc);
+    const double* k_ptr = get_data_ptr<const double>(Kc);
+    const double* v_ptr = get_data_ptr<const double>(Vc);
     double*       o_ptr = get_data_ptr<double>(output);
     float*        l_ptr = get_data_ptr<float>(lse);
 
@@ -600,19 +606,26 @@ auto flash_attention_backward_oneapi_f64(
     if (Q.dtype() != DType::Float64) {
         throw std::runtime_error("flash_attention_backward_oneapi_f64: requires Float64 inputs");
     }
-    const int64_t batch_heads = Q.shape()[0];
-    const int64_t seq_len     = Q.shape()[1];
-    const int64_t head_dim    = Q.shape()[2];
+    // Kernel uses hard-coded row-major (BH, S, D) flat indexing; materialize any
+    // non-contiguous input contiguous first. The trailing wait keeps them alive.
+    Tensor Qc  = Q.is_contiguous()  ? Q  : Q.contiguous();
+    Tensor Kc  = K.is_contiguous()  ? K  : K.contiguous();
+    Tensor Vc  = V.is_contiguous()  ? V  : V.contiguous();
+    Tensor Oc  = O.is_contiguous()  ? O  : O.contiguous();
+    Tensor dOc = dO.is_contiguous() ? dO : dO.contiguous();
+    const int64_t batch_heads = Qc.shape()[0];
+    const int64_t seq_len     = Qc.shape()[1];
+    const int64_t head_dim    = Qc.shape()[2];
 
     Tensor dQ = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, Q.device(), queue);
     Tensor dK = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device(), queue);
     Tensor dV = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device(), queue);
 
-    const double* q_ptr  = get_data_ptr<const double>(Q);
-    const double* k_ptr  = get_data_ptr<const double>(K);
-    const double* v_ptr  = get_data_ptr<const double>(V);
-    const double* o_ptr  = get_data_ptr<const double>(O);
-    const double* do_ptr = get_data_ptr<const double>(dO);
+    const double* q_ptr  = get_data_ptr<const double>(Qc);
+    const double* k_ptr  = get_data_ptr<const double>(Kc);
+    const double* v_ptr  = get_data_ptr<const double>(Vc);
+    const double* o_ptr  = get_data_ptr<const double>(Oc);
+    const double* do_ptr = get_data_ptr<const double>(dOc);
     double* dq_ptr = get_data_ptr<double>(dQ);
     double* dk_ptr = get_data_ptr<double>(dK);
     double* dv_ptr = get_data_ptr<double>(dV);

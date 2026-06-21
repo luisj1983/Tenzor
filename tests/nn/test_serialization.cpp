@@ -193,15 +193,23 @@ TEST_F(SerializationTest, ShapeMismatchError) {
     EXPECT_THROW(linear->load_state_dict(state), std::runtime_error);
 }
 
-// Test 8: DType mismatch error
-TEST_F(SerializationTest, DTypeMismatchError) {
+// Test 8: DType adaptation on load (documented mixed-precision flow).
+// load_state_dict adapts a checkpoint tensor to the live parameter's dtype
+// (an F64/F32 checkpoint can be loaded into an F32/F16 model) rather than
+// throwing. Shapes must still match exactly. This is the intended behavior per
+// Module::load_state_dict's contract; it previously (incorrectly) asserted a
+// throw on dtype mismatch.
+TEST_F(SerializationTest, DTypeMismatchAdaptsNotThrows) {
     auto linear = std::make_shared<Linear>(3, 2);
+    const auto live_dtype = linear->get_parameter("weight")->tensor().dtype();
 
     std::unordered_map<std::string, Tensor> state;
-    state["weight"] = ones({2, 3}, DType::Float64); // Wrong dtype
+    state["weight"] = ones({2, 3}, DType::Float64); // Different dtype, same shape
     state["bias"] = ones({2}, DType::Float32);
 
-    EXPECT_THROW(linear->load_state_dict(state), std::runtime_error);
+    EXPECT_NO_THROW(linear->load_state_dict(state));
+    // The live parameter keeps its own dtype; the checkpoint was cast to match.
+    EXPECT_EQ(linear->get_parameter("weight")->tensor().dtype(), live_dtype);
 }
 
 // Test 9: Partial state loading (missing keys)
@@ -436,4 +444,79 @@ TEST_F(SerializationTest, FileOverwrite) {
     for (int i = 0; i < 4; ++i) {
         EXPECT_FLOAT_EQ(data[i], 0.0f);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: ParameterList/ParameterDict::load_state_dict must preserve the
+// live parameter Storage handle (R.18 in-place-write invariant) and adapt the
+// checkpoint's dtype, exactly like the base Module. The previous overrides did
+// `params_[i]->tensor() = it->second.clone()`, swapping the Storage pointer
+// (orphaning aliasing views) and skipping dtype/device adaptation. Their
+// state_dict() also returned the live tensor without cloning, so a snapshot
+// aliased the live parameter. These tests fail before the fix.
+// ---------------------------------------------------------------------------
+TEST_F(SerializationTest, ParameterListLoadStateDictPreservesStorage) {
+    auto plist = std::make_shared<ParameterList>();
+    plist->append(Variable(ones({3, 3}, DType::Float32), true));
+    plist->append(Variable(ones({4}, DType::Float32), true));
+
+    // Capture the live Storage pointers before loading.
+    const void* p0_before = plist->parameters()[0]->tensor().data_ptr();
+    const void* p1_before = plist->parameters()[1]->tensor().data_ptr();
+
+    // Build a checkpoint with different values, same shapes.
+    std::unordered_map<std::string, Tensor> state;
+    state["0"] = full({3, 3}, 2.0f, DType::Float32);
+    state["1"] = full({4}, 5.0f, DType::Float32);
+
+    plist->load_state_dict(state);
+
+    // Storage handle must be unchanged (in-place write), and the bytes updated.
+    EXPECT_EQ(plist->parameters()[0]->tensor().data_ptr(), p0_before)
+        << "load_state_dict must not rebind the parameter Storage";
+    EXPECT_EQ(plist->parameters()[1]->tensor().data_ptr(), p1_before);
+    EXPECT_FLOAT_EQ(plist->parameters()[0]->tensor().data<float>()[0], 2.0f);
+    EXPECT_FLOAT_EQ(plist->parameters()[1]->tensor().data<float>()[0], 5.0f);
+}
+
+TEST_F(SerializationTest, ParameterListStateDictSnapshotDoesNotAliasLive) {
+    auto plist = std::make_shared<ParameterList>();
+    plist->append(Variable(ones({2, 2}, DType::Float32), true));
+
+    auto snapshot = plist->state_dict();
+    // Mutate the live parameter in place; the snapshot must not change.
+    plist->parameters()[0]->tensor().zero_();
+
+    EXPECT_FLOAT_EQ(snapshot.at("0").data<float>()[0], 1.0f)
+        << "state_dict() must clone, not alias the live parameter";
+}
+
+TEST_F(SerializationTest, ParameterListLoadStateDictAdaptsDType) {
+    auto plist = std::make_shared<ParameterList>();
+    plist->append(Variable(ones({2, 2}, DType::Float32), true));
+    const void* before = plist->parameters()[0]->tensor().data_ptr();
+
+    // Checkpoint stored in Float64 must be cast to the live Float32 param,
+    // without rebinding the Storage.
+    std::unordered_map<std::string, Tensor> state;
+    state["0"] = full({2, 2}, 3.0, DType::Float64);
+    plist->load_state_dict(state);
+
+    EXPECT_EQ(plist->parameters()[0]->tensor().dtype(), DType::Float32);
+    EXPECT_EQ(plist->parameters()[0]->tensor().data_ptr(), before);
+    EXPECT_FLOAT_EQ(plist->parameters()[0]->tensor().data<float>()[0], 3.0f);
+}
+
+TEST_F(SerializationTest, ParameterDictLoadStateDictPreservesStorage) {
+    auto pdict = std::make_shared<ParameterDict>();
+    pdict->insert("w", Variable(ones({3}, DType::Float32), true));
+
+    const void* before = pdict->at("w")->tensor().data_ptr();
+
+    std::unordered_map<std::string, Tensor> state;
+    state["w"] = full({3}, 7.0f, DType::Float32);
+    pdict->load_state_dict(state);
+
+    EXPECT_EQ(pdict->at("w")->tensor().data_ptr(), before);
+    EXPECT_FLOAT_EQ(pdict->at("w")->tensor().data<float>()[0], 7.0f);
 }

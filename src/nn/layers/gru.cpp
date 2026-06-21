@@ -58,10 +58,17 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
 
     int64_t batch_size = input_shape[0];
 
-    // Ensure module parameters are on the same device as input
+    // Ensure module parameters are on the same device as input. Only trigger
+    // the transfer when the parameter is actually on a different device —
+    // otherwise this re-runs the (potentially expensive) move every timestep,
+    // re-copying non-contiguous weights each step (LSTMCell guards identically).
     auto input_device = input.device();
-    weight_ih_->to(input_device);
-    weight_hh_->to(input_device);
+    if (weight_ih_->weight()->device() != input_device) {
+        weight_ih_->to(input_device);
+    }
+    if (weight_hh_->weight()->device() != input_device) {
+        weight_hh_->to(input_device);
+    }
 
     // Initialize hidden state if not provided
     Variable h = hx;

@@ -39,6 +39,18 @@ protected:
         }
         return sum_val;
     }
+
+    // Tolerance on a sum over 16 elements given per-element rounding of the
+    // active dtype. Wide enough for genuine low-precision rounding, tight
+    // enough to still distinguish the correct 14.4 (restore + step) from the
+    // restore-skipped 14.6, and 16.2 from an un-normalized perturbation.
+    float sum_tol() const {
+        switch (dtype()) {
+            case DType::Float16:  return 0.05f;
+            case DType::BFloat16: return 0.12f;
+            default:              return 1e-3f;  // Float32
+        }
+    }
 };
 
 TEST_P(SAMSWAMultiDTypeTest, SAMFirstStepPerturbsWeights) {
@@ -51,7 +63,12 @@ TEST_P(SAMSWAMultiDTypeTest, SAMFirstStepPerturbsWeights) {
     sam.first_step();
     float after = param_sum(params);
 
-    EXPECT_NE(before, after);
+    // epsilon = rho * grad / ||grad||_2 = 0.05 / sqrt(16) = 0.0125 per element;
+    // each of 16 weights goes 1 → 1.0125, sum 16 → 16.2. Low-precision dtypes
+    // round the per-element 1.0125, so use a dtype-aware bound.
+    EXPECT_NEAR(before, 16.0f, sum_tol());
+    EXPECT_NEAR(after, 16.2f, sum_tol())
+        << "first_step perturbation magnitude wrong (expected w += rho*g/||g||)";
 }
 
 TEST_P(SAMSWAMultiDTypeTest, SAMSecondStepRestoresAndSteps) {
@@ -63,12 +80,16 @@ TEST_P(SAMSWAMultiDTypeTest, SAMSecondStepRestoresAndSteps) {
     set_unit_grad(params);
     sam.first_step();
     float perturbed = param_sum(params);
-    EXPECT_NE(original, perturbed);
+    EXPECT_NEAR(original, 16.0f, sum_tol());
+    EXPECT_NEAR(perturbed, 16.2f, sum_tol());
 
     set_unit_grad(params);
     sam.second_step();
     float final_val = param_sum(params);
-    EXPECT_NE(final_val, perturbed);
+    // Restore to 1.0 then SGD: w = 1.0 - 0.1*1.0 = 0.9, sum 14.4. A skipped
+    // restore would give 1.0125-0.1=0.9125 → 14.6, outside the F16 bound.
+    EXPECT_NEAR(final_val, 14.4f, sum_tol())
+        << "second_step must restore to original then apply SGD step";
 }
 
 TEST_P(SAMSWAMultiDTypeTest, SAMLrGetSet) {

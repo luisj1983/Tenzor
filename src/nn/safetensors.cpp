@@ -404,7 +404,16 @@ auto SafeTensorsSerializer::load(const std::string& path)
             }
             expected_start = end;
         }
-        if (!regions.empty() && expected_start != data_section_len) {
+        if (regions.empty()) {
+            // No tensors: the data section must be empty too. Otherwise a file
+            // declaring zero tensors but a non-empty data section would slip
+            // through the coverage contract (trailing/unaccounted data).
+            if (data_section_len != 0) {
+                throw std::runtime_error(
+                    "SafeTensors: header declares no tensors but the data section "
+                    "is " + std::to_string(data_section_len) + " bytes (expected 0)");
+            }
+        } else if (expected_start != data_section_len) {
             throw std::runtime_error(
                 "SafeTensors: tensor data offsets do not cover the data section "
                 "(regions end at " + std::to_string(expected_start) +

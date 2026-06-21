@@ -460,9 +460,16 @@ auto ZeROStage1Optimizer::step_impl() -> void {
                 profiling_stats_.gather_time_ms / profiling_stats_.num_gathers;
         }
 
-        // Calculate communication/compute overlap ratio
-        // Overlap = 1 - (comm_time / total_time) when compute and comm can overlap
-        if (total_duration > 0) {
+        // Calculate communication/compute overlap ratio.
+        // Overlap measures the fraction of COMMUNICATION time that is hidden
+        // behind compute, so it is only meaningful when communication actually
+        // occurred. With no communication (e.g. single-rank, no process group)
+        // there is nothing to overlap and the ratio must be 0 — without the
+        // communication_time_ms>0 guard the formula would attribute spurious
+        // "overlap" to the gap between summed (possibly multithreaded) compute
+        // time and wall-clock duration, reporting a non-zero overlap with zero
+        // communication.
+        if (total_duration > 0 && profiling_stats_.communication_time_ms > 0) {
             double sequential_time = profiling_stats_.communication_time_ms + profiling_stats_.compute_time_ms;
             if (sequential_time > total_duration) {
                 profiling_stats_.comm_compute_overlap_ratio =
@@ -2555,8 +2562,11 @@ auto ZeROStage2Optimizer::step_impl() -> void {
                 profiling_stats_.scatter_time_ms / profiling_stats_.num_scatters;
         }
 
-        // Calculate communication/compute overlap
-        if (total_duration > 0) {
+        // Calculate communication/compute overlap. Overlap is the fraction of
+        // COMMUNICATION time hidden behind compute, so guard on communication
+        // having occurred — with zero communication there is nothing to overlap
+        // and the ratio must stay 0 (see Stage1 path for the detailed rationale).
+        if (total_duration > 0 && profiling_stats_.communication_time_ms > 0) {
             double sequential_time = profiling_stats_.communication_time_ms + profiling_stats_.compute_time_ms;
             if (sequential_time > total_duration) {
                 profiling_stats_.comm_compute_overlap_ratio =

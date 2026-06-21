@@ -376,6 +376,13 @@ __global__ void matmul_tiled_i64_kernel(
  * - Each wavefront (64 threads) processes a 16x16 block
  * - Uses FP16 for input/output with FP32 accumulation internally
  */
+// DEAD CODE: matmul_wmma_fp16_kernel and matmul_tiled_bf16_kernel below are
+// never launched. matmul_native_hip (the only fallback caller) widens
+// Float16/BFloat16 to Float32 and runs the f32 tiled path, so these are
+// unreachable. The name is also misleading: the body is a plain shared-memory
+// tiled loop, NOT an actual WMMA/amd_wmma implementation. Retained as reference
+// only; do not wire into dispatch without implementing real WMMA + an fp32
+// compute path.
 template<int WMMA_M = 16, int WMMA_N = 16, int WMMA_K = 16>
 __global__ void matmul_wmma_fp16_kernel(
     const __half* __restrict__ A,

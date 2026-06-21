@@ -151,9 +151,25 @@ inline double philox_uniform_f64(uint64_t seed, int64_t idx) noexcept {
  * @brief Generate one standard normal double for element at index `idx`.
  */
 inline double philox_normal_f64(uint64_t seed, int64_t idx) noexcept {
-    double u1 = philox_uniform_f64(seed, idx);
-    // Second draw: use a different counter lane by shifting idx
-    double u2 = philox_uniform_f64(seed ^ 0xDEADBEEFULL, idx);
+    // Build the Box-Muller uniform pair from the four independent outputs of a
+    // single Philox block (out[0..3]), mirroring philox_normal_f32. The prior
+    // implementation drew u1 and u2 from two separate single-block calls that
+    // shared the same counter and only XOR'd the key, correlating the pair and
+    // producing a non-Gaussian distribution.
+    Philox4x32 rng;
+    rng.counter[0] = static_cast<uint32_t>(idx & 0xFFFFFFFFULL);
+    rng.counter[1] = static_cast<uint32_t>((idx >> 32) & 0xFFFFFFFFULL);
+    rng.counter[2] = 0u;
+    rng.counter[3] = 0u;
+    rng.key[0] = static_cast<uint32_t>(seed & 0xFFFFFFFFULL);
+    rng.key[1] = static_cast<uint32_t>((seed >> 32) & 0xFFFFFFFFULL);
+
+    uint32_t out[4];
+    rng.generate(out);
+    uint64_t bits1 = (static_cast<uint64_t>(out[0]) << 21) | (static_cast<uint64_t>(out[1]) >> 11);
+    uint64_t bits2 = (static_cast<uint64_t>(out[2]) << 21) | (static_cast<uint64_t>(out[3]) >> 11);
+    double u1 = static_cast<double>(bits1) * (1.0 / 9007199254740992.0);
+    double u2 = static_cast<double>(bits2) * (1.0 / 9007199254740992.0);
     if (u1 < 1e-300) u1 = 1e-300;
     return std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2);
 }

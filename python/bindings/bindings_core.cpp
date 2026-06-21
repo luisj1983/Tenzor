@@ -3,6 +3,8 @@
 // bindings split effort (P3.4).
 
 #include "register.hpp"
+#include "gil_safe_pyobject.hpp"  // GIL-safe holder for hook py::object
+#include <tenzor/nn/utils/variable_cast.hpp>  // autograd-aware Variable.to(DType)
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -990,6 +992,107 @@ Returns:
                     " bytes, buffer holds " + std::to_string(available_bytes) +
                     " bytes)");
             }
+            // DTYPE check: from_blob is a zero-copy view that reinterprets the
+            // raw bytes in the requested dtype's layout. The byte-size guard
+            // above passes for a float64 buffer requested as Float32 (8N >= 4N)
+            // but the resulting Tensor would reinterpret float64 bit patterns
+            // as pairs of float32 garbage. Require the buffer's element size
+            // AND kind to match the requested dtype so no silent reinterpret
+            // happens.
+            {
+                const std::string requested_fmt =
+                    tenzor::numpy::dtype_to_numpy_format(dtype);
+                const size_t requested_itemsize = tenzor::dtype_size(dtype);
+                if (static_cast<size_t>(info.itemsize) != requested_itemsize) {
+                    throw py::value_error(
+                        "from_blob: buffer itemsize (" +
+                        std::to_string(info.itemsize) +
+                        ") does not match requested dtype size (" +
+                        std::to_string(requested_itemsize) +
+                        "); from_blob is a zero-copy view and does not convert "
+                        "dtypes. Cast the buffer first or pass the matching "
+                        "dtype.");
+                }
+                // Compare the buffer's format kind with the requested dtype's
+                // descriptor. numpy may report platform-equivalent format codes
+                // (e.g. 'l'/'q' for 8-byte ints), so only reject when both
+                // formats are non-empty and the leading kind characters differ
+                // — that distinguishes e.g. int32 ('i') from float32 ('f').
+                if (!info.format.empty() && !requested_fmt.empty()) {
+                    auto kind_char = [](const std::string& f) -> char {
+                        for (char c : f) {
+                            if (c != '@' && c != '=' && c != '<' && c != '>' &&
+                                c != '!' && c != ' ')
+                                return c;
+                        }
+                        return '\0';
+                    };
+                    char buf_kind = kind_char(info.format);
+                    char req_kind = kind_char(requested_fmt);
+                    // Group signed/unsigned integer codes of equal width as
+                    // compatible (numpy uses 'l'/'q'/'i' interchangeably across
+                    // platforms for same-size ints); reject float<->int and
+                    // mismatched kinds.
+                    auto is_int = [](char c) {
+                        return c == 'b' || c == 'B' || c == 'h' || c == 'H' ||
+                               c == 'i' || c == 'I' || c == 'l' || c == 'L' ||
+                               c == 'q' || c == 'Q' || c == 'n' || c == 'N';
+                    };
+                    auto is_float = [](char c) {
+                        return c == 'e' || c == 'f' || c == 'd';
+                    };
+                    const bool compatible =
+                        (buf_kind == req_kind) ||
+                        (is_int(buf_kind) && is_int(req_kind)) ||
+                        (is_float(buf_kind) && is_float(req_kind) &&
+                         info.itemsize == static_cast<py::ssize_t>(
+                                              requested_itemsize));
+                    if (!compatible) {
+                        throw py::value_error(
+                            "from_blob: buffer format '" + info.format +
+                            "' is incompatible with requested dtype (expected "
+                            "format '" + requested_fmt +
+                            "'); from_blob does not reinterpret across kinds.");
+                    }
+                }
+            }
+            // CONTIGUITY check: from_blob takes info.ptr as a packed,
+            // C-contiguous (row-major) view and IGNORES info.strides. A
+            // non-contiguous buffer (transposed numpy array, sliced view with
+            // gaps, Fortran-ordered array) passes the byte-size guard but its
+            // real stride layout differs from what the Tensor assumes, so the
+            // Tensor would silently read the wrong elements. Reject any buffer
+            // whose strides are not the packed C-contiguous strides for its
+            // shape. (Empty/0-element buffers are trivially contiguous.)
+            if (numel > 0 && !info.strides.empty()) {
+                // Expected packed C-contiguous strides (in bytes) from the
+                // BUFFER's own shape, not the requested tensor shape — the
+                // contiguity property is about the source buffer layout.
+                std::vector<py::ssize_t> expected(info.ndim);
+                py::ssize_t acc = info.itemsize;
+                for (py::ssize_t i = info.ndim - 1; i >= 0; --i) {
+                    expected[static_cast<size_t>(i)] = acc;
+                    acc *= info.shape[static_cast<size_t>(i)];
+                }
+                bool c_contiguous = true;
+                for (py::ssize_t i = 0; i < info.ndim; ++i) {
+                    // A dimension of length <= 1 imposes no stride constraint.
+                    if (info.shape[static_cast<size_t>(i)] > 1 &&
+                        info.strides[static_cast<size_t>(i)] !=
+                            expected[static_cast<size_t>(i)]) {
+                        c_contiguous = false;
+                        break;
+                    }
+                }
+                if (!c_contiguous) {
+                    throw py::value_error(
+                        "from_blob: buffer is not C-contiguous (row-major). "
+                        "from_blob is a zero-copy view that ignores strides and "
+                        "would read wrong values from a transposed/sliced/"
+                        "Fortran-ordered buffer. Pass a contiguous copy "
+                        "(e.g. numpy.ascontiguousarray) instead.");
+                }
+            }
             // Keep the Python object alive by capturing it in the deleter closure.
             // The deleter runs when the last Tensor sharing this storage is freed,
             // which can happen on ANY thread without the GIL held. Dropping the
@@ -1001,8 +1104,13 @@ Returns:
             return tenzor::Tensor::from_blob(
                 info.ptr, std::move(shape), dtype, device,
                 [obj_ref](void*) mutable {
-                    py::gil_scoped_acquire gil;
-                    obj_ref.reset();
+                    // Guard against running after Py_Finalize (atexit / static
+                    // teardown): acquiring the GIL on a finalized interpreter
+                    // is undefined.
+                    if (Py_IsInitialized()) {
+                        py::gil_scoped_acquire gil;
+                        obj_ref.reset();
+                    }
                 });
         },
         py::arg("buffer"), py::arg("shape"),
@@ -3604,37 +3712,95 @@ Returns:
             py::capsule capsule;
             if (py::hasattr(obj, "__dlpack__")) {
                 py::object raw;
+                py::dict kwargs;
+                // Advertise that we accept the DLPack 1.0 versioned container.
+                // Producers that support it will hand back a
+                // "dltensor_versioned" capsule; older producers ignore this and
+                // return the legacy "dltensor" capsule. Without this, a 1.0
+                // producer (including Tenzor's OWN exporter when a peer
+                // negotiated the versioned form) may emit only the versioned
+                // capsule, which the legacy-only path below would reject.
+                kwargs["max_version"] = py::make_tuple(1, 0);
                 if (!stream.is_none()) {
                     // Forward the caller-supplied stream handle so the
                     // producer can record/wait on it (v0.8 contract).
-                    py::dict kwargs;
                     kwargs["stream"] = stream;
-                    raw = obj.attr("__dlpack__")(**kwargs);
-                } else {
-                    // No stream available — fall back to the v0.7
-                    // signature. Same semantics as before for CPU
-                    // producers and default-stream CUDA producers.
-                    raw = obj.attr("__dlpack__")();
                 }
+                raw = obj.attr("__dlpack__")(**kwargs);
                 capsule = raw.cast<py::capsule>();
             } else {
                 // Legacy: the caller handed us the capsule directly.
                 capsule = obj.cast<py::capsule>();
             }
-            // Fetch the DLManagedTensor* before renaming so from_dlpack
-            // can transfer ownership; from_dlpack's internal deleter
-            // will call the producer's deleter.
+
+            // Determine which capsule flavour we received. DLPack 1.0 producers
+            // emit "dltensor_versioned" (DLManagedTensorVersioned); pre-1.0
+            // producers emit "dltensor" (DLManagedTensor). Detect by name.
+            const bool is_versioned =
+                PyCapsule_IsValid(capsule.ptr(), "dltensor_versioned") != 0;
+
+            if (is_versioned) {
+                auto* vmanaged = static_cast<DLManagedTensorVersioned*>(
+                    PyCapsule_GetPointer(capsule.ptr(),
+                                         "dltensor_versioned"));
+                if (!vmanaged) {
+                    throw std::runtime_error(
+                        "from_dlpack: invalid 'dltensor_versioned' capsule");
+                }
+                // Bridge the versioned container to the unversioned
+                // tenzor::from_dlpack consumer. Allocate a DLManagedTensor
+                // shim whose dl_tensor mirrors the versioned tensor and whose
+                // deleter forwards to the producer's versioned deleter (stored
+                // in manager_ctx). tenzor::from_dlpack takes ownership of the
+                // shim; when the Tenzor storage is freed it calls our deleter,
+                // which invokes the original producer deleter exactly once.
+                auto* shim = new DLManagedTensor();
+                shim->dl_tensor = vmanaged->dl_tensor;
+                shim->manager_ctx = vmanaged;
+                shim->deleter = [](DLManagedTensor* self) {
+                    auto* orig = static_cast<DLManagedTensorVersioned*>(
+                        self->manager_ctx);
+                    if (orig && orig->deleter) {
+                        orig->deleter(orig);
+                    }
+                    delete self;
+                };
+                tenzor::Tensor result;
+                try {
+                    result = tenzor::from_dlpack(shim);
+                } catch (...) {
+                    // from_dlpack did NOT take ownership on throw. Free the
+                    // shim WITHOUT invoking the producer deleter — the capsule
+                    // is still named "dltensor_versioned" (we rename only on
+                    // success below), so its own destructor will run the
+                    // producer deleter. Avoid a double-free by not touching
+                    // manager_ctx here.
+                    delete shim;
+                    throw;
+                }
+                // Ownership transferred — rename so the capsule destructor does
+                // not run the producer deleter a second time.
+                PyCapsule_SetName(capsule.ptr(), "used_dltensor_versioned");
+                return result;
+            }
+
+            // Legacy unversioned path.
             auto* managed = static_cast<DLManagedTensor*>(
                 PyCapsule_GetPointer(capsule.ptr(), "dltensor"));
             if (!managed) {
                 throw std::runtime_error(
-                    "from_dlpack: invalid capsule (expected name 'dltensor')");
+                    "from_dlpack: invalid capsule (expected name 'dltensor' "
+                    "or 'dltensor_versioned')");
             }
-            // Rename the capsule so the original producer's destructor
-            // won't call the DLPack deleter a second time when the
-            // capsule is garbage-collected.
+            // Take ownership FIRST; only rename the capsule once from_dlpack has
+            // successfully accepted the payload. If from_dlpack throws, the
+            // capsule keeps its "dltensor" name so the producer's capsule
+            // destructor still runs the DLPack deleter — renaming early would
+            // leak the producer's DLManagedTensor (its destructor skips the
+            // deleter for "used_dltensor").
+            tenzor::Tensor result = tenzor::from_dlpack(managed);
             PyCapsule_SetName(capsule.ptr(), "used_dltensor");
-            return tenzor::from_dlpack(managed);
+            return result;
         },
         py::arg("obj"), py::arg("stream") = py::none(),
         "Zero-copy import from a DLPack producer (NumPy 2.0+, PyTorch, "
@@ -5061,6 +5227,16 @@ Returns:
             return tenzor::to_device(self, device);
         }, py::arg("device"),
            "Move to device (autograd-aware); accepts Device or string like \"cuda:0\"")
+        // Autograd-aware dtype cast (PyTorch parity with Tensor.to(DType)).
+        // Previously only Variable.to(Device) was bound, so var.to(some_dtype)
+        // raised an opaque pybind TypeError instead of casting or surfacing a
+        // proper DTypeError for an unsupported cast. variable_cast installs a
+        // TypeCastBackward node so gradients convert back to the source dtype.
+        .def("to", [](const tenzor::Variable& self, tenzor::DType dtype) {
+            return tenzor::nn::variable_cast(self, dtype);
+        }, py::arg("dtype"),
+           "Cast to a dtype (autograd-aware); gradients convert back to the "
+           "original dtype during backward.")
         .def("cuda", [](const tenzor::Variable& self, int32_t index) {
             require_backend_for_device(tenzor::Device::cuda(index));
             py::gil_scoped_release release;
@@ -5096,11 +5272,20 @@ Returns:
              "Zero the gradient")
         // Hook registration — wrap Python callable to acquire GIL during backward
         .def("register_hook", [](tenzor::Variable& self, py::object hook) {
-            py::object hook_ref = hook;  // explicit refcount increment
+            // The hook is stored in Variable's hooks_ (a std::function) which
+            // the autograd engine copies, moves, and destroys on arbitrary C++
+            // worker threads while Variable::backward() runs under
+            // gil_scoped_release. A raw py::object capture would
+            // Py_INCREF/Py_DECREF off-GIL there, corrupting CPython refcounts
+            // (use-after-free / interpreter abort). GilSafePyObject acquires
+            // the GIL in its copy-ctor/dtor so the captured callable's lifetime
+            // is always manipulated under the GIL regardless of thread.
+            GilSafePyObject hook_ref{std::move(hook)};
             auto cpp_hook = [hook_ref](const tenzor::Tensor& grad) -> tenzor::Tensor {
                 py::gil_scoped_acquire acquire;
                 try {
-                    py::object result = hook_ref(grad);
+                    py::object result =
+                        py::reinterpret_borrow<py::object>(hook_ref.handle())(grad);
                     // PyTorch semantics: a hook returning None means "do not
                     // modify the gradient" — leave the incoming grad unchanged
                     // rather than attempting a cast that would throw.

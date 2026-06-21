@@ -243,7 +243,8 @@ RNN::RNN(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     }
 }
 
-auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variable, Variable> {
+auto RNN::forward(const Variable& input, const Variable& hx,
+                  const Tensor& lengths) -> std::pair<Variable, Variable> {
     auto input_shape = input.shape();
 
     if (input_shape.size() != 3) {
@@ -326,6 +327,24 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
     Variable layer_input = x;  // shape: (seq, batch, feat)
     std::vector<Variable> final_hidden_states;
 
+    // Optional sequence-length masking for right-padded batches (parity with
+    // LSTM/GRU). Beyond a sample's length the hidden state is held constant so
+    // padding timesteps don't corrupt the final hidden state.
+    const bool have_lengths = lengths.is_valid() && lengths.numel() > 0;
+    Tensor lengths_dev;
+    if (have_lengths) {
+        lengths_dev = lengths.to(input.device()).to(DType::Float32);
+    }
+    // Build the (batch,1) keep-mask for timestep t: 1 where lengths > t (still
+    // valid), 0 for padding. Gating constants carry no gradient.
+    auto length_mask_at = [&](int64_t t) -> std::pair<Variable, Variable> {
+        auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
+        auto mask_t = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
+        auto one_minus_mask_t =
+            full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask_t;
+        return {Variable(mask_t, false), Variable(one_minus_mask_t, false)};
+    };
+
     for (int64_t layer = 0; layer < num_layers_; ++layer) {
         auto& forward_cell = forward_cells_[layer];
         Variable forward_h = h_layers[layer * num_directions];
@@ -338,7 +357,13 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
             auto x_t_raw = ::tenzor::slice(layer_input, 0, t, t + 1);  // (1, batch, feat)
             auto x_t = ::tenzor::squeeze(x_t_raw, 0);                  // (batch, feat)
 
-            forward_h = forward_cell->forward(x_t, forward_h);
+            auto h_next = forward_cell->forward(x_t, forward_h);
+            if (have_lengths) {
+                auto [mask_v, one_minus_mask_v] = length_mask_at(t);
+                forward_h = mask_v * h_next + one_minus_mask_v * forward_h;
+            } else {
+                forward_h = h_next;
+            }
             forward_outputs.push_back(forward_h);
         }
 
@@ -366,7 +391,13 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
                 auto x_t_raw = ::tenzor::slice(layer_input, 0, t, t + 1);
                 auto x_t = ::tenzor::squeeze(x_t_raw, 0);
 
-                backward_h = backward_cell->forward(x_t, backward_h);
+                auto h_next = backward_cell->forward(x_t, backward_h);
+                if (have_lengths) {
+                    auto [mask_v, one_minus_mask_v] = length_mask_at(t);
+                    backward_h = mask_v * h_next + one_minus_mask_v * backward_h;
+                } else {
+                    backward_h = h_next;
+                }
                 backward_outputs.push_back(backward_h);
             }
 

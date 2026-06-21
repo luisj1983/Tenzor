@@ -64,16 +64,19 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         const auto& shape = A.shape();
         int64_t m = shape[0];
         Tensor y({m}, DType::Float16, A.values().device());
-        auto crow = A.crow_indices();
-        auto col = A.col_indices();
-        auto vals = A.values();
+        // Defensive contiguity: the kernel reads crow/col/vals/x via flat raw
+        // pointers, so a non-contiguous view would silently misread. Match CUDA.
+        auto crow = A.crow_indices().contiguous();
+        auto col = A.col_indices().contiguous();
+        auto vals = A.values().contiguous();
+        Tensor x_cont = x.is_contiguous() ? x : x.contiguous();
         auto* crow_ptr = crow.data<std::int64_t>();
         auto* col_ptr  = col.data<std::int64_t>();
         // Tenzor stores Float16 as `tenzor::Float16` (2-byte struct).
         // reinterpret to sycl::half* for the SYCL kernel — both are
         // identical 2-byte IEEE-754 binary16 representations.
         const auto* val_ptr_c = reinterpret_cast<const sycl::half*>(vals.data<tenzor::Float16>());
-        const auto* x_ptr_c   = reinterpret_cast<const sycl::half*>(x.data<tenzor::Float16>());
+        const auto* x_ptr_c   = reinterpret_cast<const sycl::half*>(x_cont.data<tenzor::Float16>());
         auto*       y_ptr     = reinterpret_cast<sycl::half*>(y.data<tenzor::Float16>());
         const auto* val_ptr   = val_ptr_c;
         const auto* x_ptr     = x_ptr_c;
@@ -103,13 +106,14 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         const auto& shape = A.shape();
         int64_t m = shape[0];
         Tensor y({m}, DType::BFloat16, A.values().device());
-        auto crow = A.crow_indices();
-        auto col = A.col_indices();
-        auto vals = A.values();
+        auto crow = A.crow_indices().contiguous();
+        auto col = A.col_indices().contiguous();
+        auto vals = A.values().contiguous();
+        Tensor x_cont = x.is_contiguous() ? x : x.contiguous();
         auto* crow_ptr = crow.data<std::int64_t>();
         auto* col_ptr  = col.data<std::int64_t>();
         auto* val_ptr  = vals.data<uint16_t>();
-        auto* x_ptr    = x.data<uint16_t>();
+        auto* x_ptr    = x_cont.data<uint16_t>();
         auto* y_ptr    = y.data<uint16_t>();
         queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
             [=](sycl::id<1> idx) {
@@ -139,9 +143,10 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
     const auto& shape = A.shape();
     int64_t m = shape[0];
 
-    auto crow = A.crow_indices();
-    auto col = A.col_indices();
-    auto vals = A.values();
+    auto crow = A.crow_indices().contiguous();
+    auto col = A.col_indices().contiguous();
+    auto vals = A.values().contiguous();
+    Tensor x_cont = x.is_contiguous() ? x : x.contiguous();
 
     Tensor y({m}, vals.dtype(), vals.device());
 
@@ -149,7 +154,7 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         auto* crow_ptr = crow.data<std::int64_t>();
         auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<float>();
-        auto* x_ptr = x.data<float>();
+        auto* x_ptr = x_cont.data<float>();
         auto* y_ptr = y.data<float>();
 
         queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
@@ -165,7 +170,7 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         auto* crow_ptr = crow.data<std::int64_t>();
         auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<double>();
-        auto* x_ptr = x.data<double>();
+        auto* x_ptr = x_cont.data<double>();
         auto* y_ptr = y.data<double>();
 
         queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
@@ -210,11 +215,20 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
 
     const auto& shape = A.shape();
     int64_t m = shape[0];
+    // Validate B is a 2D matrix whose row count matches A's column count before
+    // reading B.shape()[1]; otherwise b_ptr indexing reads out of bounds.
+    if (B.ndim() != 2 || B.shape()[0] != shape[1]) {
+        throw std::runtime_error(
+            "oneapi spmm_kernel: dense B must be 2D with B.shape()[0] == A.shape()[1]");
+    }
     int64_t n = B.shape()[1];
 
-    auto crow = A.crow_indices();
-    auto col = A.col_indices();
-    auto vals = A.values();
+    // Defensive contiguity: the kernel reads crow/col/vals/B via flat raw
+    // pointers, so a non-contiguous view would silently misread. Match CUDA.
+    auto crow = A.crow_indices().contiguous();
+    auto col = A.col_indices().contiguous();
+    auto vals = A.values().contiguous();
+    Tensor B_cont = B.is_contiguous() ? B : B.contiguous();
 
     // M7 fix: assert A.values dtype == B dtype before kernel dispatch.
     // The kernel reinterprets buffers via `data<float>()` / `data<double>()`
@@ -233,7 +247,7 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
         auto* crow_ptr = crow.data<std::int64_t>();
         auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<float>();
-        auto* b_ptr = B.data<float>();
+        auto* b_ptr = B_cont.data<float>();
         auto* c_ptr = C.data<float>();
 
         queue.parallel_for(sycl::range<2>(static_cast<size_t>(m), static_cast<size_t>(n)),
@@ -250,7 +264,7 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
         auto* crow_ptr = crow.data<std::int64_t>();
         auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<double>();
-        auto* b_ptr = B.data<double>();
+        auto* b_ptr = B_cont.data<double>();
         auto* c_ptr = C.data<double>();
 
         queue.parallel_for(sycl::range<2>(static_cast<size_t>(m), static_cast<size_t>(n)),
@@ -293,9 +307,9 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
     int64_t m = shape[0];
     int64_t n = shape[1];
 
-    auto crow = A.crow_indices();
-    auto col = A.col_indices();
-    auto vals = A.values();
+    auto crow = A.crow_indices().contiguous();
+    auto col = A.col_indices().contiguous();
+    auto vals = A.values().contiguous();
     int64_t nnz = A.nnz();
 
     Tensor dense({m, n}, vals.dtype(), vals.device());
@@ -384,13 +398,14 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
     int64_t m = shape[0];
     int64_t n = shape[1];
 
-    auto crow = A.crow_indices();
-    auto col = A.col_indices();
-    auto vals = A.values();
+    auto crow = A.crow_indices().contiguous();
+    auto col = A.col_indices().contiguous();
+    auto vals = A.values().contiguous();
     int64_t nnz = A.nnz();
 
-    // Start with a copy of the dense tensor
-    Tensor result = B.clone();
+    // Start with a contiguous copy of the dense tensor: out_ptr indexing below
+    // is flat row-major, so a non-contiguous B must be materialized contiguous.
+    Tensor result = B.is_contiguous() ? B.clone() : B.contiguous();
 
     if (vals.dtype() == DType::Float32) {
         auto* out_ptr = result.data<float>();
@@ -605,12 +620,13 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
             "oneapi spgemm_kernel: only Float32/Float64 supported");
     }
 
-    auto a_crow = A.crow_indices();
-    auto a_col  = A.col_indices();
-    auto a_vals = A.values();
-    auto b_crow = B.crow_indices();
-    auto b_col  = B.col_indices();
-    auto b_vals = B.values();
+    // Defensive contiguity: CSR components are read via flat raw pointers below.
+    auto a_crow = A.crow_indices().contiguous();
+    auto a_col  = A.col_indices().contiguous();
+    auto a_vals = A.values().contiguous();
+    auto b_crow = B.crow_indices().contiguous();
+    auto b_col  = B.col_indices().contiguous();
+    auto b_vals = B.values().contiguous();
 
     if (M == 0) {
         auto c_crow = tenzor::zeros({1}, DType::Int64, dev);
@@ -923,9 +939,11 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
         throw std::runtime_error("oneapi sparse_trsv_kernel: b must be 1D with length N");
     }
 
-    auto crow = L.crow_indices();
-    auto col  = L.col_indices();
-    auto vals = L.values();
+    // Defensive contiguity: CSR components and b are read via flat raw pointers.
+    auto crow = L.crow_indices().contiguous();
+    auto col  = L.col_indices().contiguous();
+    auto vals = L.values().contiguous();
+    Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
     DType dtype = vals.dtype();
 
     auto x = tenzor::zeros({N}, dtype, vals.device());
@@ -934,7 +952,7 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
         const int64_t* cr = crow.data<int64_t>();
         const int64_t* cl = col.data<int64_t>();
         const T* v = vals.data<T>();
-        const T* b_ptr = b.data<T>();
+        const T* b_ptr = b_cont.data<T>();
         T* x_ptr = x.data<T>();
         bool is_upper = upper;
         int64_t n = N;

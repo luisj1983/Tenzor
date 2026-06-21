@@ -104,9 +104,18 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
             quant_min = -7.0f;
         }
 
-        bool per_tensor = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
-                           scheme_ == QuantizationScheme::PerTensorAsymmetric);
-        if (per_tensor) {
+        // Choose the STE branch from the ACTUAL qparams, not just scheme_. The
+        // scheme and the qparams' channel axis are tracked independently and can
+        // disagree (e.g. a per-tensor-scheme FakeQuantize that later receives a
+        // length-C per-channel scale via set_qparams()/calculate_qparams()).
+        // Keying solely on scheme_ would feed a per-channel scale vector into the
+        // scalar path and silently quantize every channel with channel 0's
+        // scale. Use the per-tensor scalar path only when the params are truly
+        // scalar (one scale element); otherwise use the per-channel path along
+        // the qparams' recorded axis (falling back to the module's axis_).
+        const bool params_per_channel =
+            (qparams_->scale.numel() > 1) || (qparams_->axis >= 0);
+        if (!params_per_channel) {
             Tensor scale_cpu = (qparams_->scale.device() == Device::cpu())
                 ? qparams_->scale : qparams_->scale.to(Device::cpu());
             Tensor zp_cpu = (qparams_->zero_point.device() == Device::cpu())
@@ -117,9 +126,11 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
         }
 
         // Per-channel STE: scale/zero_point are per-channel tensors broadcast
-        // along axis_.
+        // along the qparams' channel axis (fall back to axis_ if unset).
+        int64_t channel_axis = (qparams_->axis >= 0) ? qparams_->axis : axis_;
         return fake_quantize_per_channel_with_grad(
-            input, qparams_->scale, qparams_->zero_point, quant_min, quant_max, axis_);
+            input, qparams_->scale, qparams_->zero_point,
+            quant_min, quant_max, channel_axis);
     }
 
     // Fall-through: non-autograd path (eval calibration or

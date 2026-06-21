@@ -72,8 +72,16 @@ auto SGD::step_impl() -> void {
         if (param_tensor.device().type == Device::Type::CUDA &&
             (param_tensor.dtype() == DType::Float32 || param_tensor.dtype() == DType::Float64)) {
             std::vector<Tensor> inputs = {param_tensor, grad_tensor};
+            bool first_step = false;
             if (hp.momentum > 0.0) {
                 inputs.push_back(velocity_buffers_[i]);
+                // PyTorch SGD initialises the momentum buffer to the gradient on
+                // the very first step (NO dampening). The fused CUDA kernel keys
+                // off this flag; without it, step 1 wrongly scaled by
+                // (1 - dampening). The buffer itself is zero-initialised, so the
+                // kernel's first_step branch sets buf = grad.
+                first_step = !velocity_initialized_[i];
+                velocity_initialized_[i] = true;
             }
             NewOpAttributes attrs;
             attrs.set(AttrKey::Lr, hp.lr);
@@ -81,6 +89,7 @@ auto SGD::step_impl() -> void {
             attrs.set(AttrKey::WeightDecay, hp.weight_decay);
             attrs.set(AttrKey::Dampening, hp.dampening);
             attrs.set(AttrKey::Nesterov, hp.nesterov);
+            attrs.set(AttrKey::FirstStep, first_step);
             dispatch(OpId::FusedSGDStep, inputs, attrs);
             continue;
         }
@@ -102,8 +111,15 @@ auto SGD::step_impl() -> void {
             }
             Tensor updated;
             if (hp.momentum > 0.0) {
-                velocity_buffers_[i] = velocity_buffers_[i] * scalar(hp.momentum)
-                                     + grad_hi * scalar(1.0 - hp.dampening);
+                if (!velocity_initialized_[i]) {
+                    // First momentum step: PyTorch initialises buf = grad
+                    // (no dampening applied on the first step).
+                    velocity_buffers_[i] = grad_hi.clone();
+                    velocity_initialized_[i] = true;
+                } else {
+                    velocity_buffers_[i] = velocity_buffers_[i] * scalar(hp.momentum)
+                                         + grad_hi * scalar(1.0 - hp.dampening);
+                }
                 Tensor eff_grad = hp.nesterov
                     ? grad_hi + velocity_buffers_[i] * scalar(hp.momentum)
                     : velocity_buffers_[i];
@@ -144,8 +160,15 @@ auto SGD::step_impl() -> void {
             auto dev   = p.device();
 
             if (e.hp.momentum > 0.0) {
-                vel = vel * full({1}, e.hp.momentum, dtype, dev) +
-                      e.grad * full({1}, 1.0 - e.hp.dampening, dtype, dev);
+                if (!velocity_initialized_[e.idx]) {
+                    // First momentum step: PyTorch initialises buf = grad
+                    // (no dampening applied on the first step).
+                    vel = e.grad.clone();
+                    velocity_initialized_[e.idx] = true;
+                } else {
+                    vel = vel * full({1}, e.hp.momentum, dtype, dev) +
+                          e.grad * full({1}, 1.0 - e.hp.dampening, dtype, dev);
+                }
 
                 Tensor eff_grad = e.hp.nesterov
                     ? e.grad + vel * full({1}, e.hp.momentum, dtype, dev)
@@ -198,6 +221,7 @@ auto SGD::get_lr() const -> double {
 
 auto SGD::initialize_buffers() -> void {
     velocity_buffers_.clear();
+    velocity_initialized_.assign(parameters_.size(), false);
     for (auto& param : parameters_) {
         if (param) {
             // R.16: half-precision params get Float32 velocity buffers.
@@ -216,6 +240,7 @@ auto SGD::initialize_buffers() -> void {
 // new entries must match parameters_.size() after the append.
 auto SGD::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     velocity_buffers_.reserve(new_count);
+    velocity_initialized_.resize(new_count, false);
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
@@ -249,6 +274,19 @@ auto SGD::state_dict() const -> std::unordered_map<std::string, Tensor> {
     // Save velocity buffers
     for (size_t i = 0; i < velocity_buffers_.size(); ++i) {
         state["velocity_" + std::to_string(i)] = velocity_buffers_[i].clone();
+    }
+
+    // Save the per-buffer "first momentum step done" flags so a resumed run
+    // does not re-apply the first-step (buf = grad) initialisation, which would
+    // diverge from a continuous run whenever dampening != 0.
+    if (!velocity_initialized_.empty()) {
+        Tensor init_flags({static_cast<int64_t>(velocity_initialized_.size())},
+                          DType::Int64, Device::cpu());
+        auto* f = init_flags.data<int64_t>();
+        for (size_t i = 0; i < velocity_initialized_.size(); ++i) {
+            f[i] = velocity_initialized_[i] ? 1 : 0;
+        }
+        state["velocity_initialized"] = init_flags;
     }
 
     // Audit item D.5: buffer-count guard (matches Adam pattern).
@@ -311,6 +349,24 @@ auto SGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state) 
             : DType::Float32;
         if (state.count(velocity_key)) {
             velocity_buffers_[i] = state.at(velocity_key).to(state_dt);
+        }
+    }
+
+    // Restore the first-momentum-step flags. A checkpoint that predates this
+    // field has none: in that case, treat any non-zero velocity buffer as
+    // already-initialised (a continuing run), and a zero buffer as fresh. This
+    // keeps legacy checkpoints' resume behaviour sane without a flag.
+    velocity_initialized_.assign(velocity_buffers_.size(), false);
+    if (state.count("velocity_initialized")) {
+        auto flags = state.at("velocity_initialized").to(Device::cpu());
+        const auto* f = flags.data<int64_t>();
+        const int64_t n = std::min<int64_t>(flags.numel(),
+                              static_cast<int64_t>(velocity_initialized_.size()));
+        for (int64_t i = 0; i < n; ++i) velocity_initialized_[i] = (f[i] != 0);
+    } else {
+        for (size_t i = 0; i < velocity_buffers_.size(); ++i) {
+            velocity_initialized_[i] =
+                velocity_buffers_[i].is_valid() && velocity_buffers_[i].numel() > 0;
         }
     }
 }

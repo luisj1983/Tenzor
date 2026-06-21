@@ -227,9 +227,17 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
         return {values.to(DType::BFloat16), indices};
     }
 
+    const int64_t ndim = input.ndim();
+
+    // Normalize negative dim (the dispatcher passes dim through unmodified,
+    // defaulting to -1, so the kernel owns normalization here).
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("topk ROCm: dimension out of range");
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
-    const int64_t ndim = input.ndim();
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();
@@ -354,9 +362,17 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
         return {values.to(DType::BFloat16), indices};
     }
 
+    const int64_t ndim = input.ndim();
+
+    // Normalize negative dim (the dispatcher passes dim through unmodified,
+    // defaulting to -1, so the kernel owns normalization here).
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("sort ROCm: dimension out of range");
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
-    const int64_t ndim = input.ndim();
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();

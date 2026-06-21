@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/distributed/rpc/rpc.hpp"
+#include "tenzor/distributed/rpc/function_registry.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -44,6 +45,12 @@ auto shutdown_rpc() -> void {
         g_agent->shutdown();
         g_agent.reset();
     }
+    // Release any registered RPC functions while the interpreter is still
+    // alive. Registered Python callables are captured in RpcFunction closures;
+    // clearing them here (rather than leaving them to a static destructor at
+    // interpreter finalization) ensures their refcount is dropped under a live
+    // GIL — the GIL-safe holder reacquires the GIL in its destructor.
+    FunctionRegistry::instance().clear();
 }
 
 auto get_agent() -> std::shared_ptr<TcpRpcAgent> {

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include "cuda_common.cuh"
+#include "cuda_launch_utils.cuh"  // compute_grid_size: int64-safe, grid-clamped block count
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <device_launch_parameters.h>
@@ -1307,17 +1308,34 @@ __device__ __forceinline__ uint64_t splitmix64_seed(uint64_t seed, int64_t tid) 
     return z ^ (z >> 31);
 }
 
+// Advance the per-thread state by one LCG step and return a uniform in [0,1).
+// A bare truncated-LCG output stream is linearly correlated between successive
+// draws (lattice structure), which biases multi-draw transforms like Box-Muller
+// (u1,u2 consecutive) and the gamma/poisson rejection loops. Running the LCG
+// output through the SplitMix64 finalizer before extracting the mantissa bits
+// decorrelates consecutive draws within a thread while keeping the cheap LCG as
+// the state recurrence. The state itself stays a plain LCG so the sequence is
+// reproducible; only the extracted bits are whitened.
+__device__ __forceinline__ float lcg_next_uniform(uint64_t& state) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    uint64_t z = state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    return static_cast<float>(z >> 33) / static_cast<float>(1ULL << 31);
+}
+
 __global__ void bernoulli_kernel_impl(const float* probs, float* output,
                                        int64_t n, uint64_t seed) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    // Grid-stride so a clamped grid (n > INT_MAX*block) still covers every
+    // element. Each element is seeded by its own global index for reproducibility.
+    TENZOR_CUDA_KERNEL_LOOP(tid, n) {
+        // SplitMix64-seeded per-thread LCG with whitened draws.
+        uint64_t state = splitmix64_seed(seed, tid);
+        float u = lcg_next_uniform(state);
 
-    // SplitMix64-seeded per-thread LCG.
-    uint64_t state = splitmix64_seed(seed, tid);
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-
-    output[tid] = (u < probs[tid]) ? 1.0f : 0.0f;
+        output[tid] = (u < probs[tid]) ? 1.0f : 0.0f;
+    }
 }
 
 auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
@@ -1331,7 +1349,7 @@ auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
     if (n == 0) return result;
 
     int threads = 256;
-    int blocks_n = (n + threads - 1) / threads;
+    int blocks_n = compute_grid_size(n, threads);
 
     // Seed from the library's global RNG so manual_seed is honored / reproducible.
     uint64_t seed = ::tenzor::get_global_seed();
@@ -1346,23 +1364,21 @@ auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
 // ============================================================================
 
 __device__ __forceinline__ float poisson_lcg_uniform(uint64_t& state) {
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-    return fmaxf(u, 1.0e-7f);
+    return fmaxf(lcg_next_uniform(state), 1.0e-7f);
 }
 
 __global__ void poisson_kernel_impl(const float* rates, int64_t* output,
                                      int64_t n, uint64_t seed) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
-
+  // Grid-stride so a clamped grid still covers every element; each element is
+  // seeded by its own global index for reproducibility.
+  TENZOR_CUDA_KERNEL_LOOP(tid, n) {
     float lambda = rates[tid];
     // SplitMix64-seeded per-thread LCG.
     uint64_t state = splitmix64_seed(seed, tid);
 
     if (lambda <= 0.0f) {
         output[tid] = 0;
-        return;
+        continue;
     }
 
     if (lambda < 12.0f) {
@@ -1379,7 +1395,7 @@ __global__ void poisson_kernel_impl(const float* rates, int64_t* output,
             p *= static_cast<double>(poisson_lcg_uniform(state));
         } while (p > L && k < max_iter);
         output[tid] = k - 1;
-        return;
+        continue;
     }
 
     // Transformed rejection (Hörmann PTRS) for moderate/large lambda, where
@@ -1416,6 +1432,7 @@ __global__ void poisson_kernel_impl(const float* rates, int64_t* output,
         (void)slam;
     }
     output[tid] = k;
+  }
 }
 
 auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor {
@@ -1429,7 +1446,7 @@ auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor {
     if (n == 0) return result;
 
     int threads = 256;
-    int blocks_n = (n + threads - 1) / threads;
+    int blocks_n = compute_grid_size(n, threads);
 
     // Seed from the library's global RNG so manual_seed is honored / reproducible.
     uint64_t seed = ::tenzor::get_global_seed();
@@ -1445,25 +1462,21 @@ auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor {
 
 __global__ void normal_sample_kernel_impl(const float* mean, const float* stddev,
                                            float* output, int64_t n, uint64_t seed) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    // Grid-stride; each element seeded by its own global index.
+    TENZOR_CUDA_KERNEL_LOOP(tid, n) {
+        // SplitMix64-seeded per-thread LCG with whitened draws.
+        uint64_t state = splitmix64_seed(seed, tid);
 
-    // SplitMix64-seeded per-thread LCG.
-    uint64_t state = splitmix64_seed(seed, tid);
+        // Generate two decorrelated uniforms for Box-Muller (consecutive bare-LCG
+        // outputs are lattice-correlated, which biases the (radius, angle) pair).
+        float u1 = fmaxf(lcg_next_uniform(state), 1.0e-7f);  // clamp away from log(0)
+        float u2 = lcg_next_uniform(state);
 
-    // Generate two uniform random numbers for Box-Muller
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u1 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-    // Clamp u1 away from zero to avoid log(0)
-    u1 = fmaxf(u1, 1.0e-7f);
+        // Box-Muller transform
+        float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
 
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u2 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-
-    // Box-Muller transform
-    float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
-
-    output[tid] = mean[tid] + stddev[tid] * z;
+        output[tid] = mean[tid] + stddev[tid] * z;
+    }
 }
 
 auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t stream) -> Tensor {
@@ -1478,7 +1491,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t
     if (n == 0) return result;
 
     int threads = 256;
-    int blocks_n = (n + threads - 1) / threads;
+    int blocks_n = compute_grid_size(n, threads);
     // Seed from the library's global RNG so manual_seed is honored / reproducible.
     uint64_t seed = ::tenzor::get_global_seed();
 
@@ -1493,18 +1506,17 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t
 
 __global__ void exponential_sample_kernel_impl(const float* rate, float* output,
                                                 int64_t n, uint64_t seed) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    // Grid-stride; each element seeded by its own global index.
+    TENZOR_CUDA_KERNEL_LOOP(tid, n) {
+        // SplitMix64-seeded per-thread LCG with whitened draws.
+        uint64_t state = splitmix64_seed(seed, tid);
+        float u = lcg_next_uniform(state);
+        // Clamp away from 1.0 to avoid log(0)
+        u = fminf(u, 1.0f - 1.0e-7f);
 
-    // SplitMix64-seeded per-thread LCG.
-    uint64_t state = splitmix64_seed(seed, tid);
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-    // Clamp away from 1.0 to avoid log(0)
-    u = fminf(u, 1.0f - 1.0e-7f);
-
-    // Inverse CDF: -log(1 - u) / rate
-    output[tid] = -logf(1.0f - u) / rate[tid];
+        // Inverse CDF: -log(1 - u) / rate
+        output[tid] = -logf(1.0f - u) / rate[tid];
+    }
 }
 
 auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tensor {
@@ -1517,7 +1529,7 @@ auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tenso
     if (n == 0) return result;
 
     int threads = 256;
-    int blocks_n = (n + threads - 1) / threads;
+    int blocks_n = compute_grid_size(n, threads);
     // Seed from the library's global RNG so manual_seed is honored / reproducible.
     uint64_t seed = ::tenzor::get_global_seed();
 
@@ -1533,9 +1545,7 @@ auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tenso
 // ============================================================================
 
 __device__ __forceinline__ float gamma_lcg_uniform(uint64_t& state) {
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-    return fmaxf(u, 1.0e-7f);
+    return fmaxf(lcg_next_uniform(state), 1.0e-7f);
 }
 
 __device__ __forceinline__ float gamma_lcg_normal(uint64_t& state) {
@@ -1546,9 +1556,8 @@ __device__ __forceinline__ float gamma_lcg_normal(uint64_t& state) {
 
 __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* beta_in,
                                          float* output, int64_t n, uint64_t seed) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
-
+  // Grid-stride; each element seeded by its own global index.
+  TENZOR_CUDA_KERNEL_LOOP(tid, n) {
     // SplitMix64-seeded per-thread LCG.
     uint64_t state = splitmix64_seed(seed, tid);
 
@@ -1583,6 +1592,7 @@ __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* bet
         }
     }
     output[tid] = boost * result / beta;
+  }
 }
 
 auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
@@ -1598,7 +1608,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
     if (n == 0) return result;
 
     int threads = 256;
-    int blocks_n = (n + threads - 1) / threads;
+    int blocks_n = compute_grid_size(n, threads);
     // Seed from the library's global RNG so manual_seed is honored / reproducible.
     uint64_t seed = ::tenzor::get_global_seed();
 
@@ -1806,22 +1816,21 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
 __global__ void bucketize_kernel_impl(const float* input, const float* boundaries,
                                        int64_t* output, int64_t n,
                                        int64_t num_boundaries, bool right) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
-
-    float val = input[tid];
-    // Binary search
-    int64_t lo = 0, hi = num_boundaries;
-    while (lo < hi) {
-        int64_t mid = (lo + hi) / 2;
-        bool cond = right ? (boundaries[mid] <= val) : (boundaries[mid] < val);
-        if (cond) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
+    TENZOR_CUDA_KERNEL_LOOP(tid, n) {
+        float val = input[tid];
+        // Binary search
+        int64_t lo = 0, hi = num_boundaries;
+        while (lo < hi) {
+            int64_t mid = (lo + hi) / 2;
+            bool cond = right ? (boundaries[mid] <= val) : (boundaries[mid] < val);
+            if (cond) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
+        output[tid] = lo;
     }
-    output[tid] = lo;
 }
 
 auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
@@ -1841,7 +1850,7 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
     if (n == 0) return result;
 
     int threads = 256;
-    int blocks = (n + threads - 1) / threads;
+    int blocks = compute_grid_size(n, threads);
     bucketize_kernel_impl<<<blocks, threads, 0, stream>>>(
         in_contig.data<float>(), bound_contig.data<float>(),
         result.data<int64_t>(), n, bound_contig.numel(), right);
@@ -1860,21 +1869,20 @@ template<typename T>
 __global__ void histogram_kernel_impl(const T* input, int64_t* counts,
                                        int64_t n, int64_t num_bins,
                                        T min_val, T max_val, T bin_width) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
-
-    T val = input[tid];
-    // Match CPU semantics: drop out-of-range samples rather than clamping
-    // them into the end bins. The previous clamp inflated edge-bin counts
-    // by the number of samples outside [min, max].
-    if (val < min_val || val > max_val) return;
-    int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
-    // Last bin is closed on the right: values equal to max_val land in bin
-    // num_bins - 1 rather than num_bins.
-    if (bin >= num_bins) bin = num_bins - 1;
-    if (bin < 0) bin = 0;
-    atomicAdd(reinterpret_cast<unsigned long long*>(&counts[bin]),
-              static_cast<unsigned long long>(1));
+    TENZOR_CUDA_KERNEL_LOOP(tid, n) {
+        T val = input[tid];
+        // Match CPU semantics: drop out-of-range samples rather than clamping
+        // them into the end bins. The previous clamp inflated edge-bin counts
+        // by the number of samples outside [min, max].
+        if (val < min_val || val > max_val) continue;
+        int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
+        // Last bin is closed on the right: values equal to max_val land in bin
+        // num_bins - 1 rather than num_bins.
+        if (bin >= num_bins) bin = num_bins - 1;
+        if (bin < 0) bin = 0;
+        atomicAdd(reinterpret_cast<unsigned long long*>(&counts[bin]),
+                  static_cast<unsigned long long>(1));
+    }
 }
 
 // Fill bin-edge tensor on device: edges[i] = min + i * bin_width
@@ -1945,7 +1953,7 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
 
         if (n > 0) {
             int threads = 256;
-            int blocks_n = (n + threads - 1) / threads;
+            int blocks_n = compute_grid_size(n, threads);
             histogram_kernel_impl<T><<<blocks_n, threads, 0, stream>>>(
                 in_contig.data<T>(), counts.data<int64_t>(),
                 n, bins, static_cast<T>(min_val), static_cast<T>(max_val), bin_width);
@@ -2841,9 +2849,26 @@ auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
     if (pad == 0 && length < 0) {
         result = output_buf;
     } else {
-        // Slice [:, pad : pad + out_length]
-        Tensor sliced = tenzor::slice(output_buf, 1, pad, pad + out_length);
-        result = sliced.contiguous();
+        // A caller-supplied length may extend past the available data
+        // (pad + out_length > expected_length). torch.istft handles this by
+        // zero-padding the tail rather than over-reading the buffer; the CPU
+        // reference (cpu/kernels/fft.cpp) copies min(out_length, expected-pad)
+        // samples and zero-fills the rest. Clamp the slice end to the buffer and
+        // place it into a zeros tensor of the requested width so we never slice
+        // past expected_length (which would throw or over-read).
+        int64_t avail = expected_length - pad;       // samples available after the front trim
+        int64_t copy_len = out_length < avail ? out_length : avail;
+        if (copy_len < 0) copy_len = 0;
+        Tensor sliced = tenzor::slice(output_buf, 1, pad, pad + copy_len).contiguous();
+        if (copy_len == out_length) {
+            result = sliced;
+        } else {
+            // Zero-pad the trailing (out_length - copy_len) samples by
+            // concatenating a zeros block (matches the CPU reference's memset).
+            Tensor tail = tenzor::zeros({batch_size, out_length - copy_len},
+                                        output_buf.dtype(), output_buf.device());
+            result = tenzor::cat({sliced, tail}, 1).contiguous();
+        }
     }
 
     // Reshape to original batch dims + (out_length)

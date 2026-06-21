@@ -35,6 +35,16 @@ auto FunctionRegistry::has_function(const std::string& name) const -> bool {
     return functions_.count(name) > 0;
 }
 
+auto FunctionRegistry::unregister_function(const std::string& name) -> bool {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return functions_.erase(name) > 0;
+}
+
+auto FunctionRegistry::clear() -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    functions_.clear();
+}
+
 } // namespace rpc
 } // namespace distributed
 } // namespace tenzor

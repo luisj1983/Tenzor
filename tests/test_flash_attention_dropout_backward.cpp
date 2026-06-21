@@ -111,6 +111,45 @@ TEST_P(FlashAttentionDropoutBackward, SameSeedYieldsDeterministicGradient) {
     });
 }
 
+// Regression: Float64 causal flash-attention must not produce NaN. For causal
+// attention every query row except those in the last KV tile encounters a
+// fully-masked tile (kv_start > q_row); the FP64 forward kernel previously
+// computed exp(NEG_INF - NEG_INF) = NaN for that tile, poisoning O and LSE. The
+// masked-tile skip guard (ported from the FP32 kernel) fixes it.
+TEST_P(FlashAttentionDropoutBackward, Float64CausalNoNaN) {
+    const int64_t B = 1, H = 2, S = 24, D = 16;  // S spans multiple KV tiles
+    tenzor::manual_seed(123);
+    Variable Q(tenzor::randn({B, H, S, D}, DType::Float64, device), true);
+    Variable K(tenzor::randn({B, H, S, D}, DType::Float64, device), true);
+    Variable V(tenzor::randn({B, H, S, D}, DType::Float64, device), true);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+    Variable out;
+    ASSERT_NO_THROW({
+        out = tenzor::flash_attention(Q, K, V, scale, /*causal=*/true,
+                                      /*dropout_p=*/0.0f, /*is_training=*/false);
+    });
+
+    auto host = out.tensor().to(Device::cpu()).contiguous();
+    const auto* o = host.data<double>();
+    for (int64_t i = 0; i < host.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(o[i])) << "NaN in Float64 causal flash-attn output at " << i;
+        EXPECT_FALSE(std::isinf(o[i])) << "Inf in Float64 causal flash-attn output at " << i;
+    }
+
+    // Backward must also be finite (NaN O/LSE would propagate into grads).
+    ASSERT_NO_THROW({
+        auto loss = tenzor::sum(out);
+        loss.backward();
+    });
+    ASSERT_TRUE(Q.grad().has_value());
+    auto dq = Q.grad()->to(Device::cpu()).contiguous();
+    const auto* g = dq.data<double>();
+    for (int64_t i = 0; i < dq.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(g[i])) << "NaN in Float64 causal flash-attn dQ at " << i;
+    }
+}
+
 INSTANTIATE_BACKEND_TESTS(FlashAttentionDropoutBackward);
 
 }  // namespace

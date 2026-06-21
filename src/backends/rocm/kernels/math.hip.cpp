@@ -964,7 +964,11 @@ __global__ void pow_kernel_f16(const __half* input, __half* output, float expone
 __global__ void clamp_kernel_f32(const float* input, float* output, float min_val, float max_val, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float val = input[idx];
-        output[idx] = fminf(fmaxf(val, min_val), max_val);
+        // PyTorch/CPU semantics: clamp propagates NaN. fminf/fmaxf return the
+        // non-NaN operand, so a NaN input would wrongly become a bound; pass it
+        // through unchanged. is_nan_bits avoids the unreliable HIP NaN intrinsic.
+        output[idx] = tenzor::rocm::is_nan_bits(val) ? val
+                                                     : fminf(fmaxf(val, min_val), max_val);
     }
 }
 
@@ -974,7 +978,9 @@ __global__ void clamp_kernel_f32(const float* input, float* output, float min_va
 __global__ void clamp_kernel_f64(const double* input, double* output, double min_val, double max_val, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         double val = input[idx];
-        output[idx] = fmin(fmax(val, min_val), max_val);
+        // PyTorch/CPU semantics: clamp propagates NaN (see f32 kernel).
+        output[idx] = tenzor::rocm::is_nan_bits(val) ? val
+                                                     : fmin(fmax(val, min_val), max_val);
     }
 }
 
@@ -983,6 +989,11 @@ __global__ void clamp_kernel_f64(const double* input, double* output, double min
  */
 __global__ void clamp_kernel_f16(const __half* input, __half* output, float min_val, float max_val, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
+        // PyTorch/CPU semantics: clamp propagates NaN (see f32 kernel).
+        if (tenzor::rocm::is_nan_bits(input[idx])) {
+            output[idx] = input[idx];
+            continue;
+        }
         float val = tenzor::rocm::safe_h2f(input[idx]);
         float result = fminf(fmaxf(val, min_val), max_val);
         output[idx] = tenzor::rocm::safe_f2h(result);
@@ -2150,6 +2161,12 @@ auto abs_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
  * @return Result tensor (sqrt(input))
  */
 auto sqrt_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back. Matches the CPU
+    // reference (which implements the BF16 path) so a BF16 model that runs on
+    // CPU does not throw on ROCm.
+    if (input.dtype() == DType::BFloat16) {
+        return sqrt_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2192,6 +2209,10 @@ auto sqrt_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
  * @return Result tensor (e^input)
  */
 auto exp_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return exp_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2234,6 +2255,10 @@ auto exp_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
  * @return Result tensor (ln(input))
  */
 auto log_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return log_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2476,17 +2501,23 @@ auto sign_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 // Trigonometric Operations
 // ============================================================================
 
+// Float32 sin/cos evaluate in double then narrow. Device sinf/cosf carry ~1-2
+// ULP error; computing in double brings the Float32 result to <1 ULP, matching
+// the high-accuracy CPU reference (MKL vsSin) and the CUDA backend (which does
+// the same) within the 1e-7 transcendental atol of MathOperationParity.Sin/Cos.
+// Only instantiated for float/double (Float16 has sin_kernel_f16); the double
+// cast is a no-op on the double path.
 template<typename T>
 __global__ void sin_kernel_device(const T* input, T* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = sin(input[idx]);
+        output[idx] = static_cast<T>(sin(static_cast<double>(input[idx])));
     }
 }
 
 template<typename T>
 __global__ void cos_kernel_device(const T* input, T* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = cos(input[idx]);
+        output[idx] = static_cast<T>(cos(static_cast<double>(input[idx])));
     }
 }
 
@@ -2719,6 +2750,10 @@ __global__ void dot_kernel_device(const T* a, const T* b, T* partial_sums, int64
 // ============================================================================
 
 auto sin_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return sin_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2755,6 +2790,10 @@ auto sin_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto cos_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return cos_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -4994,6 +5033,34 @@ __global__ void isfinite_kernel_f16(const __half* input, uint8_t* output, int64_
     }
 }
 
+// BFloat16 predicate kernels. BF16 has the same field layout as Float32's top
+// 16 bits: 1 sign | 8 exponent (bits 14..7) | 7 mantissa (bits 6..0). Examine
+// the raw 16-bit pattern directly because HIP's bf16->float conversion can
+// canonicalise NaN on some ROCm builds and miss the predicate.
+__global__ void isnan_kernel_bf16(const uint16_t* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint16_t bits = input[idx];
+        uint16_t exp = (bits >> 7) & 0xFFu;
+        uint16_t mant = bits & 0x7Fu;
+        output[idx] = static_cast<uint8_t>((exp == 0xFFu && mant != 0u) ? 1 : 0);
+    }
+}
+
+__global__ void isinf_kernel_bf16(const uint16_t* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint16_t bits = input[idx];
+        output[idx] = static_cast<uint8_t>(((bits & 0x7FFFu) == 0x7F80u) ? 1 : 0);
+    }
+}
+
+__global__ void isfinite_kernel_bf16(const uint16_t* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint16_t bits = input[idx];
+        uint16_t exp = (bits >> 7) & 0xFFu;
+        output[idx] = static_cast<uint8_t>((exp != 0xFFu) ? 1 : 0);
+    }
+}
+
 // ============================================================================
 // Binary Math Kernels (atan2, fmod, remainder)
 // ============================================================================
@@ -5209,6 +5276,10 @@ __global__ void maximum_kernel_int(const T* a, const T* b, T* output, int64_t n)
 // ============================================================================
 
 auto log2_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return log2_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -5237,6 +5308,10 @@ auto log2_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto log10_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return log10_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -5265,6 +5340,10 @@ auto log10_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto log1p_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return log1p_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -5293,6 +5372,10 @@ auto log1p_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto exp2_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return exp2_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -5321,6 +5404,10 @@ auto exp2_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto expm1_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return expm1_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -5349,6 +5436,10 @@ auto expm1_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto erf_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return erf_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -5377,6 +5468,10 @@ auto erf_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto erfc_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return erfc_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -5428,6 +5523,10 @@ auto isnan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(isnan_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(isnan_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data<BFloat16>()),
+            result.data<uint8_t>(), n);
     } else {
         // Integer types cannot have NaN - return all false
         HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 0, n * sizeof(uint8_t), stream));
@@ -5457,6 +5556,10 @@ auto isinf_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(isinf_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(isinf_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data<BFloat16>()),
             result.data<uint8_t>(), n);
     } else {
         // Integer types cannot have Inf - return all false
@@ -5488,6 +5591,10 @@ auto isfinite_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(isfinite_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(isfinite_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data<BFloat16>()),
+            result.data<uint8_t>(), n);
     } else {
         // Integer types are always finite - return all true
         HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 1, n * sizeof(uint8_t), stream));
@@ -5505,6 +5612,11 @@ auto isfinite_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 auto atan2_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
     if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("atan2: tensors must have the same dtype");
+    }
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (a_in.dtype() == DType::BFloat16) {
+        return atan2_kernel(a_in.to(DType::Float32), b_in.to(DType::Float32), stream)
+            .to(DType::BFloat16);
     }
 
     // NumPy-style broadcasting: expand both operands to the common shape so
@@ -5554,6 +5666,11 @@ auto fmod_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("fmod: tensors must have the same dtype");
     }
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (a.dtype() == DType::BFloat16) {
+        return fmod_kernel(a.to(DType::Float32), b.to(DType::Float32), stream)
+            .to(DType::BFloat16);
+    }
     if (a.numel() != b.numel()) {
         throw std::runtime_error("fmod: tensors must have the same number of elements");
     }
@@ -5589,6 +5706,11 @@ auto fmod_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
 auto remainder_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("remainder: tensors must have the same dtype");
+    }
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (a.dtype() == DType::BFloat16) {
+        return remainder_kernel(a.to(DType::Float32), b.to(DType::Float32), stream)
+            .to(DType::BFloat16);
     }
     if (a.numel() != b.numel()) {
         throw std::runtime_error("remainder: tensors must have the same number of elements");
@@ -7826,6 +7948,10 @@ __global__ void addcdiv_kernel_f16(const __half* input, const __half* t1, const 
 // ============================================================================
 
 auto rsqrt_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return rsqrt_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7854,6 +7980,10 @@ auto rsqrt_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto square_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return square_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7882,6 +8012,10 @@ auto square_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto asinh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return asinh_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7910,6 +8044,10 @@ auto asinh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto acosh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return acosh_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7938,6 +8076,10 @@ auto acosh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto atanh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (input.dtype() == DType::BFloat16) {
+        return atanh_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7966,6 +8108,11 @@ auto atanh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 auto hypot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    // BFloat16 widen-narrow: compute in Float32, narrow back (CPU parity).
+    if (a.dtype() == DType::BFloat16 && b.dtype() == DType::BFloat16) {
+        return hypot_kernel(a.to(DType::Float32), b.to(DType::Float32), stream)
+            .to(DType::BFloat16);
+    }
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("hypot: tensors must have the same dtype");
     }

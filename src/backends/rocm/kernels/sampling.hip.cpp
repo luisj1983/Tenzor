@@ -8,6 +8,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/creation.hpp"  // tenzor::get_global_seed (manual_seed reproducibility)
 #include <hip/hip_runtime.h>
 #include <hipcub/hipcub.hpp>
 #include <chrono>
@@ -33,6 +34,44 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
 #endif
 
 // =========================================================================
+// Counter-based per-element RNG (splitmix64)
+// =========================================================================
+//
+// A single LCG step (state = a*state + c) produces a high-bit output that is an
+// almost-affine function of the seeded `tid`, so adjacent threads get strongly
+// correlated uniforms (visible striping) and consecutive draws from one stream
+// (the Box-Muller u1,u2) are correlated enough to bias the transform. Instead,
+// fully hash (seed, tid, counter) with the splitmix64 finalizer — the same mix
+// the multinomial gumbel-keys kernel already uses — so each (element, draw) is
+// an independent, well-distributed uniform. `counter` distinguishes successive
+// draws for one element (e.g. Box-Muller u1 vs u2, rejection-sampling rounds).
+__device__ __forceinline__ uint64_t splitmix64_hash(uint64_t seed, uint64_t tid,
+                                                     uint64_t counter) {
+    uint64_t state = seed
+                   ^ (tid     * 0x9E3779B97F4A7C15ULL)
+                   ^ (counter * 0xD1B54A32D192ED03ULL);
+    state ^= state >> 30; state *= 0xBF58476D1CE4E5B9ULL;
+    state ^= state >> 27; state *= 0x94D049BB133111EBULL;
+    state ^= state >> 31;
+    return state;
+}
+
+// Uniform in (0, 1) with 24-bit resolution (matches the gumbel-keys mapping).
+__device__ __forceinline__ float splitmix64_uniform(uint64_t seed, uint64_t tid,
+                                                     uint64_t counter) {
+    uint64_t h = splitmix64_hash(seed, tid, counter);
+    float u = static_cast<float>((h >> 40) + 1u) / 16777217.0f;  // (0, 1)
+    return (u >= 1.0f) ? 0.99999994f : u;
+}
+
+// Stateful sequential draws for an element (rejection sampling), advancing the
+// counter so each call is an independent uniform.
+__device__ __forceinline__ float splitmix64_next_uniform(uint64_t seed, uint64_t tid,
+                                                          uint64_t& counter) {
+    return splitmix64_uniform(seed, tid, counter++);
+}
+
+// =========================================================================
 // Bernoulli sampling
 // =========================================================================
 
@@ -40,9 +79,7 @@ __global__ void bernoulli_kernel_impl(const float* probs, float* output,
                                        int64_t n, uint64_t seed) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
-    uint64_t state = seed + static_cast<uint64_t>(tid) * 6364136223846793005ULL + 1442695040888963407ULL;
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+    float u = splitmix64_uniform(seed, static_cast<uint64_t>(tid), 0);
     output[tid] = (u < probs[tid]) ? 1.0f : 0.0f;
 }
 
@@ -58,7 +95,7 @@ auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor {
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();  // reproducible under manual_seed(); see Generator
 
     hipLaunchKernelGGL(bernoulli_kernel_impl,
         dim3(blocks_n), dim3(threads), 0, stream,
@@ -77,8 +114,9 @@ __global__ void poisson_kernel_impl(const float* rates, int64_t* output,
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    // LCG state initialisation (same pattern as bernoulli)
-    uint64_t state = seed + static_cast<uint64_t>(tid) * 6364136223846793005ULL + 1442695040888963407ULL;
+    // Counter-based draws: each Knuth-loop iteration is an independent uniform
+    // hashed from (seed, tid, counter), so adjacent threads are decorrelated.
+    uint64_t counter = 0;
 
     float lambda = rates[tid];
     float L = expf(-lambda);
@@ -87,9 +125,7 @@ __global__ void poisson_kernel_impl(const float* rates, int64_t* output,
 
     do {
         ++k;
-        // Advance LCG and produce a uniform float in (0, 1)
-        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-        float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+        float u = splitmix64_next_uniform(seed, static_cast<uint64_t>(tid), counter);
         p *= u;
     } while (p > L);
 
@@ -107,7 +143,7 @@ auto poisson_sample_kernel(const Tensor& rates, hipStream_t stream) -> Tensor {
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();  // reproducible under manual_seed(); see Generator
 
     hipLaunchKernelGGL(poisson_kernel_impl,
         dim3(blocks_n), dim3(threads), 0, stream,
@@ -125,14 +161,10 @@ __global__ void normal_sample_kernel_impl(const float* mean, const float* stddev
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
-
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u1 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-    u1 = fmaxf(u1, 1.0e-7f);
-
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u2 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+    // Two INDEPENDENT uniforms (distinct counters) for Box-Muller, instead of
+    // two consecutive correlated LCG outputs which bias the transform.
+    float u1 = fmaxf(splitmix64_uniform(seed, static_cast<uint64_t>(tid), 0), 1.0e-7f);
+    float u2 = splitmix64_uniform(seed, static_cast<uint64_t>(tid), 1);
 
     float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
     output[tid] = mean[tid] + stddev[tid] * z;
@@ -152,7 +184,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, hipStream_t 
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();  // reproducible under manual_seed(); see Generator
 
     hipLaunchKernelGGL(normal_sample_kernel_impl,
         dim3(blocks_n), dim3(threads), 0, stream,
@@ -172,9 +204,7 @@ __global__ void exponential_sample_kernel_impl(const float* rate, float* output,
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+    float u = splitmix64_uniform(seed, static_cast<uint64_t>(tid), 0);
     u = fminf(u, 1.0f - 1.0e-7f);
 
     output[tid] = -logf(1.0f - u) / rate[tid];
@@ -191,7 +221,7 @@ auto exponential_sample_kernel(const Tensor& rate, hipStream_t stream) -> Tensor
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();  // reproducible under manual_seed(); see Generator
 
     hipLaunchKernelGGL(exponential_sample_kernel_impl,
         dim3(blocks_n), dim3(threads), 0, stream,
@@ -205,14 +235,20 @@ auto exponential_sample_kernel(const Tensor& rate, hipStream_t stream) -> Tensor
 // Gamma sampling (Marsaglia-Tsang 2000) — device-side, no host fallback.
 // =========================================================================
 
-__device__ __forceinline__ float gamma_next_uniform(uint64_t& state) {
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    return static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+// Counter-based draws for one element (seed, tid fixed; counter advances).
+struct GammaRng {
+    uint64_t seed;
+    uint64_t tid;
+    uint64_t counter;
+};
+
+__device__ __forceinline__ float gamma_next_uniform(GammaRng& rng) {
+    return splitmix64_next_uniform(rng.seed, rng.tid, rng.counter);
 }
 
-__device__ __forceinline__ float gamma_next_normal(uint64_t& state) {
-    float u1 = fmaxf(gamma_next_uniform(state), 1.0e-7f);
-    float u2 = gamma_next_uniform(state);
+__device__ __forceinline__ float gamma_next_normal(GammaRng& rng) {
+    float u1 = fmaxf(gamma_next_uniform(rng), 1.0e-7f);
+    float u2 = gamma_next_uniform(rng);
     return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
 }
 
@@ -221,7 +257,7 @@ __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* bet
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+    GammaRng rng{seed, static_cast<uint64_t>(tid), 0};
 
     float alpha = alpha_in[tid];
     float beta  = beta_in[tid];
@@ -230,7 +266,7 @@ __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* bet
 
     float boost = 1.0f;
     if (alpha < 1.0f) {
-        float u0 = fmaxf(gamma_next_uniform(state), 1.0e-7f);
+        float u0 = fmaxf(gamma_next_uniform(rng), 1.0e-7f);
         boost = powf(u0, 1.0f / alpha);
         alpha += 1.0f;
     }
@@ -239,11 +275,11 @@ __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* bet
     const float c = 1.0f / sqrtf(9.0f * d);
     float result;
     for (;;) {
-        float x = gamma_next_normal(state);
+        float x = gamma_next_normal(rng);
         float v = 1.0f + c * x;
         if (v <= 0.0f) continue;
         v = v * v * v;
-        float u = fmaxf(gamma_next_uniform(state), 1.0e-7f);
+        float u = fmaxf(gamma_next_uniform(rng), 1.0e-7f);
         float x2 = x * x;
         if (u < 1.0f - 0.0331f * x2 * x2 ||
             logf(u) < 0.5f * x2 + d * (1.0f - v + logf(v))) {
@@ -268,7 +304,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();  // reproducible under manual_seed(); see Generator
 
     hipLaunchKernelGGL(gamma_sample_kernel_impl,
         dim3(blocks_n), dim3(threads), 0, stream,
@@ -287,9 +323,7 @@ __global__ void multinomial_sample_kernel(const float* cdf, int64_t* output,
                                            uint64_t seed) {
     int64_t sid = blockIdx.x * blockDim.x + threadIdx.x;
     if (sid >= num_samples) return;
-    uint64_t state = seed + static_cast<uint64_t>(sid) * 6364136223846793005ULL + 1442695040888963407ULL;
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31) * total;
+    float u = splitmix64_uniform(seed, static_cast<uint64_t>(sid), 0) * total;
 
     int64_t lo = 0, hi = num_categories - 1;
     while (lo < hi) {
@@ -348,7 +382,7 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
             std::to_string(num_categories) + ") when replacement=false");
     }
 
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();  // reproducible under manual_seed(); see Generator
 
     if (!replacement) {
         // Gumbel top-k trick: log(p_i) + -log(-log(U_i)), then sort descending.

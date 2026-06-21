@@ -3554,7 +3554,8 @@ __global__ void fused_sgd_kernel(
     double weight_decay,
     double dampening,
     bool nesterov,
-    bool has_momentum_buffer
+    bool has_momentum_buffer,
+    bool first_step
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numel) return;
@@ -3568,10 +3569,18 @@ __global__ void fused_sgd_kernel(
     }
 
     if (has_momentum_buffer && momentum > 0.0) {
-        T v = momentum_buffer[idx];
+        T v;
 
-        // Update momentum buffer
-        v = T(momentum) * v + T(1.0 - dampening) * g;
+        // PyTorch SGD: on the very first momentum step the buffer is
+        // initialised to the (weight-decayed) gradient with NO dampening;
+        // dampening is only applied on subsequent steps. Applying
+        // (1 - dampening) on step 1 (buffer == 0) is the latent bug this
+        // fixes — it must match the CPU reference / torch.optim.SGD.
+        if (first_step) {
+            v = g;
+        } else {
+            v = T(momentum) * momentum_buffer[idx] + T(1.0 - dampening) * g;
+        }
         momentum_buffer[idx] = v;
 
         if (nesterov) {
@@ -3594,6 +3603,7 @@ auto fused_sgd_step_cuda(
     double weight_decay,
     double dampening,
     bool nesterov,
+    bool first_step,
     cudaStream_t stream
 ) -> void {
     int64_t numel = param.numel();
@@ -3609,7 +3619,7 @@ auto fused_sgd_step_cuda(
             grad.data<float>(),
             momentum_ptr,
             numel, lr, momentum, weight_decay, dampening,
-            nesterov, momentum_buffer != nullptr
+            nesterov, momentum_buffer != nullptr, first_step
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::Float64) {
@@ -3620,7 +3630,7 @@ auto fused_sgd_step_cuda(
             grad.data<double>(),
             momentum_ptr,
             numel, lr, momentum, weight_decay, dampening,
-            nesterov, momentum_buffer != nullptr
+            nesterov, momentum_buffer != nullptr, first_step
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {

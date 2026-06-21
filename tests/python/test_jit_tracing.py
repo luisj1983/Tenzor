@@ -70,7 +70,9 @@ def test_jit_graph_execution():
 
     # Execute with new input — may return empty if graph has no nodes.
     # A raised exception here is a real failure: let it propagate.
-    new_input = tz.randn([2, 8])
+    # Graph.forward takes Variables (its C++ signature is
+    # forward(std::vector<Variable>)), consistent with the rest of the JIT API.
+    new_input = tz.Variable(tz.randn([2, 8]))
     outputs = graph.forward([new_input])
     if len(outputs) > 0:
         print(f"  got {len(outputs)} outputs, shape: {outputs[0].shape}")
@@ -89,12 +91,14 @@ def test_jit_compiler():
     graph = tz.jit.trace(model, dummy)
 
     original_nodes = graph.num_nodes()
-    # A raised exception from the optimizer is a real failure: let it propagate.
-    optimized = compiler.optimize(graph, max_iterations=5)
-    if optimized is not None:
-        print(f"  nodes before: {original_nodes}, after: {optimized.num_nodes()}")
-    else:
-        print(f"  optimizer returned None (original had {original_nodes} nodes)")
+    # Compiler.optimize mutates `graph` in place (its C++ signature is
+    # optimize(Graph&, int) -> int) and returns the number of optimizations
+    # applied. A raised exception is a real failure: let it propagate.
+    num_opts = compiler.optimize(graph, max_iterations=5)
+    assert isinstance(num_opts, int), "optimize() should return an int count"
+    assert num_opts >= 0, "optimization count must be non-negative"
+    print(f"  nodes before: {original_nodes}, after: {graph.num_nodes()}, "
+          f"optimizations applied: {num_opts}")
     print("  JIT compiler OK")
 
 

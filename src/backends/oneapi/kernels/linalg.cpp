@@ -706,8 +706,15 @@ auto linalg_lu_kernel(const Tensor& A, sycl::queue& queue)
 // ============================================================================
 // LinalgLUSolve - Solve A x = B given packed LU (from getrf) + pivots (getrs)
 // ============================================================================
-auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
-                            const Tensor& B, sycl::queue& queue) -> Tensor {
+auto linalg_lu_solve_kernel(const Tensor& LU_data_in, const Tensor& pivots_in,
+                            const Tensor& B_in, sycl::queue& queue) -> Tensor {
+    // LU_data/B/pivots are read via raw get_data_ptr + b*stride and fed to
+    // row_to_col_major, which ignores strides — so a non-contiguous view would
+    // produce wrong results. Materialize contiguous (matching linalg_solve_kernel
+    // / linalg_solve_triangular_kernel).
+    const Tensor LU_data = LU_data_in.is_contiguous() ? LU_data_in : LU_data_in.contiguous();
+    const Tensor pivots  = pivots_in.is_contiguous()  ? pivots_in  : pivots_in.contiguous();
+    const Tensor B       = B_in.is_contiguous()       ? B_in       : B_in.contiguous();
     auto lu_shape = LU_data.shape();
     auto b_shape  = B.shape();
     auto lu_ndim  = static_cast<int64_t>(lu_shape.size());
@@ -823,9 +830,13 @@ auto linalg_svd_kernel(const Tensor& input, bool full_matrices, sycl::queue& que
         row_to_col_major<float, SyclTransposeSvdAF32>(
             d_a.get(), get_data_ptr<const float>(input), m, n, queue);
 
-        auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<float>(queue, jobz, jobz, m, n, m, m, n);
+        // ldvt must be the number of VT rows (vt_rows), NOT n. d_vt is sized
+        // vt_rows*n; passing ldvt=n would make LAPACK write an n*n column-major
+        // matrix and overflow the buffer for the wide non-full case (m<n,
+        // full_matrices=false, where vt_rows=min(m,n)=m<n).
+        auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<float>(queue, jobz, jobz, m, n, m, m, vt_rows);
         SyclDeviceBuffer<float> scratch(sp, queue);
-        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), n, scratch.get(), sp).wait();
+        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), vt_rows, scratch.get(), sp).wait();
 
         Tensor S({k}, input.dtype(), input.device());
         queue.memcpy(const_cast<void*>(S.data_ptr()), d_s.get(), k * sizeof(float)).wait();
@@ -850,9 +861,10 @@ auto linalg_svd_kernel(const Tensor& input, bool full_matrices, sycl::queue& que
         row_to_col_major<double, SyclTransposeSvdAF64>(
             d_a.get(), get_data_ptr<const double>(input), m, n, queue);
 
-        auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<double>(queue, jobz, jobz, m, n, m, m, n);
+        // ldvt = vt_rows (not n); see Float32 branch for rationale.
+        auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<double>(queue, jobz, jobz, m, n, m, m, vt_rows);
         SyclDeviceBuffer<double> scratch(sp, queue);
-        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), n, scratch.get(), sp).wait();
+        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), vt_rows, scratch.get(), sp).wait();
 
         Tensor S({k}, input.dtype(), input.device());
         queue.memcpy(const_cast<void*>(S.data_ptr()), d_s.get(), k * sizeof(double)).wait();

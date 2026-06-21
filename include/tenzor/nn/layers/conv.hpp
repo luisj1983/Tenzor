@@ -32,8 +32,9 @@ namespace nn {
  * - H_out = floor((H_in + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1)
  * - W_out = floor((W_in + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1)
  *
- * Parameters are initialized using Kaiming uniform initialization suitable
- * for convolutional layers.
+ * Weights are initialized with Kaiming-normal (randn * sqrt(2/fan_in)) and the
+ * bias (if present) is drawn uniformly from [-1/sqrt(fan_in), 1/sqrt(fan_in)],
+ * matching the sibling conv layers and PyTorch's bias convention.
  *
  * @code
  * // 3-channel input -> 64-channel output, 3x3 kernel
@@ -148,7 +149,8 @@ private:
     int64_t groups_;        ///< Number of groups
 
     /**
-     * @brief Initialize parameters using Kaiming uniform.
+     * @brief Initialize weights with Kaiming-normal and bias with uniform
+     *        [-1/sqrt(fan_in), 1/sqrt(fan_in)].
      */
     auto reset_parameters() -> void;
 };
@@ -237,7 +239,8 @@ private:
     int64_t groups_;        ///< Number of groups
 
     /**
-     * @brief Initialize parameters using Kaiming uniform.
+     * @brief Initialize weights with Kaiming-normal and bias with uniform
+     *        [-1/sqrt(fan_in), 1/sqrt(fan_in)].
      */
     auto reset_parameters() -> void;
 };

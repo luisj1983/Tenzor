@@ -133,6 +133,42 @@ TEST_P(Pooling3dMultiDTypeTest, AvgPool3dGradientFlow) {
     expectTensorNear(input.grad().value(), input_cpu.grad().value(), poolAtol());
 }
 
+// Regression: AvgPool3d with padding>0 must honor count_include_pad (the ROCm
+// 3D kernels previously ignored it, hardcoding count_include_pad=false, so the
+// default count_include_pad=true diverged from CPU at border outputs by using
+// valid_count instead of kD*kH*kW as the divisor).
+TEST_P(Pooling3dMultiDTypeTest, AvgPool3dCountIncludePadTrue) {
+    nn::AvgPool3d pool(/*kernel=*/3, /*stride=*/2, /*padding=*/1, /*count_include_pad=*/true);
+    nn::AvgPool3d pool_cpu(3, 2, 1, true);
+
+    Variable input = createInput({1, 2, 5, 5, 5}, false);
+    auto output = pool.forward(input);
+    expectDevice(output.tensor());
+    expectDType(output.tensor());
+
+    Variable input_cpu(input.tensor().to(Device::cpu()).to(DType::Float32), false);
+    auto ref = pool_cpu.forward(input_cpu);
+    expectTensorNear(output.tensor(), ref.tensor(), poolAtol());
+}
+
+TEST_P(Pooling3dMultiDTypeTest, AvgPool3dCountIncludePadFalse) {
+    nn::AvgPool3d pool(3, 2, 1, /*count_include_pad=*/false);
+    nn::AvgPool3d pool_cpu(3, 2, 1, false);
+
+    Variable input = createInput({1, 2, 5, 5, 5}, true);
+    auto output = pool.forward(input);
+
+    Variable input_cpu(input.tensor().to(Device::cpu()).to(DType::Float32), false);
+    auto ref = pool_cpu.forward(input_cpu);
+    expectTensorNear(output.tensor(), ref.tensor(), poolAtol());
+
+    // Backward gradient must also use the same (valid-count) divisor as CPU.
+    auto out_shape = output.shape();
+    std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
+    output.backward(tenzor::ones(out_shape_vec, dtype(), device()));
+    EXPECT_GRAD_FLOWS(input);
+}
+
 // ============================================================================
 // AdaptiveMaxPool3d Tests
 // ============================================================================

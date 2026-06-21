@@ -274,6 +274,11 @@ void broadcast_op(const TIn* a_data, const TIn* b_data, TOut* c_data,
         total_elements *= dim;
     }
 
+    // Nothing to do for an empty output (matches the same-type overload).
+    if (total_elements == 0) {
+        return;
+    }
+
     const size_t ndim = output_shape.size();
 
     // Specialized loops for common dimensions
@@ -350,7 +355,14 @@ void broadcast_op(const TIn* a_data, const TIn* b_data, TOut* c_data,
 
 // In-place broadcast operation template
 // Applies op(a, b) and stores result back in a
-// b is broadcast to match a's shape
+// b is broadcast to match a's shape.
+//
+// PRECONDITION (no aliasing): a_data and b_data must not overlap. b is read
+// (potentially with stride-0 broadcast) while a is written in place, so an
+// aliased call (e.g. `a += a_view` where b is a stride-0 view over a) can read
+// already-overwritten elements and produce wrong results. Callers that may
+// alias must materialize a copy of b first. The pointers are intentionally not
+// __restrict so the compiler does not assume non-aliasing.
 template<typename T, typename Op>
 void broadcast_op_inplace(T* a_data, const T* b_data,
                           std::span<const int64_t> shape_a,
@@ -363,6 +375,11 @@ void broadcast_op_inplace(T* a_data, const T* b_data,
     int64_t total_elements = 1;
     for (auto dim : shape_a) {
         total_elements *= dim;
+    }
+
+    // Nothing to do for an empty tensor.
+    if (total_elements == 0) {
+        return;
     }
 
     const size_t ndim = shape_a.size();

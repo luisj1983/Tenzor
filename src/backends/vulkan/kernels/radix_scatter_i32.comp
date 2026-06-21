@@ -43,11 +43,19 @@ void main() {
     uint tile_start = wg_id * tile_size;
     uint tile_end = min(tile_start + tile_size, n);
 
-    for (uint i = tile_start + lid; i < tile_end; i += gl_WorkGroupSize.x) {
-        uint sortable = int32_to_sortable(keys_in[i]);
-        uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
-        uint dest = atomicAdd(local_offsets[digit_val], 1);
-        keys_out[dest] = keys_in[i];
-        idx_out[dest] = idx_in[i];
+    // STABILITY (see radix_scatter.comp): scatter the tile in strict index
+    // order from a single lane so equal-digit elements keep ascending-index
+    // order. A parallel atomicAdd assigns slots in arbitration order, breaking
+    // LSD-radix stability and diverging from the stable CPU reference.
+    barrier();
+    if (lid == 0u) {
+        for (uint i = tile_start; i < tile_end; ++i) {
+            uint sortable = int32_to_sortable(keys_in[i]);
+            uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
+            uint dest = local_offsets[digit_val];
+            local_offsets[digit_val] = dest + 1u;
+            keys_out[dest] = keys_in[i];
+            idx_out[dest] = idx_in[i];
+        }
     }
 }

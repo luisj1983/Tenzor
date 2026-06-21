@@ -814,6 +814,17 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 // ============================================================================
 // 2D FFT: Complex-to-Complex forward
+//
+// DEAD CODE (rocFFT-on variants): OpId::FFT2/IFFT2/FFTN/IFFTN are registered but
+// the op layer (src/ops/fft.cpp) decomposes fft2/fftn into sequential 1D fft()
+// calls that only dispatch OpId::FFT/IFFT, so this bespoke N-D logic is never
+// reached or tested. It additionally has a latent silent-zeros bug: in the
+// rocFFT direct-plan path the input is copied into the zeroed output only when
+// in_fft_size==out_fft_size && shapes_match, and the 1D fallback only fires when
+// the products differ — so a size-permuting n_vec (same product, different
+// shape) skips BOTH and the plan runs on a still-zeroed buffer (all-zeros out).
+// Fix when reviving: always take the 1D fallback unless shapes match exactly, or
+// error out. The native (#else) variants correctly just loop 1D ffts.
 // ============================================================================
 
 auto rocm_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,

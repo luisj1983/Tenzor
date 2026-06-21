@@ -195,6 +195,32 @@ void gemm_local<float>(const float* A, const float* B, float* C,
 template<>
 void gemm_local<double>(const double* A, const double* B, double* C,
                          int64_t M, int64_t N, int64_t K, bool transB) {
+    // The LP64 MKL interface takes int dimensions/leading-dims. If any of
+    // M/N/K (which double as the leading dimensions here) exceeds INT_MAX the
+    // static_cast<int> would silently truncate, producing a wrong-shaped GEMM
+    // with out-of-bounds access. Fall back to an int64-indexed scalar GEMM in
+    // that (extreme, multi-GB 3D volume) case so the result stays correct.
+    // Mirrors conv2d.cpp's gemm_cpu<double> guard.
+    constexpr int64_t kIntMax = static_cast<int64_t>(std::numeric_limits<int>::max());
+    if (M > kIntMax || N > kIntMax || K > kIntMax) {
+        #pragma omp parallel for collapse(2) if(M * N > ::tenzor::OmpThresholds::matmul())
+        for (int64_t i = 0; i < M; ++i) {
+            for (int64_t j = 0; j < N; ++j) {
+                double sum = 0.0;
+                if (transB) {
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += A[i * K + k] * B[j * K + k];
+                    }
+                } else {
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += A[i * K + k] * B[k * N + j];
+                    }
+                }
+                C[i * N + j] = sum;
+            }
+        }
+        return;
+    }
     if (transB) {
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
@@ -505,6 +531,14 @@ auto conv3d_forward_kernel(
     int64_t out_d = calc_out_size(is[2], ws[2], sD, pD, dD);
     int64_t out_h = calc_out_size(is[3], ws[3], sH, pH, dH);
     int64_t out_w = calc_out_size(is[4], ws[4], sW, pW, dW);
+
+    if (out_d <= 0 || out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "Invalid Conv3d configuration: output dimensions are non-positive (out_d=" +
+            std::to_string(out_d) + ", out_h=" + std::to_string(out_h) +
+            ", out_w=" + std::to_string(out_w) +
+            "); kernel/dilation too large for the padded input");
+    }
 
     Tensor output({is[0], ws[0], out_d, out_h, out_w}, input.dtype(), input.device());
 

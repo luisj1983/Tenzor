@@ -173,6 +173,28 @@ PYBIND11_MODULE(tenzor_core, m) {
     // itself derives from RuntimeError.
     static auto py_tenzor_error = py::register_exception<tenzor::TenzorException>(
         m, "TenzorError");
+
+    // IMPORTANT — translator ordering. pybind11 stores exception translators
+    // in a forward_list via push_front and applies them front-to-back, so the
+    // MOST-RECENTLY-registered translator runs FIRST. The catch-all base
+    // translator below must therefore be registered BEFORE the specific
+    // per-type translators (register_exception calls) so that it ends up at
+    // the BACK of the list and only fires when no specific translator matched.
+    // If it were registered last it would run first and convert EVERY
+    // TenzorException subclass into the base `TenzorError`, making
+    // `except tz.ShapeError` / `except tz.DeviceError` unreachable.
+    //
+    // Safety net: covers any future TenzorException-derived type that lacks an
+    // explicit register_exception below, and the cross-DSO RTTI-mismatch case
+    // where a per-class translator misses (the catch matches by base type).
+    py::register_exception_translator([](std::exception_ptr p) {
+        try {
+            if (p) std::rethrow_exception(p);
+        } catch (const tenzor::TenzorException& e) {
+            PyErr_SetString(py_tenzor_error.ptr(), e.what());
+        }
+    });
+
     py::register_exception<tenzor::ShapeException>(
         m, "ShapeError", py_tenzor_error.ptr());
     py::register_exception<tenzor::DTypeException>(
@@ -206,19 +228,6 @@ PYBIND11_MODULE(tenzor_core, m) {
         m, "NotImplementedError", PyExc_NotImplementedError);
     py::register_exception<tenzor::RuntimeError>(
         m, "RuntimeError", PyExc_RuntimeError);
-
-    // Catch-all translator: any future TenzorException-derived types not
-    // explicitly registered above will still map to TenzorError in Python.
-    // This also covers the case where pybind11's per-class translator misses
-    // a cross-DSO-boundary exception (RTTI mismatch); the catch matches by
-    // base type.
-    py::register_exception_translator([](std::exception_ptr p) {
-        try {
-            if (p) std::rethrow_exception(p);
-        } catch (const tenzor::TenzorException& e) {
-            PyErr_SetString(py_tenzor_error.ptr(), e.what());
-        }
-    });
 
     // Library initialization
     m.def("initialize", &tenzor::initialize,
@@ -387,11 +396,39 @@ PYBIND11_MODULE(tenzor_core, m) {
                 }
                 auto result = py_backward_fn_(*py::tuple(args));
 
+                // Validate the returned gradient count against the number of
+                // inputs forward() received. A multi-input custom Function whose
+                // backward mistakenly returns ONE tensor (instead of a tuple of
+                // N) would otherwise yield a size-1 grads vector for an N-input
+                // op; the engine then mis-assigns the grad to input[0] and
+                // silently drops the rest. PyTorch validates this and raises.
+                const size_t num_inputs = input_variables().size();
                 std::vector<tenzor::Tensor> grads;
                 if (py::isinstance<tenzor::Tensor>(result)) {
+                    // A bare Tensor is only valid for a single-input Function
+                    // (num_inputs may be 0 if the engine has not populated
+                    // input_variables for this trampoline path — accept the
+                    // single-grad form in that case for backward compat).
+                    if (num_inputs > 1) {
+                        throw std::runtime_error(
+                            "Custom Function.backward returned a single Tensor "
+                            "but forward() had " + std::to_string(num_inputs) +
+                            " inputs; return a tuple of " +
+                            std::to_string(num_inputs) +
+                            " gradients (use None for inputs that need no grad).");
+                    }
                     grads.push_back(result.cast<tenzor::Tensor>());
                 } else {
                     auto result_tuple = result.cast<py::tuple>();
+                    if (num_inputs > 0 && result_tuple.size() != num_inputs) {
+                        throw std::runtime_error(
+                            "Custom Function.backward returned " +
+                            std::to_string(result_tuple.size()) +
+                            " gradients but forward() had " +
+                            std::to_string(num_inputs) +
+                            " inputs; the counts must match (use None for "
+                            "inputs that need no grad).");
+                    }
                     for (auto& item : result_tuple) {
                         if (item.is_none()) {
                             grads.push_back(tenzor::Tensor{});
@@ -578,6 +615,11 @@ PYBIND11_MODULE(tenzor_core, m) {
                          }
                      };
                  }
+                 // Release the GIL for the whole blocking HTTP download
+                 // (seconds-to-minutes for large weights) so other Python
+                 // threads keep running. The progress callback re-acquires the
+                 // GIL itself (above), so it stays correct.
+                 py::gil_scoped_release release;
                  return tenzor::models::ModelHub::download_weights(
                      model_name, url, expected_sha256, show_progress, callback);
              },
@@ -604,6 +646,9 @@ PYBIND11_MODULE(tenzor_core, m) {
                          }
                      };
                  }
+                 // Release the GIL across the blocking download; the progress
+                 // callback re-acquires it above.
+                 py::gil_scoped_release release;
                  return tenzor::models::ModelHub::download_pretrained(
                      model_name, show_progress, callback);
              },
@@ -2890,13 +2935,23 @@ void bind_compression(py::module& m) {
         .value("Backward", tenzor::ProfilePhase::Backward);
 
     // Thread-local guard storage for the forward profiling interceptor
-    static thread_local std::unique_ptr<tenzor::ProfilingInterceptorGuard> s_fwd_guard;
+    // The forward interceptor guard controls the PROCESS-GLOBAL dispatch
+    // interceptor / OpProfiler, so it must live in a process-global slot — NOT
+    // thread_local. Previously it was thread_local: enabling on thread A and
+    // disabling on thread B (common with thread-pool executors / DataLoader
+    // workers) left A's guard installed forever (interceptor leaked, profiling
+    // overhead continued) while is_enabled() reported false. The mutex
+    // serialises concurrent enable/disable so the single global guard is
+    // installed/popped exactly once regardless of which thread calls.
+    static std::mutex s_fwd_guard_mutex;
+    static std::unique_ptr<tenzor::ProfilingInterceptorGuard> s_fwd_guard;
 
     profiler.def("enable", []() {
         // Enable backward profiling (autograd)
         tenzor::AutogradProfiler::instance().enable();
         // Enable forward profiling (dispatch interceptor)
         tenzor::OpProfiler::instance().enable();
+        std::lock_guard<std::mutex> lock(s_fwd_guard_mutex);
         if (!s_fwd_guard) {
             s_fwd_guard = std::make_unique<tenzor::ProfilingInterceptorGuard>();
         }
@@ -2905,7 +2960,8 @@ void bind_compression(py::module& m) {
     profiler.def("disable", []() {
         tenzor::AutogradProfiler::instance().disable();
         tenzor::OpProfiler::instance().disable();
-        s_fwd_guard.reset();  // pop the interceptor
+        std::lock_guard<std::mutex> lock(s_fwd_guard_mutex);
+        s_fwd_guard.reset();  // pop the interceptor (process-global)
     }, "Disable profiling");
 
     profiler.def("is_enabled", []() {

@@ -186,6 +186,54 @@ TEST_F(JacobianHessianTest, HessianCubic) {
     EXPECT_NEAR(hp[3], 0.0f, 1.5f);
 }
 
+TEST_F(JacobianHessianTest, HessianCubicExactAnalyticF64) {
+    // Regression for the jvp-walker multi-occurrence accumulation bug: the
+    // exact second derivative of x^3 is 6x. Before the fix the forward-over-
+    // reverse walker dropped the dependence-through-saved-intermediate and
+    // returned 4x. This must now be EXACT (analytic double-backward), so the
+    // tolerance is tight Float64, not the loose FD band of HessianCubic.
+    auto x_data = tenzor::zeros({3}, DType::Float64, Device::cpu());
+    double* xp = x_data.data<double>();
+    xp[0] = 2.0; xp[1] = -1.5; xp[2] = 0.75;
+    Variable x(x_data, true);
+
+    // f(x) = sum(x^3). grad = 3x^2. Hessian = diag(6x).
+    auto f = [](const Variable& inp) -> Variable {
+        return tenzor::sum(inp * inp * inp);
+    };
+
+    auto H = hessian(f, x);
+    const double* hp = H.data<double>();
+    const int64_t n = 3;
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            double expected = (i == j) ? 6.0 * xp[i] : 0.0;
+            EXPECT_NEAR(hp[i * n + j], expected, 1e-6)
+                << "H[" << i << "," << j << "] wrong (exact analytic 6x expected)";
+        }
+    }
+}
+
+TEST_F(JacobianHessianTest, HvpCubicExactAnalyticF64) {
+    // H·v for f=sum(x^3) is (6x) ∘ v. Tight Float64 — exact forward-over-reverse.
+    auto x_data = tenzor::zeros({3}, DType::Float64, Device::cpu());
+    double* xp = x_data.data<double>();
+    xp[0] = 2.0; xp[1] = -1.5; xp[2] = 0.75;
+    Variable x(x_data, true);
+    auto v = tenzor::zeros({3}, DType::Float64, Device::cpu());
+    double* vp = v.data<double>();
+    vp[0] = 1.0; vp[1] = -2.0; vp[2] = 0.5;
+
+    auto f = [](const Variable& inp) -> Variable {
+        return tenzor::sum(inp * inp * inp);
+    };
+    auto [out, hv] = hvp(f, x, v);
+    const double* hvp_data = hv.data<double>();
+    for (int64_t i = 0; i < 3; ++i) {
+        EXPECT_NEAR(hvp_data[i], 6.0 * xp[i] * vp[i], 1e-6);
+    }
+}
+
 // Backend-parameterized Jacobian smoke test (plan 4.1)
 class JacobianHessianBackendTest : public tenzor::testing::BackendTest {
 protected:

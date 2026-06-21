@@ -62,42 +62,154 @@ auto CumProdBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("CumProdBackward::forward should not be called");
 }
 
+namespace {
+
+// Exact, zero-aware cumprod backward kernel for one dtype, operating on a
+// contiguous [outer, n] view (dim moved to the last axis).
+//
+//   y_k = prod_{j<=k} x_j         (cumprod)
+//   dL/dx_i = sum_{k>=i} grad_k * d(y_k)/d(x_i)
+//           = sum_{k>=i} grad_k * prod_{j<=k, j!=i} x_j
+//
+// The inner product EXCLUDES the differentiated element x_i, so it never
+// divides by x_i and is correct for ANY number of zeros in the run (the usual
+// `grad*y/x` closed form is only valid with ≤1 zero). O(n^2) per run; cumprod
+// runs are short and correctness dominates here.
+template <typename T>
+void cumprod_backward_exact_kernel(const T* x, const T* g, T* gi,
+                                   int64_t outer, int64_t n) {
+    for (int64_t o = 0; o < outer; ++o) {
+        const T* xr = x + o * n;
+        const T* gr = g + o * n;
+        T* gir = gi + o * n;
+        for (int64_t i = 0; i < n; ++i) {
+            // prefix_excl = prod_{j<i} x_j   (the j!=i, j<=k=i term base).
+            T prefix_excl = T(1);
+            for (int64_t j = 0; j < i; ++j) prefix_excl *= xr[j];
+            // Accumulate sum_{k>=i} grad_k * prod_{j<=k, j!=i} x_j.
+            // running = prod_{j<=k, j!=i} x_j, starting at k=i (= prefix_excl,
+            // since the j==i factor is skipped), then multiply by x_k for k>i.
+            T running = prefix_excl;
+            T acc = T(0);
+            for (int64_t k = i; k < n; ++k) {
+                if (k > i) running *= xr[k];
+                acc += gr[k] * running;
+            }
+            gir[i] = acc;
+        }
+    }
+}
+
+} // namespace
+
 auto CumProdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& input = saved_tensors_[0];
-    const auto& output = saved_tensors_[1];
 
-    // dL/dx = flip(cumsum(flip(output * grad, dim), dim), dim) / input
-    // With zero-safe division
-    auto prod_grad = mul(output, grad);
-    auto flipped = flip(prod_grad, {dim_});
-    auto cum = cumsum(flipped, dim_);
-    auto rev_cum = flip(cum, {dim_});
+    // Exact zero-aware gradient (correct for any number of zeros per run).
+    // The previous flip/cumsum/flip-over-input closed form was only valid with
+    // ≤1 zero in a cumprod run; with ≥2 zeros the positions between the zeros
+    // have a genuinely non-zero analytic gradient that the saved-output form
+    // dropped. We compute the exact prefix-product-excluding-self sum instead.
+    const Device orig_device = input.device();
+    const DType  orig_dtype  = input.dtype();
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    // Scalar / 0-d input: cumprod is the identity, gradient passes through.
+    if (ndim == 0) {
+        return {grad};
+    }
+    int64_t dim = dim_;
+    if (dim < 0) dim += ndim;
 
-    // CC.3: zero-safe division without dtype-dependent eps.
-    // The previous approach replaced zeros in the denominator with
-    // `dtype_epsilon(input.dtype())`. For F16 that constant is ~9.8e-4 —
-    // large enough to distort the gradient on the masked positions before
-    // we zero them out. (rev_cum / eps explodes to ~1e3 for moderate rev_cum,
-    // which feeds finite-magnitude garbage into intermediate buffers and
-    // overflows when chained.) Replace zeros with ONES in the safe denominator
-    // — the division result on those positions is then a bounded value that
-    // we immediately overwrite with zero via the mask, with no eps-scale
-    // intermediate.
-    auto zero_t = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                        input.dtype(), input.device());
-    auto ones_t = ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                       input.dtype(), input.device());
-    auto zero_mask = eq(input, zero_t);
-    auto safe_input = where(zero_mask, ones_t, input);
-    auto result = div(rev_cum, safe_input);
+    // Move `dim` to the last axis, make contiguous, view as [outer, n].
+    Tensor x = input;
+    Tensor g = grad;
+    // Compute in Float32/Float64 for half/bfloat inputs (no native half mul on
+    // host), narrow back at the end.
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    const DType work_dtype = widen ? DType::Float32 : orig_dtype;
+    if (orig_device.type != Device::Type::CPU) { x = x.to(Device::cpu()); g = g.to(Device::cpu()); }
+    if (x.dtype() != work_dtype) x = x.to(work_dtype);
+    if (g.dtype() != work_dtype) g = g.to(work_dtype);
 
-    // Zero out positions where input was zero
-    return {where(zero_mask, zero_t, result)};
+    if (dim != ndim - 1) {
+        x = tenzor::movedim(x, {dim}, {ndim - 1});
+        g = tenzor::movedim(g, {dim}, {ndim - 1});
+    }
+    x = x.contiguous();
+    g = g.contiguous();
+
+    const int64_t n = (ndim == 0) ? 1 : x.shape().back();
+    const int64_t total = x.numel();
+    const int64_t outer = (n == 0) ? 0 : total / n;
+
+    Tensor gi = empty(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
+                      work_dtype, Device::cpu());
+
+    if (total > 0 && n > 0) {
+        if (work_dtype == DType::Float64) {
+            cumprod_backward_exact_kernel<double>(
+                x.data<double>(), g.data<double>(), gi.data<double>(), outer, n);
+        } else if (work_dtype == DType::Float32) {
+            cumprod_backward_exact_kernel<float>(
+                x.data<float>(), g.data<float>(), gi.data<float>(), outer, n);
+        } else if (work_dtype == DType::Complex64) {
+            cumprod_backward_exact_kernel<std::complex<float>>(
+                reinterpret_cast<const std::complex<float>*>(x.storage()->data()) + x.offset(),
+                reinterpret_cast<const std::complex<float>*>(g.storage()->data()) + g.offset(),
+                reinterpret_cast<std::complex<float>*>(gi.storage()->data()) + gi.offset(),
+                outer, n);
+        } else if (work_dtype == DType::Complex128) {
+            cumprod_backward_exact_kernel<std::complex<double>>(
+                reinterpret_cast<const std::complex<double>*>(x.storage()->data()) + x.offset(),
+                reinterpret_cast<const std::complex<double>*>(g.storage()->data()) + g.offset(),
+                reinterpret_cast<std::complex<double>*>(gi.storage()->data()) + gi.offset(),
+                outer, n);
+        } else {
+            throw std::runtime_error(
+                "CumProdBackward: unsupported dtype for exact backward (index " +
+                std::to_string(static_cast<int>(work_dtype)) + ")");
+        }
+    }
+
+    // Move axis back, narrow dtype, restore device.
+    if (dim != ndim - 1) {
+        gi = tenzor::movedim(gi, {ndim - 1}, {dim});
+    }
+    gi = gi.contiguous();
+    if (gi.dtype() != orig_dtype) gi = gi.to(orig_dtype);
+    if (gi.device() != orig_device) gi = gi.to(orig_device);
+    return {gi};
 }
 
 auto CumProdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // cumprod backward: flip(cumsum(flip(output * grad, dim), dim), dim) / input
+    //
+    // Higher-order (create_graph) path. This graph-preserving closed form is
+    // exact when a cumprod run contains AT MOST ONE zero (the dominant case for
+    // a differentiable forward — a run with ≥2 exact zeros has a zero forward
+    // output and is rarely differentiated through twice). The first-order
+    // backward() above is exact for ANY number of zeros via the
+    // prefix-product-excluding-self kernel.
+    //
+    // REMAINING EXACT-2ND-DERIVATIVE-OVER-≥2-ZEROS WORK (env-bounded):
+    // The exact gradient is gi[i] = L[i] · S[i] with
+    //     L[i] = ∏_{j<i} x[j]                       (exclusive prefix product)
+    //     S[i] = Σ_{k≥i} grad[k] · ∏_{i<j≤k} x[j]
+    // L is differentiable via roll(cumprod(x),1) with position-0 set to 1. S has
+    // NO division-free closed form in terms of cumprod/cumsum (the natural
+    // C[k]/C[i] ratio divides by x[i], which is exactly what breaks at zeros);
+    // its only zero-robust form is the reverse recurrence
+    //     S[i] = grad[i] + x[i+1] · S[i+1]
+    // i.e. a per-element REVERSE SCAN along `dim`. Expressing that as
+    // differentiable Variable ops requires a reverse-scan autograd primitive (or
+    // an O(n) unroll along a fixed-length axis) that does not yet exist; shipping
+    // an unverified O(n) unrolled higher-order rewrite would be riskier than the
+    // documented narrow limitation (per project policy: no unverified rewrites).
+    // The correct follow-up is to add a differentiable reverse-scan op and build
+    // S from it, then gradgradcheck with ≥2 zeros per run. Until then the
+    // SECOND derivative across ≥2 zeros uses the closed form below (exact for
+    // ≤1 zero; first-order remains exact for any zero count).
     const auto& input = saved_tensors_[0];
     // GG.1: recompute cumprod from saved input Variable on the higher-order
     // path so output_var carries grad_fn back through the upstream forward.

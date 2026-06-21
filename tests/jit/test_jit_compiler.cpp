@@ -1141,6 +1141,62 @@ TEST_F(JITCompilerTest, ConstantFolding_PassName) {
     EXPECT_EQ(pass.name(), "ConstantFolding");
 }
 
+// Regression: a multi-axis reduction carried as a "dims" vec-attr must fold to
+// the correct PARTIAL reduction, not a full (scalar) reduction. Before the fix,
+// evaluate_constant only read the scalar "dim" attr; a Sum node with dims={1,2}
+// returned nullopt and folded as tenzor::sum(x) over EVERY axis, producing a
+// 0-D constant with the wrong value while keeping the original [2] shape Value.
+TEST_F(JITCompilerTest, ConstantFolding_MultiAxisReduction_Sum) {
+    Graph graph;
+
+    // Source constant of shape [2,3,4] with values 0..23.
+    auto src_val = graph.create_value("src", {2, 3, 4}, DType::Float32, device_);
+    auto src_node = graph.create_node(OpType::Constant, "src_const");
+    src_node->add_output(src_val);
+    src_val->set_node(src_node);
+    Tensor src({2, 3, 4}, DType::Float32, device_);
+    {
+        float* p = src.data<float>();
+        for (int64_t i = 0; i < src.numel(); ++i) p[i] = static_cast<float>(i);
+    }
+    src_node->set_tensor_attr("value", src);
+
+    // Sum over dims {1,2}; expected output shape [2].
+    auto sum_val = graph.create_value("sum_out", {2}, DType::Float32, device_);
+    auto sum_node = graph.create_node(OpType::Sum, "sum");
+    sum_node->add_input(src_val);
+    sum_node->add_output(sum_val);
+    sum_val->set_node(sum_node);
+    sum_node->set_vec_attr("dims", {1, 2});
+    sum_node->set_bool_attr("keepdim", false);
+
+    graph.add_node(src_node);
+    graph.add_node(sum_node);
+    graph.set_inputs({});
+    graph.set_outputs({sum_val});
+
+    ConstantFoldingPass pass;
+    bool changed = pass.run(graph);
+    EXPECT_TRUE(changed);
+
+    // The Sum node should now be a Constant whose value is the [2] partial sum:
+    //   channel 0 = sum(0..11) = 66,  channel 1 = sum(12..23) = 210.
+    std::shared_ptr<Node> folded;
+    for (const auto& n : graph.nodes()) {
+        if (n->op_type() == OpType::Constant && n->has_attr("value")) {
+            Tensor v = n->get_tensor_attr("value");
+            if (v.numel() == 2) { folded = n; break; }
+        }
+    }
+    ASSERT_NE(folded, nullptr) << "no folded [2] constant produced";
+    Tensor folded_val = folded->get_tensor_attr("value");
+    ASSERT_EQ(folded_val.shape().size(), 1u);
+    EXPECT_EQ(folded_val.shape()[0], 2);
+    const float* fp = folded_val.data<float>();
+    EXPECT_FLOAT_EQ(fp[0], 66.0f);
+    EXPECT_FLOAT_EQ(fp[1], 210.0f);
+}
+
 TEST_F(JITCompilerTest, FuseConvBatchNorm_NoPattern) {
     auto graph = create_simple_graph(OpType::ReLU);
 

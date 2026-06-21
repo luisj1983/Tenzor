@@ -150,6 +150,23 @@ auto check_square(const Tensor& A) -> std::pair<int64_t, int64_t> {
     return {m, ndim};
 }
 
+// Validate that a matrix dimension fits in lapack_int (32-bit under the LP64
+// LAPACK ABI) before it is passed to a LAPACKE call. The surrounding C++
+// offset math uses true int64, so a silent 32-bit truncation here would cause
+// LAPACK to operate on a wrong/under-sized extent. Mirrors the sparse layer's
+// mkl_index_fits guard. Returns the value cast to lapack_int.
+#if defined(TENZOR_USE_MKL) || defined(TENZOR_USE_LAPACKE)
+[[maybe_unused]] inline lapack_int to_lapack_int(int64_t v, const char* what) {
+    if (v < std::numeric_limits<lapack_int>::min() ||
+        v > std::numeric_limits<lapack_int>::max()) {
+        throw std::overflow_error(
+            std::string("linalg: dimension ") + what + " (" + std::to_string(v) +
+            ") exceeds the LAPACK 32-bit index range");
+    }
+    return static_cast<lapack_int>(v);
+}
+#endif
+
 // Compute batch size (product of all dims except last two)
 auto batch_size(const Tensor& A) -> int64_t {
     auto shape = A.shape();
@@ -369,8 +386,22 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
     auto b_ndim = static_cast<int64_t>(b_shape.size());
     if (b_ndim < 1) throw std::invalid_argument("linalg::solve: B must be at least 1D");
 
+    // Validate B's row dimension matches A's order n. LAPACKE_?gesv writes
+    // n*nrhs elements per batch into work_b; a B with fewer rows than n
+    // would otherwise produce an out-of-bounds heap write.
+    int64_t b_rows = (b_ndim >= 2) ? b_shape[b_ndim - 2] : b_shape[0];
+    if (b_rows != n) {
+        throw std::invalid_argument(
+            "linalg::solve: B row dimension (" + std::to_string(b_rows) +
+            ") must match A's size n (" + std::to_string(n) + ")");
+    }
+
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
     int64_t nbatch = batch_size(work_a);
+
+    // Reject dims that would truncate in the 32-bit LAPACK index ABI.
+    (void)to_lapack_int(n, "n");
+    (void)to_lapack_int(nrhs, "nrhs");
 
     std::vector<lapack_int> ipiv(n);
 
@@ -452,6 +483,34 @@ auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitria
 
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
     int64_t nbatch = batch_size(work_a);
+
+    // For a non-unitriangular solve the substitution divides by each diagonal
+    // entry. A zero diagonal would silently yield inf/NaN; reject it up front
+    // with a diagnostic (matching sparse_triangular_solve's behaviour).
+    if (!unitriangular) {
+        auto check_zero_diag = [&](auto* a_data) {
+            for (int64_t batch = 0; batch < nbatch; ++batch) {
+                const auto* A_mat = a_data + batch * n * n;
+                for (int64_t i = 0; i < n; ++i) {
+                    if (A_mat[i * n + i] == std::remove_const_t<
+                            std::remove_pointer_t<decltype(a_data)>>(0)) {
+                        throw std::runtime_error(
+                            "linalg::solve_triangular: zero diagonal element at row " +
+                            std::to_string(i));
+                    }
+                }
+            }
+        };
+        if (work_a.dtype() == DType::Float32) {
+            check_zero_diag(work_a.data<float>());
+        } else if (work_a.dtype() == DType::Complex64) {
+            check_zero_diag(work_a.data<std::complex<float>>());
+        } else if (work_a.dtype() == DType::Complex128) {
+            check_zero_diag(work_a.data<std::complex<double>>());
+        } else {
+            check_zero_diag(work_a.data<double>());
+        }
+    }
 
     if (work_a.dtype() == DType::Float32) {
         const float* a_data = work_a.data<float>();
@@ -1574,8 +1633,19 @@ auto matrix_power(const Tensor& A, int64_t n) -> Tensor {
     }
 
     if (n == 0) {
-        // A^0 = identity matrix (batched if needed)
-        return tenzor::eye(rows, std::nullopt, A.dtype(), A.device());
+        // A^0 = identity matrix. For batched input (ndim > 2) the identity
+        // must be broadcast across every leading batch dimension so the
+        // output shape matches A, not a bare (rows, rows).
+        auto eye2d = tenzor::eye(rows, std::nullopt, A.dtype(), A.device());
+        if (A.ndim() == 2) {
+            return eye2d;
+        }
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        // Reshape the 2-D identity to (1,...,1,rows,rows) then expand.
+        std::vector<int64_t> id_shape(A.ndim(), 1);
+        id_shape[A.ndim() - 2] = rows;
+        id_shape[A.ndim() - 1] = cols;
+        return tenzor::expand(tenzor::reshape(eye2d, id_shape), out_shape).contiguous();
     }
 
     // For negative exponents, invert first then exponentiate. Compute the
@@ -1727,8 +1797,23 @@ auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
         throw std::invalid_argument("linalg::lu_solve: inputs must be at least 2D");
 
     int64_t n = lu_shape[lu_ndim - 1];
+    // LAPACKE_?getrs indexes lu_mat = lu_ptr + b*n*n and reads n*n elements
+    // per batch; a non-square LU factor would read past the buffer.
+    if (lu_shape[lu_ndim - 2] != n) {
+        throw std::invalid_argument(
+            "linalg::lu_solve: LU factor must be square, got " +
+            std::to_string(lu_shape[lu_ndim - 2]) + "x" + std::to_string(n));
+    }
+    if (b_shape[b_ndim - 2] != n) {
+        throw std::invalid_argument(
+            "linalg::lu_solve: B row dimension (" +
+            std::to_string(b_shape[b_ndim - 2]) +
+            ") must match LU order n (" + std::to_string(n) + ")");
+    }
     int64_t nrhs = b_shape[b_ndim - 1];
     int64_t nbatch = batch_size(work_lu);
+    (void)to_lapack_int(n, "n");
+    (void)to_lapack_int(nrhs, "nrhs");
 
     auto piv_cpu = pivots.to(Device::cpu()).contiguous();
 
@@ -2325,6 +2410,30 @@ auto householder_product(const Tensor& input, const Tensor& tau) -> Tensor {
     int64_t k = tau_shape.back();
     int64_t nbatch = batch_size(work);
 
+    // LAPACK ?orgqr requires m >= n >= k >= 0. Out-of-range values read past
+    // the tau / work buffers. Also require the tau batch count to match the
+    // input batch count, since tau_ptr = tau_data + b*k assumes that layout.
+    if (k < 0 || n < k || m < n) {
+        throw std::invalid_argument(
+            "linalg::householder_product: requires m >= n >= k >= 0, got m=" +
+            std::to_string(m) + ", n=" + std::to_string(n) + ", k=" +
+            std::to_string(k));
+    }
+    {
+        int64_t tau_batch = 1;
+        for (int64_t i = 0; i + 1 < static_cast<int64_t>(tau_shape.size()); ++i)
+            tau_batch *= tau_shape[i];
+        if (tau_batch != nbatch) {
+            throw std::invalid_argument(
+                "linalg::householder_product: tau batch count (" +
+                std::to_string(tau_batch) + ") must match input batch count (" +
+                std::to_string(nbatch) + ")");
+        }
+    }
+    (void)to_lapack_int(m, "m");
+    (void)to_lapack_int(n, "n");
+    (void)to_lapack_int(k, "k");
+
     if (work.dtype() == DType::Float32) {
         float* data = work.data<float>();
         float* tau_data = tau_work.data<float>();
@@ -2459,8 +2568,23 @@ auto ldl_solve(const Tensor& LD, const Tensor& pivots,
         throw std::invalid_argument("linalg::ldl_solve: inputs must be at least 2D");
 
     int64_t n = ld_shape[ld_ndim - 1];
+    // LAPACKE_?sytrs indexes ld_mat = ld_ptr + b*n*n and reads n*n elements
+    // per batch; a non-square LD factor would read past the buffer.
+    if (ld_shape[ld_ndim - 2] != n) {
+        throw std::invalid_argument(
+            "linalg::ldl_solve: LD factor must be square, got " +
+            std::to_string(ld_shape[ld_ndim - 2]) + "x" + std::to_string(n));
+    }
+    if (b_shape[b_ndim - 2] != n) {
+        throw std::invalid_argument(
+            "linalg::ldl_solve: B row dimension (" +
+            std::to_string(b_shape[b_ndim - 2]) +
+            ") must match LD order n (" + std::to_string(n) + ")");
+    }
     int64_t nrhs = b_shape[b_ndim - 1];
     int64_t nbatch = batch_size(work_ld);
+    (void)to_lapack_int(n, "n");
+    (void)to_lapack_int(nrhs, "nrhs");
 
     auto piv_cpu = pivots.to(Device::cpu()).contiguous();
 
@@ -2818,6 +2942,34 @@ auto ormqr(const Tensor& input, const Tensor& tau, const Tensor& other,
     int64_t k = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
     int64_t nbatch = batch_size(work_other);
 
+    // LAPACK ?ormqr requires 0 <= k <= order, where order = m for side 'L'
+    // and n_cols for side 'R'. The k reflectors live in input's columns, so
+    // input must have at least k columns. Out-of-range values read past the
+    // input / tau buffers. The tau batch count must also match other's.
+    {
+        int64_t order = left ? m : n_cols;
+        int64_t in_cols = in_shape[in_ndim - 1];
+        if (k < 0 || k > order || in_cols < k) {
+            throw std::invalid_argument(
+                "linalg::ormqr: requires 0 <= k <= " +
+                std::string(left ? "rows(other)" : "cols(other)") +
+                " and cols(input) >= k, got k=" + std::to_string(k) +
+                ", order=" + std::to_string(order) +
+                ", cols(input)=" + std::to_string(in_cols));
+        }
+        int64_t tau_batch = 1;
+        auto ts = tau.shape();
+        for (int64_t i = 0; i + 1 < static_cast<int64_t>(ts.size()); ++i)
+            tau_batch *= ts[i];
+        if (tau_batch != nbatch) {
+            throw std::invalid_argument(
+                "linalg::ormqr: tau batch count (" + std::to_string(tau_batch) +
+                ") must match other batch count (" + std::to_string(nbatch) + ")");
+        }
+    }
+    (void)to_lapack_int(m, "m");
+    (void)to_lapack_int(n_cols, "n");
+    (void)to_lapack_int(k, "k");
     char side = left ? 'L' : 'R';
     char trans = transpose ? 'T' : 'N';
 

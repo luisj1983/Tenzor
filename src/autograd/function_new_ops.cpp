@@ -4553,13 +4553,16 @@ auto DeformableConv2dBackward::backward(std::vector<Tensor> grad_outputs)
         dbias = db_out[0];
     }
 
-    // Pack outputs in the input order.
+    // Pack outputs in the forward input order: input, offset, weight,
+    // [bias], [mask] — bias BEFORE mask. The forward consumes inputs in this
+    // order, so the returned grads must match positionally or the engine zips
+    // dmask onto the bias leaf and dbias onto the mask leaf.
     std::vector<Tensor> grads;
     grads.push_back(std::move(dinput));
     grads.push_back(std::move(doffset));
     grads.push_back(std::move(dweight));
-    if (use_mask_) grads.push_back(std::move(dmask));
     if (has_bias_) grads.push_back(std::move(dbias));
+    if (use_mask_) grads.push_back(std::move(dmask));
     return grads;
 }
 

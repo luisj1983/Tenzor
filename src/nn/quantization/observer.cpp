@@ -258,10 +258,24 @@ auto HistogramObserver::update_histogram(const Tensor& tensor) -> void {
         min_val_ = tenzor::min(tensor_f32).to(Device::cpu()).item<float>();
         max_val_ = tenzor::max(tensor_f32).to(Device::cpu()).item<float>();
 
-        // Expand range slightly to avoid edge cases
+        // Expand range slightly to avoid edge cases.
         float range = max_val_ - min_val_;
-        min_val_ -= range * 0.01f;
-        max_val_ += range * 0.01f;
+        if (range > 0.0f) {
+            min_val_ -= range * 0.01f;
+            max_val_ += range * 0.01f;
+        } else {
+            // Constant first tensor (max == min): a 1% relative widening is a
+            // no-op, leaving range == 0 -> bin_width == 0 so every subsequent
+            // value collapses into bin 0, and the later expansion path only
+            // triggers on strictly out-of-range values, so equal-valued
+            // follow-up tensors never recover. Widen by an absolute epsilon
+            // (scaled to the magnitude of the constant) so the histogram has a
+            // usable, non-degenerate range from the first update onward. This
+            // mirrors the EPSILON handling in compute_quantization_params.
+            const float eps = std::max(1e-8f, std::fabs(max_val_) * 1e-5f);
+            min_val_ -= eps;
+            max_val_ += eps;
+        }
     }
 
     // Transfer to CPU for histogram binning (per-element access required)

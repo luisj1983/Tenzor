@@ -316,10 +316,17 @@ auto jvp_erfc(const DualTensor& x) -> DualTensor {
 
 auto jvp_clamp(const DualTensor& x, double min_val, double max_val) -> DualTensor {
     auto primal = tenzor::clamp(x.primal(), min_val, max_val);
-    // Gradient passes through where min < x < max, zero at boundaries
-    auto above_min = tenzor::gt(x.primal(), tenzor::mul(tenzor::ones_like(x.primal()), min_val));
-    auto below_max = tenzor::lt(x.primal(), tenzor::mul(tenzor::ones_like(x.primal()), max_val));
-    auto mask = tenzor::mul(above_min, below_max);
+    // INCLUSIVE boundary mask, mirroring reverse-mode ClampBackward exactly so
+    // forward-mode and reverse-mode AD agree at x == min and x == max:
+    //     mask = 1 - |sign(x - clamp(x, min, max))|
+    // which is 1 in the interior AND at the exact boundary (sign(0)==0), 0
+    // outside. The previous strict gt/lt mask zeroed the tangent at points
+    // sitting exactly on a clamp bound (e.g. clamp_min(0) on integer-valued
+    // data), diverging from ClampBackward's pass-through there.
+    auto clamped   = tenzor::clamp(x.primal(), min_val, max_val);
+    auto diff      = tenzor::sub(x.primal(), clamped);
+    auto mask      = tenzor::sub(tenzor::ones_like(x.primal()),
+                                 tenzor::abs(tenzor::sign(diff)));
     auto tangent = tenzor::mul(x.tangent(), mask);
     return DualTensor(std::move(primal), std::move(tangent));
 }

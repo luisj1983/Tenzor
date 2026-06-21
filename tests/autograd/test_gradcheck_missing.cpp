@@ -510,6 +510,24 @@ TEST_P(GradCheckMissingTest, CumProd) {
         << "cumprod gradcheck failed on " << device.to_string();
 }
 
+TEST_P(GradCheckMissingTest, CumProdMultipleZeros) {
+    // Regression: the old flip/cumsum/flip-over-input closed form was only
+    // correct with ≤1 zero per cumprod run; with ≥2 exact zeros the positions
+    // between/after the zeros had a wrong (dropped) analytic gradient. The
+    // exact prefix-product-excluding-self backward must gradcheck at tight
+    // Float64 tolerance even with multiple zeros in a run.
+    auto x_t = tenzor::zeros({2, 6}, DType::Float64, Device::cpu());
+    double* xp = x_t.data<double>();
+    // Run 0: two zeros at positions 1 and 3.
+    xp[0] = 1.5; xp[1] = 0.0; xp[2] = 2.0; xp[3] = 0.0; xp[4] = 3.0; xp[5] = 0.5;
+    // Run 1: three zeros (positions 0, 2, 5).
+    xp[6] = 0.0; xp[7] = 1.2; xp[8] = 0.0; xp[9] = 0.8; xp[10] = 1.1; xp[11] = 0.0;
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable { return tenzor::cumprod(v, /*dim=*/1); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-6, 1e-6, 1e-6))
+        << "cumprod multi-zero gradcheck failed on " << device.to_string();
+}
+
 TEST_P(GradCheckMissingTest, MaxAxis) {
     // max with axis — backward scatters to argmax positions. Use distinct
     // values so the argmax is unambiguous (no tie-breaking differences).

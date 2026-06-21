@@ -418,11 +418,14 @@ inline void microkernel_scalar(
 ) {
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
-            float sum = 0.0f;
+            // Accumulate the edge/remainder dot product in double so the slow
+            // scalar path does not introduce extra single-precision rounding
+            // relative to the wide-accumulator interior micro-kernels.
+            double sum = 0.0;
             for (int64_t k = 0; k < K; ++k) {
-                sum += A[i * lda + k] * B[k * ldb + j];
+                sum += static_cast<double>(A[i * lda + k]) * static_cast<double>(B[k * ldb + j]);
             }
-            C[i * ldc + j] += alpha * sum;
+            C[i * ldc + j] += alpha * static_cast<float>(sum);
         }
     }
 }
@@ -455,11 +458,13 @@ inline void gemm_optimized(
     float alpha = 1.0f,
     float beta = 0.0f
 ) {
-    // Handle beta scaling
+    // Handle beta scaling. Compute the element count as size_t so the byte
+    // count passed to memset cannot wrap for very large M*N.
+    const size_t total = static_cast<size_t>(M) * static_cast<size_t>(N);
     if (beta == 0.0f) {
-        std::memset(C, 0, M * N * sizeof(float));
+        std::memset(C, 0, total * sizeof(float));
     } else if (beta != 1.0f) {
-        for (int64_t i = 0; i < M * N; ++i) {
+        for (size_t i = 0; i < total; ++i) {
             C[i] *= beta;
         }
     }
@@ -468,11 +473,13 @@ inline void gemm_optimized(
     if (M * N < 256) {
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
-                float sum = 0.0f;
+                // Match the edge micro-kernel: accumulate in double for the
+                // small/scalar path so rounding is consistent across regions.
+                double sum = 0.0;
                 for (int64_t k = 0; k < K; ++k) {
-                    sum += A[i * K + k] * B[k * N + j];
+                    sum += static_cast<double>(A[i * K + k]) * static_cast<double>(B[k * N + j]);
                 }
-                C[i * N + j] += alpha * sum;
+                C[i * N + j] += alpha * static_cast<float>(sum);
             }
         }
         return;
@@ -616,11 +623,11 @@ inline void gemm_optimized(
 
                 for (int64_t i = ii; i < i_end; ++i) {
                     for (int64_t j = jj; j < j_end; ++j) {
-                        float sum = 0.0f;
+                        double sum = 0.0;
                         for (int64_t k = kk; k < k_end; ++k) {
-                            sum += A[i * K + k] * B[k * N + j];
+                            sum += static_cast<double>(A[i * K + k]) * static_cast<double>(B[k * N + j]);
                         }
-                        C[i * N + j] += alpha * sum;
+                        C[i * N + j] += alpha * static_cast<float>(sum);
                     }
                 }
             }
@@ -645,7 +652,7 @@ inline void gemm_transB_optimized(
     constexpr int64_t TRANSPOSE_THRESHOLD = 64;
     if (M > TRANSPOSE_THRESHOLD && N > TRANSPOSE_THRESHOLD && K > TRANSPOSE_THRESHOLD) {
         // Transpose B (N x K) -> B_T (K x N)
-        std::vector<float> B_T(static_cast<size_t>(K * N));
+        std::vector<float> B_T(static_cast<size_t>(K) * static_cast<size_t>(N));
         #pragma omp parallel for collapse(2) if(K * N > OMP_THRESHOLD_GEMM)
         for (int64_t k = 0; k < K; ++k) {
             for (int64_t n = 0; n < N; ++n) {
@@ -697,11 +704,11 @@ inline void gemm_transB_optimized(
     #pragma omp parallel for collapse(2) if(M * N > OMP_THRESHOLD_GEMM)
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
-            float sum = 0.0f;
+            double sum = 0.0;
             for (int64_t k = 0; k < K; ++k) {
-                sum += A[i * K + k] * B[j * K + k];
+                sum += static_cast<double>(A[i * K + k]) * static_cast<double>(B[j * K + k]);
             }
-            C[i * N + j] = sum;
+            C[i * N + j] = static_cast<float>(sum);
         }
     }
 #endif

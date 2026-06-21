@@ -113,15 +113,60 @@ auto ctc_loss_forward_kernel(
         return {loss_out, grad_out};
     }
 
-    const float* lp_data = static_cast<const float*>(log_probs.data_ptr());
-    const int32_t* tgt_data = static_cast<const int32_t*>(targets.data_ptr());
-    const int32_t* il_data = static_cast<const int32_t*>(input_lengths.data_ptr());
-    const int32_t* tl_data = static_cast<const int32_t*>(target_lengths.data_ptr());
+    // The kernel reads log_probs/targets/lengths via shape-derived flat offsets,
+    // so a non-contiguous view (e.g. a transposed (N,T,C)->(T,N,C) log_probs, a
+    // common way to produce CTC inputs) would misread. Materialize contiguous,
+    // matching the CPU reference which calls .contiguous() on every input.
+    Tensor log_probs_c = log_probs.is_contiguous() ? log_probs : log_probs.contiguous();
+    Tensor targets_c = targets.is_contiguous() ? targets : targets.contiguous();
+    Tensor input_lengths_c = input_lengths.is_contiguous() ? input_lengths : input_lengths.contiguous();
+    Tensor target_lengths_c = target_lengths.is_contiguous() ? target_lengths : target_lengths.contiguous();
+
+    const float* lp_data = static_cast<const float*>(log_probs_c.data_ptr());
+    const int32_t* tgt_data = static_cast<const int32_t*>(targets_c.data_ptr());
+    const int32_t* il_data = static_cast<const int32_t*>(input_lengths_c.data_ptr());
+    const int32_t* tl_data = static_cast<const int32_t*>(target_lengths_c.data_ptr());
     float* alpha_data = static_cast<float*>(alpha_buf.data_ptr());
     float* beta_data = static_cast<float*>(beta_buf.data_ptr());
     float* post_data = static_cast<float*>(post_scratch.data_ptr());
     float* loss_data = static_cast<float*>(loss_out.data_ptr());
     float* grad_data = static_cast<float*>(grad_out.data_ptr());
+
+    // Validate blank and target labels host-side before they are used (unguarded)
+    // as channel indices into lp_data/grad_data on the device. An out-of-range
+    // blank or target label would otherwise index out of bounds (heap corruption).
+    // Mirrors the CPU reference (cpu/kernels/ctc.cpp).
+    if (blank < 0 || blank >= C) {
+        throw std::out_of_range("ctc_loss: blank index " + std::to_string(blank) +
+            " out of range [0, " + std::to_string(C) + ")");
+    }
+    {
+        // Pull targets + target_lengths to host (USM-shared but use an explicit
+        // copy so this is correct regardless of allocation kind) and check that
+        // every active label is in [0, C).
+        const int64_t tgt_numel = targets_c.numel();
+        std::vector<int32_t> host_tgt(static_cast<size_t>(tgt_numel));
+        std::vector<int32_t> host_tl(static_cast<size_t>(N));
+        if (tgt_numel > 0) {
+            queue.memcpy(host_tgt.data(), tgt_data,
+                         static_cast<size_t>(tgt_numel) * sizeof(int32_t)).wait();
+        }
+        queue.memcpy(host_tl.data(), tl_data,
+                     static_cast<size_t>(N) * sizeof(int32_t)).wait();
+        const bool targets_2d = (targets_c.shape().size() == 2);
+        for (int64_t n = 0; n < N; ++n) {
+            int64_t len = host_tl[n];
+            for (int64_t s = 0; s < len; ++s) {
+                int64_t off = targets_2d ? (n * S_max + s) : s;  // 2D padded vs 1D
+                if (off < 0 || off >= tgt_numel) continue;
+                int32_t lbl = host_tgt[off];
+                if (lbl < 0 || lbl >= C) {
+                    throw std::out_of_range("ctc_loss: target label " + std::to_string(lbl) +
+                        " out of range [0, " + std::to_string(C) + ")");
+                }
+            }
+        }
+    }
 
     constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
     const int local_size = CTC_THREADS_PER_BLOCK;
@@ -270,14 +315,17 @@ auto ctc_loss_forward_kernel(
             }
             item.barrier(sycl::access::fence_space::global_space);
 
-            if (tid == 0) {
-                for (int64_t t = 0; t < T_n; ++t) {
-                    for (int64_t s = 0; s < L_n; ++s) {
-                        int32_t c = ext_label(s);
-                        float posterior = alpha[t * L_max_c + s] + beta[t * L_max_c + s];
-                        float& slot = post_n[t * C_c + c];
-                        slot = ctc_log_add(slot, posterior);
-                    }
+            // Parallelize over t across threads: each thread owns a disjoint set
+            // of t rows, so for a fixed t the ctc_log_add into post_n[t,c] is
+            // single-owner even when multiple s map to the same extended label c
+            // (no cross-thread race). This replaces the previous tid==0 serial
+            // loop that idled the rest of the work-group.
+            for (int64_t t = tid; t < T_n; t += nthreads) {
+                for (int64_t s = 0; s < L_n; ++s) {
+                    int32_t c = ext_label(s);
+                    float posterior = alpha[t * L_max_c + s] + beta[t * L_max_c + s];
+                    float& slot = post_n[t * C_c + c];
+                    slot = ctc_log_add(slot, posterior);
                 }
             }
             item.barrier(sycl::access::fence_space::global_space);

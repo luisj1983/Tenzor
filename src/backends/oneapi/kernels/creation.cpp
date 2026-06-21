@@ -86,10 +86,12 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             // Generate random numbers into temp buffer
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
 
-            // Convert from float32 to float16
+            // Convert from float32 to float16. Wait so the function-local
+            // temp_buffer is not freed while this conversion kernel still reads
+            // temp_ptr, and so the host sees the written output.
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 ptr[i] = sycl::half(temp_ptr[i]);
-            });
+            }).wait();
         }
         else if (dtype == DType::BFloat16) {
             // Generate Float32 then convert to BFloat16
@@ -102,11 +104,12 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             ::oneapi::mkl::rng::gaussian<float> distribution(0.0f, 1.0f);
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
 
+            // Wait so temp_buffer outlives the conversion kernel reading temp_ptr.
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 uint32_t bits;
                 __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
                 ptr[i] = static_cast<uint16_t>(bits >> 16);
-            });
+            }).wait();
         }
         else {
             throw std::runtime_error("Unsupported dtype for randn (oneMKL path)");
@@ -270,9 +273,11 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
 
+            // Wait so the function-local temp_buffer is not freed while this
+            // conversion kernel still reads temp_ptr, and the host sees output.
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 ptr[i] = sycl::half(temp_ptr[i]);
-            });
+            }).wait();
         }
         else if (dtype == DType::BFloat16) {
             // Generate Float32 then convert to BFloat16 (truncate upper 16 bits)
@@ -285,12 +290,13 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
 
+            // Wait so temp_buffer outlives the conversion kernel reading temp_ptr.
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 // BFloat16: upper 16 bits of float32
                 uint32_t bits;
                 __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
                 ptr[i] = static_cast<uint16_t>(bits >> 16);
-            });
+            }).wait();
         }
         else {
             throw std::runtime_error("Unsupported dtype for rand (oneMKL path)");
@@ -462,6 +468,8 @@ auto arange_kernel(double start, double end, double step, DType dtype, Device de
         throw std::runtime_error("Unsupported dtype for arange kernel");
     }
 
+    // Drain the enqueued fill kernel before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -613,6 +621,9 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
         throw std::runtime_error("Unsupported dtype for linspace kernel");
     }
 
+    // Drain the enqueued fill kernel before the host reads the USM-shared output.
+    // (The steps==1 fast path already waits via memcpy().wait() and returns early.)
+    queue.wait_and_throw();
     return output;
 }
 
@@ -715,6 +726,8 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& q
         throw std::runtime_error("Unsupported dtype for eye kernel");
     }
 
+    // Drain the memset + diagonal fill before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -765,6 +778,8 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
         throw std::runtime_error("randint_kernel: only Int32 and Int64 supported");
     }
 
+    // Drain the enqueued fill kernel before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 

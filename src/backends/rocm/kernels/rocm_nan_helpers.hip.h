@@ -67,6 +67,27 @@ __device__ __host__ inline bool is_nan_bits(hip_bfloat16 x) {
 }
 
 // ============================================================================
+// Typed quiet-NaN constructors. Build the qNaN directly in T's native bit
+// width instead of casting a float32 NaN through the (distrusted) float->T
+// conversion, so variance-undefined cells come back as a real NaN for every
+// dtype rather than possibly 0/Inf under the conversion quirk above.
+// ============================================================================
+template<typename T> __device__ __host__ inline T make_qnan();
+
+template<> __device__ __host__ inline float make_qnan<float>() {
+    union { uint32_t u; float f; } pun; pun.u = 0x7FC00000u; return pun.f;
+}
+template<> __device__ __host__ inline double make_qnan<double>() {
+    union { uint64_t u; double d; } pun; pun.u = 0x7FF8000000000000ull; return pun.d;
+}
+template<> __device__ __host__ inline __half make_qnan<__half>() {
+    union { uint16_t u; __half h; } pun; pun.u = 0x7E00u; return pun.h;  // qNaN
+}
+template<> __device__ __host__ inline hip_bfloat16 make_qnan<hip_bfloat16>() {
+    union { uint16_t u; hip_bfloat16 b; } pun; pun.u = 0x7FC0u; return pun.b;  // qNaN
+}
+
+// ============================================================================
 // E.2: NaN-preserving half / bfloat16 conversions.
 //
 // HIP's __float2half / __half2float / __float2bfloat16 / __bfloat162float

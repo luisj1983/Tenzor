@@ -28,7 +28,11 @@ using namespace tenzor::testing;
 
 class SkipPolicyMetaTest : public ::testing::Test {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    static void SetUpTestSuite() {
+        // Use the thread-safe one-shot helper, never tenzor::initialize()
+        // directly (see backend_test_fixture.hpp / multi_backend_dtype_fixture).
+        ::tenzor::testing::EnsureInitialized();
+    }
 
     // RAII: snapshot/restore an env var so individual tests don't pollute
     // each other. setenv("", overwrite=1) or unsetenv leaves a known-empty
@@ -212,7 +216,8 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     try {
         if (!::testing::GTEST_FLAG(list_tests)) {
-            tenzor::initialize();
+            // Thread-safe one-shot bring-up; never tenzor::initialize() directly.
+            ::tenzor::testing::EnsureInitialized();
         }
     } catch (const std::exception& e) {
         std::cerr << "Failed to initialize Tenzor: " << e.what() << std::endl;

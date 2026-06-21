@@ -366,8 +366,11 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
     }
 
     // Float32 path (Float16/BFloat16 promote losslessly per element).
-    Tensor input_f32 = input.to(DType::Float32);
-    Tensor grid_f32  = grid.to(DType::Float32);
+    // .contiguous() is required: Tensor::to(dtype) returns *this unchanged when
+    // already Float32, so a permuted/sliced Float32 input/grid would be read
+    // with dense NCHW offsets and pick the wrong elements.
+    Tensor input_f32 = input.to(DType::Float32).contiguous();
+    Tensor grid_f32  = grid.to(DType::Float32).contiguous();
     Tensor output_f32({N, C, H_out, W_out}, DType::Float32, input.device());
     launch_grid_sample_forward<float>(mode, grid_size, block_size, stream,
         input_f32.data<float>(), grid_f32.data<float>(), output_f32.data<float>(),
@@ -740,9 +743,12 @@ auto grid_sample_backward_kernel_host(const Tensor& grad_output,
 
     DType in_dt = input.dtype();
     DType gr_dt = grid.dtype();
-    Tensor input_f32 = input.to(DType::Float32);
-    Tensor grid_f32  = grid.to(DType::Float32);
-    Tensor go_f32    = grad_output.to(DType::Float32);
+    // .contiguous() is required: to(Float32) returns *this when already Float32,
+    // so a non-contiguous input/grid/grad_output would be misread by the dense
+    // NCHW-indexed kernel (matches the FP64 branch above).
+    Tensor input_f32 = input.to(DType::Float32).contiguous();
+    Tensor grid_f32  = grid.to(DType::Float32).contiguous();
+    Tensor go_f32    = grad_output.to(DType::Float32).contiguous();
     Tensor gi_f32({N, C, H_in, W_in},  DType::Float32, input.device());
     Tensor gg_f32({N, H_out, W_out, 2}, DType::Float32, grid.device());
     HIP_CHECK(hipMemsetAsync(gi_f32.data_ptr(), 0, gi_f32.numel() * sizeof(float), stream));

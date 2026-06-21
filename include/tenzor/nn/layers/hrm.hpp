@@ -384,7 +384,10 @@ public:
      * @brief Compute Q-values for halt and continue actions
      *
      * @param state Current H-module state (batch, seq_len, d_model)
-     * @return Pair of (Q_halt, Q_continue) tensors, each (batch, seq_len)
+     * @return Pair of (Q_halt, Q_continue) tensors, each (batch, 1). The
+     *         sequence dimension is reduced by pool_state(), and the Q-head's
+     *         output is split into two single-column slices, so the result is
+     *         per-batch (NOT per-timestep). Values are sigmoid-bounded to [0,1].
      */
     auto compute_q_values(const Variable& state) -> std::pair<Variable, Variable>;
 
@@ -637,11 +640,6 @@ private:
      */
     auto run_h_cycle(Variable& h_state, Variable& l_state,
                      const Tensor& mask) -> Variable;
-
-    /**
-     * @brief Apply output activation (stablemax or softmax)
-     */
-    auto apply_output_activation(const Variable& logits) -> Variable;
 
     /**
      * @brief Compute participation ratio for analysis

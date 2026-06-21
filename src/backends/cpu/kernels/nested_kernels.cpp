@@ -613,10 +613,14 @@ auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets,
     auto padded = tenzor::full({B, max_len, D}, padding_value,
                                 values.dtype(), values.device());
 
-    if (values.dtype() == DType::Float32) {
-        const auto* val_ptr = values.data<float>();
-        auto* pad_ptr = padded.data<float>();
-
+    // This is pure data movement: each (segment, position, feature) element is
+    // copied verbatim. Dispatch on the element width rather than the semantic
+    // dtype so Float16/BFloat16 (16-bit) are handled the same as Float32/
+    // Float64 without per-dtype duplication, matching the sibling nested
+    // kernels' half-precision support.
+    auto copy_segments = [&]<typename Elem>() {
+        const auto* val_ptr = reinterpret_cast<const Elem*>(values.data<int8_t>());
+        auto* pad_ptr = reinterpret_cast<Elem*>(padded.data<int8_t>());
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t len = off[b + 1] - start;
@@ -629,25 +633,22 @@ auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets,
                 }
             }
         }
-    } else if (values.dtype() == DType::Float64) {
-        const auto* val_ptr = values.data<double>();
-        auto* pad_ptr = padded.data<double>();
+    };
 
-        for (int64_t b = 0; b < B; ++b) {
-            int64_t start = off[b];
-            int64_t len = off[b + 1] - start;
-            // Truncate to the padded width so a segment longer than max_len
-            // cannot write past the row (matches the CUDA kernel's behavior).
-            int64_t copy = len < max_len ? len : max_len;
-            for (int64_t pos = 0; pos < copy; ++pos) {
-                for (int64_t d = 0; d < D; ++d) {
-                    pad_ptr[(b * max_len + pos) * D + d] = val_ptr[(start + pos) * D + d];
-                }
-            }
-        }
-    } else {
-        throw std::runtime_error(
-            "nested_to_padded_kernel: unsupported dtype");
+    switch (values.dtype()) {
+        case DType::Float64:
+            copy_segments.template operator()<uint64_t>();
+            break;
+        case DType::Float32:
+            copy_segments.template operator()<uint32_t>();
+            break;
+        case DType::Float16:
+        case DType::BFloat16:
+            copy_segments.template operator()<uint16_t>();
+            break;
+        default:
+            throw std::runtime_error(
+                "nested_to_padded_kernel: unsupported dtype");
     }
 
     return padded;
@@ -670,10 +671,12 @@ auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> T
 
     auto values = tenzor::empty({total_len, D}, padded.dtype(), padded.device());
 
-    if (padded.dtype() == DType::Float32) {
-        const auto* pad_ptr = padded.data<float>();
-        auto* val_ptr = values.data<float>();
-
+    // Pure data movement: dispatch on element width so Float16/BFloat16 (16-bit)
+    // are copied like Float32/Float64 without per-dtype duplication, matching the
+    // sibling nested kernels' half-precision support.
+    auto copy_segments = [&]<typename Elem>() {
+        const auto* pad_ptr = reinterpret_cast<const Elem*>(padded.data<int8_t>());
+        auto* val_ptr = reinterpret_cast<Elem*>(values.data<int8_t>());
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t len = off[b + 1] - start;
@@ -686,25 +689,22 @@ auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> T
                 }
             }
         }
-    } else if (padded.dtype() == DType::Float64) {
-        const auto* pad_ptr = padded.data<double>();
-        auto* val_ptr = values.data<double>();
+    };
 
-        for (int64_t b = 0; b < B; ++b) {
-            int64_t start = off[b];
-            int64_t len = off[b + 1] - start;
-            // Truncate to the padded width so a segment longer than max_len
-            // cannot write past the row (matches the CUDA kernel's behavior).
-            int64_t copy = len < max_len ? len : max_len;
-            for (int64_t pos = 0; pos < copy; ++pos) {
-                for (int64_t d = 0; d < D; ++d) {
-                    val_ptr[(start + pos) * D + d] = pad_ptr[(b * max_len + pos) * D + d];
-                }
-            }
-        }
-    } else {
-        throw std::runtime_error(
-            "nested_from_padded_kernel: unsupported dtype");
+    switch (padded.dtype()) {
+        case DType::Float64:
+            copy_segments.template operator()<uint64_t>();
+            break;
+        case DType::Float32:
+            copy_segments.template operator()<uint32_t>();
+            break;
+        case DType::Float16:
+        case DType::BFloat16:
+            copy_segments.template operator()<uint16_t>();
+            break;
+        default:
+            throw std::runtime_error(
+                "nested_from_padded_kernel: unsupported dtype");
     }
 
     return values;
@@ -732,18 +732,28 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
                                        const Tensor& attn_out,
                                        const Tensor& q_offsets, const Tensor& kv_offsets,
                                        float scale, bool causal) -> std::vector<Tensor> {
-    // The forward (nested_attention_kernel) supports F32/F64/F16/BF16; this backward
-    // kernel computes in Float32. Widen any non-F32 dtype, compute, and narrow each
-    // gradient back so forward/backward dtype support match (no asymmetric throw).
-    if (Q.dtype() != DType::Float32) {
-        const DType orig = Q.dtype();
+    // The forward (nested_attention_kernel) supports F32/F64/F16/BF16. This
+    // backward computes natively in Float32 and Float64; half precisions
+    // (Float16/BFloat16) widen to Float32, compute, and narrow each gradient
+    // back so forward/backward dtype support match (no asymmetric throw). A
+    // native Float64 path avoids the precision loss of round-tripping double
+    // inputs through Float32, which would otherwise spuriously fail tight
+    // gradcheck tolerances.
+    const DType dt = Q.dtype();
+    if (dt == DType::Float16 || dt == DType::BFloat16) {
         auto grads = nested_attention_backward_kernel(
             grad_out.to(DType::Float32), Q.to(DType::Float32), K.to(DType::Float32),
             V.to(DType::Float32), attn_out.to(DType::Float32),
             q_offsets, kv_offsets, scale, causal);
-        for (auto& g : grads) { g = g.to(orig); }
+        for (auto& g : grads) { g = g.to(dt); }
         return grads;
     }
+    if (dt != DType::Float32 && dt != DType::Float64) {
+        throw std::runtime_error(
+            "nested_attention_backward_kernel: only Float32/Float64 (and "
+            "Float16/BFloat16 via widening) supported");
+    }
+
     auto q_off_cpu = (q_offsets.device().type != Device::Type::CPU)
         ? q_offsets.to(Device::cpu()) : q_offsets;
     auto kv_off_cpu = (kv_offsets.device().type != Device::Type::CPU)
@@ -760,15 +770,15 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
     auto grad_V = tenzor::zeros(std::vector<int64_t>(V.shape().begin(), V.shape().end()),
                                  V.dtype(), V.device());
 
-    if (Q.dtype() == DType::Float32) {
-        const float* q_ptr = Q.data<float>();
-        const float* k_ptr = K.data<float>();
-        const float* v_ptr = V.data<float>();
-        const float* do_ptr = grad_out.data<float>();
-        const float* o_ptr = attn_out.data<float>();
-        float* gq_ptr = grad_Q.data<float>();
-        float* gk_ptr = grad_K.data<float>();
-        float* gv_ptr = grad_V.data<float>();
+    auto run = [&]<typename T>() {
+        const T* q_ptr = Q.data<T>();
+        const T* k_ptr = K.data<T>();
+        const T* v_ptr = V.data<T>();
+        const T* do_ptr = grad_out.data<T>();
+        T* gq_ptr = grad_Q.data<T>();
+        T* gk_ptr = grad_K.data<T>();
+        T* gv_ptr = grad_V.data<T>();
+        const T scale_t = static_cast<T>(scale);
 
         #ifdef _OPENMP
         #pragma omp parallel for if(B > 2) schedule(dynamic)
@@ -781,56 +791,56 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
             if (Lq <= 0 || Lkv <= 0) continue;
 
             // Allocate workspace for attention weights and scores
-            std::vector<float> attn_weights(static_cast<size_t>(Lq * Lkv), 0.0f);
+            std::vector<T> attn_weights(static_cast<size_t>(Lq * Lkv), T(0));
 
             // Step 1: Recompute attention weights (scores -> softmax)
             for (int64_t qi = 0; qi < Lq; ++qi) {
-                const float* q_row = q_ptr + (qs + qi) * hd;
-                float max_score = -std::numeric_limits<float>::infinity();
+                const T* q_row = q_ptr + (qs + qi) * hd;
+                T max_score = -std::numeric_limits<T>::infinity();
 
                 // Compute scores
                 for (int64_t ki = 0; ki < Lkv; ++ki) {
                     if (causal && ki > qi) {
                         attn_weights[static_cast<size_t>(qi * Lkv + ki)] =
-                            -std::numeric_limits<float>::infinity();
+                            -std::numeric_limits<T>::infinity();
                         continue;
                     }
-                    const float* k_row = k_ptr + (kvs + ki) * hd;
-                    float score = 0.0f;
+                    const T* k_row = k_ptr + (kvs + ki) * hd;
+                    T score = T(0);
                     for (int64_t d = 0; d < hd; ++d) {
                         score += q_row[d] * k_row[d];
                     }
-                    score *= scale;
+                    score *= scale_t;
                     attn_weights[static_cast<size_t>(qi * Lkv + ki)] = score;
                     max_score = std::max(max_score, score);
                 }
 
                 // Softmax
-                float sum_exp = 0.0f;
+                T sum_exp = T(0);
                 int64_t ki_end = causal ? std::min(Lkv, qi + 1) : Lkv;
                 for (int64_t ki = 0; ki < ki_end; ++ki) {
-                    float e = std::exp(attn_weights[static_cast<size_t>(qi * Lkv + ki)] - max_score);
+                    T e = std::exp(attn_weights[static_cast<size_t>(qi * Lkv + ki)] - max_score);
                     attn_weights[static_cast<size_t>(qi * Lkv + ki)] = e;
                     sum_exp += e;
                 }
-                float inv_sum = (sum_exp > 0.0f) ? 1.0f / sum_exp : 0.0f;
+                T inv_sum = (sum_exp > T(0)) ? T(1) / sum_exp : T(0);
                 for (int64_t ki = 0; ki < ki_end; ++ki) {
                     attn_weights[static_cast<size_t>(qi * Lkv + ki)] *= inv_sum;
                 }
                 // Zero out masked positions
                 for (int64_t ki = ki_end; ki < Lkv; ++ki) {
-                    attn_weights[static_cast<size_t>(qi * Lkv + ki)] = 0.0f;
+                    attn_weights[static_cast<size_t>(qi * Lkv + ki)] = T(0);
                 }
             }
 
             // Step 2: grad_V = attn_weights^T @ grad_out
             // grad_V[ki, d] += sum_qi attn_weights[qi, ki] * grad_out[qi, d]
             for (int64_t ki = 0; ki < Lkv; ++ki) {
-                float* gv_row = gv_ptr + (kvs + ki) * hd;
+                T* gv_row = gv_ptr + (kvs + ki) * hd;
                 for (int64_t qi = 0; qi < Lq; ++qi) {
-                    float w = attn_weights[static_cast<size_t>(qi * Lkv + ki)];
-                    if (w == 0.0f) continue;
-                    const float* do_row = do_ptr + (qs + qi) * hd;
+                    T w = attn_weights[static_cast<size_t>(qi * Lkv + ki)];
+                    if (w == T(0)) continue;
+                    const T* do_row = do_ptr + (qs + qi) * hd;
                     for (int64_t d = 0; d < hd; ++d) {
                         gv_row[d] += w * do_row[d];
                     }
@@ -838,12 +848,12 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
             }
 
             // Step 3: d_attn = grad_out @ V^T  [Lq, Lkv]
-            std::vector<float> d_attn(static_cast<size_t>(Lq * Lkv), 0.0f);
+            std::vector<T> d_attn(static_cast<size_t>(Lq * Lkv), T(0));
             for (int64_t qi = 0; qi < Lq; ++qi) {
-                const float* do_row = do_ptr + (qs + qi) * hd;
+                const T* do_row = do_ptr + (qs + qi) * hd;
                 for (int64_t ki = 0; ki < Lkv; ++ki) {
-                    const float* v_row = v_ptr + (kvs + ki) * hd;
-                    float dot = 0.0f;
+                    const T* v_row = v_ptr + (kvs + ki) * hd;
+                    T dot = T(0);
                     for (int64_t d = 0; d < hd; ++d) {
                         dot += do_row[d] * v_row[d];
                     }
@@ -853,9 +863,9 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
 
             // Step 4: Softmax backward -> d_scores
             // d_scores[qi, ki] = attn_weights[qi, ki] * (d_attn[qi, ki] - sum_ki(d_attn[qi, ki] * attn_weights[qi, ki]))
-            std::vector<float> d_scores(static_cast<size_t>(Lq * Lkv), 0.0f);
+            std::vector<T> d_scores(static_cast<size_t>(Lq * Lkv), T(0));
             for (int64_t qi = 0; qi < Lq; ++qi) {
-                float dot_sum = 0.0f;
+                T dot_sum = T(0);
                 for (int64_t ki = 0; ki < Lkv; ++ki) {
                     dot_sum += d_attn[static_cast<size_t>(qi * Lkv + ki)] *
                                attn_weights[static_cast<size_t>(qi * Lkv + ki)];
@@ -863,17 +873,17 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
                 for (int64_t ki = 0; ki < Lkv; ++ki) {
                     d_scores[static_cast<size_t>(qi * Lkv + ki)] =
                         attn_weights[static_cast<size_t>(qi * Lkv + ki)] *
-                        (d_attn[static_cast<size_t>(qi * Lkv + ki)] - dot_sum) * scale;
+                        (d_attn[static_cast<size_t>(qi * Lkv + ki)] - dot_sum) * scale_t;
                 }
             }
 
             // Step 5: grad_Q = d_scores @ K  [Lq, hd]
             for (int64_t qi = 0; qi < Lq; ++qi) {
-                float* gq_row = gq_ptr + (qs + qi) * hd;
+                T* gq_row = gq_ptr + (qs + qi) * hd;
                 for (int64_t ki = 0; ki < Lkv; ++ki) {
-                    float ds = d_scores[static_cast<size_t>(qi * Lkv + ki)];
-                    if (ds == 0.0f) continue;
-                    const float* k_row = k_ptr + (kvs + ki) * hd;
+                    T ds = d_scores[static_cast<size_t>(qi * Lkv + ki)];
+                    if (ds == T(0)) continue;
+                    const T* k_row = k_ptr + (kvs + ki) * hd;
                     for (int64_t d = 0; d < hd; ++d) {
                         gq_row[d] += ds * k_row[d];
                     }
@@ -882,20 +892,23 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
 
             // Step 6: grad_K = d_scores^T @ Q  [Lkv, hd]
             for (int64_t ki = 0; ki < Lkv; ++ki) {
-                float* gk_row = gk_ptr + (kvs + ki) * hd;
+                T* gk_row = gk_ptr + (kvs + ki) * hd;
                 for (int64_t qi = 0; qi < Lq; ++qi) {
-                    float ds = d_scores[static_cast<size_t>(qi * Lkv + ki)];
-                    if (ds == 0.0f) continue;
-                    const float* q_row = q_ptr + (qs + qi) * hd;
+                    T ds = d_scores[static_cast<size_t>(qi * Lkv + ki)];
+                    if (ds == T(0)) continue;
+                    const T* q_row = q_ptr + (qs + qi) * hd;
                     for (int64_t d = 0; d < hd; ++d) {
                         gk_row[d] += ds * q_row[d];
                     }
                 }
             }
         }
+    };
+
+    if (dt == DType::Float64) {
+        run.template operator()<double>();
     } else {
-        throw std::runtime_error(
-            "nested_attention_backward_kernel: only Float32 supported");
+        run.template operator()<float>();
     }
 
     return {grad_Q, grad_K, grad_V};

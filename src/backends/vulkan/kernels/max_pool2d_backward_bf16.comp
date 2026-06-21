@@ -1,5 +1,4 @@
 #version 450
-#extension GL_EXT_shader_atomic_float : require
 
 // BF16 utility: unpack two bfloat16 values from a uint32 word
 vec2 unpackBF16x2(uint packed) {
@@ -18,13 +17,16 @@ uint packBF16x2(vec2 v) {
 }
 
 // Max Pooling 2D Backward Pass for BFloat16
-// Gradient flows only to max element, recomputes max indices in shader
-// Uses float32 grad_input buffer for atomic accumulation
+// Gradient flows only to max element, recomputes max indices in shader.
+// grad_input is a PACKED-BF16 buffer (2 bytes/elem). A float32 atomicAdd would
+// write 4 bytes per element index — OOB for the upper half of the tensor and
+// corrupting adjacent packed halves (it also misroutes gradients because index
+// i*4 lands at the wrong element). Accumulate into packed-BF16 via a CAS loop.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed BF16 (N, C, H_out, W_out)
 layout(binding = 1) buffer Input { uint input_data[]; };         // Packed BF16 (N, C, H, W)
-layout(binding = 2) buffer GradInput { float grad_input[]; };    // Float32 for atomicAdd (N, C, H, W)
+layout(binding = 2) buffer GradInput { uint grad_input[]; };     // Packed BF16, CAS-accumulated
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;          // Total output gradient elements (N * C * H_out * W_out)
@@ -56,6 +58,29 @@ float readBF16Input(uint idx) {
     uint packed = input_data[word_idx];
     vec2 pair = unpackBF16x2(packed);
     return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+// Atomically add a BF16 value to a packed BF16 buffer element via a CAS loop on
+// the enclosing uint32 word (no native BF16 atomicAdd). Round-to-nearest-even
+// packing via packBF16x2; only the targeted half is updated.
+void atomicAddBF16(uint flat_idx, float add_val) {
+    uint word_idx = flat_idx >> 1u;
+    uint half_idx = flat_idx & 1u;
+
+    uint old_val = grad_input[word_idx];
+    uint expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        vec2 cur = unpackBF16x2(expected);
+        float current = (half_idx == 0u) ? cur.x : cur.y;
+        float updated = current + add_val;
+        vec2 nv = (half_idx == 0u) ? vec2(updated, cur.y) : vec2(cur.x, updated);
+        uint new_word = packBF16x2(nv);
+        // packBF16x2 rewrites both halves from the unpacked pair, so the
+        // untouched half is preserved exactly; mask is implicit in the pair.
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_word);
+        if (old_val == expected) return;
+    }
 }
 
 void main() {
@@ -123,7 +148,7 @@ void main() {
                       uint(max_h) * params.in_width +
                       uint(max_w);
 
-        // Atomically add gradient (float32 buffer for atomic safety)
-        atomicAdd(grad_input[max_idx], grad_out);
+        // Atomically add gradient into the packed-BF16 buffer via CAS.
+        atomicAddBF16(max_idx, grad_out);
     }
 }

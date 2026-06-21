@@ -9,6 +9,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "cuda_common.cuh"
+#include "cuda_launch_utils.cuh"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cmath>
@@ -84,20 +85,21 @@ __global__ void grid_sample_bilinear_kernel(
     const T* __restrict__ input,
     const T* __restrict__ grid,
     T* __restrict__ output,
-    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in, int64_t H_out, int64_t W_out,
     int padding_mode,  // 0=zeros, 1=border, 2=reflection
     bool align_corners
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * C * H_out * W_out;
-    if (idx >= total) return;
+    int64_t total = N * C * H_out * W_out;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W_out;
-    int h = (idx / W_out) % H_out;
-    int c = (idx / (W_out * H_out)) % C;
-    int n = idx / (C * H_out * W_out);
+    int64_t w = idx % W_out;
+    int64_t h = (idx / W_out) % H_out;
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (C * H_out * W_out);
 
-    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
@@ -117,23 +119,23 @@ __global__ void grid_sample_bilinear_kernel(
         iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
-    int x0, y0;
+    int64_t x0, y0;
     if constexpr (std::is_same_v<T, float>) {
-        x0 = static_cast<int>(floorf(ix));
-        y0 = static_cast<int>(floorf(iy));
+        x0 = static_cast<int64_t>(floorf(ix));
+        y0 = static_cast<int64_t>(floorf(iy));
     } else {
-        x0 = static_cast<int>(floor(ix));
-        y0 = static_cast<int>(floor(iy));
+        x0 = static_cast<int64_t>(floor(ix));
+        y0 = static_cast<int64_t>(floor(iy));
     }
-    int x1 = x0 + 1;
-    int y1 = y0 + 1;
+    int64_t x1 = x0 + 1;
+    int64_t y1 = y0 + 1;
 
     T wx1 = ix - static_cast<T>(x0);
     T wy1 = iy - static_cast<T>(y0);
     T wx0 = T(1) - wx1;
     T wy0 = T(1) - wy1;
 
-    auto safe_get = [&](int y, int x) -> T {
+    auto safe_get = [&](int64_t y, int64_t x) -> T {
         if (y >= 0 && y < H_in && x >= 0 && x < W_in)
             return input[((n * C + c) * H_in + y) * W_in + x];
         return T(0);
@@ -145,10 +147,11 @@ __global__ void grid_sample_bilinear_kernel(
             wy1 * wx1 * safe_get(y1, x1);
 
     output[((n * C + c) * H_out + h) * W_out + w] = val;
+    }
 }
 
 // ============================================================================
-// Bicubic grid_sample kernel — Phase P0 / Fix 7
+// Bicubic grid_sample kernel — Phase P0 / Fix 7 (FA64ANCHOR int64-indexing)
 // ============================================================================
 //
 // 4x4 neighbourhood with Catmull-Rom basis (a = -0.5), matching PyTorch's
@@ -174,20 +177,21 @@ __global__ void grid_sample_bicubic_kernel(
     const T* __restrict__ input,
     const T* __restrict__ grid,
     T* __restrict__ output,
-    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in, int64_t H_out, int64_t W_out,
     int padding_mode,  // 0=zeros, 1=border, 2=reflection
     bool align_corners
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * C * H_out * W_out;
-    if (idx >= total) return;
+    int64_t total = N * C * H_out * W_out;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W_out;
-    int h = (idx / W_out) % H_out;
-    int c = (idx / (W_out * H_out)) % C;
-    int n = idx / (C * H_out * W_out);
+    int64_t w = idx % W_out;
+    int64_t h = (idx / W_out) % H_out;
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (C * H_out * W_out);
 
-    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
@@ -207,13 +211,13 @@ __global__ void grid_sample_bicubic_kernel(
         iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
-    int ix_floor, iy_floor;
+    int64_t ix_floor, iy_floor;
     if constexpr (std::is_same_v<T, float>) {
-        ix_floor = static_cast<int>(floorf(ix));
-        iy_floor = static_cast<int>(floorf(iy));
+        ix_floor = static_cast<int64_t>(floorf(ix));
+        iy_floor = static_cast<int64_t>(floorf(iy));
     } else {
-        ix_floor = static_cast<int>(floor(ix));
-        iy_floor = static_cast<int>(floor(iy));
+        ix_floor = static_cast<int64_t>(floor(ix));
+        iy_floor = static_cast<int64_t>(floor(iy));
     }
     const T tx = ix - static_cast<T>(ix_floor);
     const T ty = iy - static_cast<T>(iy_floor);
@@ -221,14 +225,14 @@ __global__ void grid_sample_bicubic_kernel(
     cubic_weights_dev<T>(tx, wx);
     cubic_weights_dev<T>(ty, wy);
 
-    auto safe_get = [&](int y, int x) -> T {
+    auto safe_get = [&](int64_t y, int64_t x) -> T {
         if (padding_mode == 0) {  // zeros
             if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
             return input[((n * C + c) * H_in + y) * W_in + x];
         }
         // border / reflection: clamp neighbours past the edge.
-        y = max(0, min(y, H_in - 1));
-        x = max(0, min(x, W_in - 1));
+        y = max(static_cast<int64_t>(0), min(y, H_in - 1));
+        x = max(static_cast<int64_t>(0), min(x, W_in - 1));
         return input[((n * C + c) * H_in + y) * W_in + x];
     };
 
@@ -242,6 +246,7 @@ __global__ void grid_sample_bicubic_kernel(
     }
 
     output[((n * C + c) * H_out + h) * W_out + w] = val;
+    }
 }
 
 // ============================================================================
@@ -253,19 +258,20 @@ __global__ void grid_sample_nearest_kernel(
     const T* __restrict__ input,
     const T* __restrict__ grid,
     T* __restrict__ output,
-    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in, int64_t H_out, int64_t W_out,
     int padding_mode, bool align_corners
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * C * H_out * W_out;
-    if (idx >= total) return;
+    int64_t total = N * C * H_out * W_out;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W_out;
-    int h = (idx / W_out) % H_out;
-    int c = (idx / (W_out * H_out)) % C;
-    int n = idx / (C * H_out * W_out);
+    int64_t w = idx % W_out;
+    int64_t h = (idx / W_out) % H_out;
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (C * H_out * W_out);
 
-    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
@@ -285,13 +291,13 @@ __global__ void grid_sample_nearest_kernel(
         iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
-    int nx, ny;
+    int64_t nx, ny;
     if constexpr (std::is_same_v<T, float>) {
-        nx = static_cast<int>(roundf(ix));
-        ny = static_cast<int>(roundf(iy));
+        nx = static_cast<int64_t>(roundf(ix));
+        ny = static_cast<int64_t>(roundf(iy));
     } else {
-        nx = static_cast<int>(round(ix));
-        ny = static_cast<int>(round(iy));
+        nx = static_cast<int64_t>(round(ix));
+        ny = static_cast<int64_t>(round(iy));
     }
 
     T val = T(0);
@@ -300,6 +306,7 @@ __global__ void grid_sample_nearest_kernel(
     }
 
     output[((n * C + c) * H_out + h) * W_out + w] = val;
+    }
 }
 
 // ============================================================================
@@ -309,15 +316,16 @@ __global__ void grid_sample_nearest_kernel(
 __global__ void affine_grid_kernel(
     const float* __restrict__ theta,
     float* __restrict__ grid,
-    int N, int H, int W, bool align_corners
+    int64_t N, int64_t H, int64_t W, bool align_corners
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * H * W;
-    if (idx >= total) return;
+    int64_t total = N * H * W;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W;
-    int h = (idx / W) % H;
-    int n = idx / (H * W);
+    int64_t w = idx % W;
+    int64_t h = (idx / W) % H;
+    int64_t n = idx / (H * W);
 
     float x_norm, y_norm;
     if (align_corners) {
@@ -332,9 +340,10 @@ __global__ void affine_grid_kernel(
     float x_out = t[0] * x_norm + t[1] * y_norm + t[2];
     float y_out = t[3] * x_norm + t[4] * y_norm + t[5];
 
-    int out_idx = ((n * H + h) * W + w) * 2;
+    int64_t out_idx = ((n * H + h) * W + w) * 2;
     grid[out_idx] = x_out;
     grid[out_idx + 1] = y_out;
+    }
 }
 
 // ============================================================================
@@ -347,20 +356,20 @@ auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
     auto in_shape = input.shape();
     auto grid_shape = grid.shape();
 
-    int N = static_cast<int>(in_shape[0]);
-    int C = static_cast<int>(in_shape[1]);
-    int H_in = static_cast<int>(in_shape[2]);
-    int W_in = static_cast<int>(in_shape[3]);
-    int H_out = static_cast<int>(grid_shape[1]);
-    int W_out = static_cast<int>(grid_shape[2]);
+    int64_t N = in_shape[0];
+    int64_t C = in_shape[1];
+    int64_t H_in = in_shape[2];
+    int64_t W_in = in_shape[3];
+    int64_t H_out = grid_shape[1];
+    int64_t W_out = grid_shape[2];
 
     int pad_mode = 0;
     if (padding_mode == "border") pad_mode = 1;
     else if (padding_mode == "reflection") pad_mode = 2;
 
-    int total = N * C * H_out * W_out;
+    int64_t total = N * C * H_out * W_out;
     int block_size = 256;
-    int grid_size = (total + block_size - 1) / block_size;
+    int grid_size = compute_grid_size(total, block_size);
 
     // E.1: native FP64 path for ALL modes (nearest, bilinear, bicubic).
     // Templated kernel instantiation, no widen-narrow.
@@ -427,16 +436,16 @@ auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
 
 auto affine_grid_cuda(const Tensor& theta, const std::vector<int64_t>& size,
                       bool align_corners) -> Tensor {
-    int N = static_cast<int>(size[0]);
-    int H = static_cast<int>(size[2]);
-    int W = static_cast<int>(size[3]);
+    int64_t N = size[0];
+    int64_t H = size[2];
+    int64_t W = size[3];
 
     Tensor theta_f32 = theta.to(DType::Float32).contiguous();
     Tensor grid({N, H, W, 2}, DType::Float32, theta.device());
 
-    int total = N * H * W;
+    int64_t total = N * H * W;
     int block_size = 256;
-    int grid_size = (total + block_size - 1) / block_size;
+    int grid_size = compute_grid_size(total, block_size);
 
     affine_grid_kernel<<<grid_size, block_size>>>(
         theta_f32.data<float>(), grid.data<float>(),
@@ -470,18 +479,19 @@ __global__ void grid_sample_bilinear_backward_kernel(
     const T* __restrict__ grad_output,
     T* __restrict__ grad_input,
     T* __restrict__ grad_grid,
-    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in, int64_t H_out, int64_t W_out,
     int padding_mode, bool align_corners)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * H_out * W_out;
-    if (idx >= total) return;
+    int64_t total = N * H_out * W_out;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W_out;
-    int h = (idx / W_out) % H_out;
-    int n = idx / (H_out * W_out);
+    int64_t w = idx % W_out;
+    int64_t h = (idx / W_out) % H_out;
+    int64_t n = idx / (H_out * W_out);
 
-    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
@@ -521,16 +531,16 @@ __global__ void grid_sample_bilinear_backward_kernel(
         diy_dgy = T(0.5) * static_cast<T>(H_in);
     }
 
-    int x0, y0;
+    int64_t x0, y0;
     if constexpr (std::is_same_v<T, float>) {
-        x0 = static_cast<int>(floorf(ix));
-        y0 = static_cast<int>(floorf(iy));
+        x0 = static_cast<int64_t>(floorf(ix));
+        y0 = static_cast<int64_t>(floorf(iy));
     } else {
-        x0 = static_cast<int>(floor(ix));
-        y0 = static_cast<int>(floor(iy));
+        x0 = static_cast<int64_t>(floor(ix));
+        y0 = static_cast<int64_t>(floor(iy));
     }
-    int x1 = x0 + 1;
-    int y1 = y0 + 1;
+    int64_t x1 = x0 + 1;
+    int64_t y1 = y0 + 1;
     T wx1 = ix - static_cast<T>(x0);
     T wy1 = iy - static_cast<T>(y0);
     T wx0 = T(1) - wx1;
@@ -538,17 +548,17 @@ __global__ void grid_sample_bilinear_backward_kernel(
 
     T sum_dx = T(0);
     T sum_dy = T(0);
-    for (int c = 0; c < C; ++c) {
+    for (int64_t c = 0; c < C; ++c) {
         const T go = grad_output[((n * C + c) * H_out + h) * W_out + w];
         T* ch_gi = grad_input + (n * C + c) * H_in * W_in;
         const T* ch_in = input + (n * C + c) * H_in * W_in;
 
-        auto safe_scatter = [&](int y, int x, T weight) {
+        auto safe_scatter = [&](int64_t y, int64_t x, T weight) {
             if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
                 atomicAdd(&ch_gi[y * W_in + x], go * weight);
             }
         };
-        auto safe_get = [&](int y, int x) -> T {
+        auto safe_get = [&](int64_t y, int64_t x) -> T {
             if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
                 return ch_in[y * W_in + x];
             }
@@ -586,6 +596,7 @@ __global__ void grid_sample_bilinear_backward_kernel(
     }
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
+    }
 }
 
 template <typename T>
@@ -595,18 +606,19 @@ __global__ void grid_sample_nearest_backward_kernel(
     const T* __restrict__ grad_output,
     T* __restrict__ grad_input,
     T* __restrict__ grad_grid,
-    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in, int64_t H_out, int64_t W_out,
     int padding_mode, bool align_corners)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * H_out * W_out;
-    if (idx >= total) return;
+    int64_t total = N * H_out * W_out;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W_out;
-    int h = (idx / W_out) % H_out;
-    int n = idx / (H_out * W_out);
+    int64_t w = idx % W_out;
+    int64_t h = (idx / W_out) % H_out;
+    int64_t n = idx / (H_out * W_out);
 
-    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
@@ -626,13 +638,13 @@ __global__ void grid_sample_nearest_backward_kernel(
         iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
-    int nx, ny;
+    int64_t nx, ny;
     if constexpr (std::is_same_v<T, float>) {
-        nx = static_cast<int>(roundf(ix));
-        ny = static_cast<int>(roundf(iy));
+        nx = static_cast<int64_t>(roundf(ix));
+        ny = static_cast<int64_t>(roundf(iy));
     } else {
-        nx = static_cast<int>(round(ix));
-        ny = static_cast<int>(round(iy));
+        nx = static_cast<int64_t>(round(ix));
+        ny = static_cast<int64_t>(round(iy));
     }
 
     // grad_grid: zero for nearest (non-differentiable).
@@ -640,10 +652,11 @@ __global__ void grid_sample_nearest_backward_kernel(
     grad_grid[grid_idx + 1] = T(0);
 
     if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
-        for (int c = 0; c < C; ++c) {
+        for (int64_t c = 0; c < C; ++c) {
             const T go = grad_output[((n * C + c) * H_out + h) * W_out + w];
             atomicAdd(&grad_input[((n * C + c) * H_in + ny) * W_in + nx], go);
         }
+    }
     }
 }
 
@@ -654,18 +667,19 @@ __global__ void grid_sample_bicubic_backward_kernel(
     const T* __restrict__ grad_output,
     T* __restrict__ grad_input,
     T* __restrict__ grad_grid,
-    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in, int64_t H_out, int64_t W_out,
     int padding_mode, bool align_corners)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * H_out * W_out;
-    if (idx >= total) return;
+    int64_t total = N * H_out * W_out;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W_out;
-    int h = (idx / W_out) % H_out;
-    int n = idx / (H_out * W_out);
+    int64_t w = idx % W_out;
+    int64_t h = (idx / W_out) % H_out;
+    int64_t n = idx / (H_out * W_out);
 
-    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
@@ -699,13 +713,13 @@ __global__ void grid_sample_bicubic_backward_kernel(
         diy_dgy = T(0.5) * static_cast<T>(H_in);
     }
 
-    int ix_floor, iy_floor;
+    int64_t ix_floor, iy_floor;
     if constexpr (std::is_same_v<T, float>) {
-        ix_floor = static_cast<int>(floorf(ix));
-        iy_floor = static_cast<int>(floorf(iy));
+        ix_floor = static_cast<int64_t>(floorf(ix));
+        iy_floor = static_cast<int64_t>(floorf(iy));
     } else {
-        ix_floor = static_cast<int>(floor(ix));
-        iy_floor = static_cast<int>(floor(iy));
+        ix_floor = static_cast<int64_t>(floor(ix));
+        iy_floor = static_cast<int64_t>(floor(iy));
     }
     T tx = ix - static_cast<T>(ix_floor);
     T ty = iy - static_cast<T>(iy_floor);
@@ -717,7 +731,7 @@ __global__ void grid_sample_bicubic_backward_kernel(
 
     T sum_dx = T(0);
     T sum_dy = T(0);
-    for (int c = 0; c < C; ++c) {
+    for (int64_t c = 0; c < C; ++c) {
         const T go = grad_output[((n * C + c) * H_out + h) * W_out + w];
         T dval_dix = T(0);
         T dval_diy = T(0);
@@ -725,18 +739,18 @@ __global__ void grid_sample_bicubic_backward_kernel(
         for (int dy = -1; dy <= 2; ++dy) {
             #pragma unroll
             for (int dx = -1; dx <= 2; ++dx) {
-                const int yy = iy_floor + dy;
-                const int xx = ix_floor + dx;
+                const int64_t yy = iy_floor + dy;
+                const int64_t xx = ix_floor + dx;
                 const T weight = wy[dy + 1] * wx[dx + 1];
 
                 // Scatter
-                int yy_s = yy, xx_s = xx;
+                int64_t yy_s = yy, xx_s = xx;
                 bool valid_s = true;
                 if (padding_mode == 0) {
                     if (yy < 0 || yy >= H_in || xx < 0 || xx >= W_in) valid_s = false;
                 } else {
-                    yy_s = max(0, min(yy, H_in - 1));
-                    xx_s = max(0, min(xx, W_in - 1));
+                    yy_s = max(static_cast<int64_t>(0), min(yy, H_in - 1));
+                    xx_s = max(static_cast<int64_t>(0), min(xx, W_in - 1));
                 }
                 if (valid_s) {
                     atomicAdd(&grad_input[((n * C + c) * H_in + yy_s) * W_in + xx_s],
@@ -750,8 +764,8 @@ __global__ void grid_sample_bicubic_backward_kernel(
                         v = input[((n * C + c) * H_in + yy) * W_in + xx];
                     }
                 } else {
-                    int yy_f = max(0, min(yy, H_in - 1));
-                    int xx_f = max(0, min(xx, W_in - 1));
+                    int64_t yy_f = max(static_cast<int64_t>(0), min(yy, H_in - 1));
+                    int64_t xx_f = max(static_cast<int64_t>(0), min(xx, W_in - 1));
                     v = input[((n * C + c) * H_in + yy_f) * W_in + xx_f];
                 }
                 dval_dix += wy[dy + 1] * dwx[dx + 1] * v;
@@ -776,21 +790,23 @@ __global__ void grid_sample_bicubic_backward_kernel(
     }
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
+    }
 }
 
 template <typename T>
 __global__ void affine_grid_backward_kernel(
     const T* __restrict__ grad_grid,
     T* __restrict__ grad_theta,
-    int N, int H, int W, bool align_corners)
+    int64_t N, int64_t H, int64_t W, bool align_corners)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * H * W;
-    if (idx >= total) return;
+    int64_t total = N * H * W;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += grid_stride) {
 
-    int w = idx % W;
-    int h = (idx / W) % H;
-    int n = idx / (H * W);
+    int64_t w = idx % W;
+    int64_t h = (idx / W) % H;
+    int64_t n = idx / (H * W);
 
     T x_norm, y_norm;
     if (align_corners) {
@@ -801,7 +817,7 @@ __global__ void affine_grid_backward_kernel(
         y_norm = (T(2) * static_cast<T>(h) + T(1)) / static_cast<T>(H) - T(1);
     }
 
-    int gg_idx = ((n * H + h) * W + w) * 2;
+    int64_t gg_idx = ((n * H + h) * W + w) * 2;
     T dg_x = grad_grid[gg_idx];
     T dg_y = grad_grid[gg_idx + 1];
 
@@ -812,6 +828,7 @@ __global__ void affine_grid_backward_kernel(
     atomicAdd(&t[3], dg_y * x_norm);
     atomicAdd(&t[4], dg_y * y_norm);
     atomicAdd(&t[5], dg_y);
+    }
 }
 
 auto grid_sample_backward_cuda(const Tensor& grad_output,
@@ -823,20 +840,20 @@ auto grid_sample_backward_cuda(const Tensor& grad_output,
 {
     auto in_shape = input.shape();
     auto grid_shape = grid.shape();
-    int N = static_cast<int>(in_shape[0]);
-    int C = static_cast<int>(in_shape[1]);
-    int H_in = static_cast<int>(in_shape[2]);
-    int W_in = static_cast<int>(in_shape[3]);
-    int H_out = static_cast<int>(grid_shape[1]);
-    int W_out = static_cast<int>(grid_shape[2]);
+    int64_t N = in_shape[0];
+    int64_t C = in_shape[1];
+    int64_t H_in = in_shape[2];
+    int64_t W_in = in_shape[3];
+    int64_t H_out = grid_shape[1];
+    int64_t W_out = grid_shape[2];
 
     int pad_mode = 0;
     if (padding_mode == "border") pad_mode = 1;
     else if (padding_mode == "reflection") pad_mode = 2;
 
-    int total = N * H_out * W_out;
+    int64_t total = N * H_out * W_out;
     int block_size = 256;
-    int gs = (total + block_size - 1) / block_size;
+    int gs = compute_grid_size(total, block_size);
 
     DType in_dt = input.dtype();
     DType gr_dt = grid.dtype();
@@ -911,9 +928,9 @@ auto affine_grid_backward_cuda(const Tensor& grad_grid,
                                const std::vector<int64_t>& size,
                                bool align_corners) -> Tensor
 {
-    int N = static_cast<int>(size[0]);
-    int H = static_cast<int>(size[2]);
-    int W = static_cast<int>(size[3]);
+    int64_t N = size[0];
+    int64_t H = size[2];
+    int64_t W = size[3];
 
     DType gr_dt = grad_grid.dtype();
     DType compute = (gr_dt == DType::Float64) ? DType::Float64 : DType::Float32;
@@ -922,9 +939,9 @@ auto affine_grid_backward_cuda(const Tensor& grad_grid,
     Tensor gt_c({N, 2, 3}, compute, grad_grid.device());
     cudaMemset(gt_c.data_ptr(), 0, gt_c.numel() * dtype_size(compute));
 
-    int total = N * H * W;
+    int64_t total = N * H * W;
     int block_size = 256;
-    int gs = (total + block_size - 1) / block_size;
+    int gs = compute_grid_size(total, block_size);
 
     if (compute == DType::Float64) {
         affine_grid_backward_kernel<double><<<gs, block_size>>>(

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +27,27 @@
 
 using namespace tenzor;
 using namespace tenzor::testing;
+
+// Generous absolute per-iteration ceiling (ms). These baselines are not a
+// committed-timing comparison (that is DISABLED_BaselineRegressionCheck), so we
+// cannot assert a tight per-op budget without flaking on loaded CI. But a
+// SUCCEED()-only body lets a 1000x regression — or an outright hang — pass
+// silently. ASSERT_PERF_SANE enforces a floor: the measurement must be a
+// positive, finite number below a ceiling no healthy backend approaches, so a
+// catastrophic regression / deadlock / NaN-timing turns the test red.
+namespace {
+inline constexpr double kPerfCeilingMs = 5000.0;  // 5 s/iter — absurd for any op here
+}  // namespace
+#define ASSERT_PERF_SANE(time_ms, backend)                                     \
+    do {                                                                       \
+        double _t = (time_ms);                                                 \
+        EXPECT_TRUE(std::isfinite(_t) && _t >= 0.0)                            \
+            << "non-finite/negative timing on " << backend_name(backend)       \
+            << ": " << _t << " ms";                                            \
+        EXPECT_LT(_t, kPerfCeilingMs)                                          \
+            << "catastrophic perf regression on " << backend_name(backend)     \
+            << ": " << _t << " ms/iter exceeds " << kPerfCeilingMs << " ms";   \
+    } while (0)
 
 // Helper function to measure operation time
 template<typename Func>
@@ -75,6 +97,7 @@ TEST(PerformanceRegression, MatMul_Small) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -101,6 +124,7 @@ TEST(PerformanceRegression, MatMul_Medium) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -127,6 +151,7 @@ TEST(PerformanceRegression, MatMul_Large) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -171,6 +196,7 @@ TEST(PerformanceRegression, ElementWise_Add) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -197,6 +223,7 @@ TEST(PerformanceRegression, ElementWise_Mul) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -226,6 +253,7 @@ TEST(PerformanceRegression, Activation_ReLU) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -251,6 +279,7 @@ TEST(PerformanceRegression, Activation_GELU) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -276,6 +305,7 @@ TEST(PerformanceRegression, Activation_Softmax) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -304,6 +334,7 @@ TEST(PerformanceRegression, Reduction_Sum) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -328,6 +359,7 @@ TEST(PerformanceRegression, Reduction_Mean) {
 
         std::cout << std::fixed << std::setprecision(3)
                  << backend_name(backend) << ": " << time << " ms" << std::endl;
+        ASSERT_PERF_SANE(time, backend);
     }
 
     SUCCEED();
@@ -799,19 +831,18 @@ TEST(PerformanceRegression, DISABLED_BaselineRegressionCheck) {
                 << op.key << " median regression on " << backend_name(backend)
                 << ": current " << st.median << "ms vs baseline " << entry->median_ms
                 << "ms (rtol=" << rtol << "). Set TENZOR_PERF_REGRESSION_RTOL to relax.";
-            // p99 is RECORDED (printed above) for trend tracking but NOT gated.
-            // On a non-realtime, shared kernel a single scheduler preemption
-            // during the measurement window inflates p99 arbitrarily (observed
-            // 3-5x spikes with a perfectly stable median), so enforcing it just
-            // flakes. The median is the robust regression signal. p99 gating is
-            // only meaningful on a dedicated runner with an isolated/RT CPU set;
-            // re-enable it there via the p99_rtol path if desired.
-            (void)p99_rtol;
-            if (st.p99 > entry->p99_ms * p99_rtol) {
-                std::cout << "  (advisory) " << op.key << " p99 elevated on "
-                          << backend_name(backend) << ": " << st.p99 << "ms vs baseline "
-                          << entry->p99_ms << "ms (likely OS jitter, not gated)\n";
-            }
+            // p99 IS gated, with a deliberately generous multiplier (default
+            // 3.0x via TENZOR_PERF_REGRESSION_P99_RTOL). On a non-realtime,
+            // shared kernel a single scheduler preemption inflates p99, so a
+            // tight bound would flake — but a fully-ungated p99 (the old
+            // `(void)p99_rtol;`) let a real tail-latency regression pass
+            // invisibly. The 3x default catches a genuine 3x+ tail blowup
+            // while tolerating ordinary OS jitter; raise it on a noisy host.
+            EXPECT_LT(st.p99, entry->p99_ms * p99_rtol)
+                << op.key << " p99 regression on " << backend_name(backend)
+                << ": current " << st.p99 << "ms vs baseline " << entry->p99_ms
+                << "ms (p99_rtol=" << p99_rtol
+                << "). Set TENZOR_PERF_REGRESSION_P99_RTOL to relax on a noisy host.";
         }
     }
 

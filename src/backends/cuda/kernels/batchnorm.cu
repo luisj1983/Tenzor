@@ -35,16 +35,21 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
 // BatchNorm2d Mean/Variance Computation (Welford's Algorithm)
 // ============================================================================
 
-// Two-pass algorithm for per-channel mean and variance computation
-template<typename T>
+// Two-pass algorithm for per-channel mean and variance computation.
+// `Acc` is the accumulator type: for a Float32 input it is `double`, so the
+// per-channel sum and sum-of-squared-deviations are accumulated in double —
+// matching the CPU reference (Welford in double). A `float` accumulator over
+// N*H*W elements drifts and the population variance diverges from CPU past the
+// cross-backend tolerance for large spatial sizes.
+template<typename T, typename Acc>
 __global__ void batchnorm_mean_kernel(const T* input,
                                       T* mean,
                                       int64_t N,
                                       int64_t C,
                                       int64_t H,
                                       int64_t W) {
-    extern __shared__ __align__(sizeof(T)) unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    extern __shared__ __align__(sizeof(Acc)) unsigned char shared_mem[];
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
@@ -53,27 +58,27 @@ __global__ void batchnorm_mean_kernel(const T* input,
     int64_t c = blockIdx.x;
     if (c >= C) return;
 
-    // Compute sum
-    T sum = T(0);
+    // Compute sum in the wide accumulator type
+    Acc sum = Acc(0);
     for (int64_t n = 0; n < N; n++) {
         for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
             int64_t h = idx / W;
             int64_t w = idx % W;
             int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-            sum += input[tensor_idx];
+            sum += static_cast<Acc>(input[tensor_idx]);
         }
     }
 
-    // Reduce sum across threads
+    // Reduce sum across threads (in Acc)
     sum = block_reduce_sum(sum, shared);
 
     // Thread 0 writes mean
     if (threadIdx.x == 0) {
-        mean[c] = sum / T(total_elements);
+        mean[c] = static_cast<T>(sum / Acc(total_elements));
     }
 }
 
-template<typename T>
+template<typename T, typename Acc>
 __global__ void batchnorm_variance_kernel(const T* input,
                                           const T* mean,
                                           T* variance,
@@ -81,8 +86,8 @@ __global__ void batchnorm_variance_kernel(const T* input,
                                           int64_t C,
                                           int64_t H,
                                           int64_t W) {
-    extern __shared__ __align__(sizeof(T)) unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    extern __shared__ __align__(sizeof(Acc)) unsigned char shared_mem[];
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
@@ -91,26 +96,26 @@ __global__ void batchnorm_variance_kernel(const T* input,
     int64_t c = blockIdx.x;
     if (c >= C) return;
 
-    T channel_mean = mean[c];
+    Acc channel_mean = static_cast<Acc>(mean[c]);
 
-    // Compute sum of squared differences
-    T sum_sq_diff = T(0);
+    // Compute sum of squared differences in the wide accumulator type
+    Acc sum_sq_diff = Acc(0);
     for (int64_t n = 0; n < N; n++) {
         for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
             int64_t h = idx / W;
             int64_t w = idx % W;
             int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-            T diff = input[tensor_idx] - channel_mean;
+            Acc diff = static_cast<Acc>(input[tensor_idx]) - channel_mean;
             sum_sq_diff += diff * diff;
         }
     }
 
-    // Reduce sum across threads
+    // Reduce sum across threads (in Acc)
     sum_sq_diff = block_reduce_sum(sum_sq_diff, shared);
 
     // Thread 0 writes variance
     if (threadIdx.x == 0) {
-        variance[c] = sum_sq_diff / T(total_elements);
+        variance[c] = static_cast<T>(sum_sq_diff / Acc(total_elements));
     }
 }
 
@@ -118,15 +123,17 @@ __global__ void batchnorm_variance_kernel(const T* input,
 // Chunked Mean/Variance Kernels (2D grid for better SM utilization when C < 64)
 // ============================================================================
 
-// Chunked mean kernel: 2D grid (C, spatial_chunks) for better GPU utilization when C is small
-template<typename T>
+// Chunked mean kernel: 2D grid (C, spatial_chunks) for better GPU utilization
+// when C is small. `Acc` is the wide accumulator type (double for Float32) so
+// the cross-block partial sums combine in double, matching the CPU reference.
+template<typename T, typename Acc>
 __global__ void batchnorm_mean_chunked_kernel(const T* input,
-                                               T* partial_sums,
+                                               Acc* partial_sums,
                                                int64_t N, int64_t C,
                                                int64_t H, int64_t W,
                                                int64_t spatial_chunk_size) {
-    extern __shared__ __align__(sizeof(T)) unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    extern __shared__ __align__(sizeof(Acc)) unsigned char shared_mem[];
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t c = blockIdx.x;
     int64_t chunk_id = blockIdx.y;
@@ -137,14 +144,14 @@ __global__ void batchnorm_mean_chunked_kernel(const T* input,
     int64_t chunk_start = chunk_id * spatial_chunk_size;
     int64_t chunk_end = min(chunk_start + spatial_chunk_size, total_elements);
 
-    T sum = T(0);
+    Acc sum = Acc(0);
     for (int64_t idx = chunk_start + threadIdx.x; idx < chunk_end; idx += blockDim.x) {
         int64_t n = idx / spatial_size;
         int64_t spatial_idx = idx % spatial_size;
         int64_t h = spatial_idx / W;
         int64_t w = spatial_idx % W;
         int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-        sum += input[tensor_idx];
+        sum += static_cast<Acc>(input[tensor_idx]);
     }
 
     sum = block_reduce_sum(sum, shared);
@@ -154,16 +161,16 @@ __global__ void batchnorm_mean_chunked_kernel(const T* input,
     }
 }
 
-// Chunked variance kernel: 2D grid for better utilization when C is small
-template<typename T>
+// Chunked variance kernel: 2D grid for better utilization when C is small.
+template<typename T, typename Acc>
 __global__ void batchnorm_variance_chunked_kernel(const T* input,
-                                                    const T* mean,
-                                                    T* partial_sums,
+                                                    const Acc* mean,
+                                                    Acc* partial_sums,
                                                     int64_t N, int64_t C,
                                                     int64_t H, int64_t W,
                                                     int64_t spatial_chunk_size) {
-    extern __shared__ __align__(sizeof(T)) unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    extern __shared__ __align__(sizeof(Acc)) unsigned char shared_mem[];
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t c = blockIdx.x;
     int64_t chunk_id = blockIdx.y;
@@ -174,15 +181,15 @@ __global__ void batchnorm_variance_chunked_kernel(const T* input,
     int64_t chunk_start = chunk_id * spatial_chunk_size;
     int64_t chunk_end = min(chunk_start + spatial_chunk_size, total_elements);
 
-    T channel_mean = mean[c];
-    T sum_sq_diff = T(0);
+    Acc channel_mean = mean[c];
+    Acc sum_sq_diff = Acc(0);
     for (int64_t idx = chunk_start + threadIdx.x; idx < chunk_end; idx += blockDim.x) {
         int64_t n = idx / spatial_size;
         int64_t spatial_idx = idx % spatial_size;
         int64_t h = spatial_idx / W;
         int64_t w = spatial_idx % W;
         int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-        T diff = input[tensor_idx] - channel_mean;
+        Acc diff = static_cast<Acc>(input[tensor_idx]) - channel_mean;
         sum_sq_diff += diff * diff;
     }
 
@@ -193,14 +200,15 @@ __global__ void batchnorm_variance_chunked_kernel(const T* input,
     }
 }
 
-// Finalize mean from partial sums: divide by total element count
-template<typename T>
-__global__ void batchnorm_finalize_mean_kernel(T* mean_or_var,
+// Finalize: divide the Acc partial sums by total element count and write the
+// result narrowed to the output dtype T.
+template<typename T, typename Acc>
+__global__ void batchnorm_finalize_mean_kernel(const Acc* partial, T* out,
                                                 int64_t C,
                                                 int64_t total_elements) {
     int64_t c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c < C) {
-        mean_or_var[c] /= T(total_elements);
+        out[c] = static_cast<T>(partial[c] / Acc(total_elements));
     }
 }
 
@@ -410,17 +418,18 @@ __global__ void batchnorm_forward_affine_parallel_kernel(
     int64_t C,
     int64_t HW) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total_size) return;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total_size; idx += grid_stride) {
+        // Decode channel from NCHW layout
+        int64_t c = (idx / HW) % C;
 
-    // Decode channel from NCHW layout
-    int64_t c = (idx / HW) % C;
-
-    // Compute scale and bias inline (register pressure is fine, avoids shared memory sync)
-    float invstd = rsqrtf(variance[c] + epsilon);
-    float scale = gamma[c] * invstd;
-    float val = (input[idx] - mean[c]) * scale + beta[c];
-    output[idx] = val;
+        // Compute scale and bias inline (avoids shared memory sync)
+        float invstd = rsqrtf(variance[c] + epsilon);
+        float scale = gamma[c] * invstd;
+        float val = (input[idx] - mean[c]) * scale + beta[c];
+        output[idx] = val;
+    }
 }
 
 // Vectorized version: processes 4 elements per thread
@@ -436,47 +445,48 @@ __global__ void batchnorm_forward_affine_vec4_inline_kernel(
     int64_t C,
     int64_t HW) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total_vec4) return;
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total_vec4; idx += grid_stride) {
+        // Decode channel from NCHW layout (for vec4, multiply by 4)
+        int64_t scalar_idx = idx * 4;
+        int64_t c0 = (scalar_idx / HW) % C;
 
-    // Decode channel from NCHW layout (for vec4, multiply by 4)
-    int64_t scalar_idx = idx * 4;
-    int64_t c0 = (scalar_idx / HW) % C;
+        // Load 4 elements
+        float4 in = input[idx];
 
-    // Load 4 elements
-    float4 in = input[idx];
+        // A float4 group can straddle a channel boundary when HW is not a multiple
+        // of 4 (or when the group simply spans the end of one channel and the start
+        // of the next). Compute the channel per-lane so each lane is normalized with
+        // its own channel's statistics, matching the scalar/parallel/CPU path.
+        int64_t c1 = ((scalar_idx + 1) / HW) % C;
+        int64_t c2 = ((scalar_idx + 2) / HW) % C;
+        int64_t c3 = ((scalar_idx + 3) / HW) % C;
 
-    // A float4 group can straddle a channel boundary when HW is not a multiple
-    // of 4 (or when the group simply spans the end of one channel and the start
-    // of the next). Compute the channel per-lane so each lane is normalized with
-    // its own channel's statistics, matching the scalar/parallel/CPU path.
-    int64_t c1 = ((scalar_idx + 1) / HW) % C;
-    int64_t c2 = ((scalar_idx + 2) / HW) % C;
-    int64_t c3 = ((scalar_idx + 3) / HW) % C;
+        float4 out;
+        {
+            float m = mean[c0];
+            float invstd = rsqrtf(variance[c0] + epsilon);
+            out.x = gamma[c0] * (in.x - m) * invstd + beta[c0];
+        }
+        {
+            float m = mean[c1];
+            float invstd = rsqrtf(variance[c1] + epsilon);
+            out.y = gamma[c1] * (in.y - m) * invstd + beta[c1];
+        }
+        {
+            float m = mean[c2];
+            float invstd = rsqrtf(variance[c2] + epsilon);
+            out.z = gamma[c2] * (in.z - m) * invstd + beta[c2];
+        }
+        {
+            float m = mean[c3];
+            float invstd = rsqrtf(variance[c3] + epsilon);
+            out.w = gamma[c3] * (in.w - m) * invstd + beta[c3];
+        }
 
-    float4 out;
-    {
-        float m = mean[c0];
-        float invstd = rsqrtf(variance[c0] + epsilon);
-        out.x = gamma[c0] * (in.x - m) * invstd + beta[c0];
+        output[idx] = out;
     }
-    {
-        float m = mean[c1];
-        float invstd = rsqrtf(variance[c1] + epsilon);
-        out.y = gamma[c1] * (in.y - m) * invstd + beta[c1];
-    }
-    {
-        float m = mean[c2];
-        float invstd = rsqrtf(variance[c2] + epsilon);
-        out.z = gamma[c2] * (in.z - m) * invstd + beta[c2];
-    }
-    {
-        float m = mean[c3];
-        float invstd = rsqrtf(variance[c3] + epsilon);
-        out.w = gamma[c3] * (in.w - m) * invstd + beta[c3];
-    }
-
-    output[idx] = out;
 }
 
 // ============================================================================
@@ -680,64 +690,70 @@ auto batchnorm2d_mean_var(const Tensor& input,
     bool use_chunked = (C < CHUNKED_THRESHOLD);
 
     if (input.dtype() == DType::Float32) {
+        // Float32 statistics accumulate in DOUBLE (Acc=double) to match the CPU
+        // reference (Welford in double). A float accumulator over N*H*W elements
+        // diverges from CPU past the cross-backend tolerance for large spatial.
         if (use_chunked) {
-            // Query occupancy for both chunked kernels and use the smaller block size
             auto [grid_cm, bs_cm] = optimal_launch_config(
-                batchnorm_mean_chunked_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+                batchnorm_mean_chunked_kernel<float, double>, N * H * W, (256 / 32) * sizeof(double));
             auto [grid_cv, bs_cv] = optimal_launch_config(
-                batchnorm_variance_chunked_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+                batchnorm_variance_chunked_kernel<float, double>, N * H * W, (256 / 32) * sizeof(double));
             int bn_bs = std::max(32, std::min(std::min(bs_cm, bs_cv), 1024));
             bn_bs = (bn_bs / 32) * 32;
-            int shared_mem_size = (bn_bs / 32) * sizeof(float);
+            int shared_mem_size = (bn_bs / 32) * sizeof(double);
 
             int64_t spatial_chunk_size = static_cast<int64_t>(bn_bs) * 4;
             int64_t spatial_chunks = (total_elements + spatial_chunk_size - 1) / spatial_chunk_size;
             dim3 grid(C, spatial_chunks);
 
-            // Zero-init mean buffer for atomicAdd accumulation
-            CUDA_CHECK(cudaMemsetAsync(mean.data<float>(), 0, C * sizeof(float), stream));
-            batchnorm_mean_chunked_kernel<float><<<grid, bn_bs, shared_mem_size, stream>>>(
-                input.data<float>(), mean.data<float>(), N, C, H, W, spatial_chunk_size);
+            // Double scratch for the cross-block partial sums.
+            Tensor mean_acc({C}, DType::Float64, input.device());
+            Tensor var_acc({C}, DType::Float64, input.device());
+            CUDA_CHECK(cudaMemsetAsync(mean_acc.data<double>(), 0, C * sizeof(double), stream));
+            batchnorm_mean_chunked_kernel<float, double><<<grid, bn_bs, shared_mem_size, stream>>>(
+                input.data<float>(), mean_acc.data<double>(), N, C, H, W, spatial_chunk_size);
             CUDA_CHECK(cudaGetLastError());
-            // Finalize: divide accumulated sums by total_elements
             int finalize_blocks = (C + 255) / 256;
-            batchnorm_finalize_mean_kernel<float><<<finalize_blocks, 256, 0, stream>>>(
-                mean.data<float>(), C, total_elements);
+            // mean_acc currently holds SUM; finalize into a double mean buffer
+            // (reused: divide in place via dedicated kernel writing double).
+            batchnorm_finalize_mean_kernel<double, double><<<finalize_blocks, 256, 0, stream>>>(
+                mean_acc.data<double>(), mean_acc.data<double>(), C, total_elements);
             CUDA_CHECK(cudaGetLastError());
 
-            // Zero-init variance buffer for atomicAdd accumulation
-            CUDA_CHECK(cudaMemsetAsync(variance.data<float>(), 0, C * sizeof(float), stream));
-            batchnorm_variance_chunked_kernel<float><<<grid, bn_bs, shared_mem_size, stream>>>(
-                input.data<float>(), mean.data<float>(), variance.data<float>(),
+            CUDA_CHECK(cudaMemsetAsync(var_acc.data<double>(), 0, C * sizeof(double), stream));
+            batchnorm_variance_chunked_kernel<float, double><<<grid, bn_bs, shared_mem_size, stream>>>(
+                input.data<float>(), mean_acc.data<double>(), var_acc.data<double>(),
                 N, C, H, W, spatial_chunk_size);
             CUDA_CHECK(cudaGetLastError());
-            batchnorm_finalize_mean_kernel<float><<<finalize_blocks, 256, 0, stream>>>(
-                variance.data<float>(), C, total_elements);
+            // Narrow mean/variance down to the float output tensors.
+            batchnorm_finalize_mean_kernel<float, double><<<finalize_blocks, 256, 0, stream>>>(
+                mean_acc.data<double>(), mean.data<float>(), C, 1);
+            batchnorm_finalize_mean_kernel<float, double><<<finalize_blocks, 256, 0, stream>>>(
+                var_acc.data<double>(), variance.data<float>(), C, total_elements);
             CUDA_CHECK(cudaGetLastError());
         } else {
-            // Use occupancy API — take minimum of mean and variance kernel block sizes
             auto [grid_m, bs_m] = optimal_launch_config(
-                batchnorm_mean_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+                batchnorm_mean_kernel<float, double>, N * H * W, (256 / 32) * sizeof(double));
             auto [grid_v, bs_v] = optimal_launch_config(
-                batchnorm_variance_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+                batchnorm_variance_kernel<float, double>, N * H * W, (256 / 32) * sizeof(double));
             int bn_bs = std::max(32, std::min(std::min(bs_m, bs_v), 1024));
             bn_bs = (bn_bs / 32) * 32;
-            int shared_mem_size = (bn_bs / 32) * sizeof(float);
+            int shared_mem_size = (bn_bs / 32) * sizeof(double);
 
-            batchnorm_mean_kernel<float><<<C, bn_bs, shared_mem_size, stream>>>(
+            batchnorm_mean_kernel<float, double><<<C, bn_bs, shared_mem_size, stream>>>(
                 input.data<float>(), mean.data<float>(), N, C, H, W);
             CUDA_CHECK(cudaGetLastError());
 
-            batchnorm_variance_kernel<float><<<C, bn_bs, shared_mem_size, stream>>>(
+            batchnorm_variance_kernel<float, double><<<C, bn_bs, shared_mem_size, stream>>>(
                 input.data<float>(), mean.data<float>(), variance.data<float>(), N, C, H, W);
             CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         if (use_chunked) {
             auto [grid_cm, bs_cm] = optimal_launch_config(
-                batchnorm_mean_chunked_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+                batchnorm_mean_chunked_kernel<double, double>, N * H * W, (256 / 32) * sizeof(double));
             auto [grid_cv, bs_cv] = optimal_launch_config(
-                batchnorm_variance_chunked_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+                batchnorm_variance_chunked_kernel<double, double>, N * H * W, (256 / 32) * sizeof(double));
             int bn_bs = std::max(32, std::min(std::min(bs_cm, bs_cv), 1024));
             bn_bs = (bn_bs / 32) * 32;
             int shared_mem_size = (bn_bs / 32) * sizeof(double);
@@ -746,37 +762,38 @@ auto batchnorm2d_mean_var(const Tensor& input,
             int64_t spatial_chunks = (total_elements + spatial_chunk_size - 1) / spatial_chunk_size;
             dim3 grid(C, spatial_chunks);
 
+            // mean tensor is double; accumulate partials directly into it.
             CUDA_CHECK(cudaMemsetAsync(mean.data<double>(), 0, C * sizeof(double), stream));
-            batchnorm_mean_chunked_kernel<double><<<grid, bn_bs, shared_mem_size, stream>>>(
+            batchnorm_mean_chunked_kernel<double, double><<<grid, bn_bs, shared_mem_size, stream>>>(
                 input.data<double>(), mean.data<double>(), N, C, H, W, spatial_chunk_size);
             CUDA_CHECK(cudaGetLastError());
             int finalize_blocks = (C + 255) / 256;
-            batchnorm_finalize_mean_kernel<double><<<finalize_blocks, 256, 0, stream>>>(
-                mean.data<double>(), C, total_elements);
+            batchnorm_finalize_mean_kernel<double, double><<<finalize_blocks, 256, 0, stream>>>(
+                mean.data<double>(), mean.data<double>(), C, total_elements);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cudaMemsetAsync(variance.data<double>(), 0, C * sizeof(double), stream));
-            batchnorm_variance_chunked_kernel<double><<<grid, bn_bs, shared_mem_size, stream>>>(
+            batchnorm_variance_chunked_kernel<double, double><<<grid, bn_bs, shared_mem_size, stream>>>(
                 input.data<double>(), mean.data<double>(), variance.data<double>(),
                 N, C, H, W, spatial_chunk_size);
             CUDA_CHECK(cudaGetLastError());
-            batchnorm_finalize_mean_kernel<double><<<finalize_blocks, 256, 0, stream>>>(
-                variance.data<double>(), C, total_elements);
+            batchnorm_finalize_mean_kernel<double, double><<<finalize_blocks, 256, 0, stream>>>(
+                variance.data<double>(), variance.data<double>(), C, total_elements);
             CUDA_CHECK(cudaGetLastError());
         } else {
             auto [grid_m, bs_m] = optimal_launch_config(
-                batchnorm_mean_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+                batchnorm_mean_kernel<double, double>, N * H * W, (256 / 32) * sizeof(double));
             auto [grid_v, bs_v] = optimal_launch_config(
-                batchnorm_variance_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+                batchnorm_variance_kernel<double, double>, N * H * W, (256 / 32) * sizeof(double));
             int bn_bs = std::max(32, std::min(std::min(bs_m, bs_v), 1024));
             bn_bs = (bn_bs / 32) * 32;
             int shared_mem_size = (bn_bs / 32) * sizeof(double);
 
-            batchnorm_mean_kernel<double><<<C, bn_bs, shared_mem_size, stream>>>(
+            batchnorm_mean_kernel<double, double><<<C, bn_bs, shared_mem_size, stream>>>(
                 input.data<double>(), mean.data<double>(), N, C, H, W);
             CUDA_CHECK(cudaGetLastError());
 
-            batchnorm_variance_kernel<double><<<C, bn_bs, shared_mem_size, stream>>>(
+            batchnorm_variance_kernel<double, double><<<C, bn_bs, shared_mem_size, stream>>>(
                 input.data<double>(), mean.data<double>(), variance.data<double>(), N, C, H, W);
             CUDA_CHECK(cudaGetLastError());
         }
@@ -924,7 +941,7 @@ auto batchnorm2d_forward_affine_optimized(const Tensor& input,
         if (can_vectorize && total_size >= 1024) {
             // Use vectorized kernel for large tensors
             int64_t total_vec4 = total_size / 4;
-            int vec_blocks = (total_vec4 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            int vec_blocks = get_num_blocks(total_vec4);
             batchnorm_forward_affine_vec4_inline_kernel<<<vec_blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const float4*>(input.data<float>()),
                 reinterpret_cast<float4*>(output.data<float>()),
@@ -1470,15 +1487,25 @@ auto group_norm_forward_kernel(
     int64_t num_group_instances = N * num_groups;
     int block_size = 256;
 
+    // The kernels support no-affine GroupNorm/InstanceNorm via an internal
+    // `if (weight && bias)` guard, so pass null when affine is absent instead of
+    // dereferencing a zero-size storage (which would yield a non-null garbage
+    // pointer and defeat the guard).
+    const bool has_affine = weight.numel() > 0 && bias.numel() > 0;
+
     if (input.dtype() == DType::Float32) {
         group_norm_forward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
-            input.data<float>(), weight.data<float>(), bias.data<float>(),
+            input.data<float>(),
+            has_affine ? weight.data<float>() : nullptr,
+            has_affine ? bias.data<float>() : nullptr,
             output.data<float>(), mean_out.data<float>(), inv_std_out.data<float>(),
             N, C, HW, num_groups, channels_per_group, eps);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         group_norm_forward_kernel<double><<<num_group_instances, block_size, 0, stream>>>(
-            input.data<double>(), weight.data<double>(), bias.data<double>(),
+            input.data<double>(),
+            has_affine ? weight.data<double>() : nullptr,
+            has_affine ? bias.data<double>() : nullptr,
             output.data<double>(), mean_out.data<double>(), inv_std_out.data<double>(),
             N, C, HW, num_groups, channels_per_group, eps);
             CUDA_CHECK(cudaGetLastError());
@@ -1487,8 +1514,8 @@ auto group_norm_forward_kernel(
         // single fused kernel — no extra tensor allocations or cast launches.
         group_norm_forward_kernel_mixed<__half><<<num_group_instances, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
-            reinterpret_cast<const __half*>(weight.data<Float16>()),
-            reinterpret_cast<const __half*>(bias.data<Float16>()),
+            has_affine ? reinterpret_cast<const __half*>(weight.data<Float16>()) : nullptr,
+            has_affine ? reinterpret_cast<const __half*>(bias.data<Float16>()) : nullptr,
             reinterpret_cast<__half*>(output.data<Float16>()),
             mean_out.data<float>(),
             inv_std_out.data<float>(),
@@ -1497,8 +1524,8 @@ auto group_norm_forward_kernel(
     } else if (input.dtype() == DType::BFloat16) {
         group_norm_forward_kernel_mixed<__nv_bfloat16><<<num_group_instances, block_size, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
-            reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
-            reinterpret_cast<const __nv_bfloat16*>(bias.data<BFloat16>()),
+            has_affine ? reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()) : nullptr,
+            has_affine ? reinterpret_cast<const __nv_bfloat16*>(bias.data<BFloat16>()) : nullptr,
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
             mean_out.data<float>(),
             inv_std_out.data<float>(),

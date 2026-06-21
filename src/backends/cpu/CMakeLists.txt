@@ -146,16 +146,33 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_F16C;TENZOR_HAS_FMA"
         )
 
-        # Fix 3: AVX-512 capability check in PORTABLE mode.
-        # The native branch below probes the compiler for AVX-512 intrinsics
-        # and sets the TENZOR_HAS_AVX512 compile definition target-wide so
-        # `#ifdef TENZOR_HAS_AVX512` in headers / non-AVX512 TUs can see it.
-        # Without this same check in portable mode, those headers always
-        # think AVX-512 is off — even though the per-file -mavx512f flag
-        # above does generate real AVX-512 code in math_simd_avx512.cpp and
-        # friends. Probe with -mavx512f directly so the result reflects
-        # compiler capability (not build-host CPU); the runtime dispatcher
-        # gates actual execution on the running CPU's features.
+        # Fix 3 (revised — SIGILL hardening): AVX-512 capability check in
+        # PORTABLE mode.
+        #
+        # ROOT-CAUSE FIX: previously this set TENZOR_HAS_AVX512 *target-wide*
+        # in portable mode. That was a real SIGILL-class bug: TENZOR_HAS_AVX512
+        # is used by the BASELINE translation units (math.cpp, activations.cpp,
+        # creation.cpp, simd_elementwise.hpp) as a *codegen gate* — each of them
+        # already does `#if defined(__AVX512F__) #define TENZOR_HAS_AVX512 1`,
+        # i.e. the macro is meant to mirror the *current TU's* compile target.
+        # Those baseline TUs are compiled at -m64 (no -mavx512f) in portable
+        # mode, so __AVX512F__ is unset and they correctly fall back to scalar.
+        # Forcing -DTENZOR_HAS_AVX512 target-wide overrode that local logic and
+        # made the `#ifdef TENZOR_HAS_AVX512` blocks emit _mm512_* intrinsics in
+        # a baseline TU → AVX-512 instructions a non-AVX512 CPU cannot execute
+        # → SIGILL at runtime (and a hard "target specific option mismatch"
+        # compile error under GCC, which is how this was caught).
+        #
+        # The dedicated AVX-512 TUs (math_simd_avx512.cpp and friends) receive
+        # -mavx512f per-file above, so they define TENZOR_HAS_AVX512 *locally*
+        # via their own __AVX512F__ block and are selected at runtime by the
+        # SIMD dispatcher (runtime_simd.hpp / SIMDKernelTable) only on capable
+        # hardware. They therefore need NO target-wide define.
+        #
+        # We still probe the compiler so the build log accurately reports
+        # whether AVX-512 codegen is available; runtime dispatch gates actual
+        # execution on the running CPU's features. We deliberately do NOT add a
+        # target-wide TENZOR_HAS_AVX512 define.
         include(CheckCXXSourceCompiles)
         set(CMAKE_REQUIRED_FLAGS "-mavx512f")
         check_cxx_source_compiles("
@@ -170,8 +187,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         unset(CMAKE_REQUIRED_FLAGS)
 
         if(TENZOR_HAS_AVX512_PORTABLE)
-            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
-            message(STATUS "CPU Backend: AVX-512 codegen available in PORTABLE mode (runtime-dispatched)")
+            message(STATUS "CPU Backend: AVX-512 codegen available in PORTABLE mode (runtime-dispatched via the dedicated *_avx512 TUs; NOT defined target-wide so baseline TUs stay scalar and cannot SIGILL)")
         else()
             message(STATUS "CPU Backend: PORTABLE mode - compiler does not support -mavx512f, AVX-512 kernels disabled")
         endif()
@@ -183,6 +199,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         # fewer features than the build machine.
         # ============================================================
         message(STATUS "CPU Backend: NATIVE mode - using -march=native")
+        message(WARNING
+            "CPU Backend: NATIVE build (-march=native) is host-pinned and NOT "
+            "redistributable: a binary built on an AVX-512 host will SIGILL on "
+            "an AVX2-only deploy target. Configure with -DTENZOR_PORTABLE=ON for "
+            "a portable, runtime-dispatched build.")
 
         # Enable SIMD optimizations with IEEE 754 compliance preserved
         target_compile_options(tenzor_backend_cpu PRIVATE
@@ -193,17 +214,36 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
         )
 
-        # AVX-512 translation units always get -mavx512f so that even on
-        # non-AVX-512 build hosts, the binary contains real AVX-512 code
-        # available for runtime dispatch on capable hardware.
-        set_source_files_properties(
-            kernels/math_simd_avx512.cpp
-            kernels/activations_simd_avx512.cpp
-            kernels/batchnorm_avx512.cpp
-            kernels/pooling_avx512.cpp
-            kernels/simd_kernels_avx512_f64.cpp
-            PROPERTIES COMPILE_OPTIONS "-mavx512f"
-        )
+        # AVX-512 translation units get -mavx512f so that even on non-AVX-512
+        # build hosts, the binary contains real AVX-512 code available for
+        # runtime dispatch on capable hardware. This is gated on the COMPILER
+        # actually accepting -mavx512f (probed below) rather than applied
+        # unconditionally: an old toolchain that does not understand the flag
+        # would otherwise fail to compile those TUs. The runtime dispatcher
+        # (CPUID/XCR0) still decides whether the AVX-512 code path executes.
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_FLAGS "-mavx512f")
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m512 a = _mm512_setzero_ps();
+                __m512 b = _mm512_add_ps(a, a);
+                (void)b;
+                return 0;
+            }
+        " TENZOR_HAS_AVX512)
+        unset(CMAKE_REQUIRED_FLAGS)
+
+        if(TENZOR_HAS_AVX512)
+            set_source_files_properties(
+                kernels/math_simd_avx512.cpp
+                kernels/activations_simd_avx512.cpp
+                kernels/batchnorm_avx512.cpp
+                kernels/pooling_avx512.cpp
+                kernels/simd_kernels_avx512_f64.cpp
+                PROPERTIES COMPILE_OPTIONS "-mavx512f"
+            )
+        endif()
 
         # Check for specific SIMD support
         # With -march=native, the compiler will emit the correct instructions
@@ -247,17 +287,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             message(STATUS "CPU Backend: FMA (Fused Multiply-Add) support enabled")
         endif()
 
-        # Check for AVX-512 support
-        check_cxx_source_compiles("
-            #include <immintrin.h>
-            int main() {
-                __m512 a = _mm512_setzero_ps();
-                __m512 b = _mm512_add_ps(a, a);
-                (void)b;
-                return 0;
-            }
-        " TENZOR_HAS_AVX512)
-
+        # AVX-512 support was probed above (TENZOR_HAS_AVX512, via the -mavx512f
+        # compiler-capability check that also gates the per-file flag). Publish
+        # the compile definition target-wide so #ifdef TENZOR_HAS_AVX512 in
+        # headers / non-AVX512 TUs agrees with the per-file codegen.
         if(TENZOR_HAS_AVX512)
             target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
             message(STATUS "CPU Backend: AVX-512 support enabled")
@@ -268,8 +301,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     if(TENZOR_PORTABLE)
         message(STATUS "CPU Backend: PORTABLE mode (MSVC) - baseline with runtime dispatch")
+        # /fp:precise (not /fp:fast) to preserve IEEE-754 NaN/Inf handling,
+        # mirroring the GCC/Clang -fno-finite-math-only policy. /fp:fast assumes
+        # finite math and may optimize away isnan/isinf checks and NaN propagation
+        # (e.g. softmax -inf masking), silently diverging from the other compilers.
         target_compile_options(tenzor_backend_cpu PRIVATE
-            /fp:fast
+            /fp:precise
         )
         target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_PORTABLE)
 
@@ -293,6 +330,7 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
             kernels/activations_simd_avx512.cpp
             kernels/batchnorm_avx512.cpp
             kernels/pooling_avx512.cpp
+            kernels/simd_kernels_avx512_f64.cpp
             PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
         )
 
@@ -319,9 +357,11 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
         endif()
     else()
         message(STATUS "CPU Backend: NATIVE mode (MSVC) - using /arch:AVX2")
+        # /fp:precise (not /fp:fast) to preserve IEEE-754 NaN/Inf handling,
+        # mirroring the GCC/Clang -fno-finite-math-only policy (see portable branch).
         target_compile_options(tenzor_backend_cpu PRIVATE
             /arch:AVX2
-            /fp:fast
+            /fp:precise
         )
 
         # Check for F16C support (available with AVX2 on MSVC)
@@ -368,6 +408,7 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
                 kernels/activations_simd_avx512.cpp
                 kernels/batchnorm_avx512.cpp
                 kernels/pooling_avx512.cpp
+                kernels/simd_kernels_avx512_f64.cpp
                 PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
             )
         else()

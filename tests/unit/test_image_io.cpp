@@ -167,6 +167,32 @@ TEST(ImageIO, ReadNonexistent_Throws) {
                  std::exception);
 }
 
+// SECURITY: decode_jpeg / decode_png must enforce the expected container magic
+// so a caller asking for one format cannot be silently handed a different
+// (content-sniffed) one — and so the GIF/PSD/PIC/HDR/PNM decoders (disabled in
+// this TU) are never reached. A real PNG fed to decode_jpeg must be rejected.
+TEST(ImageIO, DecodeJpegRejectsNonJpegMagic) {
+    auto img = make_pattern_image(3, 16, 16);
+    auto png = io::encode_png(img);           // valid PNG bytes
+    ASSERT_GT(png.size(), 8u);
+    EXPECT_THROW(io::decode_jpeg(png, io::ImageMode::RGB), std::exception)
+        << "decode_jpeg accepted PNG-magic bytes";
+}
+
+TEST(ImageIO, DecodePngRejectsNonPngMagic) {
+    auto img = make_pattern_image(3, 16, 16);
+    auto jpg = io::encode_jpeg(img, /*quality=*/90);  // valid JPEG bytes
+    ASSERT_GT(jpg.size(), 3u);
+    EXPECT_THROW(io::decode_png(jpg, io::ImageMode::RGB), std::exception)
+        << "decode_png accepted JPEG-magic bytes";
+}
+
+TEST(ImageIO, DecodeRejectsGarbageMagic) {
+    std::vector<uint8_t> garbage(64, 0x5A);   // not any known format
+    EXPECT_THROW(io::decode_png(garbage, io::ImageMode::RGB), std::exception);
+    EXPECT_THROW(io::decode_jpeg(garbage, io::ImageMode::RGB), std::exception);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     try {

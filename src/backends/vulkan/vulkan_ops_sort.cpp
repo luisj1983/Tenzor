@@ -31,7 +31,7 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
     if (dtype == DType::Float64) { hist_shader += "_f64"; scatter_shader += "_f64"; }
     else if (dtype == DType::Int32) { hist_shader += "_i32"; scatter_shader += "_i32"; }
     else if (dtype == DType::Int64) { hist_shader += "_i64"; scatter_shader += "_i64"; }
-    else if (dtype == DType::Float16) { scatter_shader += "_f16"; }
+    else if (dtype == DType::Float16) { hist_shader += "_f16"; scatter_shader += "_f16"; }
     // Float32 uses base shader names
 
     // Number of workgroups for histogram/scatter
@@ -40,7 +40,13 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
     if (n_wgs > 256) n_wgs = 256;  // cap workgroups to keep histogram matrix manageable
 
     size_t key_size = dtype_size(dtype);
-    size_t key_buf_size = n * key_size;
+    // Float16 keys are bound to the packed-f16 histogram/scatter shaders, which
+    // read/CAS whole 32-bit words (2 halves each) up to word index (n-1)/2. For
+    // odd n that final word spans 2 bytes past n*2; size the descriptor range as
+    // ((n+1)/2)*4 so it never overruns the bound buffer.
+    size_t key_buf_size = (dtype == DType::Float16)
+        ? ((static_cast<size_t>(n) + 1) / 2) * sizeof(uint32_t)
+        : n * key_size;
     size_t idx_buf_size = n * sizeof(int32_t);
     size_t histo_size = 256 * n_wgs * sizeof(uint32_t);
 

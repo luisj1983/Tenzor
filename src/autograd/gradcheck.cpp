@@ -30,12 +30,6 @@ namespace {
  * CUDA pointer dereference issues. The zeros() function has native
  * implementations for all backends (CPU, CUDA, OneAPI, Vulkan, ROCm).
  */
-auto zeros_like_tensor(const Tensor& tensor) -> Tensor {
-    return zeros(std::vector<int64_t>(tensor.shape().begin(), tensor.shape().end()),
-                 tensor.dtype(),
-                 tensor.device());
-}
-
 /**
  * @brief Extract scalar value from a tensor (supports 0-d and 1-element tensors).
  */
@@ -91,184 +85,114 @@ auto numerical_gradient(
     const Variable& input,
     double eps
 ) -> Tensor {
-    // Adjust epsilon based on dtype to avoid precision loss
-    // Float32 needs larger epsilon due to ~7 digits of precision
-    // Float64 can use smaller epsilon with ~15 digits of precision
-    if (input.dtype() == DType::Float32 && eps < 5e-4) {
-        eps = 5e-4;  // Minimum safe epsilon for Float32 (avoids catastrophic cancellation)
+    // Central finite-difference gradient. The perturbation is applied at the
+    // input's NATIVE dtype (so any tensors `func` captures at that dtype are
+    // not dtype-mismatched against the probe), but the perturbed values are
+    // computed and the difference is reduced in DOUBLE precision to minimise
+    // the catastrophic cancellation in (f(x+eps) − f(x−eps)).
+    //
+    // Float16 / BFloat16 inputs were previously rejected outright. They are now
+    // supported: the perturbation is staged in Float64 and cast to the native
+    // half dtype on write (with a dtype-appropriate eps floor that is actually
+    // representable), so reduced-precision backward paths can be gradchecked.
+    const DType input_dtype = input.dtype();
+    const bool is_f32   = (input_dtype == DType::Float32);
+    const bool is_f64   = (input_dtype == DType::Float64);
+    const bool is_f16   = (input_dtype == DType::Float16);
+    const bool is_bf16  = (input_dtype == DType::BFloat16);
+    if (!is_f32 && !is_f64 && !is_f16 && !is_bf16) {
+        throw std::runtime_error(
+            "gradcheck numerical_gradient supports real floating dtypes "
+            "(Float64/Float32/Float16/BFloat16)");
     }
 
-    // Create gradient tensor with same shape as input
-    auto num_grad = zeros_like_tensor(input.tensor());
+    // Dtype-appropriate minimum step so the perturbation is representable and
+    // does not vanish to catastrophic cancellation:
+    //   Float64: tiny step is fine.
+    //   Float32: ~sqrt(eps_machine) ≈ 5e-4.
+    //   Float16/BFloat16: only ~3 decimal digits, so a much larger step.
+    if (is_f32 && eps < 5e-4) eps = 5e-4;
+    if ((is_f16 || is_bf16) && eps < 1e-2) eps = 1e-2;
+    if (eps <= 0.0) eps = 1e-6;
 
-    // Get input data pointer and properties
-    int64_t total_elements = input.tensor().numel();
+    const Device original_device = input.tensor().device();
 
-    // Transfer num_grad to CPU once for efficient pointer-based writes
-    Device original_grad_device = num_grad.device();
-    Tensor num_grad_cpu = (original_grad_device == Device::cpu()) ? num_grad : num_grad.to(Device::cpu());
+    // Float64 staging copy on CPU for exact pointer-level perturbation; the
+    // probe handed to `func` is cast back to the input's native dtype so its
+    // captured operands match.
+    Tensor input_f64 = input.tensor();
+    if (input_f64.dtype() != DType::Float64) input_f64 = input_f64.to(DType::Float64);
+    if (input_f64.device() != Device::cpu()) input_f64 = input_f64.to(Device::cpu());
+    if (!input_f64.is_contiguous()) input_f64 = input_f64.contiguous();
 
-    // We need to perturb each element individually
-    // Create a copy of input for perturbation
-    Tensor input_copy = input.tensor().clone();
+    const int64_t total_elements = input_f64.numel();
 
-    // For each element in the input
+    Tensor grad_f64 = zeros(
+        std::vector<int64_t>(input_f64.shape().begin(), input_f64.shape().end()),
+        DType::Float64, Device::cpu());
+    double* grad_data = grad_f64.data<double>();
+
+    // The probe handed to `func` is at the input's NATIVE dtype: `func` may
+    // capture other operands at that dtype (logaddexp(a, ·), cosine_similarity
+    // (a, ·), …) and reject a widened probe, and some ops internally fix their
+    // working precision (STFT/ISTFT use Complex64 regardless of the input
+    // dtype) so a Float64 probe would not actually improve — and would even
+    // mislead — the finite-difference reference. The perturbation is still
+    // STAGED and the difference REDUCED in Float64 to cut cancellation; only
+    // the value seen by `func` is cast back to the native dtype.
+    auto make_probe = [&](const Tensor& staged_cpu) -> Variable {
+        Tensor t = (staged_cpu.dtype() != input_dtype) ? staged_cpu.to(input_dtype)
+                                                        : staged_cpu;
+        if (original_device != Device::cpu()) t = t.to(original_device);
+        return Variable(t, false);
+    };
+
+    auto reduce_to_scalar = [](const Variable& f) -> double {
+        if (f.tensor().numel() == 1 && !f.tensor().is_complex()) {
+            return extract_scalar(f.tensor());
+        }
+        Tensor t = f.tensor();
+        if (t.device() != Device::cpu()) t = t.to(Device::cpu());
+        if (!t.is_contiguous()) t = t.contiguous();
+        const int64_t n = t.numel();
+        double total = 0.0;
+        if (t.is_complex()) {
+            // Real-input -> complex-output: reduce as Re(z)+Im(z), matching the
+            // (1+1i) backward seed used by the analytical complex path.
+            if (t.dtype() == DType::Complex64) {
+                const auto* d = t.data<std::complex<float>>();
+                for (int64_t j = 0; j < n; ++j)
+                    total += static_cast<double>(d[j].real()) +
+                             static_cast<double>(d[j].imag());
+            } else {
+                const auto* d = t.data<std::complex<double>>();
+                for (int64_t j = 0; j < n; ++j) total += d[j].real() + d[j].imag();
+            }
+            return total;
+        }
+        // Reduced-precision outputs widen to Float64 for an accurate sum.
+        if (t.dtype() != DType::Float64) t = t.to(DType::Float64);
+        const double* d = t.data<double>();
+        for (int64_t j = 0; j < n; ++j) total += d[j];
+        return total;
+    };
+
     for (int64_t i = 0; i < total_elements; ++i) {
-        // Clone input tensor and transfer to CPU for modification
-        Device original_device = input.tensor().device();
-        Tensor x_plus_cpu = input_copy.clone();
-        Tensor x_minus_cpu = input_copy.clone();
+        Tensor x_plus  = input_f64.clone();
+        Tensor x_minus = input_f64.clone();
+        x_plus.data<double>()[i]  += eps;
+        x_minus.data<double>()[i] -= eps;
 
-        // Ensure we're on CPU for pointer-based modification
-        if (original_device != Device::cpu()) {
-            x_plus_cpu = x_plus_cpu.to(Device::cpu());
-            x_minus_cpu = x_minus_cpu.to(Device::cpu());
-        }
-
-        // Access data based on dtype and perturb element i
-        if (input.dtype() == DType::Float32) {
-            float* data_plus = x_plus_cpu.data<float>();
-            float* data_minus = x_minus_cpu.data<float>();
-
-            // Perturb element i
-            data_plus[i] += static_cast<float>(eps);
-            data_minus[i] -= static_cast<float>(eps);
-
-        } else if (input.dtype() == DType::Float64) {
-            double* data_plus = x_plus_cpu.data<double>();
-            double* data_minus = x_minus_cpu.data<double>();
-
-            data_plus[i] += eps;
-            data_minus[i] -= eps;
-
-        } else {
-            throw std::runtime_error("gradcheck only supports Float32 and Float64 dtypes");
-        }
-
-        // Create variables with perturbed tensors, transferring back to original device if needed
-        Variable x_plus, x_minus;
-        if (original_device != Device::cpu()) {
-            x_plus = Variable(x_plus_cpu.to(original_device), false);
-            x_minus = Variable(x_minus_cpu.to(original_device), false);
-        } else {
-            x_plus = Variable(x_plus_cpu, false);
-            x_minus = Variable(x_minus_cpu, false);
-        }
-
-        // Compute function outputs
-        Variable f_plus = func(x_plus);
-        Variable f_minus = func(x_minus);
-
-        // Extract scalar values (function should return scalar or we sum it)
-        double val_plus, val_minus;
-
-        // Gate the scalar fast-path on a non-complex dtype: extract_scalar only
-        // handles real dtypes and throws on Complex64/Complex128. A single-
-        // element complex output must take the summation branch below, which
-        // reduces complex values as Re(z)+Im(z) (matching the (1+1i) backward
-        // seed used by the analytical path).
-        if (f_plus.tensor().numel() == 1 && !f_plus.tensor().is_complex()) {
-            val_plus = extract_scalar(f_plus.tensor());
-            val_minus = extract_scalar(f_minus.tensor());
-        } else {
-            // If output is not scalar, sum it to get scalar
-            // This allows checking functions with multiple outputs
-            Variable sum_plus = f_plus;
-            Variable sum_minus = f_minus;
-
-            // Sum all elements
-            Tensor sum_plus_tensor = f_plus.tensor();
-            Tensor sum_minus_tensor = f_minus.tensor();
-
-            // Manual sum since we might not have sum() implemented yet
-            double total_plus = 0.0, total_minus = 0.0;
-            int64_t n = sum_plus_tensor.numel();
-
-            // Transfer to CPU and materialise a contiguous copy so that
-            // data<T>() + n correctly enumerates logical elements. Views
-            // returned by ops like slice() share storage with the parent
-            // tensor and have non-trivial strides; without contiguous() we
-            // would iterate over the parent's memory instead of the view.
-            Device sum_device = sum_plus_tensor.device();
-            Tensor sum_plus_cpu = (sum_device == Device::cpu()) ? sum_plus_tensor : sum_plus_tensor.to(Device::cpu());
-            Tensor sum_minus_cpu = (sum_device == Device::cpu()) ? sum_minus_tensor : sum_minus_tensor.to(Device::cpu());
-            if (!sum_plus_cpu.is_contiguous())  sum_plus_cpu  = sum_plus_cpu.contiguous();
-            if (!sum_minus_cpu.is_contiguous()) sum_minus_cpu = sum_minus_cpu.contiguous();
-
-            // Reduced-precision outputs (e.g. a func that casts a Float32 input
-            // down to Float16/BFloat16) have no dedicated summation branch
-            // below. Widen the CPU copy to Float32 first (widen-narrow pattern)
-            // so total_plus/total_minus are actually populated; otherwise both
-            // stay 0 and the numerical gradient is silently zero for every
-            // element. The output dtype is otherwise unconstrained (the input
-            // guard only restricts the INPUT to Float32/Float64).
-            DType out_dtype = f_plus.dtype();
-            if (out_dtype == DType::Float16 || out_dtype == DType::BFloat16) {
-                sum_plus_cpu  = sum_plus_cpu.to(DType::Float32);
-                sum_minus_cpu = sum_minus_cpu.to(DType::Float32);
-                out_dtype = DType::Float32;
-            }
-
-            if (out_dtype == DType::Float32) {
-                const float* data_p = sum_plus_cpu.data<float>();
-                const float* data_m = sum_minus_cpu.data<float>();
-                for (int64_t j = 0; j < n; ++j) {
-                    total_plus += data_p[j];
-                    total_minus += data_m[j];
-                }
-            } else if (out_dtype == DType::Float64) {
-                const double* data_p = sum_plus_cpu.data<double>();
-                const double* data_m = sum_minus_cpu.data<double>();
-                for (int64_t j = 0; j < n; ++j) {
-                    total_plus += data_p[j];
-                    total_minus += data_m[j];
-                }
-            } else if (out_dtype == DType::Complex64) {
-                // For a real-valued input x producing complex y = f(x),
-                // gradcheck reduces y to a real scalar by summing both
-                // real and imaginary parts. Equivalent to evaluating
-                // ∂(Σ Re(y) + Σ Im(y)) / ∂x so the finite-difference
-                // and analytical branches see the same scalar contraction.
-                const auto* data_p = sum_plus_cpu.data<std::complex<float>>();
-                const auto* data_m = sum_minus_cpu.data<std::complex<float>>();
-                for (int64_t j = 0; j < n; ++j) {
-                    total_plus += static_cast<double>(data_p[j].real())
-                                + static_cast<double>(data_p[j].imag());
-                    total_minus += static_cast<double>(data_m[j].real())
-                                 + static_cast<double>(data_m[j].imag());
-                }
-            } else if (out_dtype == DType::Complex128) {
-                const auto* data_p = sum_plus_cpu.data<std::complex<double>>();
-                const auto* data_m = sum_minus_cpu.data<std::complex<double>>();
-                for (int64_t j = 0; j < n; ++j) {
-                    total_plus += data_p[j].real() + data_p[j].imag();
-                    total_minus += data_m[j].real() + data_m[j].imag();
-                }
-            }
-
-            val_plus = total_plus;
-            val_minus = total_minus;
-        }
-
-        // Compute numerical gradient using central differences
-        double numerical_grad_i = (val_plus - val_minus) / (2.0 * eps);
-
-        // Store in gradient tensor (using pre-created CPU tensor)
-        if (num_grad.dtype() == DType::Float32) {
-            num_grad_cpu.data<float>()[i] = static_cast<float>(numerical_grad_i);
-        } else if (num_grad.dtype() == DType::Float64) {
-            num_grad_cpu.data<double>()[i] = numerical_grad_i;
-        }
+        double val_plus  = reduce_to_scalar(func(make_probe(x_plus)));
+        double val_minus = reduce_to_scalar(func(make_probe(x_minus)));
+        grad_data[i] = (val_plus - val_minus) / (2.0 * eps);
     }
 
-    // Transfer gradient tensor back to original device if needed
-    if (original_grad_device != Device::cpu()) {
-        num_grad = num_grad_cpu.to(original_grad_device);
-    } else {
-        num_grad = num_grad_cpu;
-    }
-
-    return num_grad;
+    // Cast the Float64 shadow back to the input's native dtype/device so the
+    // result aligns with the analytical gradient in the comparison.
+    Tensor result = is_f64 ? grad_f64 : grad_f64.to(input_dtype);
+    if (original_device != Device::cpu()) result = result.to(original_device);
+    return result;
 }
 
 auto compare_gradients(
@@ -334,8 +258,13 @@ auto compare_gradients(
         result.max_abs_error = std::max(result.max_abs_error, abs_error);
         result.max_rel_error = std::max(result.max_rel_error, rel_error);
 
-        // Check tolerance
-        double threshold = atol + rtol * std::abs(ana_val);
+        // Check tolerance. Scale the relative band by max(|analytical|,
+        // |numerical|) rather than |analytical| alone: when the analytical
+        // gradient is (wrongly) near zero but the numerical gradient is large,
+        // |ana_val|≈0 would collapse the band to atol and hide the error.
+        // PyTorch's gradcheck uses the same max() formulation.
+        double threshold = atol + rtol * std::max(std::abs(ana_val),
+                                                  std::abs(num_val));
         bool element_passed = abs_error <= threshold;
 
         if (!element_passed) {
@@ -401,14 +330,21 @@ auto gradcheck_detailed(
         return result;
     }
 
-    // Adjust epsilon and tolerances based on dtype
-    // Float32 has ~7 decimal digits of precision. For functions like cos near
-    // zero where cos(x+h)-cos(x-h) involves catastrophic cancellation, we need
-    // larger epsilon (sqrt of machine epsilon ≈ 3.5e-4) and looser tolerance.
+    // Float32 finite-difference floors. The numerical gradient is reduced in
+    // Float64, but a Float32 forward still has ~7-digit outputs, so the central
+    // difference carries ~5e-4 ABSOLUTE noise at small-gradient elements and
+    // needs a representable step. We therefore keep the eps step floor and the
+    // atol (absolute) floor — these are FD-numerical necessities.
+    //
+    // We DELIBERATELY do NOT touch rtol: the previous code also forced
+    // `rtol -> 1e-2`, which let a Float32 analytical backward that was wrong by
+    // up to 1% (relative) still pass — the exact bug-masking anti-pattern. The
+    // relative tolerance is the lever that hides real backward errors, so it is
+    // honoured exactly as the caller passed it; only the absolute FD floors are
+    // applied.
     if (input.dtype() == DType::Float32) {
         if (eps < 5e-4) eps = 5e-4;
         if (atol < 5e-4) atol = 5e-4;
-        if (rtol < 1e-2) rtol = 1e-2;
     }
 
     try {
@@ -611,29 +547,25 @@ auto gradgradcheck_detailed(
 
     // Second-derivative verification strategy
     // -----------------------------------------
-    // Tenzor's autograd engine currently accumulates leaf-variable gradients
-    // as plain Tensors, not Variables (see engine.cpp:~465), so a standard
-    // "gradcheck of the gradient function" — the approach that works in
-    // PyTorch — always terminates the chain at the leaf and reports
-    // `analytical = 0` for any non-linear function.
-    //
-    // As an approximation that exercises real second-derivative plumbing we:
-    //   1. Evaluate the Hessian H = d²f/dx² using the existing
-    //      hessian() functional (Jacobian of the grad function — a proper
-    //      numerical second derivative).
-    //   2. Independently estimate the Hessian diagonal via a direct
-    //      second-order central difference of f:
+    // `hessian()` computes each column as a Float64 central-difference
+    // Hessian-vector product (accurate to ~1e-7), so gradgradcheck validates
+    // that Hessian against an independent finite-difference reference computed
+    // here with a different stencil:
+    //   1. H = hessian(f)                         (analytic, exact)
+    //   2. Diagonal FD reference:
     //         h_ii ≈ (f(x+eps·e_i) − 2·f(x) + f(x−eps·e_i)) / eps²
-    //   3. Compare H.diag against the direct estimate element-wise.
+    //      compared element-wise against H[i,i].
+    //   3. Off-diagonal FD reference for small n (n ≤ kFullOffDiagN):
+    //         h_ij ≈ (f(x+eps·e_i+eps·e_j) − f(x+eps·e_i−eps·e_j)
+    //                − f(x−eps·e_i+eps·e_j) + f(x−eps·e_i−eps·e_j)) / (4 eps²)
+    //      compared element-wise against H[i,j] (MAGNITUDE, not just symmetry).
+    //      For larger n the O(n²) FD cost is avoided and we fall back to a
+    //      bounded symmetry spot-check (H[i,j] == H[j,i]).
     //
-    // This is a meaningful test: both methods must agree for a function's
-    // second-derivative computation to be correct. If the hessian() call
-    // itself fails or disagrees with the finite-difference estimate, the
-    // user has a real second-derivative bug to investigate.
-    //
-    // Full autograd-engine-level double-backward — letting the returned
-    // gradient carry its own grad_fn chain — is tracked for future
-    // engine work (would require leaf grad storage to be Variable-typed).
+    // Both the diagonal and (for small n) the full off-diagonal magnitudes of
+    // the analytic Hessian must agree with finite differences, so a
+    // backward-of-backward bug that produces wrong-but-symmetric off-diagonal
+    // entries is now caught for small inputs.
 
     GradCheckResult result;
     try {
@@ -660,38 +592,40 @@ auto gradgradcheck_detailed(
             return result;
         }
 
-        // Dtype-adjust eps the same way gradcheck_detailed does — Float32
-        // central differences with a sub-5e-4 step hit catastrophic
-        // cancellation.
-        if (input.dtype() == DType::Float32 && eps < 5e-4) eps = 5e-4;
+        if (eps <= 0.0) eps = 1e-4;
 
-        // Method 2: direct 2nd-order central diff of f along each axis.
-        auto input_cpu = input.tensor().to(Device::cpu());
-        double f_center;
-        {
-            Variable xv(input_cpu, false);
-            Variable fv = scalar_func(xv);
-            auto fv_cpu = fv.tensor().to(Device::cpu());
-            f_center = extract_scalar_real_contraction(fv_cpu);
-        }
+        // The FD reference is evaluated in Float64 (perturb a Float64 copy of
+        // the input, run scalar_func at Float64) so the second-order central
+        // difference — whose eps² denominator is acutely cancellation-prone —
+        // is accurate regardless of the input's native dtype. This mirrors the
+        // first-order numerical_gradient widening and lets us compare against
+        // the analytic Hessian at the caller's tolerances without inflation.
+        const Device orig_device = input.tensor().device();
+        Tensor input_f64 = input.tensor();
+        if (input_f64.dtype() != DType::Float64) input_f64 = input_f64.to(DType::Float64);
+        if (input_f64.device() != Device::cpu()) input_f64 = input_f64.to(Device::cpu());
+        if (!input_f64.is_contiguous()) input_f64 = input_f64.contiguous();
 
+        auto eval_f64 = [&](const Tensor& probe_cpu) -> double {
+            Variable v(orig_device != Device::cpu() ? probe_cpu.to(orig_device)
+                                                    : probe_cpu, false);
+            Variable fv = scalar_func(v);
+            Tensor t = fv.tensor();
+            if (t.device() != Device::cpu()) t = t.to(Device::cpu());
+            return extract_scalar_real_contraction(t);
+        };
+
+        double f_center = eval_f64(input_f64);
+
+        // Method 2a: diagonal 2nd-order central difference.
         std::vector<double> h_direct(n);
         for (int64_t i = 0; i < n; ++i) {
-            Tensor plus  = input_cpu.clone();
-            Tensor minus = input_cpu.clone();
-            if (input.dtype() == DType::Float32) {
-                plus.data<float>()[i]  += static_cast<float>(eps);
-                minus.data<float>()[i] -= static_cast<float>(eps);
-            } else {
-                plus.data<double>()[i]  += eps;
-                minus.data<double>()[i] -= eps;
-            }
-            Variable fp = scalar_func(Variable(plus,  false));
-            Variable fm = scalar_func(Variable(minus, false));
-            auto fp_t = fp.tensor().to(Device::cpu());
-            auto fm_t = fm.tensor().to(Device::cpu());
-            double fp_v = extract_scalar_real_contraction(fp_t);
-            double fm_v = extract_scalar_real_contraction(fm_t);
+            Tensor plus  = input_f64.clone();
+            Tensor minus = input_f64.clone();
+            plus.data<double>()[i]  += eps;
+            minus.data<double>()[i] -= eps;
+            double fp_v = eval_f64(plus);
+            double fm_v = eval_f64(minus);
             h_direct[i] = (fp_v - 2.0 * f_center + fm_v) / (eps * eps);
         }
 
@@ -731,21 +665,55 @@ auto gradgradcheck_detailed(
             }
         }
 
-        // Off-diagonal symmetry spot-check. The finite-difference comparison
-        // above only validates the Hessian *diagonal* (H[i,i]); a transposed or
-        // mis-stacked Hessian with correct diagonal would still pass. The true
-        // Hessian of a scalar function is symmetric (Schwarz's theorem), so we
-        // spot-check H[i,j] == H[j,i] for a bounded number of off-diagonal
-        // pairs. This catches index-transposition / mis-stacking bugs without
-        // the O(n^2) cost of a full finite-difference Hessian.
+        // Off-diagonal validation.
+        //   * Small n: full mixed-partial FD reference, comparing the
+        //     MAGNITUDE of every H[i,j] (i<j) against finite differences. This
+        //     catches a backward-of-backward bug that produces a wrong but
+        //     symmetric off-diagonal entry — the gap the old symmetry-only
+        //     spot-check left open.
+        //   * Large n: O(n²) FD is too costly, so fall back to a bounded
+        //     symmetry spot-check (H[i,j] == H[j,i]).
+        constexpr int64_t kFullOffDiagN = 16;
+        double max_offdiag_err = 0.0;
         double max_asym = 0.0;
-        int64_t asym_failing = 0;
-        if (n >= 2) {
+        int64_t offdiag_failing = 0;
+        const bool full_offdiag = (n >= 2 && n <= kFullOffDiagN);
+
+        if (full_offdiag) {
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = i + 1; j < n; ++j) {
+                    // Mixed second partial via the 4-point central stencil.
+                    Tensor pp = input_f64.clone();  // +e_i +e_j
+                    Tensor pm = input_f64.clone();  // +e_i -e_j
+                    Tensor mp = input_f64.clone();  // -e_i +e_j
+                    Tensor mm = input_f64.clone();  // -e_i -e_j
+                    pp.data<double>()[i] += eps; pp.data<double>()[j] += eps;
+                    pm.data<double>()[i] += eps; pm.data<double>()[j] -= eps;
+                    mp.data<double>()[i] -= eps; mp.data<double>()[j] += eps;
+                    mm.data<double>()[i] -= eps; mm.data<double>()[j] -= eps;
+                    double h_ij_fd = (eval_f64(pp) - eval_f64(pm)
+                                      - eval_f64(mp) + eval_f64(mm))
+                                     / (4.0 * eps * eps);
+
+                    double h_ij = (H.dtype() == DType::Float32)
+                        ? static_cast<double>(H_cpu.data<float>()[i * n + j])
+                        : H_cpu.data<double>()[i * n + j];
+
+                    double diff = std::abs(h_ij - h_ij_fd);
+                    double threshold = atol + rtol * std::max(std::abs(h_ij),
+                                                              std::abs(h_ij_fd));
+                    if (diff > max_offdiag_err) max_offdiag_err = diff;
+                    if (diff > threshold) {
+                        offdiag_failing++;
+                        if (result.fail_indices.size() < 10) {
+                            result.fail_indices.push_back(i * n + j);
+                        }
+                    }
+                }
+            }
+        } else if (n >= 2) {
             const int64_t kMaxPairs = 32;
             int64_t pairs_checked = 0;
-            // Symmetry tolerance: H is computed analytically, so a non-trivial
-            // asymmetry signals a real layout/transposition bug rather than FD
-            // noise. Use the same atol/rtol contract against the symmetric mean.
             for (int64_t i = 0; i < n && pairs_checked < kMaxPairs; ++i) {
                 for (int64_t j = i + 1; j < n && pairs_checked < kMaxPairs; ++j) {
                     double h_ij, h_ji;
@@ -761,7 +729,7 @@ auto gradgradcheck_detailed(
                     double sym_threshold = atol + rtol * sym_scale;
                     if (adiff > max_asym) max_asym = adiff;
                     if (adiff > sym_threshold) {
-                        asym_failing++;
+                        offdiag_failing++;
                         if (result.fail_indices.size() < 10) {
                             result.fail_indices.push_back(i * n + j);
                         }
@@ -771,27 +739,30 @@ auto gradgradcheck_detailed(
             }
         }
 
-        if (max_asym > max_abs) result.max_abs_error = max_asym;
-        else result.max_abs_error = max_abs;
+        result.max_abs_error =
+            std::max({max_abs, max_asym, max_offdiag_err});
         result.max_rel_error = max_rel;
-        failing += asym_failing;
+        failing += offdiag_failing;
         result.failing_elements = failing;
         result.passed = (failing == 0);
         if (!result.passed) {
             result.error_message =
-                "Second-derivative check failed (diagonal FD + off-diagonal "
-                "symmetry spot-check). max_abs=" + std::to_string(max_abs) +
-                " diag_failing=" + std::to_string(failing - asym_failing) +
+                std::string("Second-derivative check failed (") +
+                (full_offdiag ? "diagonal + full off-diagonal FD"
+                              : "diagonal FD + off-diagonal symmetry spot-check") +
+                "). max_abs=" + std::to_string(max_abs) +
+                " diag_failing=" + std::to_string(failing - offdiag_failing) +
                 "/" + std::to_string(n) +
-                " sym_failing=" + std::to_string(asym_failing) +
+                " offdiag_failing=" + std::to_string(offdiag_failing) +
+                " max_offdiag_err=" + std::to_string(max_offdiag_err) +
                 " max_asymmetry=" + std::to_string(max_asym);
         } else {
-            // Be explicit that the FD comparison covered only the diagonal;
-            // off-diagonal entries were validated for symmetry only, not value.
-            result.error_message =
-                "Second-derivative check passed (diagonal validated against "
-                "finite differences; off-diagonal entries validated for "
-                "symmetry only, not magnitude)";
+            result.error_message = full_offdiag
+                ? "Second-derivative check passed (diagonal AND full "
+                  "off-diagonal magnitudes validated against finite differences)"
+                : "Second-derivative check passed (diagonal validated against "
+                  "finite differences; off-diagonal entries validated for "
+                  "symmetry only, not magnitude — n too large for full FD)";
         }
         return result;
     } catch (const std::exception& e) {

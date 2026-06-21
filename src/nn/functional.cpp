@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace tenzor::nn::functional {
 
@@ -1252,11 +1253,15 @@ auto smooth_l1_loss(const Variable& input, const Variable& target,
 
 auto cosine_similarity(const Variable& x1, const Variable& x2,
                        int64_t dim, double eps) -> Variable {
-    // cos_sim = (x1 . x2) / (||x1|| * ||x2|| + eps)
+    // cos_sim = (x1 . x2) / max(||x1|| * ||x2||, eps)
+    // PyTorch clamps the denominator from below (clamp_min) rather than adding
+    // eps. Additive eps shifts every similarity toward 0 and caps the maximum
+    // strictly below 1; clamp_min only intervenes when the product is tiny.
     auto dot = tenzor::sum(x1 * x2, dim);
     auto norm1 = tenzor::sqrt(tenzor::sum(x1 * x1, dim));
     auto norm2 = tenzor::sqrt(tenzor::sum(x2 * x2, dim));
-    auto denom = norm1 * norm2 + static_cast<float>(eps);
+    auto denom = tenzor::clamp(norm1 * norm2, eps,
+                               std::numeric_limits<double>::infinity());
     return dot / denom;
 }
 

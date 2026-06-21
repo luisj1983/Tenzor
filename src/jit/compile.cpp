@@ -229,7 +229,12 @@ auto CompiledFunction::shape_key(std::span<const Variable> inputs) -> std::strin
             ss << shape[j];
         }
         ss << "_" << static_cast<int>(inputs[i].tensor().dtype());
-        ss << "_" << static_cast<int>(inputs[i].tensor().device().type);
+        // Encode the FULL device (type AND ordinal index), not just the type.
+        // On a multi-GPU box a module captured on cuda:0 must not be reused for
+        // a cuda:1 input under the same shape/dtype key — that returns a graph
+        // whose NVRTC module / CUDA-graph capture / cached device pointers are
+        // bound to GPU 0, causing an illegal cross-device access on GPU 1.
+        ss << "_" << inputs[i].tensor().device().to_string();
     }
     return ss.str();
 }

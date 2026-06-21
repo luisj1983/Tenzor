@@ -187,7 +187,7 @@ auto LazyGraph::merge_graphs(const std::shared_ptr<LazyGraph>& a,
     // the already-large base. If the smaller graph's nodes are already all
     // present in the base (e.g. both operands derive from the same graph), the
     // append loop simply skips them and returns the base unchanged.
-    auto& base = (a->nodes_.size() >= b->nodes_.size()) ? a : b;
+    const auto& base = (a->nodes_.size() >= b->nodes_.size()) ? a : b;
     const auto& other = (a->nodes_.size() >= b->nodes_.size()) ? b : a;
 
     std::unordered_set<LazyNode*> seen;
@@ -200,22 +200,32 @@ auto LazyGraph::merge_graphs(const std::shared_ptr<LazyGraph>& a,
             base->nodes_.push_back(n);
         }
     }
+    // Point the absorbed (non-returned) operand at the canonical base so a
+    // later flush()/nodes()/size() on `other` reports the full merged graph
+    // instead of its stale pre-merge snapshot. weak_ptr: `other` must not keep
+    // `base` (and all its nodes) alive after the caller drops it.
+    other->canonical_ = base;
     return base;
 }
 
 void LazyGraph::flush() {
     // Materialise every node in topological order. Because add_node /
     // add_input append in dependency order (an input was added before any
-    // node that references it), iterating nodes_ in insertion order is a
+    // node that references it), iterating nodes in insertion order is a
     // valid topological order. Each node's inputs are guaranteed to already
     // be materialised by the time we reach it.
+    //
+    // Iterate the CANONICAL graph's nodes (via nodes()), not this->nodes_:
+    // when this graph was the non-returned operand of a merge_graphs() call its
+    // own nodes_ is a stale pre-merge snapshot, and flushing it would silently
+    // skip every node added after the merge.
     //
     // Synchronisation is per-node (LazyNode::materialize_with) rather than
     // graph-wide: each node is computed at most once even under concurrent
     // materialize()/flush() on this OR any other graph that shares the node
     // (the post-merge_graphs case), while disjoint nodes may compute
     // concurrently.
-    for (auto& node : nodes_) {
+    for (const auto& node : nodes()) {
         if (node->is_materialized()) continue;
         if (node->is_input() || !node->op()) {
             // Unbound placeholder — surface a typed error rather than
@@ -492,11 +502,26 @@ static auto matmul_shape(const std::vector<int64_t>& a,
     if (a.empty() || b.empty()) {
         throw std::invalid_argument("LazyTensor: matmul requires at least 1D tensors");
     }
-    if (a.size() == 1 && b.size() == 1) return {};  // dot product -> scalar
+    // Validate the contraction (K) dimension up front, exactly like eager
+    // tenzor::matmul, so an incompatible lazy matmul fails when it is RECORDED
+    // (with both shapes named) rather than building a node that advertises a
+    // bogus [M,N] shape and only erroring deep inside materialization.
+    auto contraction_error = [&a, &b]() {
+        return std::invalid_argument(
+            "LazyTensor matmul: contraction dim mismatch [" +
+            int_list_to_string(a) + "] @ [" + int_list_to_string(b) + "]");
+    };
+    if (a.size() == 1 && b.size() == 1) {
+        // dot product: vector lengths must match.
+        if (a[0] != b[0]) throw contraction_error();
+        return {};  // dot product -> scalar
+    }
 
     // 1-D × N-D (N >= 2): treat `a` as if it were (1, K), broadcast batch
     // dims, then drop the prepended 1. Result shape = batch_b ++ [b.back()].
     if (a.size() == 1) {
+        // contraction: a[0] (K) must equal b[-2].
+        if (a[0] != b[b.size() - 2]) throw contraction_error();
         std::vector<int64_t> result(b.begin(), b.end() - 2);
         result.push_back(b.back());
         return result;
@@ -504,12 +529,16 @@ static auto matmul_shape(const std::vector<int64_t>& a,
     // N-D × 1-D (N >= 2): treat `b` as if it were (K, 1), broadcast batch
     // dims, then drop the trailing 1. Result shape = batch_a ++ [a[-2]].
     if (b.size() == 1) {
+        // contraction: a[-1] (K) must equal b[0].
+        if (a[a.size() - 1] != b[0]) throw contraction_error();
         std::vector<int64_t> result(a.begin(), a.end() - 2);
         result.push_back(a[a.size() - 2]);
         return result;
     }
 
-    // General: batch matmul with broadcasting on the leading dims.
+    // General: batch matmul with broadcasting on the leading dims. The inner
+    // contraction dims must agree: a[-1] == b[-2].
+    if (a[a.size() - 1] != b[b.size() - 2]) throw contraction_error();
     std::vector<int64_t> batch_a(a.begin(), a.end() - 2);
     std::vector<int64_t> batch_b(b.begin(), b.end() - 2);
     auto batch = broadcast_shape(batch_a, batch_b);

@@ -39,6 +39,16 @@ auto load_cifar_batch(const std::string& path, std::vector<uint8_t>& images,
                 std::to_string(i));
         }
     }
+
+    // Reject files with extra bytes beyond the expected record payload: a
+    // corrupt/padded batch that merely meets the minimum size would otherwise
+    // be accepted and the trailing bytes silently dropped. peek() returns EOF
+    // only when no more bytes remain.
+    if (file.peek() != std::ifstream::traits_type::eof()) {
+        throw std::runtime_error(
+            "CIFAR: trailing data after " + std::to_string(kSamplesPerBatch) +
+            " records in " + path + " (file larger than expected)");
+    }
 }
 
 auto build_tensors(const std::vector<uint8_t>& img_data,
@@ -140,6 +150,13 @@ CIFAR100::CIFAR100(const std::string& root_dir, bool train, bool normalize) {
             throw std::runtime_error(
                 "CIFAR100: truncated image data at record " + std::to_string(i));
         }
+    }
+
+    // Reject files with extra bytes beyond the expected record payload.
+    if (file.peek() != std::ifstream::traits_type::eof()) {
+        throw std::runtime_error(
+            "CIFAR100: trailing data after " + std::to_string(num_samples_) +
+            " records in " + path + " (file larger than expected)");
     }
 
     auto [imgs, lbls] = build_tensors(img_data, lbl_data,

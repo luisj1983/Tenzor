@@ -10,9 +10,11 @@
 #include <tenzor/tenzor.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
+#include "parity_tolerances.hpp"
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -180,7 +182,7 @@ TEST_P(MathOperationParity, Sin) {
 
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return sin(inputs[0]);
-    }, {a}, device, 1e-2f, 1e-2f, "Sin");  // CUDA uses fast math approximations
+    }, {a}, device, parity::TRANSCENDENTAL_RTOL, parity::TRANSCENDENTAL_ATOL, "Sin");
 }
 
 TEST_P(MathOperationParity, Cos) {
@@ -189,7 +191,7 @@ TEST_P(MathOperationParity, Cos) {
 
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return cos(inputs[0]);
-    }, {a}, device, 1e-2f, 1e-2f, "Cos");  // CUDA uses fast math approximations
+    }, {a}, device, parity::TRANSCENDENTAL_RTOL, parity::TRANSCENDENTAL_ATOL, "Cos");
 }
 
 TEST_P(MathOperationParity, Tan) {
@@ -366,7 +368,7 @@ TEST_P(ReductionOperationParity, Max_Reduction) {
 
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return max(inputs[0]);
-    }, {a}, device, 1e-1f, 1e-1f, "Max Reduction");  // CUDA has known issues with max reduction
+    }, {a}, device, 0.0f, 0.0f, "Max Reduction");  // max() selects an existing element — exact on IEEE float, no accumulation
 }
 
 TEST_P(ReductionOperationParity, Min_Reduction) {
@@ -480,12 +482,30 @@ TEST_P(MathOperationParity, Heaviside) {
 
 TEST_P(MathOperationParity, NanToNum) {
 
+    // Inject NaN/+Inf/-Inf so the replacement path is actually exercised — on
+    // all-finite input nan_to_num is a no-op and a backend that ignores its
+    // nan/posinf/neginf arguments entirely would pass. Place sentinels at known
+    // positions and keep the rest finite.
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
-    // Inject some NaN/Inf values - use the tensor as-is since nan_to_num should be a no-op on finite values
+    float* a_data = a.data<float>();
+    a_data[0] = std::numeric_limits<float>::quiet_NaN();
+    a_data[1] = std::numeric_limits<float>::infinity();
+    a_data[2] = -std::numeric_limits<float>::infinity();
+    const float finite3 = a_data[3];  // untouched finite value, must pass through
 
+    // Direct value assertion on CPU (independent of any golden): the sentinels
+    // must become exactly 0 / 1e6 / -1e6 and finite values must be unchanged.
+    auto cpu_result = nan_to_num(a, 0.0, 1e6, -1e6);
+    const float* r = cpu_result.data<float>();
+    EXPECT_FLOAT_EQ(r[0], 0.0f) << "NaN must be replaced by 0";
+    EXPECT_FLOAT_EQ(r[1], 1e6f) << "+Inf must be replaced by posinf=1e6";
+    EXPECT_FLOAT_EQ(r[2], -1e6f) << "-Inf must be replaced by neginf=-1e6";
+    EXPECT_FLOAT_EQ(r[3], finite3) << "finite values must pass through unchanged";
+
+    // Cross-backend: replacement is deterministic, so require exact agreement.
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return nan_to_num(inputs[0], 0.0, 1e6, -1e6);
-    }, {a}, device, 1e-6f, 1e-8f, "NanToNum");
+    }, {a}, device, 0.0f, 0.0f, "NanToNum");
 }
 
 TEST_P(MathOperationParity, LogSigmoid) {
@@ -641,13 +661,13 @@ TEST_P(Float64Parity, Exp) {
 TEST_P(Float64Parity, Log) {
     auto a = abs(randn({32, 32}, DType::Float64, Device::cpu())) + 0.001;
     test_operation_parity_single([](const std::vector<Tensor>& in) { return log(in[0]); },
-                          {a}, device, 1e-6f, 1e-8f, "F64 Log");
+                          {a}, device, parity::MATH_RTOL_F64, parity::MATH_ATOL_F64, "F64 Log");
 }
 
 TEST_P(Float64Parity, Tanh) {
     auto a = randn({32, 32}, DType::Float64, Device::cpu());
     test_operation_parity_single([](const std::vector<Tensor>& in) { return tanh(in[0]); },
-                          {a}, device, 1e-6f, 1e-8f, "F64 Tanh");
+                          {a}, device, parity::MATH_RTOL_F64, parity::MATH_ATOL_F64, "F64 Tanh");
 }
 
 TEST_P(Float64Parity, Sigmoid) {
@@ -659,13 +679,13 @@ TEST_P(Float64Parity, Sigmoid) {
 TEST_P(Float64Parity, Sum) {
     auto a = randn({32, 64}, DType::Float64, Device::cpu());
     test_operation_parity_single([](const std::vector<Tensor>& in) { return sum(in[0]); },
-                          {a}, device, 1e-4f, 1e-6f, "F64 Sum");
+                          {a}, device, parity::REDUCTION_RTOL_F64, parity::REDUCTION_ATOL_F64, "F64 Sum");
 }
 
 TEST_P(Float64Parity, Mean) {
     auto a = randn({32, 64}, DType::Float64, Device::cpu());
     test_operation_parity_single([](const std::vector<Tensor>& in) { return mean(in[0]); },
-                          {a}, device, 1e-4f, 1e-6f, "F64 Mean");
+                          {a}, device, parity::REDUCTION_RTOL_F64, parity::REDUCTION_ATOL_F64, "F64 Mean");
 }
 
 TEST_P(Float64Parity, Clamp) {
@@ -683,7 +703,7 @@ TEST_P(Float64Parity, Sqrt) {
 TEST_P(Float64Parity, Pow) {
     auto a = abs(randn({32, 32}, DType::Float64, Device::cpu())) + 0.01;
     test_operation_parity_single([](const std::vector<Tensor>& in) { return pow(in[0], 2.5); },
-                          {a}, device, 1e-4f, 1e-6f, "F64 Pow");
+                          {a}, device, parity::MATH_RTOL_F64, parity::MATH_ATOL_F64, "F64 Pow");
 }
 
 TEST_P(Float64Parity, Transpose) {

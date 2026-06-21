@@ -123,6 +123,27 @@ auto composed_attention_backward(const Tensor& dO,
     std::vector<int64_t> V_shape(V.shape().begin(), V.shape().end());
     bool is_4d = (orig_shape.size() == 4);
 
+    // The composed path collapses [B,H,S,D] -> [B*H,S,D] for Q,K,V identically
+    // and does bmm(Q3, K3^T); this is only valid when Q and K/V share the same
+    // head count H (standard MHA). Grouped/multi-query attention is materialised
+    // to full H by repeat_kv BEFORE any flash/composed path in this library
+    // (see src/nn/layers/gqa_attention.cpp), so equal heads is an invariant
+    // here. Assert it loudly rather than silently computing a wrong-grouping
+    // gradient if a caller ever feeds raw GQA-shaped K/V directly.
+    if (is_4d) {
+        if (K_shape.size() == 4 && K_shape[1] != orig_shape[1]) {
+            throw std::runtime_error(
+                "composed_attention_backward: Q and K have different head "
+                "counts (GQA/MQA not supported on the composed fallback; "
+                "expand K/V to the query head count before calling)");
+        }
+        if (V_shape.size() == 4 && V_shape[1] != orig_shape[1]) {
+            throw std::runtime_error(
+                "composed_attention_backward: Q and V have different head "
+                "counts (GQA/MQA not supported on the composed fallback)");
+        }
+    }
+
     auto reshape_3d = [&](const Tensor& t) -> Tensor {
         if (!is_4d) return t;
         auto s = t.shape();
@@ -151,8 +172,15 @@ auto composed_attention_backward(const Tensor& dO,
         // and leaks gradient mass).
         int64_t S_q = S.shape()[1];
         int64_t S_k = S.shape()[2];
+        // Top-left causal alignment (query i attends keys 0..i: mask ki > qi),
+        // matching the CPU FlashAttention forward kernel and the CUDA/ROCm/
+        // OneAPI forwards (all use `kv_pos > query_idx`). triu offset 1 masks
+        // strictly above the diagonal == ki > qi for any S_q, S_k. Using the
+        // bottom-right `1 + (S_k - S_q)` offset here would differentiate a
+        // DIFFERENT masked softmax than the forward computed when S_q != S_k
+        // (causal cross-attention / cached-KV decode), yielding wrong dQ/dK/dV.
         Tensor mask = tenzor::triu(tenzor::ones({S_q, S_k}, S.dtype(), S.device()),
-                                   1 + (S_k - S_q));
+                                   1);
         Tensor neg_inf = tenzor::full({1}, -std::numeric_limits<float>::infinity(),
                                       S.dtype(), S.device());
         S = tenzor::where(mask, neg_inf, S);
@@ -497,9 +525,11 @@ auto composed_attention_backward_variable(const Variable& dO,
         auto S_shape = S.tensor().shape();
         int64_t S_q = S_shape[1];
         int64_t S_k = S_shape[2];
+        // Top-left causal alignment (mask ki > qi) matching the CPU/CUDA/ROCm/
+        // OneAPI forward kernels; see the Tensor-composed twin above.
         auto mask_t = ::tenzor::triu(
             ::tenzor::ones({S_q, S_k}, S.tensor().dtype(), S.tensor().device()),
-            1 + (S_k - S_q));
+            1);
         auto neg_inf_t = ::tenzor::full({1}, -std::numeric_limits<double>::infinity(),
                                          S.tensor().dtype(), S.tensor().device());
         Variable mask_v(mask_t, false);

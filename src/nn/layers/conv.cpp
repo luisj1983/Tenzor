@@ -270,8 +270,13 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels,
     register_parameter("weight", weight_init);
 
     if (bias) {
+        // PyTorch convention (and the sibling Conv1d/ConvTranspose/Deformable
+        // layers): bias ~ U(-1/sqrt(fan_in), 1/sqrt(fan_in)). The previous
+        // zero-init diverged from every other conv layer and from PyTorch.
         std::vector<int64_t> bias_shape = {out_channels};
-        auto bias_init = Variable(zeros(bias_shape), true);
+        float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
+        auto bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
+        auto bias_init = Variable(bias_tensor, true);
         register_parameter("bias", bias_init);
     }
 }
@@ -1286,7 +1291,11 @@ Conv3d::Conv3d(int64_t in_channels, int64_t out_channels,
     register_parameter("weight", weight_init);
 
     if (bias) {
-        auto bias_init = Variable(zeros({out_channels}), true);
+        // PyTorch convention (and sibling conv layers): bias is uniform on
+        // [-1/sqrt(fan_in), 1/sqrt(fan_in)], not zero.
+        float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
+        auto bias_tensor = (rand({out_channels}) * 2.0f * bound) - bound;
+        auto bias_init = Variable(bias_tensor, true);
         register_parameter("bias", bias_init);
     }
 }

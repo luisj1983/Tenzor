@@ -1327,13 +1327,103 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
     const int64_t N = boxes1.shape()[0];
     const int64_t M = boxes2.shape()[0];
 
-    // Convert half types to Float32 for precision
-    Tensor b1_f32 = boxes1;
-    Tensor b2_f32 = boxes2;
+    // Validate iou_type before the parallel region (throwing across an OpenMP
+    // region is undefined behaviour). 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU.
+    if (iou_type < 0 || iou_type > 3) {
+        throw std::runtime_error(
+            "box_iou: unsupported iou_type " + std::to_string(iou_type) +
+            " (expected 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU)");
+    }
+
+    // Templated IoU computation. Runs in T precision so the Float64 path keeps
+    // full double precision (important for large-coordinate boxes) instead of
+    // silently downcasting to Float32. Half types are widened to Float32 first.
+    auto compute = [&](auto type_tag) -> Tensor {
+        using T = decltype(type_tag);
+        const T* b1 = boxes1.data<T>();
+        const T* b2 = boxes2.data<T>();
+        Tensor output({N, M}, boxes1.dtype(), boxes1.device());
+        T* out = output.data<T>();
+
+        const T eps = static_cast<T>(1e-7);
+        #pragma omp parallel for collapse(2) if(N * M > ::tenzor::OmpThresholds::complex())
+        for (int64_t i = 0; i < N; ++i) {
+            for (int64_t j = 0; j < M; ++j) {
+                T x1 = std::max(b1[i * 4 + 0], b2[j * 4 + 0]);
+                T y1 = std::max(b1[i * 4 + 1], b2[j * 4 + 1]);
+                T x2 = std::min(b1[i * 4 + 2], b2[j * 4 + 2]);
+                T y2 = std::min(b1[i * 4 + 3], b2[j * 4 + 3]);
+
+                T inter_w = std::max(static_cast<T>(0), x2 - x1);
+                T inter_h = std::max(static_cast<T>(0), y2 - y1);
+                T inter_area = inter_w * inter_h;
+
+                T area1 = (b1[i * 4 + 2] - b1[i * 4 + 0]) * (b1[i * 4 + 3] - b1[i * 4 + 1]);
+                T area2 = (b2[j * 4 + 2] - b2[j * 4 + 0]) * (b2[j * 4 + 3] - b2[j * 4 + 1]);
+                T union_area = area1 + area2 - inter_area;
+
+                T iou = (union_area > static_cast<T>(0)) ? inter_area / union_area : static_cast<T>(0);
+
+                if (iou_type == 1) {
+                    // GIoU
+                    T enclose_x1 = std::min(b1[i * 4 + 0], b2[j * 4 + 0]);
+                    T enclose_y1 = std::min(b1[i * 4 + 1], b2[j * 4 + 1]);
+                    T enclose_x2 = std::max(b1[i * 4 + 2], b2[j * 4 + 2]);
+                    T enclose_y2 = std::max(b1[i * 4 + 3], b2[j * 4 + 3]);
+                    T enclose_area = (enclose_x2 - enclose_x1) * (enclose_y2 - enclose_y1);
+                    iou = iou - (enclose_area - union_area) / std::max(enclose_area, eps);
+                } else if (iou_type == 2 || iou_type == 3) {
+                    // DIoU (2) / CIoU (3): subtract the normalized squared center
+                    // distance (and, for CIoU, the aspect-ratio penalty). Mirrors
+                    // the CUDA backend (vision.cu box_iou_kernel) so CPU and CUDA
+                    // agree numerically.
+                    T cx1 = (b1[i * 4 + 0] + b1[i * 4 + 2]) * static_cast<T>(0.5);
+                    T cy1 = (b1[i * 4 + 1] + b1[i * 4 + 3]) * static_cast<T>(0.5);
+                    T cx2 = (b2[j * 4 + 0] + b2[j * 4 + 2]) * static_cast<T>(0.5);
+                    T cy2 = (b2[j * 4 + 1] + b2[j * 4 + 3]) * static_cast<T>(0.5);
+                    T center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+
+                    T enc_x1 = std::min(b1[i * 4 + 0], b2[j * 4 + 0]);
+                    T enc_y1 = std::min(b1[i * 4 + 1], b2[j * 4 + 1]);
+                    T enc_x2 = std::max(b1[i * 4 + 2], b2[j * 4 + 2]);
+                    T enc_y2 = std::max(b1[i * 4 + 3], b2[j * 4 + 3]);
+                    T enc_w = enc_x2 - enc_x1;
+                    T enc_h = enc_y2 - enc_y1;
+                    T diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+
+                    T result = iou - center_dist_sq / (diag_dist_sq + eps);
+                    if (iou_type == 3) {
+                        T w1 = b1[i * 4 + 2] - b1[i * 4 + 0];
+                        T h1 = b1[i * 4 + 3] - b1[i * 4 + 1];
+                        T w2 = b2[j * 4 + 2] - b2[j * 4 + 0];
+                        T h2 = b2[j * 4 + 3] - b2[j * 4 + 1];
+                        const T four_over_pi_sq =
+                            static_cast<T>(4.0 / (3.14159265358979323846 * 3.14159265358979323846));
+                        T diff = std::atan(w2 / (h2 + eps)) - std::atan(w1 / (h1 + eps));
+                        T v = four_over_pi_sq * diff * diff;
+                        T alpha = v / (static_cast<T>(1) - iou + v + eps);  // original IoU
+                        result = result - alpha * v;
+                    }
+                    iou = result;
+                }
+                // iou_type == 0 is plain IoU (no penalty); validated above.
+
+                out[i * M + j] = iou;
+            }
+        }
+        return output;
+    };
+
+    if (boxes1.dtype() == DType::Float64) {
+        // Native Float64 path: preserves double precision and returns Float64.
+        return compute(double{});
+    }
+
+    // Float32 path. Half types (Float16/BFloat16) are widened to Float32 first
+    // (they have no precision to preserve), then computed and returned as Float32.
     if (boxes1.dtype() == DType::Float16 || boxes1.dtype() == DType::BFloat16) {
-        // Convert to Float32 by copying element-wise
-        b1_f32 = Tensor({N, 4}, DType::Float32, boxes1.device());
-        b2_f32 = Tensor({M, 4}, DType::Float32, boxes2.device());
+        Tensor b1_f32({N, 4}, DType::Float32, boxes1.device());
+        Tensor b2_f32({M, 4}, DType::Float32, boxes2.device());
         if (boxes1.dtype() == DType::Float16) {
             const Float16* src1 = boxes1.data<Float16>();
             float* dst1 = b1_f32.data<float>();
@@ -1349,98 +1439,16 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
             float* dst2 = b2_f32.data<float>();
             for (int64_t i = 0; i < M * 4; ++i) dst2[i] = static_cast<float>(src2[i]);
         }
-    } else if (boxes1.dtype() == DType::Float64) {
-        // Convert Float64 to Float32 for IoU computation
-        b1_f32 = Tensor({N, 4}, DType::Float32, boxes1.device());
-        b2_f32 = Tensor({M, 4}, DType::Float32, boxes2.device());
-        const double* src1 = boxes1.data<double>();
-        float* dst1 = b1_f32.data<float>();
-        for (int64_t i = 0; i < N * 4; ++i) dst1[i] = static_cast<float>(src1[i]);
-        const double* src2 = boxes2.data<double>();
-        float* dst2 = b2_f32.data<float>();
-        for (int64_t i = 0; i < M * 4; ++i) dst2[i] = static_cast<float>(src2[i]);
+        // Recurse on the widened Float32 tensors.
+        return box_iou_kernel(b1_f32, b2_f32, iou_type);
     }
 
-    // Validate iou_type before the parallel region (throwing across an OpenMP
-    // region is undefined behaviour). 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU.
-    if (iou_type < 0 || iou_type > 3) {
+    if (boxes1.dtype() != DType::Float32) {
         throw std::runtime_error(
-            "box_iou: unsupported iou_type " + std::to_string(iou_type) +
-            " (expected 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU)");
+            "box_iou: unsupported dtype " + std::string(dtype_name(boxes1.dtype())) +
+            " (expected Float32, Float64, Float16, or BFloat16)");
     }
-
-    Tensor output({N, M}, DType::Float32, boxes1.device());
-    const float* b1 = b1_f32.data<float>();
-    const float* b2 = b2_f32.data<float>();
-    float* out = output.data<float>();
-
-    #pragma omp parallel for collapse(2) if(N * M > ::tenzor::OmpThresholds::complex())
-    for (int64_t i = 0; i < N; ++i) {
-        for (int64_t j = 0; j < M; ++j) {
-            float x1 = std::max(b1[i * 4 + 0], b2[j * 4 + 0]);
-            float y1 = std::max(b1[i * 4 + 1], b2[j * 4 + 1]);
-            float x2 = std::min(b1[i * 4 + 2], b2[j * 4 + 2]);
-            float y2 = std::min(b1[i * 4 + 3], b2[j * 4 + 3]);
-
-            float inter_w = std::max(0.0f, x2 - x1);
-            float inter_h = std::max(0.0f, y2 - y1);
-            float inter_area = inter_w * inter_h;
-
-            float area1 = (b1[i * 4 + 2] - b1[i * 4 + 0]) * (b1[i * 4 + 3] - b1[i * 4 + 1]);
-            float area2 = (b2[j * 4 + 2] - b2[j * 4 + 0]) * (b2[j * 4 + 3] - b2[j * 4 + 1]);
-            float union_area = area1 + area2 - inter_area;
-
-            float iou = (union_area > 0.0f) ? inter_area / union_area : 0.0f;
-
-            if (iou_type == 1) {
-                // GIoU
-                float enclose_x1 = std::min(b1[i * 4 + 0], b2[j * 4 + 0]);
-                float enclose_y1 = std::min(b1[i * 4 + 1], b2[j * 4 + 1]);
-                float enclose_x2 = std::max(b1[i * 4 + 2], b2[j * 4 + 2]);
-                float enclose_y2 = std::max(b1[i * 4 + 3], b2[j * 4 + 3]);
-                float enclose_area = (enclose_x2 - enclose_x1) * (enclose_y2 - enclose_y1);
-                iou = iou - (enclose_area - union_area) / std::max(enclose_area, 1e-7f);
-            } else if (iou_type == 2 || iou_type == 3) {
-                // DIoU (2) / CIoU (3): subtract the normalized squared center
-                // distance (and, for CIoU, the aspect-ratio penalty). Mirrors
-                // the CUDA backend (vision.cu box_iou_kernel) so CPU and CUDA
-                // agree numerically.
-                float cx1 = (b1[i * 4 + 0] + b1[i * 4 + 2]) * 0.5f;
-                float cy1 = (b1[i * 4 + 1] + b1[i * 4 + 3]) * 0.5f;
-                float cx2 = (b2[j * 4 + 0] + b2[j * 4 + 2]) * 0.5f;
-                float cy2 = (b2[j * 4 + 1] + b2[j * 4 + 3]) * 0.5f;
-                float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
-
-                float enc_x1 = std::min(b1[i * 4 + 0], b2[j * 4 + 0]);
-                float enc_y1 = std::min(b1[i * 4 + 1], b2[j * 4 + 1]);
-                float enc_x2 = std::max(b1[i * 4 + 2], b2[j * 4 + 2]);
-                float enc_y2 = std::max(b1[i * 4 + 3], b2[j * 4 + 3]);
-                float enc_w = enc_x2 - enc_x1;
-                float enc_h = enc_y2 - enc_y1;
-                float diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
-
-                float result = iou - center_dist_sq / (diag_dist_sq + 1e-7f);
-                if (iou_type == 3) {
-                    float w1 = b1[i * 4 + 2] - b1[i * 4 + 0];
-                    float h1 = b1[i * 4 + 3] - b1[i * 4 + 1];
-                    float w2 = b2[j * 4 + 2] - b2[j * 4 + 0];
-                    float h2 = b2[j * 4 + 3] - b2[j * 4 + 1];
-                    const float four_over_pi_sq =
-                        static_cast<float>(4.0 / (3.14159265358979323846 * 3.14159265358979323846));
-                    float diff = std::atan(w2 / (h2 + 1e-7f)) - std::atan(w1 / (h1 + 1e-7f));
-                    float v = four_over_pi_sq * diff * diff;
-                    float alpha = v / (1.0f - iou + v + 1e-7f);  // original IoU
-                    result = result - alpha * v;
-                }
-                iou = result;
-            }
-            // iou_type == 0 is plain IoU (no penalty); validated above.
-
-            out[i * M + j] = iou;
-        }
-    }
-
-    return output;
+    return compute(float{});
 }
 
 // =========================================================================

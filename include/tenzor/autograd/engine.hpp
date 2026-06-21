@@ -176,6 +176,22 @@ private:
     std::unordered_map<uint64_t, std::vector<Tensor>> grad_accumulators_;
 
     /**
+     * @brief Graph-carrying gradient accumulation buffers (create_graph only).
+     *
+     * Parallel to grad_accumulators_ but stores the Variable form of each
+     * gradient contribution so that, under create_graph=true, a downstream
+     * Function's backward_with_variables receives grad_outputs whose grad_fn
+     * still chains back to the input. Without this the engine extracts raw
+     * tensors from var_input_grads and re-wraps them detached (Variable(g,
+     * true)) before handing them to the next Function — severing the second-
+     * order graph at every Function-to-Function gradient hand-off. That
+     * severing made dependence-through-the-gradient (as opposed to dependence
+     * through a saved tensor) invisible to higher-order AD, e.g. d²/dx²(x³)
+     * came out 4x instead of 6x. Only populated when create_graph is active.
+     */
+    std::unordered_map<uint64_t, std::vector<Variable>> grad_accumulators_var_;
+
+    /**
      * @brief Accumulate gradient for a function.
      *
      * Adds a gradient to the accumulator for the given function.
@@ -185,6 +201,22 @@ private:
      * @param grad Gradient tensor to accumulate
      */
     auto accumulate_grad(Function* func, Tensor grad) -> void;
+
+    /**
+     * @brief Accumulate a graph-carrying gradient Variable for a function.
+     *
+     * Companion to accumulate_grad used only under create_graph=true so the
+     * second-order graph stays connected across Function hand-offs.
+     */
+    auto accumulate_grad_var(Function* func, Variable grad) -> void;
+
+    /**
+     * @brief Build the graph-carrying grad_outputs for a Function under
+     *        create_graph=true, summing the Variable accumulator entries.
+     */
+    auto build_var_grad_outputs(Function* func,
+                                const std::vector<Tensor>& raw_grad_outputs)
+        -> std::vector<Variable>;
 
     /**
      * @brief Get all accumulated gradients for a function.

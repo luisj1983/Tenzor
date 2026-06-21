@@ -2005,6 +2005,24 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Expand; }
+    // Target (expanded) shape, so the forward-mode JVP rule can expand the
+    // input tangent to the same shape. Without it jvp_adapter_expand falls back
+    // to the input shape and a scalar→vector expand produces a scalar tangent
+    // (e.g. the constant gradient of sum(x) yielded a {} Hessian column instead
+    // of zeros{n}). Populated by the `expand` autograd op.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        if (!target_shape_.empty()) {
+            std::string s;
+            for (size_t i = 0; i < target_shape_.size(); ++i) {
+                if (i) s += ',';
+                s += std::to_string(target_shape_[i]);
+            }
+            attrs.set(AttrKey::Shape, s);
+        }
+        return attrs;
+    }
+    std::vector<int64_t> target_shape_;
 };
 
 class DeviceTransferBackward : public Function {

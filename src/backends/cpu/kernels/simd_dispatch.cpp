@@ -496,23 +496,29 @@ static void do_init() {
 
 void init_dispatch() {
     std::lock_guard<std::mutex> lock(init_mutex);
-    if (g_dispatch.initialized) {
+    if (g_dispatch.initialized.load(std::memory_order_acquire)) {
         return;
     }
     do_init();
-    g_dispatch.initialized = true;
+    // Publish the populated table with release so a concurrent lazy-init reader
+    // that observes initialized==true (via acquire) also sees all do_init writes.
+    g_dispatch.initialized.store(true, std::memory_order_release);
 }
 
 void reinit_dispatch() {
     std::lock_guard<std::mutex> lock(init_mutex);
     // Force re-initialisation even if already done (for testing).
-    g_dispatch.initialized = false;
+    // Mark uninitialised (release) before repopulating, then publish (release)
+    // once the table is fully rewritten. Note: reinit while kernels run
+    // concurrently remains unsupported — the function-pointer writes themselves
+    // are not atomic; reinit is a test-only entry point.
+    g_dispatch.initialized.store(false, std::memory_order_release);
     do_init();
-    g_dispatch.initialized = true;
+    g_dispatch.initialized.store(true, std::memory_order_release);
 }
 
 std::string get_simd_level() {
-    if (!g_dispatch.initialized) {
+    if (!g_dispatch.initialized.load(std::memory_order_acquire)) {
         init_dispatch();
     }
     return std::string(g_dispatch.simd_level);

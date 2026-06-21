@@ -485,6 +485,37 @@ TEST_F(TorchPickleTest, ErrorOnUnsupportedOpcode) {
     std::filesystem::remove(path);
 }
 
+// SECURITY: LONG4 (0x8b) reads a 32-bit length and must validate it against the
+// bytes remaining BEFORE allocating the buffer; otherwise a 5-byte fragment
+// declaring a ~4 GB length forces a giant allocation (OOM/bad_alloc DoS). The
+// parser must reject it as a clean "read past EOF", not crash or OOM.
+TEST_F(TorchPickleTest, Long4LengthPastEofRejectedBeforeAllocating) {
+    std::vector<uint8_t> pkl = {
+        0x80, 0x02,                      // PROTO 2
+        '}',                             // EMPTY_DICT
+        0x8b, 0xFF, 0xFF, 0xFF, 0xFF,    // LONG4 with length 0xFFFFFFFF, no data
+        '.'                              // STOP (never reached)
+    };
+
+    ZipBuilder zip;
+    zip.add("archive/data.pkl", pkl);
+    auto data = zip.build();
+
+    auto path = std::filesystem::temp_directory_path() /
+                ("tenzor_pickle_long4_oom_" + std::to_string(::getpid()) + ".pth");
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(data.data()),
+                  static_cast<std::streamsize>(data.size()));
+    }
+
+    EXPECT_THROW((void) tenzor::io::load_torch_pickle(path.string()),
+                 std::runtime_error)
+        << "LONG4 with an out-of-range length must be rejected, not allocated";
+
+    std::filesystem::remove(path);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

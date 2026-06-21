@@ -10,6 +10,22 @@
 
 namespace tenzor {
 
+namespace {
+// Validate a Device::Type before using it to index the fixed-size
+// device_kernels_ array. A corrupt/out-of-range enum value (e.g. from a
+// foreign tensor) would otherwise be an out-of-bounds array access.
+inline size_t checked_device_index(Device::Type device_type) {
+    auto idx = static_cast<size_t>(device_type);
+    if (idx >= static_cast<size_t>(Device::Type::COUNT)) {
+        throw std::out_of_range(
+            "custom_op: device type index " + std::to_string(idx) +
+            " out of range (max " +
+            std::to_string(static_cast<size_t>(Device::Type::COUNT)) + ")");
+    }
+    return idx;
+}
+}  // namespace
+
 // ============================================================================
 // CustomOpRegistry singleton
 // ============================================================================
@@ -59,7 +75,7 @@ auto CustomOpRegistry::op_name(CustomOpId id) const -> std::string_view {
 
 void CustomOpRegistry::register_kernel(CustomOpId id, Device::Type device_type,
                                        CustomKernelFn kernel) {
-    auto& dk = device_kernels_[static_cast<size_t>(device_type)];
+    auto& dk = device_kernels_[checked_device_index(device_type)];
     std::unique_lock lock(dk.mutex);
     dk.kernels[id.value] = std::move(kernel);
 }
@@ -67,7 +83,7 @@ void CustomOpRegistry::register_kernel(CustomOpId id, Device::Type device_type,
 auto CustomOpRegistry::dispatch(CustomOpId id, Device::Type device_type,
                                 std::span<const Tensor> inputs,
                                 const OpAttributes& attrs) const -> Tensor {
-    auto& dk = device_kernels_[static_cast<size_t>(device_type)];
+    auto& dk = device_kernels_[checked_device_index(device_type)];
     std::shared_lock lock(dk.mutex);
 
     auto it = dk.kernels.find(id.value);
@@ -82,7 +98,7 @@ auto CustomOpRegistry::dispatch(CustomOpId id, Device::Type device_type,
 }
 
 bool CustomOpRegistry::has_kernel(CustomOpId id, Device::Type device_type) const {
-    auto& dk = device_kernels_[static_cast<size_t>(device_type)];
+    auto& dk = device_kernels_[checked_device_index(device_type)];
     std::shared_lock lock(dk.mutex);
     return dk.kernels.contains(id.value);
 }

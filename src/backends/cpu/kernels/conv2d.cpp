@@ -1128,6 +1128,13 @@ auto conv2d_forward_kernel(
     int64_t out_h = calculate_output_size(height, kernel_h, stride_h, pad_h, dil_h);
     int64_t out_w = calculate_output_size(width,  kernel_w, stride_w, pad_w, dil_w);
 
+    if (out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "Invalid Conv2d configuration: output dimensions are non-positive (out_h=" +
+            std::to_string(out_h) + ", out_w=" + std::to_string(out_w) +
+            "); kernel/dilation too large for the padded input");
+    }
+
     // Create output tensor with correct dtype
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());

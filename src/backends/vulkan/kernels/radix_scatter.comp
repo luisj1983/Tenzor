@@ -49,15 +49,31 @@ void main() {
     uint tile_start = wg_id * tile_size;
     uint tile_end = min(tile_start + tile_size, n);
 
-    // Stride the scatter loop by the actual workgroup size (not a hardcoded
-    // 256) so every element is scattered exactly once: wgSize<256 would
-    // otherwise drop elements, and wgSize>256 would make lanes lid and lid+256
-    // collide on the same element index (double-scatter / data race).
-    for (uint i = tile_start + lid; i < tile_end; i += gl_WorkGroupSize.x) {
-        uint sortable = float_to_sortable(keys_in[i]);
-        uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
-        uint dest = atomicAdd(local_offsets[digit_val], 1);
-        keys_out[dest] = keys_in[i];
-        idx_out[dest] = idx_in[i];
+    // STABILITY: LSD radix is only correct if, within each pass, elements that
+    // share a digit keep their ASCENDING-INDEX order (the host depends on this
+    // — see vulkan_ops_sort.cpp — and the CPU reference is stable). A parallel
+    // `dest = atomicAdd(local_offsets[digit],1)` assigns consecutive slots in
+    // atomic-arbitration order, NOT index order, so equal-digit elements within
+    // a tile come out in a non-deterministic permutation — a wrong (unstable)
+    // sort/argsort/topk tie order that diverges from CPU.
+    //
+    // To guarantee stability we scatter each tile in strict index order. A
+    // single lane walks tile_start..tile_end and consumes per-digit offsets
+    // sequentially, so element i is always placed before element j whenever
+    // i<j and they share a digit. local_offsets is per-workgroup (loaded from
+    // this wg's histogram slice), so different workgroups still scatter into
+    // disjoint, correctly-based ranges in parallel; only the WITHIN-tile order
+    // is serialized, which is what stability requires. No atomics are needed
+    // because only one lane mutates local_offsets.
+    barrier();
+    if (lid == 0u) {
+        for (uint i = tile_start; i < tile_end; ++i) {
+            uint sortable = float_to_sortable(keys_in[i]);
+            uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
+            uint dest = local_offsets[digit_val];
+            local_offsets[digit_val] = dest + 1u;
+            keys_out[dest] = keys_in[i];
+            idx_out[dest] = idx_in[i];
+        }
     }
 }

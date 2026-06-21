@@ -604,7 +604,11 @@ auto GlooBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
         if (op == ReduceOp::AVG && world_size_ > 0) {
             wide = tenzor::div(wide, static_cast<double>(world_size_));
         }
-        tensor = wide.to(orig_dtype);
+        // Write back THROUGH the caller's storage (zero_() + +=) rather than
+        // rebinding `tensor = ...`, preserving aliased Variables/views/grads
+        // (H6 aliasing fix, matching the MPI/NCCL backends).
+        tensor.zero_();
+        tensor += wide.to(orig_dtype);
         return;
     }
     ring_all_reduce(tensor, ring_op);
@@ -651,20 +655,34 @@ auto GlooBackend::all_gather(const Tensor& tensor, std::vector<Tensor>& output) 
         throw std::invalid_argument("all_gather: output size must equal world_size");
     }
 
-    // Send local tensor to all ranks
-    for (int dst = 0; dst < world_size_; ++dst) {
-        if (dst != rank_) {
-            send_tensor(tensor, dst);
-        } else {
-            output[rank_] = tensor.clone();
-        }
-    }
+    // Own contribution is a local copy.
+    output[rank_] = tensor.clone();
 
-    // Receive from all other ranks
-    for (int src = 0; src < world_size_; ++src) {
-        if (src != rank_) {
-            output[src] = zeros_like(tensor);
-            recv_tensor(output[src], src);
+    // Deadlock-free full-mesh exchange. The previous implementation issued ALL
+    // send_tensor() to every peer first and ONLY THEN all recv_tensor(). Because
+    // TCPConnection::send() blocks until every byte is flushed, once the
+    // aggregate in-flight data exceeds the kernel socket buffers every rank
+    // blocks in its send loop before any reaches its recv loop — a classic
+    // full-mesh TCP deadlock at scale.
+    //
+    // Instead, exchange with one peer at a time using a fixed ordering that
+    // guarantees the two endpoints of every pair post their send/recv in the
+    // opposite order: the lower-ranked endpoint sends first then receives, the
+    // higher-ranked endpoint receives first then sends. Each socket therefore
+    // always has exactly one side reading while the other writes, so no send can
+    // block indefinitely. (This mirrors the paired send/recv ordering Gloo's
+    // ring collectives already rely on.)
+    for (int peer = 0; peer < world_size_; ++peer) {
+        if (peer == rank_) {
+            continue;
+        }
+        output[peer] = zeros_like(tensor);
+        if (rank_ < peer) {
+            send_tensor(tensor, peer);
+            recv_tensor(output[peer], peer);
+        } else {
+            recv_tensor(output[peer], peer);
+            send_tensor(tensor, peer);
         }
     }
 }
@@ -833,8 +851,12 @@ auto GlooBackend::finalize() -> void {
         server_socket_ = -1;
     }
 
-    // Clean up rendezvous store files
-    std::string store_path = "/tmp/tenzor_rendezvous_" + std::to_string(master_port_);
+    // Clean up rendezvous store files. Must use the SAME per-user path that
+    // write_port_to_store() created — the previous hardcoded
+    // /tmp/tenzor_rendezvous_<port> (no uid, no XDG) never matched the write
+    // path, so rank files leaked and a later run on the same port could read a
+    // stale port and connect to a dead/wrong peer.
+    std::string store_path = rendezvous_store_path();
     if (std::filesystem::exists(store_path)) {
         try {
             std::filesystem::remove_all(store_path);
@@ -920,10 +942,18 @@ auto GlooBackend::init_connections() -> void {
                 throw std::runtime_error("Failed to accept connection from rank " + std::to_string(peer_rank));
             }
 
-            // Receive peer rank ID for verification
+            // Receive peer rank ID for verification. Use a full-read loop
+            // (recv_all) rather than a single ::recv: the 4-byte rank id can be
+            // split across TCP segments, and a single recv returning n<4 would
+            // spuriously fail the handshake for a valid peer.
             int received_rank = -1;
-            ssize_t n = ::recv(client_fd, &received_rank, sizeof(int), 0);
-            if (n != sizeof(int) || received_rank != peer_rank) {
+            try {
+                recv_all(client_fd, &received_rank, sizeof(int), "handshake rank id");
+            } catch (...) {
+                ::close(client_fd);
+                throw;
+            }
+            if (received_rank != peer_rank) {
                 ::close(client_fd);
                 throw std::runtime_error("Handshake failed: expected rank " + std::to_string(peer_rank) +
                                        " but got " + std::to_string(received_rank));
@@ -1030,10 +1060,17 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
                 throw;
             }
 
-            // Receive peer rank ID for verification
+            // Receive peer rank ID for verification. Full-read loop (recv_all):
+            // a single ::recv can return a short read when the 4-byte rank id is
+            // split across TCP segments, spuriously failing a valid handshake.
             int received_rank = -1;
-            ssize_t n = ::recv(sockfd, &received_rank, sizeof(int), 0);
-            if (n != sizeof(int) || received_rank != peer_rank) {
+            try {
+                recv_all(sockfd, &received_rank, sizeof(int), "handshake rank id");
+            } catch (...) {
+                ::close(sockfd);
+                throw;
+            }
+            if (received_rank != peer_rank) {
                 ::close(sockfd);
                 throw std::runtime_error("Handshake failed: expected rank " + std::to_string(peer_rank) +
                                        " but got " + std::to_string(received_rank));
@@ -1051,17 +1088,23 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
                             " at " + master_addr_ + ":" + std::to_string(peer_port));
 }
 
-auto GlooBackend::write_port_to_store(int rank, int port) -> void {
+auto GlooBackend::rendezvous_store_path() const -> std::string {
     // Per-user, owner-only rendezvous dir. A fixed world-accessible
     // /tmp/tenzor_rendezvous_<port> let any local user pre-create the dir or
     // rank files to inject a bogus port (MITM the handshake) or DoS it.
-    std::string store_path;
+    // Single source of truth: write_port_to_store, read_port_from_store, and
+    // finalize() must all derive the SAME path, otherwise cleanup removes the
+    // wrong directory and leaks rank files that can poison a later run on the
+    // same port.
     if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && xdg[0]) {
-        store_path = std::string(xdg) + "/tenzor_rendezvous_" + std::to_string(master_port_);
-    } else {
-        store_path = "/tmp/tenzor_rendezvous_" + std::to_string(getuid()) +
-                     "_" + std::to_string(master_port_);
+        return std::string(xdg) + "/tenzor_rendezvous_" + std::to_string(master_port_);
     }
+    return "/tmp/tenzor_rendezvous_" + std::to_string(getuid()) +
+           "_" + std::to_string(master_port_);
+}
+
+auto GlooBackend::write_port_to_store(int rank, int port) -> void {
+    std::string store_path = rendezvous_store_path();
     std::filesystem::create_directories(store_path);
     ::chmod(store_path.c_str(), 0700);
 
@@ -1076,13 +1119,7 @@ auto GlooBackend::write_port_to_store(int rank, int port) -> void {
 
 auto GlooBackend::read_port_from_store(int rank) -> int {
     // Must match write_port_to_store()'s per-user path exactly.
-    std::string store_path;
-    if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && xdg[0]) {
-        store_path = std::string(xdg) + "/tenzor_rendezvous_" + std::to_string(master_port_);
-    } else {
-        store_path = "/tmp/tenzor_rendezvous_" + std::to_string(getuid()) +
-                     "_" + std::to_string(master_port_);
-    }
+    std::string store_path = rendezvous_store_path();
     std::string rank_file = store_path + "/rank_" + std::to_string(rank);
 
     // Wait for file to appear (with timeout)
@@ -1165,7 +1202,11 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
     // with matching numel, sizing the recv by the peer dtype would overflow the
     // heap allocation. Reject the mismatch and always size the recv by the
     // local buffer's own capacity, never the peer's.
-    if (static_cast<DType>(dtype) != cpu_tensor.dtype()) {
+    // Compare the RAW peer-supplied value against the local dtype's raw value.
+    // Casting an unbounded peer uint32_t to the DType enum before validating is
+    // technically UB for out-of-range values; comparing raw integers avoids the
+    // out-of-range cast entirely while still rejecting any mismatch.
+    if (dtype != static_cast<uint32_t>(cpu_tensor.dtype())) {
         throw std::runtime_error(
             "recv_tensor: dtype mismatch - peer sent dtype " +
             std::to_string(dtype) + " but local buffer dtype is " +
@@ -1186,11 +1227,14 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
     // ring_all_reduce's explicit CPU else-branch instead of silently dropping
     // the data. (For a contiguous CPU tensor get_cpu_buffer shares storage and
     // this is a no-op rebind.)
-    if (tensor.device().type != Device::Type::CPU) {
-        tensor = cpu_tensor.to(tensor.device());
-    } else {
-        tensor = cpu_tensor;
-    }
+    // Write the received data back THROUGH the caller's existing storage rather
+    // than rebinding the reference. A plain `tensor = cpu_tensor` rebinds the
+    // intrusive_ptr to a fresh impl, detaching any aliased Variable/view/grad
+    // (H6 aliasing hazard). zero_() += writes through the original storage,
+    // preserving aliases and reflecting a non-contiguous CPU staging copy back
+    // into the caller's strided tensor.
+    tensor.zero_();
+    tensor += cpu_tensor.to(tensor.device());
 }
 
 auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceOp op) -> void {
@@ -1350,12 +1394,14 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
                 std::string(dtype_name(cpu_tensor.dtype())));
     }
 
-    // Copy back to original device if needed
-    if (tensor.device().type != Device::Type::CPU) {
-        tensor = cpu_tensor.to(tensor.device());
-    } else {
-        tensor = cpu_tensor;
-    }
+    // Write the reduced result back THROUGH the caller's existing storage rather
+    // than rebinding the reference (`tensor = cpu_tensor`). Tensor's
+    // copy-assignment rebinds the intrusive_ptr to a fresh impl, detaching any
+    // aliased Variable/view/grad that shares the original storage (the same H6
+    // aliasing hazard the MPI/NCCL backends were rewritten to avoid). zero_() +=
+    // writes through the original strides/storage, preserving aliases.
+    tensor.zero_();
+    tensor += cpu_tensor.to(tensor.device());
 }
 
 auto GlooBackend::get_cpu_buffer(const Tensor& tensor) -> Tensor {

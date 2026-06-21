@@ -341,6 +341,29 @@ inline std::vector<std::string> getAvailableBackendsWithDevices() {
     return result;
 }
 
+// ----------------------------------------------------------------------------
+// EnsureInitialized: thread-safe, process-wide one-shot runtime bring-up.
+// ----------------------------------------------------------------------------
+// Mirrors backend_test_fixture.hpp's EnsureInitialized() so these fixtures do
+// not call tenzor::initialize() directly behind a non-thread-safe `bool
+// initialized_` guard (which could race / double-initialize if a BackendTest
+// suite and a MultiBackendDTypeTest suite interleave). The TF32-disable default
+// is applied by the file-scope static initializer above; the std::call_once
+// here guarantees initialize() runs exactly once regardless of suite order.
+// Guarded so this header and backend_test_fixture.hpp can both be included in
+// one TU without an ODR redefinition of this inline function. Whichever header
+// is processed first provides the (identical) definition.
+#ifndef TENZOR_TESTING_ENSURE_INITIALIZED_DEFINED
+#define TENZOR_TESTING_ENSURE_INITIALIZED_DEFINED
+inline void EnsureInitialized() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        ::setenv("TENZOR_DISABLE_TF32", "1", /*overwrite=*/0);
+        tenzor::initialize();
+    });
+}
+#endif // TENZOR_TESTING_ENSURE_INITIALIZED_DEFINED
+
 // ============================================================================
 // Multi-Backend + Multi-DType Test Fixture
 // ============================================================================
@@ -372,11 +395,9 @@ protected:
     static bool initialized_;
 
     void SetUp() override {
-        // Initialize Tenzor library (only once)
-        if (!initialized_) {
-            tenzor::initialize();
-            initialized_ = true;
-        }
+        // Initialize Tenzor library exactly once per process, thread-safely.
+        // Never call tenzor::initialize() directly (see EnsureInitialized).
+        EnsureInitialized();
 
         // Deterministic RNG seed per test — keeps randn() output stable across
         // process invocations so recorded golden tensors stay valid.
@@ -783,10 +804,9 @@ protected:
     static bool initialized_;
 
     void SetUp() override {
-        if (!initialized_) {
-            tenzor::initialize();
-            initialized_ = true;
-        }
+        // Initialize Tenzor library exactly once per process, thread-safely.
+        // Never call tenzor::initialize() directly (see EnsureInitialized).
+        EnsureInitialized();
 
         // Deterministic RNG seed per test — keeps randn() output stable across
         // process invocations so recorded golden tensors stay valid.

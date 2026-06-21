@@ -160,6 +160,7 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for relu");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -217,6 +218,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         throw std::runtime_error("Unsupported dtype for relu_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -268,6 +270,7 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for sigmoid");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -326,6 +329,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
         throw std::runtime_error("Unsupported dtype for sigmoid_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -376,6 +380,7 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for tanh");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -434,6 +439,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
         throw std::runtime_error("Unsupported dtype for tanh_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -494,6 +500,7 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for gelu");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -571,6 +578,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         throw std::runtime_error("Unsupported dtype for gelu_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -721,6 +729,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
         throw std::runtime_error("Unsupported dtype for softmax");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -845,6 +854,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         throw std::runtime_error("Unsupported dtype for softmax_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -897,6 +907,7 @@ auto leaky_relu_kernel(const Tensor& input, double alpha, sycl::queue& queue) ->
         throw std::runtime_error("Unsupported dtype for leaky_relu");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -954,6 +965,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         throw std::runtime_error("Unsupported dtype for leaky_relu_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -1159,6 +1171,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) ->
         throw std::runtime_error("Unsupported dtype for log_softmax");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1342,6 +1355,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
         throw std::runtime_error("Unsupported dtype for log_softmax_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -1398,6 +1412,7 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for swish");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1474,6 +1489,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
         throw std::runtime_error("Unsupported dtype for swish_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -1532,6 +1548,8 @@ auto relu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
     else {
         throw std::runtime_error("relu_inplace: unsupported dtype");
     }
+    // Drain so the in-place mutation completes before the host reads `input`.
+    queue.wait_and_throw();
 }
 
 auto sigmoid_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
@@ -1565,6 +1583,7 @@ auto sigmoid_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
     else {
         throw std::runtime_error("sigmoid_inplace: unsupported dtype");
     }
+    queue.wait_and_throw();
 }
 
 auto tanh_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
@@ -1598,6 +1617,7 @@ auto tanh_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
     else {
         throw std::runtime_error("tanh_inplace: unsupported dtype");
     }
+    queue.wait_and_throw();
 }
 
 auto leaky_relu_inplace_kernel(Tensor& input, float alpha, sycl::queue& queue) -> void {
@@ -1632,6 +1652,7 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, sycl::queue& queue) -
     else {
         throw std::runtime_error("leaky_relu_inplace: unsupported dtype");
     }
+    queue.wait_and_throw();
 }
 
 auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
@@ -1671,6 +1692,7 @@ auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
     else {
         throw std::runtime_error("gelu_inplace: unsupported dtype");
     }
+    queue.wait_and_throw();
 }
 
 // ============================================================================
@@ -1729,6 +1751,7 @@ auto elu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor 
     else {
         throw std::runtime_error("Unsupported dtype for elu");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1781,6 +1804,7 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
     else {
         throw std::runtime_error("Unsupported dtype for elu_backward");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1842,6 +1866,7 @@ auto selu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     else {
         throw std::runtime_error("Unsupported dtype for selu");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1897,6 +1922,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
     else {
         throw std::runtime_error("Unsupported dtype for selu_backward");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1958,6 +1984,7 @@ auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     else {
         throw std::runtime_error("Unsupported dtype for mish");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2018,6 +2045,7 @@ auto hardswish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     else {
         throw std::runtime_error("Unsupported dtype for hardswish");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2062,6 +2090,7 @@ auto hardsigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     else {
         throw std::runtime_error("Unsupported dtype for hardsigmoid");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2129,6 +2158,7 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
     else {
         throw std::runtime_error("Unsupported dtype for mish_backward");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2202,6 +2232,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, sycl::que
     else {
         throw std::runtime_error("Unsupported dtype for softplus");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2271,6 +2302,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
     else {
         throw std::runtime_error("Unsupported dtype for softplus_backward");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2458,6 +2490,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
     else {
         throw std::runtime_error("Unsupported dtype for linear");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2531,6 +2564,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += static_cast<float>(g_ptr[b * out_features + o]);
             gb_ptr[o] = sycl::half(sum);
         });
+        queue.wait_and_throw();
         return {grad_input, grad_weight, grad_bias};
     }
     if (grad_cont.dtype() == DType::BFloat16) {
@@ -2569,6 +2603,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += bf16_to_f32(g_ptr[b * out_features + o]);
             gb_ptr[o] = f32_to_bf16(sum);
         });
+        queue.wait_and_throw();
         return {grad_input, grad_weight, grad_bias};
     }
 
@@ -2749,6 +2784,11 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
         throw std::runtime_error("Unsupported dtype for linear_backward");
     }
 
+    // Drain before return: the F32/F64 grad_bias reduction above is enqueued
+    // AFTER the #ifdef TENZOR_HAS_ONEMKL wait (which only covered grad_input/
+    // grad_weight), so without this the host reads stale grad_bias, and the
+    // contiguous grad_cont/in_cont/w_cont temporaries free while kernels run.
+    queue.wait_and_throw();
     return {grad_input, grad_weight, grad_bias};
 }
 
@@ -2882,6 +2922,7 @@ auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& qu
         throw std::runtime_error("Unsupported dtype for dropout");
     }
 
+    queue.wait_and_throw();
     return {output, mask};
 }
 
@@ -2927,6 +2968,7 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     else {
         throw std::runtime_error("Unsupported dtype for dropout_backward");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -3063,6 +3105,9 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
         return results;
     }
 
+    // Drain so the host (nn layer) reads valid output/mean/rstd, and so the local
+    // in_cont copy stays alive until the kernel finishes reading it.
+    queue.wait_and_throw();
     return {output, mean_t, inv_std_t};
 }
 
@@ -3224,6 +3269,9 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
         return results;
     }
 
+    // Drain so the host (autograd) reads valid grads, and so the local
+    // grad_cont/in_cont copies stay alive until the kernels finish reading them.
+    queue.wait_and_throw();
     return {grad_input, grad_weight, grad_bias};
 }
 
@@ -3350,6 +3398,7 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
         throw std::runtime_error("Unsupported dtype for rrelu");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -3414,6 +3463,7 @@ auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input,
         throw std::runtime_error("Unsupported dtype for rrelu_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 
@@ -3487,6 +3537,7 @@ auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
         throw std::runtime_error("Unsupported dtype for log_sigmoid_backward");
     }
 
+    queue.wait_and_throw();
     return grad_input;
 }
 

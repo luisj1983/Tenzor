@@ -338,6 +338,16 @@ TEST_F(ModelHubTest, CleanCache_SizeLimit) {
 // ============================================================================
 
 TEST_F(ModelHubTest, DownloadWeights_FileURL) {
+    // This test exercises the download/caching plumbing with a local file://
+    // fixture, not the integrity policy. With verify_checksums on (the secure
+    // default) download_weights refuses an unverifiable (no-checksum) download;
+    // explicitly opt out here — the documented escape hatch for unverified
+    // transport — so the plumbing path is reached.
+    {
+        HubConfig cfg = ModelHub::get_config();
+        cfg.verify_checksums = false;
+        ModelHub::set_config(cfg);
+    }
     // Register a test model with file:// URL
     std::string test_url = "file://" + test_file_path;
     std::string model_name = "test_download_model";
@@ -365,6 +375,13 @@ TEST_F(ModelHubTest, DownloadWeights_FileURL) {
 }
 
 TEST_F(ModelHubTest, DownloadWeights_Caching) {
+    // Plumbing test (cache hit), not integrity policy: opt out of checksum
+    // verification so the no-checksum cached lookup is reached.
+    {
+        HubConfig cfg = ModelHub::get_config();
+        cfg.verify_checksums = false;
+        ModelHub::set_config(cfg);
+    }
     // Create a cached file
     std::string model_name = "cached_model";
     std::string cache_path = test_cache_dir + "/" + model_name + ".pt";
@@ -430,6 +447,14 @@ TEST_F(ModelHubTest, ProgressCallback) {
         EXPECT_GE(eta, 0.0);
     };
 
+    // Plumbing test (progress callback), not integrity policy: opt out of
+    // checksum verification so the local file:// download path is reached.
+    {
+        HubConfig cfg = ModelHub::get_config();
+        cfg.verify_checksums = false;
+        ModelHub::set_config(cfg);
+    }
+
     // Try downloading with callback
     // Note: This may not trigger callback for file:// URLs or cached files
     std::string model_name = "callback_test_model";
@@ -447,6 +472,13 @@ TEST_F(ModelHubTest, ProgressCallback) {
 // ============================================================================
 
 TEST_F(ModelHubTest, DownloadStats) {
+    // Plumbing test (download stats), not integrity policy: opt out of checksum
+    // verification so the local file:// download path is reached.
+    {
+        HubConfig cfg = ModelHub::get_config();
+        cfg.verify_checksums = false;
+        ModelHub::set_config(cfg);
+    }
     // Create a test file to "download"
     std::string model_name = "stats_test_model";
     std::string test_url = "file://" + test_file_path;

@@ -557,6 +557,16 @@ auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim) -> 
     if (start_dim < 0) start_dim += ndim;
     if (end_dim < 0) end_dim += ndim;
 
+    if (start_dim < 0 || start_dim >= ndim || end_dim < 0 || end_dim >= ndim) {
+        throw std::out_of_range("flatten: start_dim/end_dim out of range (start_dim=" +
+                                std::to_string(start_dim) + ", end_dim=" + std::to_string(end_dim) +
+                                ", ndim=" + std::to_string(ndim) + ")");
+    }
+    if (start_dim > end_dim) {
+        throw std::invalid_argument("flatten: start_dim (" + std::to_string(start_dim) +
+                                    ") must be <= end_dim (" + std::to_string(end_dim) + ")");
+    }
+
     // Calculate flattened dimension size
     int64_t flat_size = 1;
     for (int64_t d = start_dim; d <= end_dim; ++d) {
@@ -686,7 +696,11 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape
 }
 
 auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor {
-    const auto& in_shape = input.shape();
+    // Contiguify: data<T>() returns storage+offset and does NOT apply strides, so a
+    // non-contiguous view (transposed/permuted/sliced/broadcast) would otherwise be
+    // read as if contiguous and produce wrong data. Mirror roll_kernel's guard.
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
+    const auto& in_shape = cont.shape();
     int64_t ndim = static_cast<int64_t>(repeats.size());
 
     // Compute output shape
@@ -700,7 +714,7 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats) -> 
 
     Tensor output(out_shape, input.dtype(), input.device());
     const size_t elem_size = dtype_size(input.dtype());
-    const auto* src = input.data<uint8_t>();
+    const auto* src = cont.data<uint8_t>();
     auto* dst = output.data<uint8_t>();
 
     // Simple implementation: iterate over output indices, map back to input
@@ -789,6 +803,11 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim) -> std::
     const auto& shape = input.shape();
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range(
+            "split: dim " + std::to_string(dim) + " is out of range for tensor with " +
+            std::to_string(ndim) + " dimensions");
+    }
 
     int64_t dim_size = shape[dim];
     std::vector<Tensor> result;
@@ -827,7 +846,13 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim) -> std::vect
         throw std::runtime_error("chunk: chunks must be positive");
     }
     const auto& shape = input.shape();
-    if (dim < 0) dim += input.ndim();
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range(
+            "chunk: dim " + std::to_string(dim) + " is out of range for tensor with " +
+            std::to_string(ndim) + " dimensions");
+    }
     int64_t dim_size = shape[dim];
     int64_t split_size = (dim_size + chunks - 1) / chunks;
     return split_kernel(input, split_size, dim);
@@ -922,6 +947,12 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
 
 auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
     auto shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("roll: dimension out of range (got " +
+                                std::to_string(dim) + ", ndim=" + std::to_string(ndim) + ")");
+    }
     auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),

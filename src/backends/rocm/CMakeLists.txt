@@ -165,6 +165,17 @@ target_compile_options(tenzor_rocm_kernels PRIVATE
     # -fno-fast-math overrides above stay for their OTHER reasons (fp-contract /
     # approximate rsqrt / a compiler ICE), which this flag does not address.
     $<$<COMPILE_LANGUAGE:HIP>:-fno-finite-math-only>
+    # -munsafe-fp-atomics lets the compiler emit native hardware FP atomicAdd
+    # (global_atomic_add_f32 etc.) instead of a CAS loop. This is correct and
+    # used by reduction / scatter-add / grad-accumulation kernels on every
+    # target Tenzor supports (CDNA gfx9xx and RDNA2/3 gfx10xx/gfx11xx all
+    # implement hardware FP atomics). The "unsafe" name refers to the IEEE
+    # rounding/denormal caveats of the hardware op, NOT to dropping updates:
+    # the atomic is still a true read-modify-write, so concurrent accumulation
+    # is not lost. ROCm documents that on a (hypothetical) target lacking the
+    # hw atomic the compiler falls back to a CAS loop, which is also atomic.
+    # Cross-backend reduction parity (which would expose lost updates) passes,
+    # so this stays library-wide rather than gated per-arch.
     $<$<COMPILE_LANGUAGE:HIP>:-munsafe-fp-atomics>
     $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:HIP>>:-O3>
     $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:HIP>>:-g -ggdb>

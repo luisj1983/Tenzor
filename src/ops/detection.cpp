@@ -181,130 +181,34 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
     if (boxes1.shape()[1] != 4 || boxes2.shape()[1] != 4) {
         throw std::invalid_argument("Boxes must have 4 coordinates");
     }
+    // Box-ordering invariant: each box is (x1, y1, x2, y2) with x2 >= x1 and
+    // y2 >= y1. As in torchvision, degenerate/inverted boxes are NOT rejected
+    // here (PyTorch parity) — a negative width/height simply yields a zero or
+    // negative area. The kernel is responsible for clamping intersection to be
+    // non-negative so a degenerate box cannot produce a negative union.
 
-    const int64_t N = boxes1.shape()[0];
-    const int64_t M = boxes2.shape()[0];
-
-    // For Float16 on any device, convert to Float32 for numerical stability
-    // (Float16 has limited precision and some tensor ops may not support it well)
-    if (boxes1.dtype() == DType::Float16 || boxes2.dtype() == DType::Float16) {
+    // For Float16/BFloat16 on any device, convert to Float32 for numerical
+    // stability (half precision has limited range/precision), then convert the
+    // result back to the original dtype.
+    if (boxes1.dtype() == DType::Float16 || boxes2.dtype() == DType::Float16 ||
+        boxes1.dtype() == DType::BFloat16 || boxes2.dtype() == DType::BFloat16) {
         auto boxes1_f32 = boxes1.to(DType::Float32);
         auto boxes2_f32 = boxes2.to(DType::Float32);
         auto result_f32 = box_iou(boxes1_f32, boxes2_f32, iou_type);
         return result_f32.to(boxes1.dtype());
     }
 
-    // For non-CPU devices, dispatch to registered backend kernel. Force
-    // contiguous: a non-contiguous column slice (e.g. proposals[:, 1:5]) would
-    // otherwise be indexed assuming a packed 4-per-row layout by the kernel.
-    if (boxes1.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::IouType, static_cast<int>(iou_type));
-        std::vector<Tensor> inputs_vec = {boxes1.contiguous(), boxes2.contiguous()};
-        auto results = dispatch<OpId::BoxIoU>(inputs_vec, attrs);
-        return results[0];
-    }
-
-    // CPU implementation using manual loops for reliability
-    {
-        // Remember original dtype for output
-        DType original_dtype = boxes1.dtype();
-
-        // Convert to Float32 for computation. .contiguous() is essential: callers
-        // routinely pass a non-contiguous column slice (e.g. proposals[:, 1:5]
-        // with row stride 5). Without it, .to(Float32) is a no-op view and the
-        // i*4 row indexing below reads progressively shifted garbage for every
-        // row past the first — silently corrupting the IoU matrix.
-        auto boxes1_f32 = boxes1.to(DType::Float32).contiguous();
-        auto boxes2_f32 = boxes2.to(DType::Float32).contiguous();
-
-        auto result = zeros({N, M}, DType::Float32, Device::cpu());
-        const float* boxes1_data = static_cast<const float*>(boxes1_f32.data_ptr());
-        const float* boxes2_data = static_cast<const float*>(boxes2_f32.data_ptr());
-        float* result_data = static_cast<float*>(result.data_ptr());
-
-        constexpr float pi = 3.14159265358979323846f;
-        constexpr float four_over_pi_sq = 4.0f / (pi * pi);
-
-        for (int64_t i = 0; i < N; i++) {
-            float x1_1 = boxes1_data[i * 4 + 0];
-            float y1_1 = boxes1_data[i * 4 + 1];
-            float x2_1 = boxes1_data[i * 4 + 2];
-            float y2_1 = boxes1_data[i * 4 + 3];
-            float w1 = x2_1 - x1_1;
-            float h1 = y2_1 - y1_1;
-            float area1 = w1 * h1;
-            float cx1 = (x1_1 + x2_1) * 0.5f;
-            float cy1 = (y1_1 + y2_1) * 0.5f;
-
-            for (int64_t j = 0; j < M; j++) {
-                float x1_2 = boxes2_data[j * 4 + 0];
-                float y1_2 = boxes2_data[j * 4 + 1];
-                float x2_2 = boxes2_data[j * 4 + 2];
-                float y2_2 = boxes2_data[j * 4 + 3];
-                float w2 = x2_2 - x1_2;
-                float h2 = y2_2 - y1_2;
-                float area2 = w2 * h2;
-                float cx2 = (x1_2 + x2_2) * 0.5f;
-                float cy2 = (y1_2 + y2_2) * 0.5f;
-
-                // Intersection
-                float inter_x1 = std::max(x1_1, x1_2);
-                float inter_y1 = std::max(y1_1, y1_2);
-                float inter_x2 = std::min(x2_1, x2_2);
-                float inter_y2 = std::min(y2_1, y2_2);
-                float inter_w = std::max(0.0f, inter_x2 - inter_x1);
-                float inter_h = std::max(0.0f, inter_y2 - inter_y1);
-                float inter_area = inter_w * inter_h;
-
-                // Union
-                float union_area = area1 + area2 - inter_area;
-
-                // IoU
-                float iou = inter_area / (union_area + 1e-7f);
-
-                if (iou_type == IoUType::IoU) {
-                    result_data[i * M + j] = iou;
-                } else if (iou_type == IoUType::GIoU) {
-                    // Enclosing box
-                    float enclose_x1 = std::min(x1_1, x1_2);
-                    float enclose_y1 = std::min(y1_1, y1_2);
-                    float enclose_x2 = std::max(x2_1, x2_2);
-                    float enclose_y2 = std::max(y2_1, y2_2);
-                    float enclose_w = enclose_x2 - enclose_x1;
-                    float enclose_h = enclose_y2 - enclose_y1;
-                    float enclose_area = enclose_w * enclose_h;
-                    result_data[i * M + j] = iou - (enclose_area - union_area) / (enclose_area + 1e-7f);
-                } else if (iou_type == IoUType::DIoU || iou_type == IoUType::CIoU) {
-                    // Enclosing box for diagonal distance
-                    float enclose_x1 = std::min(x1_1, x1_2);
-                    float enclose_y1 = std::min(y1_1, y1_2);
-                    float enclose_x2 = std::max(x2_1, x2_2);
-                    float enclose_y2 = std::max(y2_1, y2_2);
-                    float enclose_w = enclose_x2 - enclose_x1;
-                    float enclose_h = enclose_y2 - enclose_y1;
-
-                    // Center distance squared
-                    float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
-
-                    // Diagonal distance squared
-                    float diag_dist_sq = enclose_w * enclose_w + enclose_h * enclose_h;
-
-                    if (iou_type == IoUType::DIoU) {
-                        result_data[i * M + j] = iou - center_dist_sq / (diag_dist_sq + 1e-7f);
-                    } else {  // CIoU
-                        // Aspect ratio consistency
-                        float v = four_over_pi_sq * std::pow(std::atan(w2 / (h2 + 1e-7f)) - std::atan(w1 / (h1 + 1e-7f)), 2.0f);
-                        float alpha = v / (1.0f - iou + v + 1e-7f);
-                        result_data[i * M + j] = iou - center_dist_sq / (diag_dist_sq + 1e-7f) - alpha * v;
-                    }
-                }
-            }
-        }
-
-        // Convert back to original dtype
-        return result.to(original_dtype);
-    }
+    // Dispatch to the registered backend kernel for both CPU and non-CPU.
+    // Force contiguous: a non-contiguous column slice (e.g. proposals[:, 1:5]
+    // with row stride 5) would otherwise be indexed assuming a packed
+    // 4-per-row layout by the kernel, silently corrupting the IoU matrix.
+    // The CPU kernel computes Float64 natively (no downcast to Float32), so
+    // large-coordinate Float64 boxes keep full double precision.
+    OpAttributes attrs;
+    attrs.set(AttrKey::IouType, static_cast<int>(iou_type));
+    std::vector<Tensor> inputs_vec = {boxes1.contiguous(), boxes2.contiguous()};
+    auto results = dispatch<OpId::BoxIoU>(inputs_vec, attrs);
+    return results[0];
 }
 
 auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Tensor {

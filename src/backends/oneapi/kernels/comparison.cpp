@@ -79,7 +79,9 @@ inline auto shapes_match(std::span<const int64_t> a, std::span<const int64_t> b)
 // Broadcasting Support for Comparisons
 // ============================================================================
 
-constexpr int MAX_BROADCAST_DIMS = 8;
+// Match math.cpp's binary-op broadcast cap (16) so a 9–16D broadcasting
+// comparison succeeds where the equivalent add/mul does, instead of throwing.
+constexpr int MAX_BROADCAST_DIMS = 16;
 
 struct BroadcastInfo {
     int64_t out_strides[MAX_BROADCAST_DIMS];
@@ -95,7 +97,7 @@ static auto compute_broadcast_info(
     const std::vector<int64_t>& out_shape) -> BroadcastInfo {
 
     if (out_shape.size() > MAX_BROADCAST_DIMS) {
-        throw std::runtime_error("OneAPI comparison: max 8 broadcast dimensions supported");
+        throw std::runtime_error("OneAPI comparison: max 16 broadcast dimensions supported");
     }
 
     BroadcastInfo info{};
@@ -192,6 +194,8 @@ static auto dispatch_broadcast_compare(
     } else {
         throw std::runtime_error("Unsupported dtype for broadcast comparison");
     }
+    // Drain before the host reads the USM-shared Bool output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -199,7 +203,13 @@ static auto dispatch_broadcast_compare(
 // Element-wise Equal (==)
 // ============================================================================
 
-auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto eq_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    // Both the same-shape path (linear a_ptr[idx]) and the broadcast path
+    // (compute_broadcast_info derives strides from shape, assuming contiguous
+    // row-major physical layout) require contiguous operands; a transpose/slice
+    // view would otherwise read the wrong physical elements.
+    const Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    const Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     // Validate inputs
     auto a_shape = a.shape();
     auto b_shape = b.shape();
@@ -295,6 +305,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for eq comparison");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -302,7 +313,9 @@ auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 // Element-wise Not Equal (!=)
 // ============================================================================
 
-auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto ne_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    const Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    const Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
@@ -393,6 +406,7 @@ auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for ne comparison");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -400,7 +414,9 @@ auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 // Element-wise Less Than (<)
 // ============================================================================
 
-auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto lt_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    const Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    const Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
@@ -492,6 +508,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for lt comparison");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -499,7 +516,9 @@ auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 // Element-wise Less Than or Equal (<=)
 // ============================================================================
 
-auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto le_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    const Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    const Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
@@ -591,6 +610,7 @@ auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for le comparison");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -598,7 +618,9 @@ auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 // Element-wise Greater Than (>)
 // ============================================================================
 
-auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto gt_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    const Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    const Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
@@ -690,6 +712,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for gt comparison");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 
@@ -697,7 +720,9 @@ auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 // Element-wise Greater Than or Equal (>=)
 // ============================================================================
 
-auto ge_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto ge_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    const Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    const Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
@@ -789,6 +814,7 @@ auto ge_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for ge comparison");
     }
 
+    queue.wait_and_throw();
     return output;
 }
 

@@ -378,6 +378,12 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         grad_beta_ptr[i] = diff_ss_ptr[C + i];
     });
 
+    // The extract kernel reads diff_scale_shift (a function-local USM tensor) and
+    // writes the USM-shared grad_gamma/grad_beta. Drain the queue before returning
+    // so the kernel finishes before diff_scale_shift/scale_shift are destroyed
+    // (use-after-free) and before the host reads stale gradients.
+    queue.wait_and_throw();
+
     return {grad_input, grad_gamma, grad_beta};
 }
 
@@ -2180,6 +2186,13 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     else {
         throw std::runtime_error("Unsupported dtype for group_norm_backward_kernel");
     }
+
+    // The three passes above are enqueued without an intervening wait. Drain the
+    // queue before returning so all passes finish before the function-local
+    // ds_buf/db_buf scratch tensors are destroyed (use-after-free) and before the
+    // host reads the USM-shared grad_input/grad_weight/grad_bias. The forward
+    // group_norm_kernel waits between passes; the backward must drain too.
+    queue.wait_and_throw();
 
     return {grad_input, grad_weight, grad_bias};
 }

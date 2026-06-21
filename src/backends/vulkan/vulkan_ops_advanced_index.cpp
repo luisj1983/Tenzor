@@ -213,8 +213,17 @@ auto VulkanBackend::dispatchAdvancedIndex(const Tensor& src,
     const char* shader_name = select_gather_shader(src.dtype());
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    size_t src_bytes = src_contig.numel() * src_contig.dtype_size();
-    size_t dst_bytes = output.numel() * output.dtype_size();
+    // The 2-byte (_f16) shader packs 2 halves per 32-bit word and reads/CAS-writes
+    // whole words; round those data ranges up to ((numel+1)/2)*4 so an odd-numel
+    // src/output tail word stays in-bounds.
+    const bool packed16 = (src.dtype() == DType::Float16 || src.dtype() == DType::BFloat16 ||
+                           src.dtype() == DType::Int16 || src.dtype() == DType::UInt16);
+    auto data_bytes = [packed16](int64_t numel, size_t dsize) -> size_t {
+        if (packed16) return ((static_cast<size_t>(numel) + 1) / 2) * sizeof(uint32_t);
+        return static_cast<size_t>(numel) * dsize;
+    };
+    size_t src_bytes = data_bytes(src_contig.numel(), src_contig.dtype_size());
+    size_t dst_bytes = data_bytes(output.numel(), output.dtype_size());
     size_t meta_bytes = kMetaInt64Count * sizeof(int64_t);
     size_t idx_bytes = static_cast<size_t>(idx_buf.numel()) * sizeof(int64_t);
 
@@ -297,8 +306,17 @@ auto VulkanBackend::dispatchAdvancedIndexPut(const Tensor& src,
     const char* shader_name = select_put_shader(src.dtype());
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    size_t result_bytes = result.numel() * result.dtype_size();
-    size_t values_bytes = values_contig.numel() * values_contig.dtype_size();
+    // The 2-byte (_f16) put shader packs 2 halves per 32-bit word and CAS-writes
+    // whole words; round result/values ranges up to ((numel+1)/2)*4 so odd-numel
+    // tail words stay in-bounds.
+    const bool packed16 = (src.dtype() == DType::Float16 || src.dtype() == DType::BFloat16 ||
+                           src.dtype() == DType::Int16 || src.dtype() == DType::UInt16);
+    auto data_bytes = [packed16](int64_t numel, size_t dsize) -> size_t {
+        if (packed16) return ((static_cast<size_t>(numel) + 1) / 2) * sizeof(uint32_t);
+        return static_cast<size_t>(numel) * dsize;
+    };
+    size_t result_bytes = data_bytes(result.numel(), result.dtype_size());
+    size_t values_bytes = data_bytes(values_contig.numel(), values_contig.dtype_size());
     size_t meta_bytes = kMetaInt64Count * sizeof(int64_t);
     size_t idx_bytes = static_cast<size_t>(idx_buf.numel()) * sizeof(int64_t);
 

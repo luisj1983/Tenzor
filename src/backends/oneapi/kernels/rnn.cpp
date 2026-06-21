@@ -76,15 +76,24 @@ static void copy_to_time(Tensor& output, const Tensor& src, int64_t t, sycl::que
  * @return {output (seq, batch, H), h_n (batch, H), c_n (batch, H)}
  */
 auto lstm_forward_kernel(
-    const Tensor& input,     // (seq_len, batch, input_size)
-    const Tensor& W_ih,      // (4*hidden_size, input_size)
-    const Tensor& W_hh,      // (4*hidden_size, hidden_size)
+    const Tensor& input_in,  // (seq_len, batch, input_size)
+    const Tensor& W_ih_in,   // (4*hidden_size, input_size)
+    const Tensor& W_hh_in,   // (4*hidden_size, hidden_size)
     const Tensor& bias_ih,   // (4*hidden_size) or empty
     const Tensor& bias_hh,   // (4*hidden_size) or empty
-    const Tensor& h0,        // (batch, hidden_size)
-    const Tensor& c0,        // (batch, hidden_size)
+    const Tensor& h0_in,     // (batch, hidden_size)
+    const Tensor& c0_in,     // (batch, hidden_size)
     sycl::queue& queue
 ) -> std::vector<Tensor> {
+    // slice_at/copy_to_time and the weight-transpose helpers read .data_ptr()
+    // with shape-derived offsets, so input/weights/states must be contiguous
+    // (e.g. a batch_first permute of input would otherwise be misread).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor W_ih  = W_ih_in.is_contiguous() ? W_ih_in : W_ih_in.contiguous();
+    Tensor W_hh  = W_hh_in.is_contiguous() ? W_hh_in : W_hh_in.contiguous();
+    Tensor h0    = h0_in.is_contiguous() ? h0_in : h0_in.contiguous();
+    Tensor c0    = c0_in.is_contiguous() ? c0_in : c0_in.contiguous();
+
     auto in_shape = input.shape();
     int64_t seq_len = in_shape[0];
     int64_t batch_size = in_shape[1];
@@ -214,6 +223,9 @@ auto lstm_forward_kernel(
         copy_to_time(output, h_t, t, queue);
     }
 
+    // Drain the final copy_to_time and pending kernels before the host reads the
+    // USM-shared output/h_t/c_t.
+    queue.wait_and_throw();
     return {output, h_t, c_t};
 }
 
@@ -221,14 +233,21 @@ auto lstm_forward_kernel(
 // GRU Forward (single layer, full sequence)
 // ============================================================================
 auto gru_forward_kernel(
-    const Tensor& input,     // (seq_len, batch, input_size)
-    const Tensor& W_ih,      // (3*hidden_size, input_size)
-    const Tensor& W_hh,      // (3*hidden_size, hidden_size)
+    const Tensor& input_in,  // (seq_len, batch, input_size)
+    const Tensor& W_ih_in,   // (3*hidden_size, input_size)
+    const Tensor& W_hh_in,   // (3*hidden_size, hidden_size)
     const Tensor& bias_ih,   // (3*hidden_size) or empty
     const Tensor& bias_hh,   // (3*hidden_size) or empty
-    const Tensor& h0,        // (batch, hidden_size)
+    const Tensor& h0_in,     // (batch, hidden_size)
     sycl::queue& queue
 ) -> std::vector<Tensor> {
+    // slice_at/slice_gate/transpose_2d read .data_ptr() with shape-derived
+    // offsets, so input/weights/state must be contiguous.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor W_ih  = W_ih_in.is_contiguous() ? W_ih_in : W_ih_in.contiguous();
+    Tensor W_hh  = W_hh_in.is_contiguous() ? W_hh_in : W_hh_in.contiguous();
+    Tensor h0    = h0_in.is_contiguous() ? h0_in : h0_in.contiguous();
+
     auto in_shape = input.shape();
     int64_t seq_len = in_shape[0];
     int64_t batch_size = in_shape[1];
@@ -359,6 +378,8 @@ auto gru_forward_kernel(
         copy_to_time(output, h_t, t, queue);
     }
 
+    // Drain the final copy_to_time before the host reads the USM-shared output/h_t.
+    queue.wait_and_throw();
     return {output, h_t};
 }
 
@@ -370,10 +391,14 @@ auto lstm_multilayer_forward_kernel(
     const std::vector<Tensor>& W_ih_list,
     const std::vector<Tensor>& W_hh_list,
     const std::vector<Tensor>& bias_list,
-    const Tensor& h0,   // (num_layers, batch, hidden_size)
-    const Tensor& c0,   // (num_layers, batch, hidden_size)
+    const Tensor& h0_in,   // (num_layers, batch, hidden_size)
+    const Tensor& c0_in,   // (num_layers, batch, hidden_size)
     sycl::queue& queue
 ) -> std::vector<Tensor> {
+    // slice_at(h0/c0, l) reads .data_ptr() with shape-derived offsets; the
+    // single-layer kernel handles `input` contiguity internally.
+    Tensor h0 = h0_in.is_contiguous() ? h0_in : h0_in.contiguous();
+    Tensor c0 = c0_in.is_contiguous() ? c0_in : c0_in.contiguous();
     int64_t num_layers = static_cast<int64_t>(W_ih_list.size());
     auto h0_shape = h0.shape();
     int64_t batch_size = h0_shape[1];
@@ -422,6 +447,8 @@ auto lstm_multilayer_forward_kernel(
         copy_to_time(c_n, results[2], l, queue);
     }
 
+    // Drain the final per-layer copy_to_time before the host reads h_n/c_n.
+    queue.wait_and_throw();
     return {current_input, h_n, c_n};
 }
 
@@ -433,9 +460,11 @@ auto gru_multilayer_forward_kernel(
     const std::vector<Tensor>& W_ih_list,
     const std::vector<Tensor>& W_hh_list,
     const std::vector<Tensor>& bias_list,
-    const Tensor& h0,   // (num_layers, batch, hidden_size)
+    const Tensor& h0_in,   // (num_layers, batch, hidden_size)
     sycl::queue& queue
 ) -> std::vector<Tensor> {
+    // slice_at(h0, l) reads .data_ptr() with shape-derived offsets.
+    Tensor h0 = h0_in.is_contiguous() ? h0_in : h0_in.contiguous();
     int64_t num_layers = static_cast<int64_t>(W_ih_list.size());
     auto h0_shape = h0.shape();
     int64_t batch_size = h0_shape[1];
@@ -457,6 +486,8 @@ auto gru_multilayer_forward_kernel(
         copy_to_time(h_n, results[1], l, queue);
     }
 
+    // Drain the final per-layer copy_to_time before the host reads h_n.
+    queue.wait_and_throw();
     return {current_input, h_n};
 }
 
@@ -464,9 +495,9 @@ auto gru_multilayer_forward_kernel(
 // Bidirectional LSTM Forward
 // ============================================================================
 auto bilstm_forward_kernel(
-    const Tensor& input,        // (seq_len, batch, input_size)
-    const Tensor& h0,           // (2, batch, hidden_size)
-    const Tensor& c0,           // (2, batch, hidden_size)
+    const Tensor& input_in,     // (seq_len, batch, input_size)
+    const Tensor& h0_in,        // (2, batch, hidden_size)
+    const Tensor& c0_in,        // (2, batch, hidden_size)
     const Tensor& W_ih_fwd,     // (4H, input_size)
     const Tensor& W_hh_fwd,     // (4H, hidden_size)
     const Tensor& bias_ih_fwd,  // (4H)
@@ -477,6 +508,12 @@ auto bilstm_forward_kernel(
     const Tensor& bias_hh_bwd,  // (4H)
     sycl::queue& queue
 ) -> std::vector<Tensor> {
+    // slice_at(input/h0/c0, ...) reads .data_ptr() with shape-derived offsets,
+    // so they must be contiguous (a batch_first permute would be misread). The
+    // weights are forwarded to lstm_forward_kernel which guards them internally.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor h0 = h0_in.is_contiguous() ? h0_in : h0_in.contiguous();
+    Tensor c0 = c0_in.is_contiguous() ? c0_in : c0_in.contiguous();
     auto in_shape = input.shape();
     int64_t seq_len = in_shape[0];
     int64_t batch_size = in_shape[1];
@@ -563,6 +600,10 @@ auto bilstm_forward_kernel(
     copy_to_time(c_n, c_n_fwd, 0, queue);
     copy_to_time(c_n, c_n_bwd, 1, queue);
 
+    // Drain the interleave kernel and the h_n/c_n copies before the function-local
+    // fwd_output/bwd_output (and the fwd/bwd state tensors) destruct and free their
+    // USM backing, and before the host reads the USM-shared combined_output/h_n/c_n.
+    queue.wait_and_throw();
     return {combined_output, h_n, c_n};
 }
 

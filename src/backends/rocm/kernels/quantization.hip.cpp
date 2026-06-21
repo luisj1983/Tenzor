@@ -131,13 +131,15 @@ auto quantized_linear_hip(
 
     Tensor output({batch_size, out_features}, DType::Float32, input_c.device());
 
-    // Dequantized Float32 output: scale = input_scale * weight_scale (NO division
-    // by output_scale). This op produces a dequantized result, not a requantized
-    // int8 tensor, so output_scale/output_zero_point are unused here — matching the
-    // CPU and CUDA reference backends.
-    (void)output_scale;
+    // Output dequant scale = input_scale * weight_scale / output_scale, matching
+    // the CPU (quantized_linear.cpp:78), CUDA (quantized_linear.cu:136) and
+    // OneAPI (quantization.cpp:170) reference backends. The earlier code dropped
+    // the `/ output_scale`, so for any dispatch with output_scale != 1.0 the
+    // ROCm result diverged from every other backend by a factor of output_scale.
+    // Guard against a zero output_scale like OneAPI does (safe_output_scale).
+    const float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
     (void)output_zero_point;
-    float combined_scale = input_scale * weight_scale;
+    float combined_scale = input_scale * weight_scale / safe_output_scale;
 
     const int THREADS = 256;
     dim3 blocks((out_features + THREADS - 1) / THREADS, batch_size);

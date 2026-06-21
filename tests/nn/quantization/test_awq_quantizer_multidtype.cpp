@@ -24,8 +24,11 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "awq_dequant_helper.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -117,11 +120,49 @@ TEST_P(AWQQuantizerMultiDTypeTest, QuantizeLayerRoundTrip) {
     ASSERT_EQ(result.quantized_weight.dim(), 2);
     EXPECT_EQ(result.quantized_weight.size(0), 32);
     EXPECT_GT(result.scales.numel(), 0);
+    ASSERT_EQ(result.in_features, 64);
 
-    // Sanity: tolerance table lookup (compile-time guard so this test gets
-    // updated if the dtype enum grows new float variants).
-    float atol = awq_atol_for(dtype_);
-    EXPECT_GT(atol, 0.0f);
+    // Reconstruct the dequantized weight from the packed INT4 codes and verify
+    // it round-trips to within the analytic INT4 half-quant-step PLUS the
+    // dtype-conversion slack. The quantizer upcasts to Float32 internally, so
+    // the only additional error over the pure-Float32 case is the input-side
+    // rounding from converting the reference to dtype_ — captured by
+    // awq_atol_for(dtype_). Both terms are real; a quantizer emitting garbage
+    // of the right shape (the previous shape-only check) fails this.
+    auto recon = ::tenzor::testing::awq_detail::reconstruct_awq(result,
+                                                                config.group_size);
+
+    auto ref_cpu = weight_cpu.to(DType::Float32);  // original Float32 reference
+    const float* ref_p = ref_cpu.data<float>();
+    auto scales_out = result.scales.to(Device::cpu()).to(DType::Float32);
+    auto act_out    = result.act_scales.to(Device::cpu()).to(DType::Float32);
+    const float* scales_p = scales_out.data<float>();
+    const float* act_p    = act_out.data<float>();
+    const int64_t out_features = result.scales.size(0);
+    const int64_t num_groups   = result.scales.size(1);
+    const int64_t in_features  = result.in_features;
+
+    const float dtype_slack = awq_atol_for(dtype_);
+    double max_excess = 0.0, max_abs_err = 0.0;
+    for (int64_t o = 0; o < out_features; ++o) {
+        for (int64_t j = 0; j < in_features; ++j) {
+            int64_t g = j / config.group_size;
+            float scale = scales_p[o * num_groups + g];
+            float aj    = act_p[j];
+            double step = 0.5 * static_cast<double>(scale) /
+                std::max(static_cast<double>(std::abs(aj)), 1e-12);
+            double bound = step + dtype_slack;
+            double err = std::abs(
+                static_cast<double>(recon[o * in_features + j]) -
+                static_cast<double>(ref_p[o * in_features + j]));
+            max_abs_err = std::max(max_abs_err, err);
+            max_excess = std::max(max_excess, err - bound);
+        }
+    }
+    EXPECT_LE(max_excess, 1e-4)
+        << "AWQ dequant round-trip for dtype " << dtype_name(dtype_)
+        << " exceeds half-quant-step+conversion bound by " << max_excess
+        << " (max abs err " << max_abs_err << ")";
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(AWQQuantizerMultiDTypeTest);

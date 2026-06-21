@@ -431,14 +431,51 @@ auto ConstantFoldingPass::evaluate_constant(const Node& node) -> Tensor {
         }
     }
 
-    // Audit J5-followup: reduction helper reads `dim` (optional) and
-    // `keepdim` (default false) attrs from the node.
-    auto reduce_dim = [&node]() -> std::optional<int64_t> {
-        return node.has_attr("dim") ? std::optional<int64_t>{node.get_int_attr("dim")}
-                                    : std::nullopt;
-    };
+    // Audit J5-followup: reduction helper reads `keepdim` (default false).
     auto reduce_keepdim = [&node]() -> bool {
         return node.has_attr("keepdim") ? node.get_bool_attr("keepdim") : false;
+    };
+
+    // Normalize a multi-axis "dims" reduction list against the input rank:
+    // convert negatives, drop out-of-range entries, sort ascending, dedup.
+    // Mirrors normalize_reduce_dims() in graph.cpp so constant-folding agrees
+    // with the native graph executor and symbolic shape inference.
+    auto normalize_dims = [](const std::vector<int64_t>& dims, int64_t rank)
+            -> std::vector<int64_t> {
+        std::vector<int64_t> norm;
+        norm.reserve(dims.size());
+        for (auto d : dims) {
+            if (d < 0) d += rank;
+            if (d >= 0 && d < rank) norm.push_back(d);
+        }
+        std::sort(norm.begin(), norm.end());
+        norm.erase(std::unique(norm.begin(), norm.end()), norm.end());
+        return norm;
+    };
+
+    // Evaluate a reduction node whose axis is either a scalar "dim", a vector
+    // "dims" (multi-axis), or absent (full reduction). For the multi-axis case
+    // reduce one axis at a time from highest to lowest (non-keepdim) so earlier
+    // erasures don't shift the indices still to remove — exactly the sequential
+    // strategy the interpreter uses (graph.cpp Sum/Mean/Max/Min cases).
+    auto fold_reduction = [&](const Tensor& in,
+                              auto reduce_fn) -> Tensor {
+        bool keepdim = reduce_keepdim();
+        if (node.has_int_attr("dim")) {
+            return reduce_fn(in, std::optional<int64_t>{node.get_int_attr("dim")},
+                             keepdim);
+        }
+        if (node.has_vec_attr("dims")) {
+            auto norm = normalize_dims(
+                node.get_vec_attr("dims"),
+                static_cast<int64_t>(in.shape().size()));
+            Tensor acc = in;
+            for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                acc = reduce_fn(acc, std::optional<int64_t>{*it}, keepdim);
+            }
+            return acc;
+        }
+        return reduce_fn(in, std::nullopt, keepdim);
     };
 
     // Evaluate operation
@@ -455,11 +492,26 @@ auto ConstantFoldingPass::evaluate_constant(const Node& node) -> Tensor {
         case OpType::Abs:    return tenzor::abs(inputs[0]);
         case OpType::MatMul: return tenzor::matmul(inputs[0], inputs[1]);
         case OpType::Bmm:    return tenzor::bmm(inputs[0], inputs[1]);
-        // Audit J5-followup: reductions with dim/keepdim attrs.
-        case OpType::Sum:    return tenzor::sum(inputs[0], reduce_dim(), reduce_keepdim());
-        case OpType::Mean:   return tenzor::mean(inputs[0], reduce_dim(), reduce_keepdim());
-        case OpType::Max:    return tenzor::max(inputs[0], reduce_dim(), reduce_keepdim());
-        case OpType::Min:    return tenzor::min(inputs[0], reduce_dim(), reduce_keepdim());
+        // Audit J5-followup: reductions with dim/keepdim attrs. Multi-axis
+        // "dims" reductions fold one axis at a time (see fold_reduction) so a
+        // node like x.sum(dim=[1,2]) over constants yields the correct partial
+        // shape/value instead of being collapsed to a full reduction.
+        case OpType::Sum:
+            return fold_reduction(inputs[0],
+                [](const Tensor& t, std::optional<int64_t> d, bool k) {
+                    return tenzor::sum(t, d, k); });
+        case OpType::Mean:
+            return fold_reduction(inputs[0],
+                [](const Tensor& t, std::optional<int64_t> d, bool k) {
+                    return tenzor::mean(t, d, k); });
+        case OpType::Max:
+            return fold_reduction(inputs[0],
+                [](const Tensor& t, std::optional<int64_t> d, bool k) {
+                    return tenzor::max(t, d, k); });
+        case OpType::Min:
+            return fold_reduction(inputs[0],
+                [](const Tensor& t, std::optional<int64_t> d, bool k) {
+                    return tenzor::min(t, d, k); });
         // Audit J5-followup: Pow via float_power (Tensor, Tensor overload).
         case OpType::Pow:    return tenzor::float_power(inputs[0], inputs[1]);
         // Audit J5-followup: Reshape — second input is a 1-D Int64 shape tensor.
@@ -1589,16 +1641,20 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
                 graph.replace_node_with_value(node, input1->id());
                 return true;
             }
-            // x * 0 = 0 (redirect to the zero constant only if it is already the
-            // output shape; a broadcasting scalar zero must not replace x:(M,N))
-            if (is_const1 && is_all_zeros(*producer1) && same_shape(input1)) {
-                graph.replace_node_with_value(node, input1->id());
-                return true;
-            }
-            // 0 * x = 0
-            if (is_const0 && is_all_zeros(*producer0) && same_shape(input0)) {
-                graph.replace_node_with_value(node, input0->id());
-                return true;
+            // x * 0 = 0 — UNSAFE: IEEE-754 gives NaN*0 = NaN and Inf*0 = NaN,
+            // so folding to the literal zero changes results for non-finite x.
+            // Gated behind allow_unsafe_algebra_ (default off). The shape guard
+            // also avoids replacing x:(M,N) with a broadcasting scalar zero.
+            if (allow_unsafe_algebra_) {
+                if (is_const1 && is_all_zeros(*producer1) && same_shape(input1)) {
+                    graph.replace_node_with_value(node, input1->id());
+                    return true;
+                }
+                // 0 * x = 0
+                if (is_const0 && is_all_zeros(*producer0) && same_shape(input0)) {
+                    graph.replace_node_with_value(node, input0->id());
+                    return true;
+                }
             }
             break;
 
@@ -1619,6 +1675,14 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
 
 auto AlgebraicSimplificationPass::simplify_unary_op(std::shared_ptr<Node> node, Graph& graph) -> bool {
     if (node->inputs().empty()) return false;
+
+    // Both transforms below change observable output for non-finite / out-of-
+    // domain inputs and are therefore gated behind allow_unsafe_algebra_:
+    //   log(exp(x)) = x   — original overflows exp(x)->+Inf, log(+Inf)=+Inf for
+    //                       large x; the rewrite yields the finite x instead.
+    //   exp(log(x)) = x   — only valid for x>0; for x<=0 the original produces
+    //                       NaN/-Inf, the rewrite returns the (finite) x.
+    if (!allow_unsafe_algebra_) return false;
 
     // log(exp(x)) = x
     if (node->op_type() == OpType::Log) {

@@ -89,6 +89,47 @@ TEST_P(OptimizerTestSGDWithMomentum, WithMomentum) {
 
 INSTANTIATE_BACKEND_TESTS(OptimizerTestSGDWithMomentum);
 
+// Regression: PyTorch SGD does NOT apply dampening on the first momentum step
+// (it initialises the momentum buffer to the gradient). The fused CUDA kernel
+// previously applied (1 - dampening) on step 1 too, diverging from CPU/PyTorch.
+// With dampening=0.5, momentum=0.9, grad=1:
+//   step1 correct: buf = 1.0          -> param = 1 - 0.1*1.0  = 0.90
+//   step1 buggy  : buf = (1-0.5)*1=0.5-> param = 1 - 0.1*0.5  = 0.95  (caught)
+//   step2 correct: buf = 0.9*1 + 0.5*1 = 1.4 -> param = 0.9 - 0.1*1.4 = 0.76
+class OptimizerTestSGDMomentumDampeningFirstStep : public BackendTest {};
+
+TEST_P(OptimizerTestSGDMomentumDampeningFirstStep, FirstStepNoDampening) {
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
+
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    // ctor order: (params, lr, momentum, dampening, weight_decay, nesterov)
+    // lr=0.1, momentum=0.9, dampening=0.5, weight_decay=0, nesterov=false
+    auto optimizer = SGD(params, 0.1, 0.9, 0.5, 0.0, false);
+
+    optimizer.step();
+    {
+        auto cpu = param->tensor().to(Device::cpu());
+        auto d = cpu.data<float>();
+        for (int i = 0; i < 4; i++)
+            EXPECT_NEAR(d[i], 0.90f, 1e-5f)
+                << "First step applied dampening (should not) at " << i
+                << " on " << device.to_string();
+    }
+
+    param->set_grad(ones({2, 2}, DType::Float32, device));
+    optimizer.step();
+    {
+        auto cpu = param->tensor().to(Device::cpu());
+        auto d = cpu.data<float>();
+        for (int i = 0; i < 4; i++)
+            EXPECT_NEAR(d[i], 0.76f, 1e-5f)
+                << "Second step mismatch at " << i << " on " << device.to_string();
+    }
+}
+
+INSTANTIATE_BACKEND_TESTS(OptimizerTestSGDMomentumDampeningFirstStep);
+
 class OptimizerTestSGDWithWeightDecay : public BackendTest {};
 
 TEST_P(OptimizerTestSGDWithWeightDecay, WithWeightDecay) {

@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <optional>
 #include "../mps_cmd_check.h"
 
 // Single definition of the keep-alive box declared in mps_buffer_util.h. ObjC
@@ -205,6 +206,54 @@ Tensor dispatch_unary(const std::string& shader_name, const Tensor& input) {
     ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
     return output;
+}
+
+// In-place unary activation: run the existing out-of-place activation shader
+// from `a`'s buffer into a temporary buffer, then blit-copy the result back
+// into `a`'s own buffer. Fully on-device (no CPU roundtrip); the caller's
+// tensor storage is mutated in place. `scalar_param` (optional) supplies a
+// scalar at buffer index 2 via setBytes for shaders that need one (e.g.
+// leaky_relu's negative_slope), mirroring dispatch_unary_scalar1.
+void dispatch_inplace_unary(const std::string& shader_name, Tensor& a,
+                            std::optional<float> scalar_param = std::nullopt) {
+    size_t numel = a.numel();
+    if (numel == 0) return;
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
+    id<MTLBuffer> buf_in = get_buffer(a);
+
+    // Temporary output buffer the activation writes to.
+    size_t nbytes = numel * static_cast<size_t>(dtype_size(a.dtype()));
+    id<MTLBuffer> buf_tmp = [g_device newBufferWithLength:nbytes
+                                                 options:MTLResourceStorageModeShared];
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_tmp offset:0 atIndex:1];
+    if (scalar_param.has_value()) {
+        float p = *scalar_param;
+        [encoder setBytes:&p length:sizeof(float) atIndex:2];
+    }
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(
+        static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+        static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+
+    // Blit the activation result back into the input buffer (in-place semantics).
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+    [blit copyFromBuffer:buf_tmp sourceOffset:0
+                toBuffer:buf_in destinationOffset:0
+                    size:nbytes];
+    [blit endEncoding];
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    ::tenzor::mps::mps_cmd_check(cmd, __func__);
 }
 
 } // anonymous namespace
@@ -1839,6 +1888,17 @@ Tensor mps_add_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_bin
 Tensor mps_sub_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("sub_inplace_kernel", a, b); return a; }
 Tensor mps_mul_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("mul_inplace_kernel", a, b); return a; }
 Tensor mps_div_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("div_inplace_kernel", a, b); return a; }
+
+// In-place unary activations — native Metal, on-device write-back (no CPU
+// roundtrip). Reuse the same shaders as the out-of-place variants.
+Tensor& mps_relu_inplace_kernel(Tensor& a)    { dispatch_inplace_unary("relu_kernel", a); return a; }
+Tensor& mps_sigmoid_inplace_kernel(Tensor& a) { dispatch_inplace_unary("sigmoid_kernel", a); return a; }
+Tensor& mps_tanh_inplace_kernel(Tensor& a)    { dispatch_inplace_unary("tanh_kernel", a); return a; }
+Tensor& mps_gelu_inplace_kernel(Tensor& a)    { dispatch_inplace_unary("gelu_kernel", a); return a; }
+Tensor& mps_leaky_relu_inplace_kernel(Tensor& a, float negative_slope) {
+    dispatch_inplace_unary("leaky_relu_kernel", a, negative_slope);
+    return a;
+}
 
 // ============================================================================
 // Cast (dtype conversion)

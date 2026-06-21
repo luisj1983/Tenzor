@@ -75,12 +75,16 @@ __global__ void nested_softmax_kernel(
     }
 }
 
-auto nested_softmax_hip(const Tensor& values, const Tensor& offsets,
+auto nested_softmax_hip(const Tensor& values_in, const Tensor& offsets_in,
                          int64_t dim, hipStream_t stream) -> Tensor {
-    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
-        auto out32 = nested_softmax_hip(values.to(DType::Float32), offsets, dim, stream);
-        return out32.to(values.dtype());
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_softmax_hip(values_in.to(DType::Float32), offsets_in, dim, stream);
+        return out32.to(values_in.dtype());
     }
+    // Kernels index values/offsets with dense [row*D+d] offsets, so a
+    // non-contiguous ragged buffer would be misread. Materialize contiguous.
+    Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
+    Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;
@@ -144,12 +148,14 @@ __global__ void nested_log_softmax_kernel(
     }
 }
 
-auto nested_log_softmax_hip(const Tensor& values, const Tensor& offsets,
+auto nested_log_softmax_hip(const Tensor& values_in, const Tensor& offsets_in,
                              int64_t dim, hipStream_t stream) -> Tensor {
-    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
-        auto out32 = nested_log_softmax_hip(values.to(DType::Float32), offsets, dim, stream);
-        return out32.to(values.dtype());
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_log_softmax_hip(values_in.to(DType::Float32), offsets_in, dim, stream);
+        return out32.to(values_in.dtype());
     }
+    Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
+    Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;
@@ -201,12 +207,14 @@ __global__ void nested_sum_kernel(
     }
 }
 
-auto nested_sum_hip(const Tensor& values, const Tensor& offsets,
+auto nested_sum_hip(const Tensor& values_in, const Tensor& offsets_in,
                      hipStream_t stream) -> Tensor {
-    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
-        auto out32 = nested_sum_hip(values.to(DType::Float32), offsets, stream);
-        return out32.to(values.dtype());
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_sum_hip(values_in.to(DType::Float32), offsets_in, stream);
+        return out32.to(values_in.dtype());
     }
+    Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
+    Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;
@@ -262,12 +270,14 @@ __global__ void nested_mean_kernel(
     }
 }
 
-auto nested_mean_hip(const Tensor& values, const Tensor& offsets,
+auto nested_mean_hip(const Tensor& values_in, const Tensor& offsets_in,
                       hipStream_t stream) -> Tensor {
-    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
-        auto out32 = nested_mean_hip(values.to(DType::Float32), offsets, stream);
-        return out32.to(values.dtype());
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_mean_hip(values_in.to(DType::Float32), offsets_in, stream);
+        return out32.to(values_in.dtype());
     }
+    Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
+    Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;
@@ -364,15 +374,19 @@ __global__ void nested_attention_kernel(
     }
 }
 
-auto nested_attention_hip(const Tensor& Q, const Tensor& K, const Tensor& V,
-                           const Tensor& q_offsets, const Tensor& kv_offsets,
+auto nested_attention_hip(const Tensor& Q_in, const Tensor& K_in, const Tensor& V_in,
+                           const Tensor& q_offsets_in, const Tensor& kv_offsets_in,
                            float scale, bool causal, hipStream_t stream) -> Tensor {
-    if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
-        auto out32 = nested_attention_hip(Q.to(DType::Float32), K.to(DType::Float32),
-                                          V.to(DType::Float32), q_offsets, kv_offsets,
+    if (Q_in.dtype() == DType::Float16 || Q_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_attention_hip(Q_in.to(DType::Float32), K_in.to(DType::Float32),
+                                          V_in.to(DType::Float32), q_offsets_in, kv_offsets_in,
                                           scale, causal, stream);
-        return out32.to(Q.dtype());
+        return out32.to(Q_in.dtype());
     }
+    // Dense [(start+s)*D+d] indexing requires contiguous Q/K/V/offsets.
+    auto mc = [](const Tensor& t) { return t.is_contiguous() ? t : t.contiguous(); };
+    Tensor Q = mc(Q_in), K = mc(K_in), V = mc(V_in);
+    Tensor q_offsets = mc(q_offsets_in), kv_offsets = mc(kv_offsets_in);
     int64_t head_dim = Q.shape().back();
     int64_t total_q_len = Q.shape()[0];
     int64_t B = q_offsets.numel() - 1;
@@ -566,13 +580,15 @@ __global__ void nested_to_padded_kernel(
     }
 }
 
-auto nested_to_padded_hip(const Tensor& values, const Tensor& offsets,
+auto nested_to_padded_hip(const Tensor& values_in, const Tensor& offsets_in,
                            int64_t max_len, float padding_value,
                            hipStream_t stream) -> Tensor {
-    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
-        auto out32 = nested_to_padded_hip(values.to(DType::Float32), offsets, max_len, padding_value, stream);
-        return out32.to(values.dtype());
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_to_padded_hip(values_in.to(DType::Float32), offsets_in, max_len, padding_value, stream);
+        return out32.to(values_in.dtype());
     }
+    Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
+    Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;
@@ -623,12 +639,14 @@ __global__ void nested_from_padded_kernel(
     }
 }
 
-auto nested_from_padded_hip(const Tensor& padded, const Tensor& offsets,
+auto nested_from_padded_hip(const Tensor& padded_in, const Tensor& offsets_in,
                               hipStream_t stream) -> Tensor {
-    if (padded.dtype() == DType::Float16 || padded.dtype() == DType::BFloat16) {
-        auto out32 = nested_from_padded_hip(padded.to(DType::Float32), offsets, stream);
-        return out32.to(padded.dtype());
+    if (padded_in.dtype() == DType::Float16 || padded_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_from_padded_hip(padded_in.to(DType::Float32), offsets_in, stream);
+        return out32.to(padded_in.dtype());
     }
+    Tensor padded  = padded_in.is_contiguous()  ? padded_in  : padded_in.contiguous();
+    Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto pad_shape = padded.shape();
     int64_t B = pad_shape[0];
     int64_t max_len = pad_shape[1];
@@ -714,19 +732,23 @@ __global__ void nested_layer_norm_kernel(
     }
 }
 
-auto nested_layer_norm_hip(const Tensor& values, const Tensor& offsets,
-                            const Tensor& weight, const Tensor& bias,
+auto nested_layer_norm_hip(const Tensor& values_in, const Tensor& offsets_in,
+                            const Tensor& weight_in, const Tensor& bias_in,
                             float eps, hipStream_t stream) -> Tensor {
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        auto out32 = nested_layer_norm_hip(values_in.to(DType::Float32), offsets_in,
+                                           weight_in.to(DType::Float32), bias_in.to(DType::Float32),
+                                           eps, stream);
+        return out32.to(values_in.dtype());
+    }
+    // Dense [row*D+d] indexing requires contiguous values/offsets/weight/bias.
+    auto mc = [](const Tensor& t) { return t.is_contiguous() ? t : t.contiguous(); };
+    Tensor values = mc(values_in), offsets = mc(offsets_in);
+    Tensor weight = mc(weight_in), bias = mc(bias_in);
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;
 
-    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
-        auto out32 = nested_layer_norm_hip(values.to(DType::Float32), offsets,
-                                           weight.to(DType::Float32), bias.to(DType::Float32),
-                                           eps, stream);
-        return out32.to(values.dtype());
-    }
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 

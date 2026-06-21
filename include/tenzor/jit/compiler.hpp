@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -589,10 +590,22 @@ private:
  */
 class AlgebraicSimplificationPass : public Pass {
 public:
+    /// @param allow_unsafe_algebra Enable rewrites that change results for
+    /// non-finite or out-of-domain inputs: exp(log x)=x (invalid for x<=0),
+    /// log(exp x)=x (changes overflow to +Inf), and x*0=0 (IEEE-754 makes
+    /// NaN*0 and Inf*0 yield NaN, not 0). These are gated OFF by default so a
+    /// correctness-first compile preserves NaN/Inf/domain semantics, matching
+    /// how XLA/PyTorch fence such transforms behind fast-math. The pure
+    /// identity rewrites (x+0, x*1, x/1) are always applied — they are
+    /// value-preserving for all inputs.
+    explicit AlgebraicSimplificationPass(bool allow_unsafe_algebra = false)
+        : allow_unsafe_algebra_(allow_unsafe_algebra) {}
     auto run(Graph& graph) -> bool override;
     auto name() const -> std::string override { return "AlgebraicSimplification"; }
 
 private:
+    bool allow_unsafe_algebra_ = false;
+
     /**
      * @brief Try to simplify a binary operation.
      *
@@ -1264,6 +1277,18 @@ public:
     auto replay_cuda_graph(std::vector<Tensor>& inputs) -> bool;
 
     /**
+     * @brief Get the captured graph's output tensors.
+     *
+     * The returned tensors alias the device buffers the captured graph writes
+     * into, so after a replay_cuda_graph() call they hold the fresh results for
+     * the most recent replay inputs. Returns an empty vector if nothing has been
+     * captured.
+     *
+     * @return The captured output tensors (post-replay results live here).
+     */
+    auto replay_cuda_graph_outputs() const -> std::vector<Tensor>;
+
+    /**
      * @brief Invalidate the captured CUDA graph.
      *
      * Call this when input shapes change or when the graph is no longer needed.
@@ -1306,6 +1331,17 @@ private:
     MemoryPlan memory_plan_;                                         ///< Memory plan for buffer reuse
     std::unique_ptr<CUDAGraph> cuda_graph_;                          ///< Captured CUDA graph for replay
     std::vector<std::vector<int64_t>> captured_shapes_;              ///< Input shapes at capture time
+    /// The exact contiguous input Tensors whose device buffers the captured
+    /// CUDA/HIP graph hard-codes. A captured graph re-runs verbatim over these
+    /// pointers — it has no input-rebinding API — so replay() MUST first copy
+    /// each fresh replay input's data into these buffers (device-to-device),
+    /// otherwise replay returns the stale capture-time result. Retaining the
+    /// Tensors here keeps their storage alive for the lifetime of the graph.
+    std::vector<Tensor> captured_inputs_;
+    /// The captured graph's output Tensors. Their device storage is the buffer
+    /// the terminal nodes write into, so after a replay() they hold the fresh
+    /// results. Exposed via replay_cuda_graph_outputs() so a replay is readable.
+    std::vector<Tensor> captured_outputs_;
     std::shared_ptr<nn::Module> source_module_;                      ///< Source module for re-tracing
     std::unordered_map<std::string, std::shared_ptr<Graph>> shape_cache_;  ///< Cached graphs by shape key
     int retrace_count_{0};                                           ///< Number of retraces performed
@@ -1313,6 +1349,14 @@ private:
     std::vector<DynamicDimSpec> dynamic_dims_;                       ///< Dynamic dimension configuration
     Device traced_device_{Device::cpu()};                            ///< Device used at most recent trace
     DType  traced_dtype_{DType::Float32};                            ///< DType used at most recent trace
+
+    /// Serialises the mutating paths of forward()/replay/capture so a single
+    /// CompiledModule shared across inference threads (the natural server
+    /// pattern) cannot race on graph_, shape_cache_, traced_device_/dtype_,
+    /// cuda_graph_ or captured_shapes_. Recursive so a future internal call
+    /// chain that re-enters a guarded method cannot self-deadlock. Mutable so it
+    /// can be locked from const-correct accessors if added later.
+    mutable std::recursive_mutex forward_mutex_;
 
     /// Compute cache key from input shapes
     static auto compute_shape_key(const Variable& input) -> std::string;

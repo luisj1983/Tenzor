@@ -11,6 +11,13 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     int32_t device_id = weight.device().index;
     bool is_float64 = (weight.dtype() == DType::Float64);
     bool is_float16 = (weight.dtype() == DType::Float16);
+    // embedding_f16/_f64 declare native float16_t/double SSBO members and require
+    // the device shaderFloat16/shaderFloat64 features; gate so a missing feature
+    // raises a clean catchable exception instead of a device-lost deep in the op
+    // (mirrors dispatchCast/dispatchWhere). The bf16 path reinterprets raw 2-byte
+    // storage as packed uint and needs no extension.
+    if (is_float16) vulkan::ensure_fp16_supported(device_id, "Embedding");
+    if (is_float64) vulkan::ensure_fp64_supported(device_id, "Embedding");
     std::string shader_name = is_float64 ? "embedding_f64"
                             : is_float16 ? "embedding_f16"
                             : "embedding";

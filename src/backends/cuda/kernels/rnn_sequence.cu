@@ -42,11 +42,14 @@ std::vector<Tensor> gru_forward_cudnn_inference(
     const Tensor& bias_ih, const Tensor& h0, const Tensor& bias_hh);
 #endif
 
-// Numerically stable sigmoid: clamp input to [-20, 20] to prevent exp overflow
+// Logistic sigmoid. Matches the unclamped CPU reference (rnn_kernels.cpp) and
+// gru.cu's 1/(1+exp(-x)) so saturated gates / their gradients agree across
+// backends. A previous clamp to [-20,20] diverged from CPU at saturated gates
+// (and forced the gradient to exactly 0 there); IEEE handles the extremes
+// gracefully (exp(-x) -> +inf gives sigma -> 0, exp(-x) -> 0 gives sigma -> 1).
 template<typename T>
 __device__ __forceinline__ T stable_sigmoid(T x) {
-    T clamped = max(T(-20), min(T(20), x));
-    return T(1) / (T(1) + exp(-clamped));
+    return T(1) / (T(1) + exp(-x));
 }
 
 // Forward declarations from other CUDA kernels
@@ -103,6 +106,21 @@ static void launch_add_bias(T* output, const T* bias,
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
+// Compute a grid dimension for `total` elements at `block` threads, in 64-bit,
+// clamped to the device's maxGridSize so the int launch argument never
+// overflows. Callers must pair this with a grid-stride kernel so a clamped grid
+// still covers every element.
+static int rnn_clamped_grid(int64_t total, int block) {
+    int64_t grid64 = (total + block - 1) / block;
+    int device_id = 0;
+    cudaGetDevice(&device_id);
+    int max_grid_x = 65535;
+    cudaDeviceGetAttribute(&max_grid_x, cudaDevAttrMaxGridDimX, device_id);
+    int grid = static_cast<int>(std::min<int64_t>(grid64, static_cast<int64_t>(max_grid_x)));
+    if (grid < 1) grid = 1;
+    return grid;
+}
+
 // ============================================================================
 // GRU fused cell kernel for sequence ops
 // ============================================================================
@@ -116,34 +134,35 @@ __global__ void gru_cell_fused_kernel(
     int64_t batch_size,
     int64_t hidden_size
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = batch_size * hidden_size;
-    if (idx >= total) return;
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += stride) {
+        int64_t b = idx / hidden_size;
+        int64_t h = idx % hidden_size;
 
-    int64_t b = idx / hidden_size;
-    int64_t h = idx % hidden_size;
+        // Gate offsets
+        int64_t base_ih = b * 3 * hidden_size + h;
+        int64_t base_hh = b * 3 * hidden_size + h;
 
-    // Gate offsets
-    int64_t base_ih = b * 3 * hidden_size + h;
-    int64_t base_hh = b * 3 * hidden_size + h;
+        T r_ih = gates_ih[base_ih];
+        T z_ih = gates_ih[base_ih + hidden_size];
+        T n_ih = gates_ih[base_ih + 2 * hidden_size];
 
-    T r_ih = gates_ih[base_ih];
-    T z_ih = gates_ih[base_ih + hidden_size];
-    T n_ih = gates_ih[base_ih + 2 * hidden_size];
+        T r_hh = gates_hh[base_hh];
+        T z_hh = gates_hh[base_hh + hidden_size];
+        T n_hh = gates_hh[base_hh + 2 * hidden_size];
 
-    T r_hh = gates_hh[base_hh];
-    T z_hh = gates_hh[base_hh + hidden_size];
-    T n_hh = gates_hh[base_hh + 2 * hidden_size];
+        // Reset gate: r = sigmoid(r_ih + r_hh)
+        T r = stable_sigmoid(r_ih + r_hh);
+        // Update gate: z = sigmoid(z_ih + z_hh)
+        T z = stable_sigmoid(z_ih + z_hh);
+        // New gate: n = tanh(n_ih + r * n_hh)
+        T n = tanh(n_ih + r * n_hh);
 
-    // Reset gate: r = sigmoid(r_ih + r_hh)
-    T r = stable_sigmoid(r_ih + r_hh);
-    // Update gate: z = sigmoid(z_ih + z_hh)
-    T z = stable_sigmoid(z_ih + z_hh);
-    // New gate: n = tanh(n_ih + r * n_hh)
-    T n = tanh(n_ih + r * n_hh);
-
-    T hp = h_prev[idx];
-    h_out[idx] = (T(1) - z) * n + z * hp;
+        T hp = h_prev[idx];
+        h_out[idx] = (T(1) - z) * n + z * hp;
+    }
 }
 
 // ============================================================================
@@ -400,7 +419,7 @@ auto gru_forward_cuda(
     // Pre-compute GRU cell launch config (constant across timesteps)
     int64_t total = batch * hidden;
     int block = 256;
-    int grid = (total + block - 1) / block;
+    int grid = rnn_clamped_grid(total, block);
 
     for (int64_t t = 0; t < seq_len; ++t) {
         // Zero-copy view into pre-computed input gates for this timestep.
@@ -598,20 +617,21 @@ __global__ void bilstm_concat_kernel(
     int64_t batch,
     int64_t hidden
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = seq_len * batch * hidden;
-    if (idx >= total) return;
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += stride) {
+        int64_t h = idx % hidden;
+        int64_t rem = idx / hidden;
+        int64_t b = rem % batch;
+        int64_t t = rem / batch;
 
-    int64_t h = idx % hidden;
-    int64_t rem = idx / hidden;
-    int64_t b = rem % batch;
-    int64_t t = rem / batch;
+        int64_t src_offset = (t * batch + b) * hidden + h;
+        int64_t dst_base = (t * batch + b) * 2 * hidden;
 
-    int64_t src_offset = (t * batch + b) * hidden + h;
-    int64_t dst_base = (t * batch + b) * 2 * hidden;
-
-    output[dst_base + h] = fwd_output[src_offset];
-    output[dst_base + hidden + h] = bwd_output[src_offset];
+        output[dst_base + h] = fwd_output[src_offset];
+        output[dst_base + hidden + h] = bwd_output[src_offset];
+    }
 }
 
 // Kernel to reverse a sequence along dim 0: output[t] = input[seq_len-1-t]
@@ -623,16 +643,17 @@ __global__ void reverse_sequence_kernel(
     int64_t batch,
     int64_t hidden
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = seq_len * batch * hidden;
-    if (idx >= total) return;
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += stride) {
+        int64_t step_size = batch * hidden;
+        int64_t t = idx / step_size;
+        int64_t offset = idx % step_size;
+        int64_t t_rev = seq_len - 1 - t;
 
-    int64_t step_size = batch * hidden;
-    int64_t t = idx / step_size;
-    int64_t offset = idx % step_size;
-    int64_t t_rev = seq_len - 1 - t;
-
-    output[t_rev * step_size + offset] = input[t * step_size + offset];
+        output[t_rev * step_size + offset] = input[t * step_size + offset];
+    }
 }
 
 auto bilstm_forward_cuda(
@@ -663,7 +684,7 @@ auto bilstm_forward_cuda(
     Tensor input_rev({seq_len, batch, shape[2]}, input.dtype(), input.device());
     int64_t total = seq_len * batch * shape[2];
     int block = 256;
-    int grid = (total + block - 1) / block;
+    int grid = rnn_clamped_grid(total, block);
 
     if (input.dtype() == DType::Float32) {
         reverse_sequence_kernel<float><<<grid, block, 0, stream>>>(
@@ -685,7 +706,7 @@ auto bilstm_forward_cuda(
     // Reverse backward output
     Tensor bwd_output_rev({seq_len, batch, hidden}, input.dtype(), input.device());
     int64_t total_out = seq_len * batch * hidden;
-    grid = (total_out + block - 1) / block;
+    grid = rnn_clamped_grid(total_out, block);
 
     if (input.dtype() == DType::Float32) {
         reverse_sequence_kernel<float><<<grid, block, 0, stream>>>(
@@ -705,7 +726,7 @@ auto bilstm_forward_cuda(
     {
         int64_t concat_total = seq_len * batch * hidden;
         int concat_block = 256;
-        int concat_grid = (concat_total + concat_block - 1) / concat_block;
+        int concat_grid = rnn_clamped_grid(concat_total, concat_block);
 
         if (input.dtype() == DType::Float32) {
             bilstm_concat_kernel<float><<<concat_grid, concat_block, 0, stream>>>(

@@ -1449,13 +1449,15 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
 // Adaptive AvgPool1d Backward Kernel
 // ============================================================================
 
-template<typename T>
+// Float-only by contract: every caller converts non-f32 dtypes to Float32
+// scratch first (see adaptive_avgpool1d_backward). Taking float* explicitly
+// (instead of a misleading template<T> that always reinterpret_cast'd to
+// float*) makes the contract type-safe.
 __global__ void adaptive_avgpool1d_backward_impl(
-    const T* __restrict__ grad_output,
-    T* __restrict__ grad_input,
+    const float* __restrict__ grad_output,
+    float* __restrict__ grad_input,
     int64_t N, int64_t C, int64_t L_in, int64_t L_out
 ) {
-    using Compute = pool_compute_t<T>;
     const int64_t total = N * C * L_out;
 
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1471,11 +1473,11 @@ __global__ void adaptive_avgpool1d_backward_impl(
 
         int64_t count = l_end - l_start;
         if (count <= 0) continue;  // empty window: no gradient to scatter
-        float grad_val = dev_load(grad_output, idx) / static_cast<float>(count);
+        float grad_val = grad_output[idx] / static_cast<float>(count);
 
         for (int64_t l = l_start; l < l_end; ++l) {
             int64_t in_idx = (n * C + c) * L_in + l;
-            atomicAdd(reinterpret_cast<float*>(grad_input) + in_idx, grad_val);
+            atomicAdd(grad_input + in_idx, grad_val);
         }
     }
 }
@@ -1495,8 +1497,8 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output,
 
     if (grad_output.dtype() == DType::Float32) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl<float>, total_out);
-        adaptive_avgpool1d_backward_impl<float><<<grid, block, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl, total_out);
+        adaptive_avgpool1d_backward_impl<<<grid, block, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
             N, C, L_in, L_out);
         CUDA_CHECK(cudaGetLastError());
@@ -1511,8 +1513,8 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output,
             grad_output.data<double>(), go_f32.data<float>(), total_out);
         CUDA_CHECK(cudaGetLastError());
 
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl<float>, total_out);
-        adaptive_avgpool1d_backward_impl<float><<<grid, block, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl, total_out);
+        adaptive_avgpool1d_backward_impl<<<grid, block, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
             N, C, L_in, L_out);
         CUDA_CHECK(cudaGetLastError());
@@ -1539,8 +1541,8 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output,
             CUDA_CHECK(cudaGetLastError());
         }
 
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl<float>, total_out);
-        adaptive_avgpool1d_backward_impl<float><<<grid, block, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl, total_out);
+        adaptive_avgpool1d_backward_impl<<<grid, block, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
             N, C, L_in, L_out);
         CUDA_CHECK(cudaGetLastError());
@@ -2398,15 +2400,15 @@ auto adaptive_avgpool3d_forward(const Tensor& input,
 // Adaptive AvgPool3d Backward Kernel
 // ============================================================================
 
-template<typename T>
+// Float-only by contract (see adaptive_avgpool1d_backward_impl); take float*
+// explicitly instead of a template<T> that always reinterpret_cast'd to float*.
 __global__ void adaptive_avgpool3d_backward_impl(
-    const T* __restrict__ grad_output,
-    T* __restrict__ grad_input,
+    const float* __restrict__ grad_output,
+    float* __restrict__ grad_input,
     int64_t N, int64_t C,
     int64_t D_in, int64_t H_in, int64_t W_in,
     int64_t D_out, int64_t H_out, int64_t W_out
 ) {
-    using Compute = pool_compute_t<T>;
     const int64_t total = N * C * D_out * H_out * W_out;
 
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2428,13 +2430,13 @@ __global__ void adaptive_avgpool3d_backward_impl(
 
         int count = static_cast<int>((d_end - d_start) * (h_end - h_start) * (w_end - w_start));
         if (count <= 0) continue;  // empty window: no gradient to scatter
-        float grad_val = dev_load(grad_output, idx) / static_cast<float>(count);
+        float grad_val = grad_output[idx] / static_cast<float>(count);
 
         for (int64_t d = d_start; d < d_end; ++d) {
             for (int64_t h = h_start; h < h_end; ++h) {
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
-                    atomicAdd(reinterpret_cast<float*>(grad_input) + in_idx, grad_val);
+                    atomicAdd(grad_input + in_idx, grad_val);
                 }
             }
         }
@@ -2460,8 +2462,8 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output,
 
     if (grad_output.dtype() == DType::Float32) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl<float>, total_out);
-        adaptive_avgpool3d_backward_impl<float><<<grid, block, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl, total_out);
+        adaptive_avgpool3d_backward_impl<<<grid, block, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
             N, C, D_in, H_in, W_in, D_out, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());
@@ -2475,8 +2477,8 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output,
             grad_output.data<double>(), go_f32.data<float>(), total_out);
         CUDA_CHECK(cudaGetLastError());
 
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl<float>, total_out);
-        adaptive_avgpool3d_backward_impl<float><<<grid, block, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl, total_out);
+        adaptive_avgpool3d_backward_impl<<<grid, block, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
             N, C, D_in, H_in, W_in, D_out, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());
@@ -2503,8 +2505,8 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output,
             CUDA_CHECK(cudaGetLastError());
         }
 
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl<float>, total_out);
-        adaptive_avgpool3d_backward_impl<float><<<grid, block, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl, total_out);
+        adaptive_avgpool3d_backward_impl<<<grid, block, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
             N, C, D_in, H_in, W_in, D_out, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());

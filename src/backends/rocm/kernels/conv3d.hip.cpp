@@ -13,14 +13,24 @@
 namespace tenzor {
 namespace rocm {
 
-// RAII wrapper for rocBLAS handle
+// Non-owning handle wrapper backed by a thread-local cached rocBLAS handle.
+// rocblas_create_handle allocates device workspace and probes device
+// properties, so creating/destroying it per forward/backward call (as this
+// previously did) is pure per-layer/per-step overhead. Mirrors conv2d's
+// get_cached_conv_handle: create once per thread, reuse, only rebind the
+// stream. The cached handle is intentionally never destroyed (process-lifetime
+// thread_local), matching the conv2d cache.
 class RocBLASHandleGuardConv3d {
 public:
     RocBLASHandleGuardConv3d() {
-        ROCBLAS_CHECK(rocblas_create_handle(&handle_));
-    }
-    ~RocBLASHandleGuardConv3d() {
-        if (handle_) rocblas_destroy_handle(handle_);
+        struct CachedHandle {
+            rocblas_handle h = nullptr;
+            CachedHandle() { ROCBLAS_CHECK(rocblas_create_handle(&h)); }
+            // No destructor: leak deliberately at process exit to avoid teardown
+            // ordering issues with the rocBLAS/HIP runtime.
+        };
+        static thread_local CachedHandle cached;
+        handle_ = cached.h;
     }
     RocBLASHandleGuardConv3d(const RocBLASHandleGuardConv3d&) = delete;
     RocBLASHandleGuardConv3d& operator=(const RocBLASHandleGuardConv3d&) = delete;
@@ -323,14 +333,19 @@ auto conv3d_forward_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // BFloat16/Float16: upcast to Float32, compute, convert back. The deeper
+    // rocblas_hgemm branches accumulate the GEMM reduction (K = C_in_per_group *
+    // kD*kH*kW, often >1000) entirely in FP16, which overflows past 65504 and
+    // loses 2-3 decimal digits vs the CPU/CUDA FP32-accumulate reference, so we
+    // never reach them for half-precision input.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        const DType orig = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         auto bias_f32 = bias.numel() > 0 ? bias.to(DType::Float32) : bias;
         auto result = conv3d_forward_hip(input_f32, weight_f32, bias_f32,
                                           stride, padding, dilation, groups, stream);
-        return result.to(DType::BFloat16);
+        return result.to(orig);
     }
 
     auto input_shape = input.shape();
@@ -569,13 +584,15 @@ auto conv3d_backward_input_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (grad_output.dtype() == DType::BFloat16) {
+    // BFloat16/Float16: upcast to Float32, compute, convert back (the deeper
+    // rocblas_hgemm branch accumulates in FP16; see conv3d_forward_hip comment).
+    if (grad_output.dtype() == DType::BFloat16 || grad_output.dtype() == DType::Float16) {
+        const DType orig = grad_output.dtype();
         auto grad_output_f32 = grad_output.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         auto result = conv3d_backward_input_hip(grad_output_f32, weight_f32, input_shape,
                                                  stride, padding, dilation, groups, stream);
-        return result.to(DType::BFloat16);
+        return result.to(orig);
     }
 
     auto weight_shape = weight.shape();
@@ -802,13 +819,15 @@ auto conv3d_backward_weight_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // BFloat16/Float16: upcast to Float32, compute, convert back (the deeper
+    // rocblas_hgemm branch accumulates in FP16; see conv3d_forward_hip comment).
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        const DType orig = input.dtype();
         auto grad_output_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);
         auto result = conv3d_backward_weight_hip(grad_output_f32, input_f32, weight_shape,
                                                   stride, padding, dilation, groups, stream);
-        return result.to(DType::BFloat16);
+        return result.to(orig);
     }
 
     auto input_shape = input.shape();

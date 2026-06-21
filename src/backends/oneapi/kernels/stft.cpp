@@ -124,23 +124,25 @@ auto stft_kernel(const Tensor& input, int64_t n_fft,
         queue.wait_and_throw();
     }
 
-    // OneAPI rfft/fft returns Float32 with a trailing pair dim of 2:
-    // shape (B, num_frames, freq_bins, 2). We re-wrap this as Complex64 with
-    // shape (B, num_frames, freq_bins) since the byte layout is identical.
-    Tensor fft_out_f32;
+    // OneAPI rfft/fft returns Complex64 of shape (B, num_frames, freq_bins);
+    // its physical storage is interleaved (real, imag) float pairs, identical to
+    // the Complex64 byte layout we re-wrap below.
+    Tensor fft_out_c;
     if (onesided) {
-        fft_out_f32 = rfft_kernel(framed, /*dim=*/2, n_fft,
-                                  normalized ? "ortho" : "backward", queue);
+        fft_out_c = rfft_kernel(framed, /*dim=*/2, n_fft,
+                                normalized ? "ortho" : "backward", queue);
     } else {
-        fft_out_f32 = fft_kernel(framed, /*dim=*/2, n_fft,
-                                 normalized ? "ortho" : "backward", queue);
+        // fft_kernel only accepts complex input (it does no real→complex
+        // promotion); `framed` is Float32, so promote it to Complex64 first.
+        fft_out_c = fft_kernel(framed.to(DType::Complex64), /*dim=*/2, n_fft,
+                               normalized ? "ortho" : "backward", queue);
     }
 
     // Build a Complex64 tensor of shape (B, num_frames, freq_bins) and copy bytes
     Tensor fft_out(std::vector<int64_t>{batch_size, num_frames, freq_bins},
                    DType::Complex64, input.device());
     queue.memcpy(get_data_ptr<float>(fft_out),
-                 get_data_ptr<const float>(fft_out_f32),
+                 get_data_ptr<const float>(fft_out_c),
                  batch_size * num_frames * freq_bins * 2 * sizeof(float)).wait();
 
     // Transpose last two dims: (B, freq_bins, num_frames) Complex64

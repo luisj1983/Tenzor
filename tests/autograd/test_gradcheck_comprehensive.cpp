@@ -649,31 +649,36 @@ TEST_P(GradCheckComprehensiveTest, AsStrided) {
 }
 
 TEST_P(GradCheckComprehensiveTest, TopK) {
+    // Gradcheck the REAL autograd topk values output (not a slice proxy).
+    // make_var produces strictly-positive, distinct random values, so the
+    // top-k boundary is well away from ties and the scatter-to-original-
+    // position backward is differentiable under finite differences.
+    // A position-dependent weight (squared values) makes the reduction
+    // sensitive to WHICH input positions the gradient is scattered back to,
+    // so a wrong scatter would fail the check (a plain sum would not).
     auto x = make_var({4, 16}, device);
     auto f = [](const Variable& v) {
-        // topk returns values; gradients flow through the selected positions
-        auto result = sum(v);  // Use sum through sorted top-k as proxy
-        return result;
+        auto vals = tenzor::topk(v, 5, 1, /*largest=*/true,
+                                 /*sorted=*/true).first;
+        return sum(vals * vals);
     };
-    // Direct topk gradcheck is tricky due to discrete index selection;
-    // test that sort+slice (equivalent to topk) has correct gradients
-    auto f2 = [](const Variable& v) {
-        // Sort descending then take first 5 elements per row
-        auto sorted = tenzor::sort(v, 1);  // Variable sort not available, use composition
-        return slice(v, 1, 0, 5);
-    };
-    EXPECT_TRUE(gradcheck(f2, x));
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
 TEST_P(GradCheckComprehensiveTest, Sort) {
-    // Sort gradients: permutation of identity matrix rows
+    // Gradcheck the REAL autograd sort values output. The backward scatters
+    // grad through the inverse permutation; weighting the sorted values by a
+    // per-position coefficient (arange) makes the reduction order-sensitive,
+    // so an incorrect inverse permutation in the backward fails the check.
     auto x = make_var({4, 8}, device);
-    auto f = [](const Variable& v) {
-        // Sort is non-differentiable at equal-element boundaries
-        // but the gradient should be a permutation matrix
-        return slice(v, 1, 0, 4);  // Slice is differentiable
+    // Deterministic, distinct per-position weights [1..8] (no grad).
+    auto w_t = arange(1.0, 9.0, 1.0, DType::Float32, device).reshape({1, 8});
+    auto w = Variable(w_t, /*requires_grad=*/false);
+    auto f = [&w](const Variable& v) {
+        auto sorted = tenzor::sort(v, 1, /*descending=*/false).first;
+        return sum(sorted * w);
     };
-    EXPECT_TRUE(gradcheck(f, x));
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
 TEST_P(GradCheckComprehensiveTest, Gamma) {

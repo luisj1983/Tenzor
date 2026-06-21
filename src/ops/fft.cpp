@@ -30,6 +30,20 @@ void validate_fft_input(const Tensor& input, const char* op_name) {
     }
 }
 
+// Validate that an optional shape vector `s` matches the number of transform
+// dimensions. PyTorch requires len(s) == len(dim); a mismatched length would
+// otherwise index `(*s)[i]` past the vector end (OOB heap read) or silently
+// drop trailing entries.
+void validate_s_length(const std::optional<std::vector<int64_t>>& s,
+                       size_t num_dims, const char* op_name) {
+    if (s && s->size() != num_dims) {
+        throw std::invalid_argument(
+            std::string(op_name) + ": length of s (" + std::to_string(s->size()) +
+            ") must equal the number of transformed dimensions (" +
+            std::to_string(num_dims) + ")");
+    }
+}
+
 // Get complex dtype corresponding to a real dtype.  Half-precision
 // inputs widen to Complex64 (Float32 internal arithmetic per E.5).
 DType to_complex_dtype(DType dt) {
@@ -159,8 +173,17 @@ auto irfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
         return transpose(r, dim, last_dim_irfft);
     }
 
-    // Default output length: 2 * (input_len - 1)
-    int64_t signal_len = n.value_or(2 * (input.shape()[dim] - 1));
+    // Default output length: 2 * (input_len - 1). For a 1-element spectrum
+    // this default computes to 0; PyTorch's minimum valid real length is 2,
+    // so fall back to 2 rather than throwing on a legitimate tiny spectrum.
+    // An explicitly-supplied n is still validated for positivity.
+    int64_t signal_len;
+    if (n.has_value()) {
+        signal_len = n.value();
+    } else {
+        signal_len = 2 * (input.shape()[dim] - 1);
+        if (signal_len <= 0) signal_len = 2;
+    }
     if (signal_len <= 0) {
         throw std::runtime_error("irfft: n must be positive, got " + std::to_string(signal_len));
     }
@@ -175,6 +198,7 @@ auto irfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
 
 auto fft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
           std::vector<int64_t> dim, const std::string& norm) -> Tensor {
+    validate_s_length(s, dim.size(), "fft2");
     // Apply 1D FFT along each dimension sequentially
     Tensor result = input;
     for (size_t i = 0; i < dim.size(); ++i) {
@@ -186,6 +210,7 @@ auto fft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
 
 auto ifft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
            std::vector<int64_t> dim, const std::string& norm) -> Tensor {
+    validate_s_length(s, dim.size(), "ifft2");
     Tensor result = input;
     for (size_t i = 0; i < dim.size(); ++i) {
         std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
@@ -196,6 +221,7 @@ auto ifft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
 
 auto rfft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
            std::vector<int64_t> dim, const std::string& norm) -> Tensor {
+    validate_s_length(s, dim.size(), "rfft2");
     // Apply rfft along last dimension, then fft along remaining dimensions
     // dim should have exactly 2 elements, last one gets rfft
     std::optional<int64_t> n_last = s ? std::make_optional((*s)[dim.size() - 1]) : std::nullopt;
@@ -210,6 +236,7 @@ auto rfft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
 
 auto irfft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
             std::vector<int64_t> dim, const std::string& norm) -> Tensor {
+    validate_s_length(s, dim.size(), "irfft2");
     // Inverse of rfft2: apply ifft along all dims except last, then irfft along last
     Tensor result = input;
     for (size_t i = 0; i + 1 < dim.size(); ++i) {
@@ -230,6 +257,7 @@ auto rfftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
         dims.resize(input.ndim());
         for (int64_t i = 0; i < input.ndim(); ++i) dims[i] = i;
     }
+    validate_s_length(s, dims.size(), "rfftn");
     // Apply rfft along last dimension, then fft along remaining
     std::optional<int64_t> n_last = s ? std::make_optional((*s)[dims.size() - 1]) : std::nullopt;
     Tensor result = rfft(input, n_last, dims.back(), norm);
@@ -249,6 +277,7 @@ auto irfftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
         dims.resize(input.ndim());
         for (int64_t i = 0; i < input.ndim(); ++i) dims[i] = i;
     }
+    validate_s_length(s, dims.size(), "irfftn");
     // Apply ifft along all dims except last, then irfft along last
     Tensor result = input;
     for (size_t i = 0; i + 1 < dims.size(); ++i) {
@@ -270,6 +299,7 @@ auto fftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
         dims.resize(input.ndim());
         for (int64_t i = 0; i < input.ndim(); ++i) dims[i] = i;
     }
+    validate_s_length(s, dims.size(), "fftn");
 
     Tensor result = input;
     for (size_t i = 0; i < dims.size(); ++i) {
@@ -288,6 +318,7 @@ auto ifftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
         dims.resize(input.ndim());
         for (int64_t i = 0; i < input.ndim(); ++i) dims[i] = i;
     }
+    validate_s_length(s, dims.size(), "ifftn");
 
     Tensor result = input;
     for (size_t i = 0; i < dims.size(); ++i) {
@@ -543,25 +574,45 @@ auto ihfft(const Tensor& input,
 
 auto fftfreq(int64_t n, double d, DType dtype, Device device) -> Tensor {
     // Returns: [0, 1, ..., n/2-1, -n/2, ..., -1] / (n * d)
+    if (n < 0) {
+        throw std::invalid_argument("fftfreq: n must be non-negative, got " +
+                                    std::to_string(n));
+    }
+    if (n == 0) {
+        // Empty result for n == 0 (avoids 1/(0*d) = inf -> NaN bins).
+        return tenzor::empty({0}, dtype, device);
+    }
     int64_t half = (n - 1) / 2 + 1;  // ceil(n/2)
-    auto pos = tenzor::arange(0.0f, static_cast<float>(half), 1.0f, dtype, device);
-    float scale = 1.0f / (static_cast<float>(n) * static_cast<float>(d));
+    // Build the integer index ramp in Int64 (a float ramp loses exact integer
+    // representation beyond 2^24) then scale by 1/(n*d) in double precision.
+    double scale = 1.0 / (static_cast<double>(n) * d);
+    auto pos = tenzor::arange(int64_t(0), half, int64_t(1), DType::Int64, device);
     // For n <= 1 the negative-frequency block is empty (n/2 == 0); arange would
     // throw on start==end, so emit only the single 0/(n*d) element.
     if (n / 2 == 0) {
-        return tenzor::mul(pos, tenzor::full({1}, scale, dtype, device));
+        return tenzor::mul(pos.to(dtype),
+                           tenzor::full({1}, scale, dtype, device));
     }
-    auto neg = tenzor::arange(static_cast<float>(-(n / 2)), 0.0f, 1.0f, dtype, device);
-    auto freqs = tenzor::cat({pos, neg}, 0);
+    auto neg = tenzor::arange(-(n / 2), int64_t(0), int64_t(1), DType::Int64, device);
+    auto freqs = tenzor::cat({pos, neg}, 0).to(dtype);
     return tenzor::mul(freqs, tenzor::full({1}, scale, dtype, device));
 }
 
 auto rfftfreq(int64_t n, double d, DType dtype, Device device) -> Tensor {
     // Returns: [0, 1, ..., n/2] / (n * d)
+    if (n < 0) {
+        throw std::invalid_argument("rfftfreq: n must be non-negative, got " +
+                                    std::to_string(n));
+    }
+    if (n == 0) {
+        return tenzor::empty({0}, dtype, device);
+    }
     int64_t half = n / 2 + 1;
-    auto freqs = tenzor::arange(0.0f, static_cast<float>(half), 1.0f, dtype, device);
-    float scale = 1.0f / (static_cast<float>(n) * static_cast<float>(d));
-    return tenzor::mul(freqs, tenzor::full({1}, scale, dtype, device));
+    // Build the index ramp in Int64 for exact indices, then scale in double.
+    double scale = 1.0 / (static_cast<double>(n) * d);
+    auto freqs = tenzor::arange(int64_t(0), half, int64_t(1), DType::Int64, device);
+    return tenzor::mul(freqs.to(dtype),
+                       tenzor::full({1}, scale, dtype, device));
 }
 
 // ============================================================================

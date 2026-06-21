@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <map>
 #include <unordered_map>
+#include <memory>
 #include <mutex>
 #include <atomic>
 #include <thread>
@@ -204,6 +205,16 @@ public:
         size_t size{0};             ///< Original allocation size
         int fragment_count{1};      ///< Number of fragments (1 = not split)
         size_t freed_size{0};       ///< Size of fragments returned to free pool
+        /// Per-root lock that serialises the O(N) sibling-coalescing work for
+        /// THIS root only, so coalescing two different roots proceeds in
+        /// parallel instead of contending on the single global_mutex_. Held as
+        /// a shared_ptr so its lifetime is independent of the map entry's: a
+        /// coalescer can keep the mutex alive across a brief global_mutex_
+        /// release even if another thread erases the root (the merge then
+        /// re-validates the root under global_mutex_ before committing). The
+        /// LOCK ORDER is always global_mutex_ -> per-root mutex; never the
+        /// reverse, so no deadlock is possible.
+        std::shared_ptr<std::mutex> lock{std::make_shared<std::mutex>()};
     };
 
     /**

@@ -518,6 +518,12 @@ __global__ void sum_bias_grad_kernel_wave_reduce(
 // ============================================================================
 
 #ifdef USE_MIOPEN
+// DEAD CODE: conv2d_forward_miopen is never referenced by the registry (the
+// registered forward is the im2col+rocBLAS conv2d_forward_kernel). It also
+// hardcodes miopenFloat / data<float>() for ALL dtypes (no dtype branch) and
+// re-runs miopenFindConvolutionForwardAlgorithm on every call (no caching), so
+// it would silently corrupt Float64/Float16 and be slow if ever wired in. Gate
+// to Float32 + cache the algo + add a dtype guard before dispatching it.
 // MIOpen-accelerated path for standard convolutions
 auto conv2d_forward_miopen(
     const Tensor& input,
@@ -1038,6 +1044,11 @@ auto conv2d_forward_kernel(
             }
 
         } else if (dtype == DType::Float16) {
+            // DEAD CODE: conv2d_forward_kernel upcasts Float16->Float32 at entry
+            // and recurses, so this rocblas_hgemm branch is unreachable. If the
+            // upcast is ever removed, this path FP16-accumulates over col_cols
+            // (often hundreds), losing precision/overflowing — convert it to
+            // rocblas_gemm_ex with rocblas_datatype_f32_r compute (see matmul).
             HipBuffer col_buf(col_rows * col_cols * sizeof(__half));
             __half* col_buffer = col_buf.as<__half>();
 

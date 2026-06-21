@@ -30,18 +30,32 @@ namespace {
 // initialisation and the read/write of the cached handle are serialised — no
 // data race, and no permanent-negative.
 auto get_ml_dtypes_module() -> py::object {
-    static py::object cached_module;  // null until first successful import
-    if (cached_module && !cached_module.is_none()) {
-        return cached_module;
+    // The cache is a deliberately-leaked heap ``py::object`` reached through a
+    // raw pointer with a trivial static destructor. A bare ``static
+    // py::object`` would run ``~object()`` at C++ static-destruction time
+    // (during libc ``exit()``), i.e. *after* the Python interpreter has been
+    // finalised — that ``Py_DECREF`` of a now-dangling handle SIGSEGVs in
+    // ``_Py_Dealloc``. Holding the object via a never-freed pointer means no
+    // destructor runs at shutdown; the OS reclaims the (tiny) allocation. The
+    // GIL is held by every caller so the lazy init and pointer read/write are
+    // serialised.
+    static py::object* cached_module = nullptr;  // null until first import
+    if (cached_module && *cached_module && !cached_module->is_none()) {
+        return *cached_module;
     }
     try {
-        cached_module = py::module_::import("ml_dtypes");
+        py::object mod = py::module_::import("ml_dtypes");
+        if (!cached_module) {
+            cached_module = new py::object(std::move(mod));  // intentionally leaked
+        } else {
+            *cached_module = std::move(mod);
+        }
     } catch (const py::error_already_set&) {
         // Not installed (yet). Leave the cache empty so a subsequent call
         // retries — a later `pip install ml_dtypes` is then picked up.
         return py::none();
     }
-    return cached_module;
+    return *cached_module;
 }
 
 // Resolve the ml_dtypes.bfloat16 NumPy dtype. Returns the dtype object on
@@ -451,6 +465,13 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype,
 
 // Tensor to NumPy conversion (convenience wrapper)
 auto tensor_to_numpy(const Tensor& tensor) -> py::array {
+    // This is a public header-exported convenience wrapper that any C++ caller
+    // may invoke, possibly from a GIL-released region. create_numpy_array reads
+    // a function-static cached py::object, imports modules, and calls into
+    // CPython — all of which require the GIL. Acquire it here so the wrapper is
+    // safe regardless of the caller's GIL state (a no-op re-entrant acquire
+    // when the GIL is already held, as in the .numpy() binding path).
+    py::gil_scoped_acquire gil;
     Tensor cpu_tensor = prepare_tensor_for_numpy(tensor);
     return create_numpy_array(cpu_tensor, tensor.dtype());
 }
@@ -506,10 +527,15 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
         }
     }
 
-    // Calculate total elements
+    // Calculate total elements. Use checked_mul so a maliciously- or
+    // accidentally-large multi-dim shape whose dimension product overflows
+    // int64 throws instead of wrapping to a small/negative value (which would
+    // under-count size_bytes below and either silently truncate the memcpy or,
+    // on a negative-to-size_t cast, drive a huge out-of-bounds copy). Matches
+    // the checked-arithmetic the create_numpy_array export path already uses.
     int64_t numel = 1;
     for (auto dim : shape) {
-        numel *= dim;
+        numel = checked_mul(numel, static_cast<int64_t>(dim));
     }
 
     // True zero-copy fast path: for a CPU destination with a C-contiguous
@@ -524,8 +550,15 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
         return Tensor::from_blob(
             data_ptr, shape, dtype, device,
             [keepalive](void*) mutable {
-                py::gil_scoped_acquire gil;
-                keepalive.reset();
+                // The Tensor may outlive Py_Finalize (atexit / static teardown);
+                // acquiring the GIL on an already-finalized interpreter is
+                // undefined. Guard with Py_IsInitialized — if the interpreter
+                // is gone the process is exiting and the leaked reference is
+                // moot.
+                if (Py_IsInitialized()) {
+                    py::gil_scoped_acquire gil;
+                    keepalive.reset();
+                }
             });
     }
 
@@ -538,7 +571,21 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
             ? arr
             : py::array::ensure(arr, py::array::c_style);
         py::buffer_info contiguous_buf = contiguous.request();
-        size_t size_bytes = numel * dtype_size(dtype);
+        // Guard size_bytes against overflow and validate it against the actual
+        // source buffer so a shape/dtype mismatch can never drive an
+        // over-read past the contiguous buffer's end.
+        size_t size_bytes = static_cast<size_t>(
+            checked_mul(numel, static_cast<int64_t>(dtype_size(dtype))));
+        const size_t src_bytes =
+            static_cast<size_t>(contiguous_buf.size) *
+            static_cast<size_t>(contiguous_buf.itemsize);
+        if (size_bytes > src_bytes) {
+            throw std::runtime_error(
+                "numpy_to_tensor: destination requires " +
+                std::to_string(size_bytes) +
+                " bytes but source buffer holds only " +
+                std::to_string(src_bytes) + " bytes");
+        }
         std::memcpy(tensor_data, contiguous_buf.ptr, size_bytes);
     }
 

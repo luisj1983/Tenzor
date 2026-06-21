@@ -181,11 +181,17 @@ public:
      *
      * @param input Input sequence tensor
      * @param hx Initial hidden state. If empty, zero-initialized.
+     * @param lengths Optional tensor of sequence lengths per batch element for
+     *        masking right-padded sequences. When provided, timesteps beyond a
+     *        sample's length do not update its hidden state, so the returned
+     *        final hidden state reflects the last valid timestep rather than
+     *        being corrupted by padding. Matches LSTM/GRU::forward.
      * @return Tuple of (output, h_n) where:
      *   - output: All hidden states for each time step
      *   - h_n: Final hidden state for each layer
      */
-    auto forward(const Variable& input, const Variable& hx) -> std::pair<Variable, Variable>;
+    auto forward(const Variable& input, const Variable& hx,
+                 const Tensor& lengths = {}) -> std::pair<Variable, Variable>;
 
     /**
      * @brief Override base Module forward (single parameter).

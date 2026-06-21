@@ -79,7 +79,19 @@ public:
     /** @brief Gather tensors from all processes */
     virtual auto all_gather(std::vector<Tensor>& output, const Tensor& input) -> void = 0;
 
-    /** @brief Reduce-scatter: reduce then scatter */
+    /**
+     * @brief Reduce-scatter: SUM-reduce the per-rank `input` chunks across all
+     *        ranks, then scatter so each rank receives its own reduced chunk in
+     *        `output`.
+     *
+     * @note This collective is **SUM-only by contract** — there is intentionally
+     *       no ReduceOp parameter. Averaging reduce-scatter (e.g. FSDP gradient
+     *       averaging) is performed by the CALLER dividing `output` by
+     *       `world_size()` after this returns; doing the divide caller-side keeps
+     *       it in the caller's working dtype/precision. All overrides
+     *       (NCCL/MPI/Gloo) therefore use SUM unconditionally; do not assume MIN/
+     *       MAX/AVG semantics here.
+     */
     virtual auto reduce_scatter(Tensor& output, std::span<const Tensor> input) -> void = 0;
 
     /**
@@ -200,6 +212,11 @@ private:
     int rank_;
     int world_size_;
     void* comm_{nullptr};  // ncclComm_t stored as void* to avoid header dep
+    // GPU device this communicator is bound to (recorded at construction). The
+    // ncclComm_t is tied to exactly one device; barrier() and collectives must
+    // use THIS device rather than whatever device happens to be current
+    // (cudaGetDevice), and every tensor's device is validated against it.
+    int comm_device_{-1};
     // L7 fix: cached single-element dummy tensor reused across barrier()
     // calls. Lazy-initialized on first barrier() to avoid the per-call
     // allocation on the distributed hot path. Sized for whichever device
@@ -207,7 +224,9 @@ private:
     mutable std::optional<Tensor> barrier_dummy_;
 
     /// Private constructor used by `split()` to wrap an already-split comm.
-    NCCLProcessGroup(int rank, int world_size, void* comm);
+    /// `comm_device` is the GPU device the split communicator is bound to
+    /// (inherited from the parent communicator).
+    NCCLProcessGroup(int rank, int world_size, void* comm, int comm_device);
 
     /** @brief TCP bootstrap: exchange ncclUniqueId across all ranks */
     auto bootstrap_unique_id(const std::string& master_addr, int master_port) -> void;

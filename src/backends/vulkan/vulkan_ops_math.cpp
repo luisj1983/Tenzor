@@ -255,15 +255,19 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         void* push_constants_ptr;
         size_t push_constants_size;
 
-        if (is_float64 || is_int64) {
-            // Float64 and Int64 shaders use 64-bit param field
+        if (is_float64) {
+            // Only the Float64 shader (math_f64) declares a 64-bit `double param`
+            // (16-byte push range). math_i64 declares a 32-bit `int param`
+            // (12-byte push range), so Int64 must use the 32-bit struct —
+            // pushing 16 bytes against the 12-byte range is a push-constant
+            // overrun (VUID-vkCmdPushConstants-offset-01795).
             push_constants_f64.n = static_cast<uint32_t>(a_op.numel());
             push_constants_f64.op = opcode;
             push_constants_f64.param = 0.0;
             push_constants_ptr = &push_constants_f64;
             push_constants_size = sizeof(PushConstantsF64);
         } else {
-            // Float32, Float16, BFloat16, Int32 use 32-bit param field
+            // Float32, Float16, BFloat16, Int32, Int64 use 32-bit param field
             push_constants_f32.n = static_cast<uint32_t>(a_op.numel());
             push_constants_f32.op = opcode;
             push_constants_f32.param = 0.0f;
@@ -762,7 +766,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     std::vector<std::pair<uint32_t, const void*>> bindings;
     std::vector<size_t> sizes;
 
-    if (shader_name == "math" || shader_name == "math_f64" || shader_name == "math_i32" || shader_name == "math_f16" || shader_name == "math_bf16") {
+    if (shader_name == "math" || shader_name == "math_f64" || shader_name == "math_i32" || shader_name == "math_i64" || shader_name == "math_f16" || shader_name == "math_bf16") {
         bindings = {
             {0, buffer_in},
             {1, buffer_in},  // Unary ops don't use binding 1, but descriptor set expects it
@@ -812,9 +816,19 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
 }
 
 auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
-                                              const Tensor& input,
+                                              const Tensor& input_orig,
                                               double param) -> Tensor {
-    int32_t device_id = input.device().index;
+    int32_t device_id = input_orig.device().index;
+
+    // Materialize to packed, zero-offset, contiguous storage before binding —
+    // exactly as dispatchUnaryOp does. The math/math_f16/math_bf16/math_f64
+    // shaders (and the integer-pow shaders below) index from element 0 assuming a
+    // contiguous offset-0 layout; a sliced/narrowed/permuted view would otherwise
+    // read the wrong physical elements and a non-zero storage offset could trip
+    // minStorageBufferOffsetAlignment. dispatchContiguous is a no-op when input is
+    // already contiguous and offset-0.
+    const Tensor input = (input_orig.offset() != 0 || !input_orig.is_contiguous())
+        ? dispatchContiguous(input_orig) : input_orig;
 
     // Integer pow: dedicated by-byte-width shaders (the float "math" shader would
     // reinterpret integer storage as float and corrupt it). Non-negative integer

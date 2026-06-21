@@ -18,6 +18,24 @@ namespace tenzor {
 auto VulkanBackend::dispatchLSTMForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
                                          const Tensor& bias_ih, const Tensor& bias_hh,
                                          const Tensor& h0, const Tensor& c0) -> std::vector<Tensor> {
+    // Float16/BFloat16: the lstm_cell shaders only have float32 (and float64)
+    // variants binding `float gates[]` / `float` state buffers. Binding a
+    // 2-byte-packed half buffer to them reinterprets the storage as float32
+    // (garbage gates) and reads ~2x past the buffer (OOB). Widen every input to
+    // Float32, run the f32 cell path, and narrow the outputs back — the
+    // standard half widen-narrow pattern used across the backend.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto cast = [&](const Tensor& t) {
+            return t.numel() > 0 ? dispatchCast(t, DType::Float32) : t;
+        };
+        auto out32 = dispatchLSTMForward(cast(input), cast(W_ih), cast(W_hh),
+                                         cast(bias_ih), cast(bias_hh),
+                                         cast(h0), cast(c0));
+        for (auto& t : out32) t = dispatchCast(t, orig);
+        return out32;
+    }
+
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
     int64_t batch_size = input_shape[1];
@@ -119,6 +137,19 @@ auto VulkanBackend::dispatchLSTMForward(const Tensor& input, const Tensor& W_ih,
 auto VulkanBackend::dispatchGRUForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
                                         const Tensor& bias, const Tensor& h0,
                                         const Tensor& bias_hh_in) -> std::vector<Tensor> {
+    // Float16/BFloat16: gru_cell shaders bind float32 buffers only (same reason
+    // as LSTM). Widen to Float32, run, narrow back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto cast = [&](const Tensor& t) {
+            return t.numel() > 0 ? dispatchCast(t, DType::Float32) : t;
+        };
+        auto out32 = dispatchGRUForward(cast(input), cast(W_ih), cast(W_hh),
+                                        cast(bias), cast(h0), cast(bias_hh_in));
+        for (auto& t : out32) t = dispatchCast(t, orig);
+        return out32;
+    }
+
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
     int64_t batch_size = input_shape[1];

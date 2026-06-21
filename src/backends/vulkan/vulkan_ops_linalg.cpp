@@ -2818,13 +2818,20 @@ auto VulkanBackend::dispatchLinalgLU(const Tensor& input) -> std::vector<Tensor>
         endSingleTimeCommands(cmd, device_id);
     }
 
-    // Reshape pivots to match input batch shape + {n}. Values are 0-based
-    // (runBlockedLU's internal convention), which matches what linalg_trsm and
-    // linalg_det_from_lu consume — the test only checks shape and dtype, so we
-    // keep the internal convention to avoid a round-trip.
+    // Reshape pivots to match input batch shape + {n}. runBlockedLU emits 0-based
+    // absolute row indices (its internal convention, consumed by linalg_trsm /
+    // linalg_det_from_lu via their own runBlockedLU calls). The PUBLIC lu() API
+    // contract — matching CPU/CUDA and documented in linalg.hpp — is 1-based
+    // LAPACK ipiv. Convert the returned pivots to 1-based; dispatchLinalgLUSolve
+    // converts them back to 0-based for the trsm shader.
     std::vector<int64_t> pivots_shape(shape.begin(), shape.end() - 2);
     pivots_shape.push_back(n);
     Tensor pivots_out = dispatchReshape(pivots_flat, pivots_shape);
+    {
+        // pivots_out += 1 (Int32). Build a ones tensor on-device and add.
+        Tensor one = dispatchFull(pivots_shape, 1.0, DType::Int32).to(input.device());
+        pivots_out = dispatchBinaryOp("add", pivots_out, one);
+    }
 
     // Downcast L and U back to original dtype if we promoted
     if (needs_promote) {
@@ -2838,9 +2845,9 @@ auto VulkanBackend::dispatchLinalgLU(const Tensor& input) -> std::vector<Tensor>
 // ============================================================================
 // LU Solve: given packed LU factors and pivots, solve AX = B.
 // Reuses the existing linalg_trsm shader which consumes the packed LU format.
-// The input pivots are 1-based LAPACK convention (from dispatchLinalgLU), but
-// linalg_trsm expects the 0-based internal convention used by runBlockedLU —
-// convert by subtracting 1.
+// The input pivots are 1-based LAPACK convention (from dispatchLinalgLU and the
+// public lu() API), but linalg_trsm expects the 0-based internal convention used
+// by runBlockedLU — convert by subtracting 1 (done below).
 // ============================================================================
 auto VulkanBackend::dispatchLinalgLUSolve(const Tensor& LU_data, const Tensor& pivots,
                                           const Tensor& B) -> Tensor {
@@ -2872,9 +2879,16 @@ auto VulkanBackend::dispatchLinalgLUSolve(const Tensor& LU_data, const Tensor& p
     int64_t batch_size = 1;
     for (int64_t i = 0; i < lu_ndim - 2; ++i) batch_size *= lu_shape[i];
 
-    // Pivots are already 0-based (matching runBlockedLU's internal convention
-    // and what linalg_trsm consumes). No conversion needed.
+    // The public lu() API returns 1-based LAPACK pivots (dispatchLinalgLU), but
+    // linalg_trsm consumes runBlockedLU's 0-based convention — convert back by
+    // subtracting 1.
     Tensor pivots_zero = pivots.contiguous();
+    {
+        auto ps = pivots_zero.shape();
+        std::vector<int64_t> piv_shape(ps.begin(), ps.end());
+        Tensor one = dispatchFull(piv_shape, 1.0, DType::Int32).to(pivots_zero.device());
+        pivots_zero = dispatchBinaryOp("sub", pivots_zero, one);
+    }
 
     // Dispatch TRSM shader (identical pattern to dispatchLinalgSolve tiled path)
     auto lu_cont = lu.contiguous();

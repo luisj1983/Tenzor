@@ -48,6 +48,10 @@ dev = [
     "black>=21.0",
     "flake8>=3.9",
     "mypy>=0.900",
+    # Enables the native bfloat16 NumPy dtype on tensor.numpy() export
+    # (otherwise BFloat16 falls back to a uint16 bit representation). The
+    # test_bfloat16_numpy suite exercises the ml_dtypes path when present.
+    "ml_dtypes>=0.2",
 ]
 docs = [
     "sphinx>=4.0",
@@ -105,6 +109,14 @@ sdist.exclude = [
 
 [tool.scikit-build.cmake.define]
 TENZOR_BUILD_PYTHON = "ON"
+# Portable, runtime-dispatched CPU build for redistributable wheels. Without
+# this, the CPU backend's default NATIVE mode adds -march=native -mtune=native
+# (src/backends/cpu/CMakeLists.txt) to the whole tenzor_backend_cpu target, so
+# every CPU TU is compiled at the CI runner's ISA baseline with no runtime
+# guard — a user on an older CPU then SIGILLs on `import tenzor`. PORTABLE mode
+# compiles a baseline target and runtime-dispatches the *_avx512.cpp TUs via
+# CPUID/XCR0, which is what a published wheel must use.
+TENZOR_PORTABLE = "ON"
 TENZOR_BUILD_TESTS = "OFF"
 TENZOR_BUILD_EXAMPLES = "OFF"
 TENZOR_BUILD_BENCHMARKS = "OFF"
@@ -137,7 +149,7 @@ test-command = "python -c \"import numpy as np, tenzor as tz; tz.initialize(); a
 
 [tool.cibuildwheel.linux]
 # Force a CPU-only build inside the manylinux container regardless of host env.
-environment = { CMAKE_ARGS = "-DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_TORCH_INTEROP=OFF -DTENZOR_USE_MLIR_JIT=OFF" }
+environment = { CMAKE_ARGS = "-DTENZOR_PORTABLE=ON -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_TORCH_INTEROP=OFF -DTENZOR_USE_MLIR_JIT=OFF" }
 
 [tool.black]
 line-length = 100

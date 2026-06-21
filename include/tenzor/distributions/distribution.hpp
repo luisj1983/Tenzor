@@ -288,10 +288,49 @@ public:
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
-        auto log_probs = tenzor::log(probs_);
-        // value (class indices) has one fewer dim than log_probs (..., K).
-        // gather requires equal rank, so add the category dim, gather, drop it.
-        auto idx = tenzor::unsqueeze(value.to(DType::Int64), -1);
+        auto log_probs = tenzor::log(probs_);  // (batch..., K)
+        const auto lp_shape = log_probs.shape();  // rank >= 1
+        const int64_t K = lp_shape.empty() ? 1 : lp_shape.back();
+        const int64_t batch_rank =
+            static_cast<int64_t>(lp_shape.size()) - 1;  // dims before K
+
+        auto idx_i64 = value.to(DType::Int64);
+        const auto val_shape = idx_i64.shape();
+        const int64_t val_rank = static_cast<int64_t>(val_shape.size());
+
+        // PyTorch Categorical.log_prob(value): for probs of batch_shape B and
+        // event size K, `value` may be ANY shape whose trailing dims broadcast
+        // against B. gather() requires input and index to share rank, so we
+        // must align log_probs (B..., K) with the query layout — NOT just
+        // assume value has exactly the batch dims (which breaks for unbatched
+        // probs (K,) queried with an (N,) index, the previous bug:
+        // "gather: input and index must have same number of dimensions").
+        //
+        // General handling:
+        //   - Unbatched probs (batch_rank == 0): every query value indexes the
+        //     same K-vector. Broadcast log_probs to value_shape + (K,), make
+        //     idx value_shape + (1,), gather along -1, squeeze.
+        //   - Batched probs whose batch dims match value's trailing dims: the
+        //     classic path (value rank == batch_rank), unsqueeze + gather.
+        if (batch_rank == 0) {
+            // Reshape log_probs (K,) -> (1,1,...,1,K) with val_rank leading 1s,
+            // then expand to value_shape + (K,).
+            std::vector<int64_t> lp_expand_shape;
+            lp_expand_shape.reserve(static_cast<size_t>(val_rank) + 1);
+            for (int64_t i = 0; i < val_rank; ++i) lp_expand_shape.push_back(1);
+            lp_expand_shape.push_back(K);
+            auto lp_reshaped = log_probs.reshape(lp_expand_shape);
+
+            std::vector<int64_t> target_shape(val_shape.begin(), val_shape.end());
+            target_shape.push_back(K);
+            auto lp_b = tenzor::expand(lp_reshaped, target_shape).contiguous();
+
+            auto idx = tenzor::unsqueeze(idx_i64, -1);  // value_shape + (1,)
+            return tenzor::squeeze(gather(lp_b, -1, idx), -1);
+        }
+
+        // Batched: keep the original equal-rank contract.
+        auto idx = tenzor::unsqueeze(idx_i64, -1);
         return tenzor::squeeze(gather(log_probs, -1, idx), -1);
     }
 

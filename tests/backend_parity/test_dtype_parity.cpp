@@ -292,20 +292,23 @@ TEST_P(DTypeParity, PrecisionComparison_TrigFunctions) {
     auto a_f32 = generate_uniform_tensor({32, 32}, -3.14f, 3.14f, DType::Float32, Device::cpu());
     auto a_f64 = a_f32.to(DType::Float64);
 
-    // Sin tolerance is looser than strict double precision because:
-    //   - Float32: the CPU Taylor-11 polynomial has ~6e-8 max error on
-    //     [-π/2, π/2], and near-zero sin values land in the atol floor,
-    //     so atol=1e-6 (~10 ULP) is the realistic target.
-    //   - Float64: Vulkan GLSL compute shaders don't guarantee IEEE 754
-    //     double sin (AMD drivers in particular compute it via single
-    //     precision reduction), so atol=1e-6 covers that gap too.
+    // Float32: the CPU Taylor-11 polynomial has ~6e-8 max error on [-π/2, π/2],
+    // and near-zero sin values land in the atol floor, so atol=1e-6 (~10 ULP)
+    // is the realistic Float32 target.
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return sin(inputs[0]);
     }, {a_f32}, device, 1e-5f, 1e-6f, "Sin Float32");
 
+    // Float64: the whole point of this test is that Float64 sin is MORE precise
+    // than Float32. Using a Float32-class tolerance (1e-5/1e-6) would let a
+    // backend silently degrade Float64 sin to single precision and still pass.
+    // The Vulkan trigonometric_f64 shader uses Cody-Waite range reduction + a
+    // degree-15 double-precision Taylor series, giving ~1e-15 agreement with the
+    // CPU/OneAPI reference, so the strict Float64 tolerance applies to every
+    // backend including Vulkan (no skip).
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return sin(inputs[0]);
-    }, {a_f64}, device, 1e-5f, 1e-6f, "Sin Float64");
+    }, {a_f64}, device, 1e-9f, 1e-10f, "Sin Float64");
 }
 
 // ============================================================================

@@ -590,6 +590,7 @@ public:
         data_ = bytes;
         stack_.clear();
         memo_.clear();
+        memo_next_ = 0;
         while (cursor_ < data_.size()) {
             uint8_t op = read_byte();
             if (handle_op(op)) {
@@ -610,6 +611,11 @@ private:
     size_t cursor_ = 0;
     std::vector<PValuePtr> stack_;
     std::unordered_map<int64_t, PValuePtr> memo_;
+    // Next implicit MEMOIZE (protocol-5) index. Tracked with its own counter
+    // rather than memo_.size() so that explicitly-keyed BINPUT/LONG_BINPUT
+    // entries (which share this map) cannot desync the running index and make
+    // a later MEMOIZE overwrite an occupied slot.
+    int64_t memo_next_ = 0;
 
     auto read_byte() -> uint8_t {
         if (cursor_ >= data_.size()) {
@@ -909,6 +915,14 @@ private:
             case 0x8b: {              // LONG4
                 uint32_t n = read_u32le();
                 int64_t val = 0;
+                // Validate the length against the bytes actually remaining in
+                // the stream BEFORE allocating the buffer; otherwise a 5-byte
+                // pickle fragment (0x8b FF FF FF FF) would force a ~4 GB
+                // allocation (OOM / bad_alloc DoS) before read_into's own
+                // bounds check fires. Mirror the guard in read_string/read_into.
+                if (static_cast<size_t>(n) > data_.size() - cursor_) {
+                    throw std::runtime_error("torch_pickle: LONG4 length past EOF");
+                }
                 std::vector<uint8_t> buf(n);
                 if (n > 0) read_into(buf.data(), n);
                 // The true sign is the MSB of the highest byte (buf[n-1]), not
@@ -1051,7 +1065,7 @@ private:
                 push(it->second); return false;
             }
             case 0x94: {              // MEMOIZE
-                memo_[static_cast<int64_t>(memo_.size())] = top();
+                memo_[memo_next_++] = top();
                 return false;
             }
             case 's': {              // SETITEM

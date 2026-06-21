@@ -17,6 +17,32 @@ namespace utils {
 void unregister_parametrization_for_module(uint64_t module_id);
 }
 
+namespace detail {
+// Shared in-place parameter/buffer load used by Module::load_state_dict and the
+// ParameterList/ParameterDict overrides. Adapts the checkpoint payload to the
+// live tensor's dtype + device, then writes via ``dst.zero_(); add_(dst, src)``
+// so the live Storage handle is preserved (R.18 in-place-write invariant):
+// aliasing views (FSDP2 shards, saved-for-backward captures, optimizer-held
+// shared_ptrs) observe the new bytes instead of dangling at the pre-load
+// buffer. Shapes must match exactly; only dtype/device are adapted.
+void load_param_in_place(Tensor& dst, const Tensor& src,
+                         const std::string& name, const char* kind) {
+    if (dst.shape().size() != src.shape().size() ||
+        !std::equal(dst.shape().begin(), dst.shape().end(), src.shape().begin())) {
+        throw std::runtime_error(std::string("Shape mismatch for ") + kind + " '" + name + "'");
+    }
+    Tensor adapted = src;
+    if (adapted.dtype() != dst.dtype()) {
+        adapted = adapted.to(dst.dtype());
+    }
+    if (adapted.device() != dst.device()) {
+        adapted = adapted.to(dst.device());
+    }
+    dst.zero_();
+    add_(dst, adapted);
+}
+} // namespace detail
+
 namespace {
 // Process-monotonic counter. Starts at 1 so that id 0 is reserved for
 // "no module" / sentinel use. memory_order_relaxed is sufficient — we only
@@ -400,31 +426,14 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
 
     // Local helper: adapt loaded tensor to live tensor's dtype + device and
     // copy in-place so the live Storage handle is preserved.
+    // Adapt the checkpoint payload to the live tensor's dtype + device, then
+    // write in-place so the live Storage handle is preserved. This realises the
+    // advertised mixed-precision flow (an F32 checkpoint can be loaded into an
+    // F16 inference model and vice-versa). Shared with the
+    // ParameterList/ParameterDict overrides via detail::load_param_in_place.
     auto copy_into_live = [](Tensor& dst, const Tensor& src, const std::string& name,
                              const char* kind) {
-        if (dst.shape().size() != src.shape().size() ||
-            !std::equal(dst.shape().begin(), dst.shape().end(), src.shape().begin())) {
-            throw std::runtime_error(std::string("Shape mismatch for ") + kind + " '" + name + "'");
-        }
-        // Adapt the checkpoint payload to the live tensor's dtype + device.
-        // This realises the advertised mixed-precision flow: an F32 checkpoint
-        // can be loaded into an F16 inference model (and vice-versa) by casting
-        // the source to the live parameter's dtype before the copy. Shapes
-        // still must match exactly (checked above) -- only dtype/device are
-        // adapted, never the element layout.
-        Tensor adapted = src;
-        if (adapted.dtype() != dst.dtype()) {
-            adapted = adapted.to(dst.dtype());
-        }
-        if (adapted.device() != dst.device()) {
-            adapted = adapted.to(dst.device());
-        }
-        // R.18-preserving write: zero, then in-place add. This keeps the
-        // TensorImpl/Storage handle of ``dst`` intact so aliasing views
-        // (FSDP2 shard slices, saved-for-backward captures) see the new
-        // bytes instead of dangling at the pre-load buffer.
-        dst.zero_();
-        add_(dst, adapted);
+        detail::load_param_in_place(dst, src, name, kind);
     };
 
     // Load own parameters
@@ -836,7 +845,10 @@ auto ParameterList::named_parameters() -> std::vector<std::pair<std::string, std
 auto ParameterList::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
     for (size_t i = 0; i < params_.size(); ++i) {
-        state[std::to_string(i)] = params_[i]->tensor();
+        // Clone so the snapshot does not alias the live parameter Storage,
+        // matching Module::state_dict(). Returning the live tensor would let a
+        // later in-place update mutate the saved snapshot.
+        state[std::to_string(i)] = params_[i]->tensor().clone();
     }
     return state;
 }
@@ -846,7 +858,12 @@ auto ParameterList::load_state_dict(const std::unordered_map<std::string, Tensor
         auto key = std::to_string(i);
         auto it = state.find(key);
         if (it != state.end()) {
-            params_[i]->tensor() = it->second.clone();
+            // R.18-preserving, dtype/device-adapting in-place copy (mirrors
+            // Module::load_state_dict). Rebinding the Storage via `= clone()`
+            // would orphan aliasing views (FSDP2 shards, saved-for-backward
+            // captures, optimizer-held shared_ptrs) and silently drop the
+            // checkpoint's dtype/device adaptation.
+            detail::load_param_in_place(params_[i]->tensor(), it->second, key, "parameter");
         }
     }
 }
@@ -918,7 +935,9 @@ auto ParameterDict::named_parameters() -> std::vector<std::pair<std::string, std
 auto ParameterDict::state_dict() const -> std::unordered_map<std::string, Tensor> {
     std::unordered_map<std::string, Tensor> state;
     for (const auto& key : order_) {
-        state[key] = params_.at(key)->tensor();
+        // Clone so the snapshot does not alias the live parameter Storage,
+        // matching Module::state_dict().
+        state[key] = params_.at(key)->tensor().clone();
     }
     return state;
 }
@@ -927,7 +946,9 @@ auto ParameterDict::load_state_dict(const std::unordered_map<std::string, Tensor
     for (const auto& key : order_) {
         auto it = state.find(key);
         if (it != state.end()) {
-            params_.at(key)->tensor() = it->second.clone();
+            // R.18-preserving, dtype/device-adapting in-place copy (mirrors
+            // Module::load_state_dict). See ParameterList::load_state_dict.
+            detail::load_param_in_place(params_.at(key)->tensor(), it->second, key, "parameter");
         }
     }
 }

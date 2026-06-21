@@ -24,6 +24,7 @@
 
 #include <array>
 #include <cctype>
+#include <limits>
 #include <cerrno>
 #include <complex>
 #include <cstdio>
@@ -408,7 +409,15 @@ auto parse_output_line(const std::string& shape_and_data)
             int64_t v = 0;
             while (pos < header.size() &&
                    std::isdigit(static_cast<unsigned char>(header[pos]))) {
-                v = v * 10 + (header[pos] - '0');
+                int digit = header[pos] - '0';
+                // Overflow-guarded accumulation: a corrupted/huge header must
+                // not silently wrap to a negative/garbage dimension.
+                if (v > (std::numeric_limits<int64_t>::max() - digit) / 10) {
+                    throw JitInvokeError(
+                        "iree-run-module output header: dimension overflows int64: " +
+                        header);
+                }
+                v = v * 10 + digit;
                 ++pos;
             }
             shape.push_back(v);
@@ -427,7 +436,16 @@ auto parse_output_line(const std::string& shape_and_data)
     const ::tenzor::DType dt = iree_element_to_dtype(element);
 
     int64_t numel = 1;
-    for (auto d : shape) numel *= d;
+    for (auto d : shape) {
+        // Each dim is already non-negative (parsed from digits) and overflow-
+        // bounded above; guard the running product too so numel cannot wrap.
+        if (d != 0 && numel > std::numeric_limits<int64_t>::max() / d) {
+            throw JitInvokeError(
+                "iree-run-module output header: shape product overflows int64: " +
+                header);
+        }
+        numel *= d;
+    }
     if (shape.empty()) numel = 1;
 
     // Strip iree-run-module formatting punctuation. For complex values we
@@ -808,6 +826,26 @@ IreeInvoker::~IreeInvoker() {
 
 namespace {
 
+// Wrap `s` in single quotes for /bin/sh, escaping any embedded single quote
+// as the '\'' sequence. Mirrors iree_paths.cpp's shell_quote (which is in that
+// file's anonymous namespace and not exported). Used before building popen()
+// command strings so a resolved binary path containing a space, ';', '$()' or
+// quote cannot break or inject into the command.
+auto shell_quote(const std::string& s) -> std::string {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('\'');
+    for (char c : s) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out.push_back(c);
+        }
+    }
+    out.push_back('\'');
+    return out;
+}
+
 // Prepend `dir` to LD_LIBRARY_PATH (or set it if unset). Called before
 // the first IREE HIP HAL device probe so dlopen("libamdhip64.so") finds
 // a working copy on hosts where /opt/rocm is corrupt. setenv() during
@@ -900,8 +938,11 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
         cache[driver_name] = false;
         return false;
     }
-    std::string cmd = run_module + " --list_devices=" + driver_name +
-                      " 2>/dev/null";
+    // Shell-quote the resolved binary path (it may come from an env override or
+    // an install dir containing spaces / shell metacharacters); driver_name is
+    // an internal literal but quote it too for uniformity.
+    std::string cmd = shell_quote(run_module) + " --list_devices=" +
+                      shell_quote(driver_name) + " 2>/dev/null";
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
         std::lock_guard<std::mutex> g(cache_mu);

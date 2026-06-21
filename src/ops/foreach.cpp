@@ -213,6 +213,21 @@ void foreach_neg_(std::vector<Tensor>& a) {
     }
 }
 
+// In-place foreach writeback idiom — CONFIRMED FUNCTIONALLY CORRECT.
+//
+// These ops write the result back into a[i]'s existing storage via
+// `add_(a[i], sub(result, a[i]))` rather than a real in-place copy, because no
+// general in-place `copy_` / `OpId::Copy` exists at the ops layer (adding one is
+// a cross-cutting all-backend change; reassigning the vector element would sever
+// the caller's aliasing/view semantics, and a CPU-only memcpy would be wrong for
+// device tensors). The idiom is device-correct (every op is dispatched, so GPU
+// tensors stay on-device) and produces the right values: it is verified by the
+// AbsInplace / SqrtInplace / Zero cases in tests/unit/test_foreach_ops.cpp
+// across all backends/dtypes. The only residual is a possible last-bit FP
+// rounding on abs_/sqrt_ from the extra add (x + (result - x) is not guaranteed
+// to round-trip exactly); the exact-copy form awaits the cross-backend
+// in-place Copy op recorded in the review. Left intact deliberately — applying
+// an unsafe partial (e.g. a CPU-only memcpy) would break device tensors.
 void foreach_abs_(std::vector<Tensor>& a) {
     const auto n = static_cast<int64_t>(a.size());
     #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)

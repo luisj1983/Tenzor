@@ -683,12 +683,24 @@ auto ModelCheckpoint::write_checkpoint(const std::string& path, const Checkpoint
 
         // Get current position (end of content, before checksum)
         auto content_end = file.tellp();
+        // tellp() returns -1 on failure; constructing a vector sized from a -1
+        // streampos wraps to a huge unsigned size_t and triggers bad_alloc
+        // instead of a clean error. Validate before allocating.
+        if (content_end == std::streampos(-1) ||
+            static_cast<std::streamoff>(content_end) < 0) {
+            throw std::runtime_error(
+                "Checkpoint write: failed to determine file size for checksum "
+                "(tellp() returned an invalid position)");
+        }
+        const auto content_size = static_cast<std::size_t>(
+            static_cast<std::streamoff>(content_end));
 
         // Read all content written so far
         file.close();
         std::ifstream read_file(path, std::ios::binary);
-        std::vector<uint8_t> content(content_end);
-        read_file.read(reinterpret_cast<char*>(content.data()), content_end);
+        std::vector<uint8_t> content(content_size);
+        read_file.read(reinterpret_cast<char*>(content.data()),
+                       static_cast<std::streamsize>(content_size));
         read_file.close();
 
         // Compute checksum on content
@@ -754,9 +766,24 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
         }
     }
 
+    // Read a section element count and validate the stream state before using
+    // it as a loop bound. On a file truncated at a section boundary the read
+    // fails and the count is indeterminate; checking !file here turns that into
+    // a clean error (defense-in-depth; the subsequent ckpt_read_* would also
+    // throw, but only after looping on garbage).
+    auto read_count = [&file, &path](const char* section) -> uint32_t {
+        uint32_t count = 0;
+        file.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!file) {
+            throw std::runtime_error(
+                std::string("Checkpoint read: truncated file before ") + section +
+                " section count: " + path);
+        }
+        return count;
+    };
+
     // ========== Model State ==========
-    uint32_t num_model_tensors;
-    file.read(reinterpret_cast<char*>(&num_model_tensors), sizeof(num_model_tensors));
+    uint32_t num_model_tensors = read_count("model state");
 
     for (uint32_t i = 0; i < num_model_tensors; ++i) {
         std::string name = ckpt_read_string(file);
@@ -764,8 +791,7 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
     }
 
     // ========== Optimizer State ==========
-    uint32_t num_optimizer_tensors;
-    file.read(reinterpret_cast<char*>(&num_optimizer_tensors), sizeof(num_optimizer_tensors));
+    uint32_t num_optimizer_tensors = read_count("optimizer state");
 
     for (uint32_t i = 0; i < num_optimizer_tensors; ++i) {
         std::string name = ckpt_read_string(file);
@@ -773,8 +799,7 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
     }
 
     // ========== Scheduler State ==========
-    uint32_t num_scheduler_tensors;
-    file.read(reinterpret_cast<char*>(&num_scheduler_tensors), sizeof(num_scheduler_tensors));
+    uint32_t num_scheduler_tensors = read_count("scheduler state");
 
     for (uint32_t i = 0; i < num_scheduler_tensors; ++i) {
         std::string name = ckpt_read_string(file);
@@ -786,8 +811,7 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
     // check skips the read and leaves checkpoint.rng_state empty so
     // callers can detect "RNG wasn't captured".
     if (checkpoint.version >= 2) {
-        uint32_t num_rng_tensors;
-        file.read(reinterpret_cast<char*>(&num_rng_tensors), sizeof(num_rng_tensors));
+        uint32_t num_rng_tensors = read_count("RNG state");
 
         for (uint32_t i = 0; i < num_rng_tensors; ++i) {
             std::string name = ckpt_read_string(file);
@@ -796,8 +820,7 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
     }
 
     // ========== Metadata ==========
-    uint32_t num_metadata;
-    file.read(reinterpret_cast<char*>(&num_metadata), sizeof(num_metadata));
+    uint32_t num_metadata = read_count("metadata");
 
     std::unordered_map<std::string, std::string> metadata_dict;
     for (uint32_t i = 0; i < num_metadata; ++i) {

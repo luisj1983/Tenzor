@@ -1,7 +1,8 @@
 #version 450
 
 // Backward activation functions for BFloat16 autograd
-// Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu
+// Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu,
+//             5=elu, 6=selu, 7=mish, 8=softplus
 // BFloat16 elements are packed 2 per 32-bit word
 
 layout(local_size_x_id = 0) in;
@@ -17,6 +18,14 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 const float PI = 3.14159265359;
+const float SELU_ALPHA = 1.6732632423543772848170429916717;
+const float SELU_SCALE = 1.0507009873554804934193349852946;
+
+// Numerically-stable tanh via 2*sigmoid(2x)-1, matching the forward mish path
+// (the GLSL intrinsic tanh() drifts from std::tanh on NVIDIA/RADV).
+float tanh_stable(float x) {
+    return 2.0 / (1.0 + exp(-2.0 * x)) - 1.0;
+}
 
 // erf via Abramowitz & Stegun 7.1.26 (max abs error ~1.5e-7); exact erf GELU
 // matches the forward and the other backends.
@@ -61,6 +70,31 @@ float apply_backward(float g_out, float val) {
             float cdf = 0.5 * (1.0 + erf_approx(x * 0.70710678));
             float pdf = 0.39894228 * exp(-0.5 * x * x);  // 1/sqrt(2*pi)
             return g_out * (cdf + x * pdf);
+        }
+
+        case 5: // elu_backward
+            return (val > 0.0) ? g_out : g_out * params.alpha * exp(val);
+
+        case 6: // selu_backward
+            return (val > 0.0) ? g_out * SELU_SCALE
+                               : g_out * SELU_SCALE * SELU_ALPHA * exp(val);
+
+        case 7: { // mish_backward
+            float x = val;
+            float sp = x > 20.0 ? x : (x < -20.0 ? exp(x) : log(1.0 + exp(x)));
+            float tanh_sp = tanh_stable(sp);
+            float sigmoid_x = 1.0 / (1.0 + exp(-x));
+            float derivative = tanh_sp + x * sigmoid_x * (1.0 - tanh_sp * tanh_sp);
+            return g_out * derivative;
+        }
+
+        case 8: { // softplus_backward: grad_output * sigmoid(beta * x)
+            float bx = params.alpha * val;
+            float grad;
+            if (bx > 20.0) grad = 1.0;
+            else if (bx < -20.0) grad = exp(bx);
+            else grad = 1.0 / (1.0 + exp(-bx));
+            return g_out * grad;
         }
 
         default:

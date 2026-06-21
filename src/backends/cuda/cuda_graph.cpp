@@ -31,6 +31,13 @@ public:
         if (stream_) {
             cudaStreamDestroy(stream_);
         }
+        // A failed cudaStreamEndCapture during an aborted capture (or any error
+        // above) leaves a sticky error latched on the runtime for this thread,
+        // which would otherwise surface as a spurious failure in the NEXT,
+        // unrelated CUDA call. Destructors must not throw, so we deliberately
+        // swallow these return codes — but drain the sticky error here so it
+        // cannot bleed into subsequent ops.
+        cudaGetLastError();
     }
 
     void begin_capture() override {

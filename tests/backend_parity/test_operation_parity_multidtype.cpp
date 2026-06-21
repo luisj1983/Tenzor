@@ -11,6 +11,7 @@
 #include <tenzor/backend/fast_dispatch.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
+#include "parity_tolerances.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -92,7 +93,7 @@ TEST_P(MultiDTypeParity, MatMul_BFloat16) {
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return tenzor::matmul(inputs[0], inputs[1]);
-    }, {a, b}, 5e-1f, 1e-1f, "MatMul_BFloat16");
+    }, {a, b}, parity::MATMUL_RTOL_BF16, parity::MATMUL_ATOL_BF16, "MatMul_BFloat16");
 }
 
 TEST_P(MultiDTypeParity, Softmax_BFloat16) {

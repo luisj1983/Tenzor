@@ -375,18 +375,20 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_BasicRestart
     EXPECT_EQ(scheduler.get_T_cur(), 0);
     EXPECT_EQ(scheduler.get_T_i(), 10);
 
-    // First cycle: T_0 - 1 == 9 steps land at the eta_min trough; the 10th
-    // step triggers the restart and bounces back to base_lr (see
-    // test_schedulers_advanced.cpp for the matching analysis).
+    // First cycle: 9 steps reach the cycle minimum. PyTorch SGDR uses the full
+    // period T_i in the denominator, so at T_cur == 9 (T_i == 10) the LR is the
+    // lowest in-cycle value but not exactly eta_min. The 10th step triggers the
+    // restart (see test_schedulers_advanced.cpp for the matching analysis).
     std::vector<double> lrs_cycle1;
     for (int i = 0; i < 9; i++) {
         scheduler.step();
         lrs_cycle1.push_back(scheduler.get_last_lr());
     }
 
-    // LR should decrease during cycle and reach eta_min at T_cur == T_i - 1.
+    // LR should decrease monotonically toward eta_min.
     EXPECT_GT(lrs_cycle1[0], lrs_cycle1[8]);
-    EXPECT_NEAR(lrs_cycle1[8], 0.0, 1e-6);
+    const double expected_min = (1.0 + std::cos(std::numbers::pi * 9.0 / 10.0)) / 2.0;
+    EXPECT_NEAR(lrs_cycle1[8], expected_min, 1e-6);
 
     // 10th call triggers the restart roll-over.
     scheduler.step();
@@ -429,15 +431,17 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_EtaMin) {
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 10, 1, 0.1);  // eta_min=0.1
 
-    // T_0 - 1 == 9 steps to land at the eta_min trough; a 10th step would
-    // trigger the restart.
+    // 9 steps reach the cycle minimum (T_cur == 9, T_i == 10). With the full-
+    // period PyTorch denominator this is the lowest in-cycle LR but not exactly
+    // eta_min.
     for (int i = 0; i < 9; i++) {
         scheduler.step();
     }
 
-    // LR should not go below eta_min and should reach eta_min at T_cur == T_i - 1.
+    // LR must stay at or above eta_min and equal the exact PyTorch SGDR value.
+    const double expected = 0.1 + (1.0 - 0.1) * (1.0 + std::cos(std::numbers::pi * 9.0 / 10.0)) / 2.0;
     EXPECT_GE(scheduler.get_last_lr(), 0.1);
-    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-6);
+    EXPECT_NEAR(scheduler.get_last_lr(), expected, 1e-6);
 }
 
 TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_MultipleRestarts) {

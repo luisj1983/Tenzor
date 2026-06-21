@@ -12,6 +12,7 @@
 #include <tenzor/nn/loss/losses.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
+#include "parity_tolerances.hpp"
 #include <cmath>
 #include <limits>
 
@@ -155,12 +156,25 @@ auto a = randn({32, 32}, DType::Float32, Device::cpu());
 }
 
 TEST_P(NumericalStabilityParity, NaN_InOperation) {
-auto a = randn({32, 32}, DType::Float32, Device::cpu());
+    // Split the mixed-sign case (which left tensors_close comparing NaN to NaN
+    // under a finite tolerance — unreliable) into two deterministic halves.
 
+    // All-negative input -> sqrt must be NaN everywhere on the target backend.
+    auto neg = full({32, 32}, -4.0f, DType::Float32, Device::cpu());
+    auto neg_sqrt = sqrt(neg.to(device)).cpu();
+    const float* ns = neg_sqrt.data<float>();
+    for (int64_t i = 0; i < neg_sqrt.numel(); ++i) {
+        EXPECT_TRUE(std::isnan(ns[i]))
+            << "sqrt of a negative value must be NaN (index " << i << ") on "
+            << backend_name(device);
+    }
+
+    // All-positive input -> sqrt is finite and must match CPU exactly.
+    auto pos = generate_uniform_tensor({32, 32}, 0.1f, 100.0f, DType::Float32,
+                                       Device::cpu(), 71);
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-        // sqrt of negative should produce NaN
-        return sqrt(inputs[0] * -1.0f);
-    }, {a}, device, 1e-6f, 1e-8f, "NaN from Operation");
+        return sqrt(inputs[0]);
+    }, {pos}, device, 1e-6f, 1e-8f, "Sqrt Positive (NaN-op companion)");
 }
 
 // ============================================================================
@@ -244,39 +258,57 @@ auto a = randn({32, 64}, DType::Float32, Device::cpu()) * 10.0f;
 // moved to `device` so the test exercises the actual GPU stability path.
 TEST_P(NumericalStabilityParity, BatchNorm_SmallVariance) {
     // BatchNorm with very small variance — epsilon must prevent division by ~zero
-    auto input = full({4, 8, 2, 2}, 42.0f, DType::Float32, Device::cpu());
+    auto input_cpu = full({4, 8, 2, 2}, 42.0f, DType::Float32, Device::cpu());
     auto noise = randn({4, 8, 2, 2}, DType::Float32, Device::cpu()) * 1e-10f;
-    input = add(input, noise);
-    input = input.to(device);
+    input_cpu = add(input_cpu, noise);
 
-    auto running_mean = full({8}, 42.0f, DType::Float32, device);
-    auto running_var = full({8}, 1e-12f, DType::Float32, device);
-    auto weight_var = Variable(ones({8}, DType::Float32, device), false);
-    auto bias_var = Variable(zeros({8}, DType::Float32, device), false);
+    auto bn = [](const Tensor& in, const Device& dev) {
+        auto running_mean = full({8}, 42.0f, DType::Float32, dev);
+        auto running_var = full({8}, 1e-12f, DType::Float32, dev);
+        auto weight_var = Variable(ones({8}, DType::Float32, dev), false);
+        auto bias_var = Variable(zeros({8}, DType::Float32, dev), false);
+        auto input_var = Variable(in.to(dev), false);
+        return nn::functional::batch_norm(
+                   input_var, running_mean, running_var, weight_var, bias_var,
+                   /*training=*/false, /*momentum=*/0.1, /*eps=*/1e-5)
+            .tensor()
+            .to(Device::cpu());
+    };
 
-    auto input_var = Variable(input, false);
-    auto result = nn::functional::batch_norm(
-        input_var, running_mean, running_var,
-        weight_var, bias_var,
-        /*training=*/false, /*momentum=*/0.1, /*eps=*/1e-5);
-    auto result_t = result.tensor().to(Device::cpu());
+    auto cpu_ref = bn(input_cpu, Device::cpu());
+    auto result_t = bn(input_cpu, device);
 
     EXPECT_FALSE(has_inf_nan(result_t).data<bool>()[0])
         << "BatchNorm with small variance should not produce NaN/Inf";
+    // Compare against the CPU reference so a backend returning all-zeros (also
+    // finite) is caught.
+    EXPECT_TRUE(tensors_close(cpu_ref, result_t, parity::NORM_RTOL, parity::NORM_ATOL))
+        << "BatchNorm small-variance output diverges from CPU reference on "
+        << backend_name(device);
 }
 
 TEST_P(NumericalStabilityParity, LayerNorm_ConstantInput) {
     // LayerNorm with all-identical elements — variance is zero
-    auto input = full({4, 16}, 5.0f, DType::Float32, device);
-    auto weight_var = Variable(ones({16}, DType::Float32, device), false);
-    auto bias_var = Variable(zeros({16}, DType::Float32, device), false);
+    auto ln = [](const Device& dev) {
+        auto input = full({4, 16}, 5.0f, DType::Float32, dev);
+        auto weight_var = Variable(ones({16}, DType::Float32, dev), false);
+        auto bias_var = Variable(zeros({16}, DType::Float32, dev), false);
+        auto input_var = Variable(input, false);
+        return nn::functional::layer_norm(input_var, {16}, weight_var, bias_var, 1e-5)
+            .tensor()
+            .to(Device::cpu());
+    };
 
-    auto input_var = Variable(input, false);
-    auto result = nn::functional::layer_norm(input_var, {16}, weight_var, bias_var, 1e-5);
-    auto result_t = result.tensor().to(Device::cpu());
+    auto cpu_ref = ln(Device::cpu());
+    auto result_t = ln(device);
 
     EXPECT_FALSE(has_inf_nan(result_t).data<bool>()[0])
         << "LayerNorm with constant input should not produce NaN/Inf";
+    // Constant input -> zero variance -> normalized output is all-zero (bias);
+    // compare to the CPU reference so a backend emitting garbage is caught.
+    EXPECT_TRUE(tensors_close(cpu_ref, result_t, parity::NORM_RTOL, parity::NORM_ATOL))
+        << "LayerNorm constant-input output diverges from CPU reference on "
+        << backend_name(device);
 }
 
 TEST_P(NumericalStabilityParity, CrossEntropy_NearZeroProbabilities) {
@@ -292,27 +324,44 @@ TEST_P(NumericalStabilityParity, CrossEntropy_NearZeroProbabilities) {
         targets_cpu.data<int64_t>()[i] = i % 10;
     }
 
-    auto logits_var = Variable(logits_cpu.to(device), false);
-    auto targets = targets_cpu.to(device);
-    auto loss = nn::functional::cross_entropy(logits_var, targets);
-    auto loss_t = loss.tensor().to(Device::cpu());
+    auto ce = [&](const Device& dev) {
+        auto logits_var = Variable(logits_cpu.to(dev), false);
+        auto targets = targets_cpu.to(dev);
+        return nn::functional::cross_entropy(logits_var, targets)
+            .tensor()
+            .to(Device::cpu());
+    };
+
+    auto cpu_ref = ce(Device::cpu());
+    auto loss_t = ce(device);
 
     EXPECT_FALSE(has_inf_nan(loss_t).data<bool>()[0])
         << "CrossEntropy with extreme logits should not produce NaN/Inf";
     EXPECT_LT(loss_t.data<float>()[0], 1.0f);
+    EXPECT_TRUE(tensors_close(cpu_ref, loss_t, parity::LOSS_RTOL, parity::LOSS_ATOL))
+        << "CrossEntropy near-zero-prob loss diverges from CPU reference on "
+        << backend_name(device);
 }
 
 TEST_P(NumericalStabilityParity, Softmax_VeryLargeInput) {
     // Softmax with inputs in [1000, 1001] range — tests max-subtraction trick
-    auto input = full({4, 32}, 1000.0f, DType::Float32, Device::cpu());
+    auto input_cpu = full({4, 32}, 1000.0f, DType::Float32, Device::cpu());
     auto noise = randn({4, 32}, DType::Float32, Device::cpu());
-    input = add(input, noise).to(device);
+    input_cpu = add(input_cpu, noise);
 
-    auto input_var = Variable(input, false);
-    auto result = softmax(input_var, 1).tensor().to(Device::cpu());
+    auto sm = [](const Tensor& in, const Device& dev) {
+        auto input_var = Variable(in.to(dev), false);
+        return softmax(input_var, 1).tensor().to(Device::cpu());
+    };
+
+    auto cpu_ref = sm(input_cpu, Device::cpu());
+    auto result = sm(input_cpu, device);
 
     EXPECT_FALSE(has_inf_nan(result).data<bool>()[0])
         << "Softmax with very large inputs should not produce NaN/Inf";
+    EXPECT_TRUE(tensors_close(cpu_ref, result, parity::SOFTMAX_RTOL, parity::SOFTMAX_ATOL))
+        << "Softmax very-large-input output diverges from CPU reference on "
+        << backend_name(device);
 
     auto row_sums = tenzor::sum(result, 1);
     for (int64_t i = 0; i < 4; ++i) {
@@ -355,23 +404,25 @@ TEST_P(NumericalStabilityParity, Attention_LongSequence) {
     int64_t d_k = 64;
     float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
 
-    auto Q = randn({1, seq_len, d_k}, DType::Float32, Device::cpu()).to(device);
-    auto K = randn({1, d_k, seq_len}, DType::Float32, Device::cpu()).to(device);
+    auto Q_cpu = randn({1, seq_len, d_k}, DType::Float32, Device::cpu());
+    auto K_cpu = randn({1, d_k, seq_len}, DType::Float32, Device::cpu());
 
-    // Compute attention scores: Q @ K^T * scale
-    auto scores = tenzor::matmul(Q, K) * scale;
+    auto attn = [&](const Device& dev) {
+        auto Q = Q_cpu.to(dev);
+        auto K = K_cpu.to(dev);
+        auto scores = tenzor::matmul(Q, K) * scale;
+        auto scores_2d = scores.reshape({seq_len, seq_len});
+        auto scores_var = Variable(scores_2d, false);
+        return softmax(scores_var, 1).tensor().to(Device::cpu());
+    };
 
-    auto scores_cpu = scores.to(Device::cpu());
-    EXPECT_FALSE(has_inf_nan(scores_cpu).data<bool>()[0])
-        << "Attention scores should be finite";
-
-    // Apply softmax — this is the critical stability test
-    auto scores_2d = scores.reshape({seq_len, seq_len});
-    auto scores_var = Variable(scores_2d, false);
-    auto attn_weights = softmax(scores_var, 1).tensor().to(Device::cpu());
+    auto cpu_ref = attn(Device::cpu());
+    auto attn_weights = attn(device);
 
     EXPECT_FALSE(has_inf_nan(attn_weights).data<bool>()[0])
         << "Attention weights after softmax should be finite";
+    EXPECT_TRUE(tensors_close(cpu_ref, attn_weights, parity::SOFTMAX_RTOL, parity::SOFTMAX_ATOL))
+        << "Attention weights diverge from CPU reference on " << backend_name(device);
 
     // Each row should sum to ~1.0
     auto row_sum = tenzor::sum(attn_weights, 1);

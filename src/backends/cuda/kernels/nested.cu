@@ -816,7 +816,14 @@ __global__ void nested_from_padded_kernel_t(
     int64_t end = offsets[b + 1];
     int64_t len = end - start;
 
-    for (int64_t pos = 0; pos < len; ++pos) {
+    // Truncate to the padded width: a segment longer than max_len would index
+    // padded[(b*max_len + pos)*D + d] for pos >= max_len, reading past row b into
+    // the next batch row (wrong data) or, for the last row, past the padded
+    // allocation entirely (out-of-bounds device read). The CPU reference clamps
+    // copy = min(len, max_len); mirror that here.
+    int64_t copy = len < max_len ? len : max_len;
+
+    for (int64_t pos = 0; pos < copy; ++pos) {
         for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
             values[(start + pos) * D + d] = padded[(b * max_len + pos) * D + d];
         }

@@ -21,11 +21,11 @@ public:
         }
 
         // Gradient: grad_input = grad_output * mask * scale
-        // mask is (batch, 1, 1, ..., 1) and broadcasts to input shape
+        // mask is (batch, 1, 1, ..., 1) and broadcasts to input shape. scale is
+        // a constant, so multiply by a scalar ({1}-shaped) tensor that
+        // broadcasts, instead of materialising a full grad-sized buffer.
         auto grad_masked = mul(grad_outputs[0], mask_);
-        auto shape_span = grad_outputs[0].shape();
-        std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-        auto scale_tensor = full(shape_vec, static_cast<float>(scale_),
+        auto scale_tensor = full({1}, static_cast<float>(scale_),
                                  grad_outputs[0].dtype(), grad_outputs[0].device());
         auto grad_input = mul(grad_masked, scale_tensor);
 
@@ -74,12 +74,18 @@ auto DropPath::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> mask_shape(shape_span.size(), 1);
     mask_shape[0] = batch_size;
 
-    // Generate Bernoulli mask on target device using tensor ops
+    // Generate Bernoulli mask on target device using tensor ops. Draw the
+    // uniforms and run the threshold compare in Float32, then cast the 0/1 mask
+    // to the input dtype. Generating randoms directly in a half dtype quantizes
+    // both the uniform draw and the compare, biasing the realised keep
+    // probability away from (1 - p); Dropout does exactly this for the same
+    // reason.
     Device dev = input.tensor().device();
     DType dt = input.tensor().dtype();
-    auto random_tensor = rand(mask_shape, dt, dev);
-    auto threshold = full(mask_shape, static_cast<float>(p_), dt, dev);
-    auto mask_data = gt(random_tensor, threshold).to(dt);
+    auto random_tensor = rand(mask_shape, DType::Float32, dev);
+    auto threshold = full(mask_shape, static_cast<float>(p_), DType::Float32, dev);
+    auto mask_f32 = gt(random_tensor, threshold).to(DType::Float32);
+    auto mask_data = (dt == DType::Float32) ? mask_f32 : mask_f32.to(dt);
 
     // Apply inverted drop path: output = input * mask / (1 - p)
     // mask broadcasts from (batch, 1, ..., 1) to input shape

@@ -236,6 +236,14 @@ private:
     auto connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnection>;
 
     /**
+     * @brief Per-user, owner-only rendezvous store directory for this run's
+     *        master port. Single source of truth shared by write/read/finalize
+     *        so cleanup removes exactly what was created (a mismatched path
+     *        leaked rank files that could poison a later run on the same port).
+     */
+    auto rendezvous_store_path() const -> std::string;
+
+    /**
      * @brief Write port to file-based rendezvous store.
      */
     auto write_port_to_store(int rank, int port) -> void;

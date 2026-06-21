@@ -630,7 +630,16 @@ auto OneCycleLR::compute_lr() -> double {
         return max_lr_ / final_div_factor_;
     }
 
-    int64_t warmup_steps = static_cast<int64_t>(pct_start_ * total_steps_);
+    // Round (not truncate) the warmup length, and ensure a configured warmup
+    // fraction never collapses to zero steps. Plain truncation drops the entire
+    // warmup phase whenever pct_start * total_steps < 1 (small total_steps),
+    // starting training by annealing from max_lr and also risking a divide by
+    // zero in the warmup pct below.
+    int64_t warmup_steps =
+        static_cast<int64_t>(std::llround(pct_start_ * static_cast<double>(total_steps_)));
+    if (pct_start_ > 0.0 && warmup_steps < 1) {
+        warmup_steps = 1;
+    }
 
     if (step_count_ < warmup_steps) {
         // Phase 1: Warmup
@@ -791,10 +800,12 @@ auto CosineAnnealingWarmRestarts::step() -> void {
 }
 
 auto CosineAnnealingWarmRestarts::update_lr() -> void {
-    // Cosine annealing formula
-    // Use T_i - 1 in denominator so that at T_cur = T_i - 1 (last step of cycle),
-    // cos(π) = -1 and LR reaches eta_min
-    int64_t period = std::max(T_i_ - 1, int64_t(1));  // Avoid division by zero
+    // PyTorch SGDR formula: eta_t = eta_min + (base_lr - eta_min) *
+    //                                (1 + cos(pi * T_cur / T_i)) / 2.
+    // The denominator is the full period T_i (NOT T_i - 1). Using T_i - 1 makes
+    // eta_min reached one step early each restart and shifts every intermediate
+    // LR away from the reference schedule. T_i_ is guaranteed >= 1 by the ctor.
+    int64_t period = std::max(T_i_, int64_t(1));  // Avoid division by zero
     double cos_term = std::cos(std::numbers::pi * static_cast<double>(T_cur_) / static_cast<double>(period));
     double new_lr = eta_min_ + (base_lr_ - eta_min_) * (1.0 + cos_term) / 2.0;
 

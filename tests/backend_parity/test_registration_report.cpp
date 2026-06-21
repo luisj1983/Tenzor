@@ -13,9 +13,11 @@
 #include <tenzor/ops/op_id.hpp>
 #include <tenzor/backend/dispatch_table.hpp>
 #include "parity_test_utils.hpp"
+#include "required_ops.hpp"
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -153,7 +155,33 @@ TEST(RegistrationReport, CoverageMatrix) {
         RecordProperty(std::string(be.name) + "_Missing", total_ops - backend_coverage[be.name]);
     }
 
-    // This test is informational — it always passes.
-    // Use KernelCompleteness tests for enforcing required coverage.
-    SUCCEED();
+    // ------------------------------------------------------------------
+    // Enforcement: the report must FAIL when a backend is missing kernels
+    // it is required to have. The matrix above is informational; the gate
+    // below is not. CPU is always available and must implement every op in
+    // the required-op floor (get_required_ops()) — a CPU dispatch table
+    // missing any required kernel is a hard build/registration regression.
+    // Every other available backend must also cover the required floor
+    // (mirroring KernelCompleteness), so a backend missing 100% of its
+    // kernels can no longer slip through with a green report.
+    // ------------------------------------------------------------------
+    const auto required = get_required_ops();
+    for (const auto& be : available) {
+        const auto& table = DispatchTableRegistry::get_table_const(be.type);
+        std::vector<std::string> missing_required;
+        for (auto op : required) {
+            if (!table.has_kernel(op)) {
+                missing_required.emplace_back(std::string(op_id_to_name(op)));
+            }
+        }
+        std::ostringstream missing_list;
+        for (size_t i = 0; i < missing_required.size(); ++i) {
+            if (i > 0) missing_list << ", ";
+            missing_list << missing_required[i];
+        }
+        EXPECT_TRUE(missing_required.empty())
+            << be.name << " backend is missing " << missing_required.size()
+            << " of " << required.size() << " required kernels:\n  "
+            << missing_list.str();
+    }
 }

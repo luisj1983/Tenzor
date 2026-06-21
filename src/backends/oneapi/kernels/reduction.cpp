@@ -2180,8 +2180,13 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool
 // ============================================================================
 // Unique kernel - find unique values
 // ============================================================================
-auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool return_counts,
+auto unique_kernel(const Tensor& input_raw, bool sorted, bool return_inverse, bool return_counts,
                    sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
+    // The device paths memcpy/index input via flat row-major offsets (and the
+    // no-oneDPL path reshapes it), so a non-contiguous view (transpose/slice)
+    // would copy the wrong physical bytes and misread the inverse map. Match the
+    // other reductions in this file: materialize contiguous up front.
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     int64_t numel = input.numel();
 
     // Upcast unsupported dtypes to wider types supported by the device paths

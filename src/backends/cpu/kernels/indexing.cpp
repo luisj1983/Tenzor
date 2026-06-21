@@ -1170,17 +1170,32 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes) -> Tensor {
 
     // If num_classes not specified, infer from max value
     if (num_classes <= 0) {
+        int64_t inferred = 0;
         if (indices.dtype() == DType::Int64) {
             const int64_t* data = indices.data<int64_t>();
             for (int64_t i = 0; i < numel; ++i) {
-                num_classes = std::max(num_classes, data[i] + 1);
+                if (data[i] < 0) {
+                    throw std::out_of_range("one_hot: indices must be non-negative");
+                }
+                inferred = std::max(inferred, data[i] + 1);
             }
         } else {
             const int32_t* data = indices.data<int32_t>();
             for (int64_t i = 0; i < numel; ++i) {
-                num_classes = std::max(num_classes, static_cast<int64_t>(data[i]) + 1);
+                if (data[i] < 0) {
+                    throw std::out_of_range("one_hot: indices must be non-negative");
+                }
+                inferred = std::max(inferred, static_cast<int64_t>(data[i]) + 1);
             }
         }
+        // An empty index tensor or all-zero indices can leave inferred == 0;
+        // a one-hot dimension must be positive, so reject before allocating.
+        if (inferred <= 0) {
+            throw std::invalid_argument(
+                "one_hot: could not infer a positive num_classes from indices; "
+                "pass num_classes explicitly");
+        }
+        num_classes = inferred;
     }
 
     // Output shape: indices_shape + [num_classes]
@@ -1653,21 +1668,31 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor
     Tensor output = input.clone();
     int64_t numel = input.numel();
 
-    // Support both Bool and Float32 masks (CUDA may convert Bool to Float32
-    // during device transfers), mirroring masked_select/masked_fill/where.
-    const bool use_float_mask = (mask.dtype() == DType::Float32);
-    const bool* bool_mask_ptr = nullptr;
-    const float* float_mask_ptr = nullptr;
-    if (mask.dtype() == DType::Bool) {
-        bool_mask_ptr = mask.data<bool>();
-    } else if (use_float_mask) {
-        float_mask_ptr = mask.data<float>();
-    } else {
+    // Support Bool dtype and any floating mask dtype (for CUDA compatibility and
+    // Float64/Float16/BFloat16 masks), mirroring masked_select/masked_fill/where.
+    // Any non-zero element is treated as true.
+    const bool mask_is_bool = (mask.dtype() == DType::Bool);
+    const bool mask_is_floating =
+        mask.dtype() == DType::Float32 || mask.dtype() == DType::Float64 ||
+        mask.dtype() == DType::Float16 || mask.dtype() == DType::BFloat16;
+    if (!mask_is_bool && !mask_is_floating) {
         char msg[256];
         snprintf(msg, sizeof(msg),
-                 "masked_scatter: mask tensor must have dtype Bool or Float32, but got dtype %d",
+                 "masked_scatter: mask tensor must have dtype Bool or a floating dtype, but got dtype %d",
                  static_cast<int>(mask.dtype()));
         throw std::invalid_argument(msg);
+    }
+
+    Tensor mask_f32;
+    const bool use_float_mask = mask_is_floating;
+    const bool* bool_mask_ptr = nullptr;
+    const float* float_mask_ptr = nullptr;
+    if (mask_is_bool) {
+        bool_mask_ptr = mask.data<bool>();
+    } else {
+        // Widen Float64/Float16/BFloat16 masks to Float32 (no-op for Float32).
+        mask_f32 = (mask.dtype() == DType::Float32) ? mask : mask.to(DType::Float32);
+        float_mask_ptr = mask_f32.data<float>();
     }
     auto is_mask_true = [use_float_mask, bool_mask_ptr, float_mask_ptr](int64_t i) -> bool {
         return use_float_mask ? (float_mask_ptr[i] != 0.0f) : bool_mask_ptr[i];

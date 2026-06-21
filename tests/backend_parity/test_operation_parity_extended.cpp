@@ -312,6 +312,18 @@ auto a = randn({8, 16}, DType::Float64, Device::cpu());
     }, {a, b}, 1e-12f, 1e-14f, "MatMul_Float64");
 }
 
+// Broadcast batch matmul: a=(B, m, k) @ b=(k, n) — b is rank-2 and must be
+// broadcast across the B batch dim. Regression for the OneAPI N-D matmul OOB
+// where b_batch_stride*bi ran past b's k*n elements.
+TEST_P(ExtendedParity, MatMul_BroadcastBatch_RankMismatch_Float64) {
+    auto a = randn({4, 8, 16}, DType::Float64, Device::cpu());
+    auto b = randn({16, 8}, DType::Float64, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return tenzor::matmul(inputs[0], inputs[1]);
+    }, {a, b}, 1e-12f, 1e-14f, "MatMul_BroadcastBatch_RankMismatch_Float64");
+}
+
 TEST_P(ExtendedParity, Softmax_Float64) {
 auto input = randn({8, 16}, DType::Float64, Device::cpu());
 

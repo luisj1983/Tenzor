@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <limits>
 
 // Forward declarations for kernels in other files
 namespace tenzor {
@@ -285,6 +286,10 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         throw std::runtime_error("Unsupported dtype for transpose");
     }
 
+    // Drain the queue: allocate() returns USM-shared host-accessible memory, so a
+    // host read of `output` before the in-order queue finishes the parallel_for
+    // would see stale data.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -297,6 +302,15 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
 
     if (dims.size() != ndim) {
         throw std::invalid_argument("Permute: number of dimensions must match");
+    }
+
+    // The device kernels below declare a fixed `int64_t coords[8]` and fill it
+    // with an uncapped loop `for (d in [0,ndim)) coords[d] = ...`, and the host
+    // stride arrays (iter/in/out/perm) are 8 elements. A rank > 8 tensor would
+    // overrun those buffers (device-side coords[8] write past end). Guard it,
+    // mirroring transpose_kernel/strided_fill.
+    if (ndim > 8) {
+        throw std::invalid_argument("oneapi permute: tensor rank > 8 is unsupported (on-device coordinate/stride arrays are fixed at 8 dims)");
     }
 
     // Convert spans to vectors
@@ -497,8 +511,16 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
         throw std::runtime_error("Unsupported dtype for permute");
     }
 
+    // Drain the queue before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
+
+// Sentinel meaning "squeeze every size-1 axis". Must match the CPU reference
+// (cpu/kernels/transform.cpp) and the OneAPI dispatch default for OpId::Squeeze:
+// a distinct value (NOT -1) so that a legitimate negative axis like squeeze(-1)
+// is not silently misinterpreted as squeeze-all.
+static constexpr int64_t SQUEEZE_ALL = std::numeric_limits<int64_t>::min();
 
 // Squeeze kernel - remove dimensions of size 1
 auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
@@ -506,7 +528,7 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
 
     std::vector<int64_t> out_shape;
 
-    if (dim == -1) {
+    if (dim == SQUEEZE_ALL) {
         // Squeeze all dimensions of size 1
         for (auto s : shape) {
             if (s != 1) {
@@ -540,7 +562,7 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
     const size_t bytes = input.numel() * input.dtype_size();
     const void* in_ptr = input.data_ptr();
     void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes);
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
@@ -575,7 +597,7 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> T
     const size_t bytes = input.numel() * input.dtype_size();
     const void* in_ptr = input.data_ptr();
     void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes);
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
@@ -590,7 +612,7 @@ auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const size_t bytes = input.numel() * input.dtype_size();
         const void* in_ptr = input.data_ptr();
         void* out_ptr = const_cast<void*>(output.data_ptr());
-        queue.memcpy(out_ptr, in_ptr, bytes);
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
         return output;
     }
 
@@ -807,6 +829,9 @@ auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         throw std::runtime_error("Unsupported dtype for contiguous kernel");
     }
 
+    // Drain the gather parallel_for before the host (or a caller that frees the
+    // strided input) reads the USM-shared contiguous output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -819,7 +844,7 @@ auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     const size_t bytes = input.numel() * input.dtype_size();
     const void* in_ptr = input.data_ptr();
     void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes);
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
@@ -832,7 +857,7 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     const size_t bytes = output.numel() * output.dtype_size();
 
     void* ptr = const_cast<void*>(output.data_ptr());
-    queue.memset(ptr, 0, bytes);
+    queue.memset(ptr, 0, bytes).wait();
 
     return output;
 }
@@ -1228,6 +1253,10 @@ auto slice_kernel(const Tensor& input,
             }
         }
 
+        // Drain the async memcpys before the function-local `cont` (a contiguous
+        // copy of a non-contiguous view) destructs at loop end and frees its USM
+        // backing while the copies may still be reading it.
+        queue.wait();
         result = next;
     }
 
@@ -1272,6 +1301,9 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, sycl::qu
         result.push_back(std::move(chunk));
     }
 
+    // Drain the async memcpys before the function-local `cont` destructs (UAF)
+    // and before the host reads the USM-shared chunk outputs.
+    queue.wait();
     return result;
 }
 
@@ -1452,6 +1484,9 @@ auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue)
                                  std::to_string(static_cast<int>(in_cont.dtype())));
     }
 
+    // Drain the gather parallel_for before the function-local in_cont/idx_cont
+    // contiguous copies destruct (UAF) and before the host reads the output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1782,6 +1817,9 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, sycl::queue& q
                                  std::to_string(static_cast<int>(in_cont.dtype())));
     }
 
+    // Drain the parallel_for before the function-local in_cont contiguous copy
+    // destructs (UAF) and before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1807,9 +1845,9 @@ class CastBoolToF32;
 class CastI64ToF64;
 class CastF64ToI64;
 
-auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) -> Tensor {
-    if (input.dtype() == target_dtype) {
-        return clone_kernel(input, queue);
+auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue) -> Tensor {
+    if (input_in.dtype() == target_dtype) {
+        return clone_kernel(input_in, queue);
     }
 
     // Intel oneAPI CPU runtime bug: device casts touching 16-bit integer
@@ -1825,10 +1863,15 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
             // backtrace), so it takes the host detour too.
             return dt == DType::Int16 || dt == DType::UInt16 || dt == DType::UInt32;
         };
-        if (runtime_unsafe(input.dtype()) || runtime_unsafe(target_dtype)) {
-            return input.to(Device::cpu()).to(target_dtype).to(input.device());
+        if (runtime_unsafe(input_in.dtype()) || runtime_unsafe(target_dtype)) {
+            return input_in.to(Device::cpu()).to(target_dtype).to(input_in.device());
         }
     }
+
+    // The conversion kernels below index the source linearly (in[i]/in[2*k]),
+    // assuming row-major contiguous storage. Materialize a contiguous copy so a
+    // transpose/slice/permute view is converted at the correct physical offsets.
+    Tensor input = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
@@ -2239,6 +2282,10 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
         throw std::runtime_error("cast_kernel: unsupported dtype conversion");
     }
 
+    // Drain the conversion parallel_for (most paths do not wait individually; only
+    // the FP8 paths above do) before the host reads the USM-shared output and
+    // before the function-local contiguous `input` copy destructs.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2482,8 +2529,13 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
     const int64_t matrix_size = rows * cols;
     const int64_t total = batch_size * matrix_size;
 
+    // Both in_ptr and out_ptr are indexed by the same flat `idx`; materialize a
+    // contiguous source so a transposed/sliced batch-of-matrices view (common for
+    // attention masks) is read at the correct physical offsets.
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<TriuKernelFloat32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t mat_idx = idx % matrix_size;
@@ -2493,7 +2545,7 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             out_ptr[idx] = (col >= row + diagonal) ? in_ptr[idx] : 0.0f;
         });
     } else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<TriuKernelFloat64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t mat_idx = idx % matrix_size;
@@ -2502,7 +2554,7 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             out_ptr[idx] = (col >= row + diagonal) ? in_ptr[idx] : 0.0;
         });
     } else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<TriuKernelFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t mat_idx = idx % matrix_size;
@@ -2511,7 +2563,7 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             out_ptr[idx] = (col >= row + diagonal) ? in_ptr[idx] : sycl::half(0.0f);
         });
     } else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         const uint16_t zero_bf16 = f32_to_bf16(0.0f);
         queue.parallel_for<TriuKernelBFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
@@ -2524,6 +2576,8 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
         throw std::runtime_error("triu: unsupported dtype");
     }
 
+    // Drain before the host reads the output and before in_cont destructs.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2555,8 +2609,12 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
     const int64_t matrix_size = rows * cols;
     const int64_t total = batch_size * matrix_size;
 
+    // Materialize a contiguous source (see triu_kernel) so non-contiguous
+    // batch-of-matrices views are read at the correct physical offsets.
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<TrilKernelFloat32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t mat_idx = idx % matrix_size;
@@ -2565,7 +2623,7 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             out_ptr[idx] = (col <= row + diagonal) ? in_ptr[idx] : 0.0f;
         });
     } else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<TrilKernelFloat64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t mat_idx = idx % matrix_size;
@@ -2574,7 +2632,7 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             out_ptr[idx] = (col <= row + diagonal) ? in_ptr[idx] : 0.0;
         });
     } else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<TrilKernelFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t mat_idx = idx % matrix_size;
@@ -2583,7 +2641,7 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             out_ptr[idx] = (col <= row + diagonal) ? in_ptr[idx] : sycl::half(0.0f);
         });
     } else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         const uint16_t zero_bf16 = f32_to_bf16(0.0f);
         queue.parallel_for<TrilKernelBFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
@@ -2596,6 +2654,8 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
         throw std::runtime_error("tril: unsupported dtype");
     }
 
+    // Drain before the host reads the output and before in_cont destructs.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -2612,8 +2672,13 @@ class DiagConstructKernelFloat64;
 class DiagConstructKernelFloat16;
 class DiagConstructKernelBFloat16;
 
-auto diag_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> Tensor {
-    const int64_t ndim = input.ndim();
+auto diag_kernel(const Tensor& input_in, int64_t diagonal, sycl::queue& queue) -> Tensor {
+    const int64_t ndim = input_in.ndim();
+
+    // Both the 2D-extract (in_ptr[r*cols+c]) and 1D-construct (in_ptr[idx]) paths
+    // index the source with shape-derived flat offsets, so the source must be
+    // contiguous to read the correct elements of a transposed/sliced view.
+    Tensor input = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
 
     if (ndim == 2) {
         // Extract diagonal from 2D matrix -> 1D
@@ -2667,6 +2732,7 @@ auto diag_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             throw std::runtime_error("diag: unsupported dtype");
         }
 
+        queue.wait_and_throw();
         return output;
     } else if (ndim == 1) {
         // Construct diagonal matrix from 1D vector -> 2D
@@ -2721,6 +2787,7 @@ auto diag_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> T
             throw std::runtime_error("diag: unsupported dtype");
         }
 
+        queue.wait_and_throw();
         return output;
     } else {
         throw std::invalid_argument("diag: input must be 1-D or 2-D, got " + std::to_string(ndim) + "-D");
@@ -2746,6 +2813,10 @@ auto trace_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
     Tensor output({}, input.dtype(), input.device());
 
+    // The reduction reads in_ptr[idx*cols+idx] with shape-derived offsets, so the
+    // source must be contiguous for a transposed/sliced matrix view.
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
     if (diag_len == 0) {
         // Trace of empty diagonal is 0
         if (input.dtype() == DType::Float32) {
@@ -2765,7 +2836,7 @@ auto trace_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     }
 
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         auto sum_buf = sycl::malloc_shared<float>(1, queue);
         sum_buf[0] = 0.0f;
 
@@ -2777,7 +2848,7 @@ auto trace_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.memcpy(const_cast<void*>(output.data_ptr()), sum_buf, sizeof(float)).wait();
         sycl::free(sum_buf, queue);
     } else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         auto sum_buf = sycl::malloc_shared<double>(1, queue);
         sum_buf[0] = 0.0;
 
@@ -2789,7 +2860,7 @@ auto trace_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.memcpy(const_cast<void*>(output.data_ptr()), sum_buf, sizeof(double)).wait();
         sycl::free(sum_buf, queue);
     } else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         auto sum_buf = sycl::malloc_shared<float>(1, queue);
         sum_buf[0] = 0.0f;
 
@@ -2802,7 +2873,7 @@ auto trace_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.memcpy(const_cast<void*>(output.data_ptr()), &result, sizeof(sycl::half)).wait();
         sycl::free(sum_buf, queue);
     } else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         auto sum_buf = sycl::malloc_shared<float>(1, queue);
         sum_buf[0] = 0.0f;
 
@@ -2912,6 +2983,9 @@ auto flip_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor
         throw std::runtime_error("flip: unsupported dtype");
     }
 
+    // Drain the parallel_for before the function-local in_cont destructs (UAF)
+    // and before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -3011,6 +3085,10 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
         throw std::runtime_error("repeat_interleave: unsupported dtype");
     }
 
+    // Drain the parallel_for before the function-local in_cont destructs (UAF)
+    // and before the host reads the USM-shared output. (The tensor variant
+    // below already waits — this matches it.)
+    queue.wait_and_throw();
     return output;
 }
 

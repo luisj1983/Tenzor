@@ -257,17 +257,16 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
     // Pack INT4 weights if using 4-bit quantization
     Tensor packed;
     if (config_.bits == 4) {
-        // Shift to unsigned range for packing: for symmetric, shift by -qmin
-        // so values are in [0, 15] for INT4
-        if (config_.sym) {
-            // Shift signed [-8, 7] to unsigned [0, 15] for packing
-            auto shift = ops::full({out_features, in_features},
-                                   static_cast<double>(-qmin), DType::Int32, Q.device());
-            auto Q_unsigned = Q + shift;
-            packed = pack_int4(Q_unsigned);
-        } else {
-            packed = pack_int4(Q);
-        }
+        // pack_int4 masks each value with & 0xF. For SYMMETRIC codes (signed
+        // [-8,7], zeros recorded as 0) we pack the TWO'S-COMPLEMENT nibble
+        // directly — the canonical sign-extending unpacker (cpu::unpack_int4 /
+        // quantize.cpp INT4 path) recovers the original signed value with no
+        // offset. The previous +8 offset-binary shift produced nibbles that a
+        // sign-extending consumer reads back off by exactly +8 (e.g. code -8
+        // packed as 0 unpacks to 0, not -8) while zeros=0 gave no hint of the
+        // bias. For ASYMMETRIC codes (already unsigned [0,15], real zero point)
+        // pack as-is.
+        packed = pack_int4(Q);
     } else {
         // 8-bit: choose storage dtype by signedness so codes are not corrupted.
         // Symmetric quantization produces codes in [-128, 127] (signed), which

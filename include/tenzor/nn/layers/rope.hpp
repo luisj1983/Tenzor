@@ -21,11 +21,18 @@ namespace nn {
  * that the dot product between query and key depends on their relative
  * position, providing translation-invariant attention.
  *
- * For each pair of dimensions (2i, 2i+1):
- *   x_rot[2i]   = x[2i]   * cos(θ_i * pos) - x[2i+1] * sin(θ_i * pos)
- *   x_rot[2i+1] = x[2i+1] * cos(θ_i * pos) + x[2i]   * sin(θ_i * pos)
+ * This implementation uses the split-half (GPT-NeoX / Llama) pairing, NOT the
+ * interleaved (RoFormer) (2i, 2i+1) layout. The head dimension is split into
+ * two halves x1 = x[..., :dim/2] and x2 = x[..., dim/2:], and for each
+ * i in [0, dim/2) the pair (x1[i], x2[i]) is rotated:
+ *   x_rot1[i] = x1[i] * cos(θ_i * pos) - x2[i] * sin(θ_i * pos)
+ *   x_rot2[i] = x2[i] * cos(θ_i * pos) + x1[i] * sin(θ_i * pos)
  *
  * Where θ_i = 1 / (base^(2i/dim))
+ *
+ * Q and K use the same scheme, so attention scores are self-consistent.
+ * Checkpoints trained with the interleaved (2i, 2i+1) layout are NOT directly
+ * compatible without permuting the head dimension.
  *
  * Shape:
  * - Input: (..., seq_len, head_dim) where head_dim is even

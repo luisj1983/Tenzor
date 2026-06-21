@@ -549,7 +549,12 @@ SPECIAL_TAGS(Renorm)
 // function for the float32 case via a small compute kernel — actually OneMKL
 // directly supports half so we can just call it; but for BF16 promotion is needed).
 #define ONEMKL_DISPATCH_UNARY(MKL_FN, TAG_PREFIX, NAME, F32_FALLBACK, F64_FALLBACK) \
-    auto NAME##_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {        \
+    auto NAME##_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {      \
+        /* The kernel indexes input by flat position and the oneMKL VM call        \
+         * assumes contiguous packing, so a non-contiguous view must be            \
+         * materialized first (mirrors the binary special ops). */                 \
+        const Tensor input = input_in.is_contiguous() ? input_in                   \
+                                                      : input_in.contiguous();     \
         Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()), \
                       input.dtype(), input.device());                              \
         const int64_t numel = input.numel();                                       \
@@ -586,6 +591,10 @@ SPECIAL_TAGS(Renorm)
         } else {                                                                   \
             throw std::runtime_error(#NAME ": unsupported dtype");                 \
         }                                                                          \
+        /* Drain before the host reads the USM-shared output (and before the       \
+         * local contiguous copy of input is freed). The F32/F64/F16 VM calls are  \
+         * enqueued asynchronously; the BF16 path already waits internally. */     \
+        queue.wait_and_throw();                                                    \
         return output;                                                             \
     }
 
@@ -604,7 +613,11 @@ ONEMKL_DISPATCH_UNARY(erfinv, ErfInv,   erfinv,    erfinv_dev_f32, erfinv_dev_f6
 // Polynomial-fallback launcher (used for digamma/sinc which OneMKL VM lacks,
 // and for the entire op set when OneMKL is unavailable).
 #define DEFINE_ONEAPI_SPECIAL_UNARY(NAME, TAG_PREFIX, F32_FN, F64_FN)                          \
-    auto NAME##_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {                    \
+    auto NAME##_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {                 \
+        /* Index input by flat position; a non-contiguous view must be made        \
+         * contiguous first or it reads the wrong physical elements. */            \
+        const Tensor input = input_in.is_contiguous() ? input_in                              \
+                                                      : input_in.contiguous();                \
         Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),        \
                       input.dtype(), input.device());                                          \
         const int64_t numel = input.numel();                                                   \
@@ -636,6 +649,9 @@ ONEMKL_DISPATCH_UNARY(erfinv, ErfInv,   erfinv,    erfinv_dev_f32, erfinv_dev_f6
         } else {                                                                               \
             throw std::runtime_error(#NAME ": only Float32/64/16 + BF16 supported");           \
         }                                                                                      \
+        /* Drain before the host reads the USM-shared output and before the local  \
+         * contiguous input copy is freed (the parallel_for is async). */          \
+        queue.wait_and_throw();                                                                \
         return output;                                                                         \
     }
 
@@ -800,7 +816,10 @@ class MultigammalnKernelF64;
 class MultigammalnKernelF16;
 class MultigammalnKernelBF16;
 
-auto multigammaln_kernel(const Tensor& input, int64_t d, sycl::queue& queue) -> Tensor {
+auto multigammaln_kernel(const Tensor& input_in, int64_t d, sycl::queue& queue) -> Tensor {
+    // Indexes input by flat position; a non-contiguous view must be made
+    // contiguous first or it reads the wrong physical elements.
+    const Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -852,6 +871,7 @@ auto multigammaln_kernel(const Tensor& input, int64_t d, sycl::queue& queue) -> 
     } else {
         throw std::runtime_error("multigammaln: only Float32/64/16 + BF16 supported");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -905,6 +925,7 @@ auto beta_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> 
     } else {
         throw std::runtime_error("beta: unsupported dtype");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -951,13 +972,16 @@ auto zeta_kernel(const Tensor& s_in, const Tensor& q_in, sycl::queue& queue) -> 
     } else {
         throw std::runtime_error("zeta: unsupported dtype");
     }
+    queue.wait_and_throw();
     return output;
 }
 
 // =========================================================================
 // Polygamma ψ^(n)(x)
 // =========================================================================
-auto polygamma_kernel(int64_t n, const Tensor& input, sycl::queue& queue) -> Tensor {
+auto polygamma_kernel(int64_t n, const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // Indexes input by flat position; non-contiguous views must be materialized.
+    const Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -991,13 +1015,24 @@ auto polygamma_kernel(int64_t n, const Tensor& input, sycl::queue& queue) -> Ten
     } else {
         throw std::runtime_error("polygamma: unsupported dtype");
     }
+    queue.wait_and_throw();
     return output;
 }
 
 // =========================================================================
 // Regularized incomplete beta I_x(a, b)
 // =========================================================================
-auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, sycl::queue& queue) -> Tensor {
+auto betainc_kernel(const Tensor& a_in, const Tensor& b_in, const Tensor& x_in, sycl::queue& queue) -> Tensor {
+    // betainc(a, b, x) is elementwise over three broadcastable operands. The
+    // kernel indexes a_ptr[idx]/b_ptr[idx]/x_ptr[idx] at a shared flat index, so
+    // all three must share the common broadcast shape and be contiguous — without
+    // this, differing shapes or non-contiguous views read out of bounds / wrong
+    // offsets. Broadcast pairwise to the common shape, then materialize contiguous
+    // (mirrors beta_kernel/zeta_kernel's broadcast_binary_operands guard).
+    auto common = broadcast_shapes(broadcast_shapes(a_in.shape(), b_in.shape()), x_in.shape());
+    Tensor a = broadcast_to(a_in, common).contiguous();
+    Tensor b = broadcast_to(b_in, common).contiguous();
+    Tensor x = broadcast_to(x_in, common).contiguous();
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   a.dtype(), a.device());
     const int64_t numel = a.numel();
@@ -1049,6 +1084,7 @@ auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, sycl::que
     } else {
         throw std::runtime_error("betainc: unsupported dtype");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1101,6 +1137,7 @@ auto logaddexp_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue
     } else {
         throw std::runtime_error("logaddexp: unsupported dtype");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1153,6 +1190,7 @@ auto logaddexp2_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queu
     } else {
         throw std::runtime_error("logaddexp2: unsupported dtype");
     }
+    queue.wait_and_throw();
     return output;
 }
 
@@ -1201,6 +1239,7 @@ auto xlogy_kernel(const Tensor& x_in, const Tensor& y_in, sycl::queue& queue) ->
     } else {
         throw std::runtime_error("xlogy: unsupported dtype");
     }
+    queue.wait_and_throw();
     return output;
 }
 

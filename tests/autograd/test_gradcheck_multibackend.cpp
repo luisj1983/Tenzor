@@ -2095,6 +2095,34 @@ TEST_P(GradCheckMultiBackendTest, LinalgEig_GradVIsNotDropped) {
         << " — EigBackward is dropping grad_V";
 }
 
+TEST_P(GradCheckMultiBackendTest, LinalgEigBatchedComplexGrad) {
+    // Regression: batched eig with COMPLEX eigenvalues previously threw at
+    // backward ("complex-eigenvalue backward supports only non-batched"). Now
+    // the complex path loops per-batch; gradcheck the W (real+imag) backward of
+    // a batch of 2x2 blocks with genuinely complex eigenvalues at tight F64.
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
+    if (dtype() == DType::Float32) {
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Batched complex eig grad uses Float64 for tolerance margin"); return;
+    }
+    // Batch of two 2x2 matrices whose eigenvalues are complex (a-bi style).
+    // Base blocks: [[s, -1],[1, s]] has eigenvalues s ± i.
+    auto a_t = tenzor::zeros({2, 2, 2}, dtype(), Device::cpu());
+    double* ap = a_t.data<double>();
+    // batch 0: s=0.3
+    ap[0] = 0.3; ap[1] = -1.0; ap[2] = 1.0; ap[3] = 0.3;
+    // batch 1: s=-0.5, slightly scaled off-diagonals to vary the spectrum
+    ap[4] = -0.5; ap[5] = -1.2; ap[6] = 0.9; ap[7] = -0.5;
+    Variable x(a_t.to(device()), true);
+
+    // Real-valued loss depending on both real and imaginary eigenvalue parts.
+    auto f = [](const Variable& v) -> Variable {
+        auto [W_re, W_im, V] = ::tenzor::eig(v);
+        return tenzor::sum(W_re) + tenzor::sum(W_im);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-6, 1e-5, 1e-5))
+        << "batched complex eig gradcheck failed on " << device().to_string();
+}
+
 TEST_P(GradCheckMultiBackendTest, LinalgLDLFactor) {
     if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {

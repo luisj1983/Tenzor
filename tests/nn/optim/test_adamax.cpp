@@ -97,10 +97,27 @@ TEST_P(AdamaxTest, StateDictRoundtrip) {
     EXPECT_EQ(state.count("exp_avg_0"), 1u);
     EXPECT_EQ(state.count("exp_inf_0"), 1u);
 
-    auto params2 = make_params();
+    // Build opt2 over a parameter whose values are a clone of opt's current
+    // params, so a subsequent identical step is governed only by the restored
+    // optimizer state (exp_avg / exp_inf / step_count), not by param values.
+    auto params2 = std::vector<std::shared_ptr<Variable>>{
+        std::make_shared<Variable>(params[0]->tensor().clone(), /*requires_grad=*/true)};
     optim::Adamax opt2(params2, /*lr=*/1e-5);
     opt2.load_state_dict(state);
     EXPECT_DOUBLE_EQ(opt2.get_lr(), 2e-3) << "lr should come from loaded state";
+
+    // Strong round-trip check: take one identical unit-gradient step on both
+    // optimizers. If the moment buffers (exp_avg_0 / exp_inf_0) and step_count
+    // were truly restored, both updates must be bit-for-bit close. A save/load
+    // that drops or zeroes the moment buffers diverges here.
+    step_with_unit_grad(params, opt);
+    step_with_unit_grad(params2, opt2);
+    auto a = params[0]->tensor().to(DType::Float64).cpu();
+    auto b = params2[0]->tensor().to(DType::Float64).cpu();
+    double max_diff = ::tenzor::max(::tenzor::abs(a - b)).item<double>();
+    EXPECT_LT(max_diff, 1e-6)
+        << "Post-load step diverged (max param diff " << max_diff
+        << ") — load_state_dict did not restore the moment buffers";
 }
 
 INSTANTIATE_BACKEND_TESTS(AdamaxTest);

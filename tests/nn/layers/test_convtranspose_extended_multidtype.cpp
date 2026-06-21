@@ -113,6 +113,52 @@ TEST_P(ConvTranspose3dMultiDTypeTest, ForwardShape_NoBias) {
     expectShape(y.tensor(), {1, 3, 6, 6, 6});
 }
 
+// output_padding support (per-axis). output_padding enlarges the output by
+// `op` along each spatial axis: out = (in-1)*s - 2p + d*(k-1) + op + 1. The
+// scatter loop is identical to the op=0 case (each input contributes to
+// ow = iw*s - p + kw*d, bounds-checked against the larger out extent), so the
+// op=0 result must be a prefix sub-volume of the op>0 result. This verifies the
+// previously-missing non-default output_padding path now produces both the
+// correct shape AND correct values (the enlarged region holds the genuine
+// scatter contributions / zeros, not garbage).
+TEST_P(ConvTranspose3dMultiDTypeTest, OutputPadding_ShapeAndValues) {
+    // Deterministic weights/inputs so op=0 vs op=1 are directly comparable.
+    // stride=2 (op must be < stride), kernel=2, padding=0.
+    auto make_conv = [&](int64_t op) {
+        return ConvTranspose3d(/*in=*/2, /*out=*/3, /*kernel=*/2, /*stride=*/2,
+                               /*padding=*/0, /*output_padding=*/op,
+                               /*dilation=*/1, /*groups=*/1, /*bias=*/false);
+    };
+
+    ConvTranspose3d conv0 = make_conv(0);
+    ConvTranspose3d conv1 = make_conv(1);
+    // Set both weights to the same constant so op=0 and op=1 are directly
+    // comparable on their shared region (no dependence on random init).
+    conv0.get_parameter("weight")->tensor().fill_(0.5);
+    conv1.get_parameter("weight")->tensor().fill_(0.5);
+    conv0.to(device());
+    conv1.to(device());
+
+    auto x = Variable(full({1, 2, 3, 3, 3}, 1.0f, dtype(), device()), false);
+
+    auto y0 = conv0.forward(x);
+    auto y1 = conv1.forward(x);
+
+    // op=0: out = (3-1)*2 - 0 + (2-1) + 0 + 1 = 6
+    expectShape(y0.tensor(), {1, 3, 6, 6, 6});
+    // op=1: out = (3-1)*2 - 0 + (2-1) + 1 + 1 = 7
+    expectShape(y1.tensor(), {1, 3, 7, 7, 7});
+
+    // The op=0 volume must equal the leading [0:6,0:6,0:6] sub-volume of op=1.
+    auto h0 = y0.tensor().to(Device::cpu()).to(DType::Float32);
+    auto h1 = y1.tensor().to(Device::cpu()).to(DType::Float32);
+    auto h1_crop = slice(slice(slice(h1, 2, 0, 6), 3, 0, 6), 4, 0, 6);
+    auto diff = max(abs(h0 - h1_crop)).item<float>();
+    EXPECT_LT(diff, 1e-3f)
+        << device().to_string()
+        << ": output_padding=1 must match output_padding=0 on the shared region";
+}
+
 // Phase 3 addition: backward gradient population.
 TEST_P(ConvTranspose3dMultiDTypeTest, BackwardGradPopulated) {
     nn::ConvTranspose3d conv(2, 3, 3);

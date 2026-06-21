@@ -538,7 +538,8 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
  * [offsets[bag], offsets[bag+1]).
  */
 auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
-                                   const Tensor& offsets, const OpAttributes& attrs,
+                                   const Tensor& offsets, const Tensor& max_indices,
+                                   const OpAttributes& attrs,
                                    sycl::queue& queue) -> Tensor {
     int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
     int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
@@ -560,7 +561,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indi
     // FP16/BF16: upcast to Float32, recurse, downcast (indices stays Int64)
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         auto go_f32 = grad_output.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, attrs, queue);
+        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, max_indices, attrs, queue);
         return result.to(grad_output.dtype());
     }
 
@@ -570,6 +571,57 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indi
 
     const int64_t* offsets_ptr = get_data_ptr<const int64_t>(offsets);
     const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
+
+    // Max-mode backward: the forward emits, per (bag, feature), the GLOBAL element
+    // index that achieved the maximum (`max_indices`). Gradient routes ONLY to that
+    // winning element's vocabulary row — NOT scattered to every index in the bag
+    // (which is what the sum/mean path below does). Without this branch, max-mode
+    // EmbeddingBag produced wrong weight gradients (the sum path distributed grad to
+    // all bag members). Matches the CPU reference (cpu/kernels/nn_kernels.cpp).
+    if (mode == "max") {
+        if (!max_indices.is_valid() || max_indices.numel() == 0) {
+            throw std::runtime_error(
+                "embedding_bag_backward: mode=\"max\" requires the per-feature argmax "
+                "indices (4th input) produced by EmbeddingBagForward.");
+        }
+        if (max_indices.dtype() != DType::Int64) {
+            throw std::runtime_error("embedding_bag_backward: max_indices must be Int64");
+        }
+        Tensor argmax_cont = max_indices.is_contiguous() ? max_indices : max_indices.contiguous();
+        const int64_t* argmax_ptr = get_data_ptr<const int64_t>(argmax_cont);
+
+        auto scatter_max = [&]<typename T>() {
+            T* gw_ptr = get_data_ptr<T>(grad_weight);
+            const T* go_ptr = get_data_ptr<const T>(grad_output);
+            queue.fill(gw_ptr, static_cast<T>(0), total_weight_elements).wait();
+            // One work-item per (bag, feature). Each routes its grad to the single
+            // winning element's row; atomic_add guards the rare case where two bags
+            // pick the same (row, feature) slot.
+            queue.parallel_for(
+                sycl::range<2>(num_bags, embedding_dim),
+                [=](sycl::id<2> id) {
+                    int64_t bag = id[0];
+                    int64_t j = id[1];
+                    int64_t elem = argmax_ptr[bag * embedding_dim + j];
+                    if (elem < 0 || elem >= total_elements) return;  // empty bag / OOB
+                    int64_t row = indices_ptr[elem];
+                    if (row < 0 || row >= num_embeddings) return;
+                    sycl::atomic_ref<T, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_gw(gw_ptr[row * embedding_dim + j]);
+                    atomic_gw.fetch_add(go_ptr[bag * embedding_dim + j]);
+                }).wait();
+        };
+        if (grad_output.dtype() == DType::Float32) {
+            scatter_max.template operator()<float>();
+        } else if (grad_output.dtype() == DType::Float64) {
+            scatter_max.template operator()<double>();
+        } else {
+            throw std::runtime_error("embedding_bag_backward: unsupported grad_output dtype for max mode");
+        }
+        return grad_weight;
+    }
 
     if (grad_output.dtype() == DType::Float32) {
         float* gw_ptr = get_data_ptr<float>(grad_weight);

@@ -63,9 +63,14 @@ TEST_P(SAMSWATest, SAMFirstStepPerturbsWeights) {
     sam.first_step();
     float after = param_sum(params);
 
-    // first_step perturbs weights in the gradient direction
-    EXPECT_NE(before, after)
-        << "first_step should perturb weights";
+    // first_step perturbs weights by epsilon = rho * grad / ||grad||_2.
+    // params=ones(4,4) (16 elems), grad=ones so ||grad||_2 = sqrt(16) = 4,
+    // rho=0.05 → epsilon per element = 0.05 / 4 = 0.0125. Each weight becomes
+    // 1 + 0.0125 = 1.0125; sum over 16 = 16.2. A sign error or wrong magnitude
+    // (e.g. epsilon without the /||grad|| normalization) fails this.
+    EXPECT_NEAR(before, 16.0f, 1e-4f);
+    EXPECT_NEAR(after, 16.2f, 1e-4f)
+        << "first_step perturbation magnitude wrong (expected w += rho*g/||g||)";
 }
 
 TEST_P(SAMSWATest, SAMSecondStepRestoresAndSteps) {
@@ -80,7 +85,9 @@ TEST_P(SAMSWATest, SAMSecondStepRestoresAndSteps) {
     sam.first_step();  // perturb
 
     float perturbed = param_sum(params);
-    EXPECT_NE(original, perturbed);
+    // Perturbed sum = 16 * (1 + 0.05/4) = 16.2 (see SAMFirstStepPerturbsWeights).
+    EXPECT_NEAR(original, 16.0f, 1e-4f);
+    EXPECT_NEAR(perturbed, 16.2f, 1e-4f);
 
     // Second forward-backward at perturbed point
     set_unit_grad(params);
@@ -88,10 +95,14 @@ TEST_P(SAMSWATest, SAMSecondStepRestoresAndSteps) {
 
     float final_val = param_sum(params);
 
-    // After second_step, weights should differ from both original and perturbed
-    // (restored to original, then SGD step applied)
-    EXPECT_NE(final_val, perturbed)
-        << "second_step should restore weights and step";
+    // second_step must RESTORE w to the original (1.0 per element) BEFORE the
+    // base SGD step, then apply SGD: w = 1.0 - lr*grad = 1.0 - 0.1*1.0 = 0.9.
+    // sum over 16 = 14.4. If restoration were skipped (step from the perturbed
+    // 1.0125), final would be 1.0125 - 0.1 = 0.9125 → sum 14.6 — this exact
+    // value check distinguishes the two and pins both restore and step math.
+    EXPECT_NEAR(final_val, 14.4f, 1e-4f)
+        << "second_step must restore to original then apply SGD step "
+           "(restore-skipped would give 14.6)";
 }
 
 // Audit item D.7 — SAM must work with the polymorphic Optimizer::step(closure)
@@ -202,10 +213,13 @@ TEST_P(SAMSWATest, AveragedModelUpdateProducesRunningAverage) {
     // The averaged value should be between the initial and latest
     auto avg_cpu = avg.averaged_params()[0].to(Device::cpu());
     auto* avg_data = avg_cpu.data<float>();
-    // Exact value depends on whether initial clone counts as n=1 or n=0
-    // Either way, should be in a reasonable range
-    EXPECT_GT(avg_data[0], 1.0f);
-    EXPECT_LT(avg_data[0], 5.0f);
+    // PyTorch SWA running mean (n_averaged starts at 0): first update installs
+    // 3 (n=1); second does avg += (5 - 3)/(1+1) = 3 + 1 = 4. The equal-weight
+    // running mean of {3, 5} is exactly 4.0. An off-by-one in the denominator
+    // (e.g. dividing by n instead of n+1, or counting the ctor clone) shifts
+    // this away from 4.0 and is caught here.
+    EXPECT_NEAR(avg_data[0], 4.0f, 1e-5f)
+        << "AveragedModel running mean of {3,5} must be exactly 4.0";
 }
 
 TEST_P(SAMSWATest, AveragedModelApplyTo) {

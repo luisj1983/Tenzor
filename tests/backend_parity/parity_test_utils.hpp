@@ -919,7 +919,13 @@ void test_operation_parity_single(Op operation,
             FAIL() << test_name << " has no recorded golden and no GPU backend is available.\n"
                    << "  Record one from a multi-backend host with TENZOR_RECORD_GOLDENS=1.";
         }
-        return;
+        // No golden and no second backend: there is nothing to compare against.
+        // Emit GTEST_SKIP (not a silent `return`) so the result shows as
+        // SKIPPED rather than a vacuous PASS that verified nothing.
+        GTEST_SKIP() << test_name << ": CPU-only run with no recorded golden — "
+                        "nothing to compare against. Record a golden on a "
+                        "multi-backend host with TENZOR_RECORD_GOLDENS=1, or set "
+                        "TENZOR_REQUIRE_MULTI_BACKEND=1 to make this a failure.";
     }
     // Run on the target backend and compare against CPU.
     std::vector<Tensor> target_inputs;

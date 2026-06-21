@@ -282,6 +282,9 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         throw std::runtime_error("im2col: Unsupported data type (only Float32/Float64/Float16/BFloat16 supported)");
     }
 
+    // The per-batch parallel_for kernels are enqueued without a wait. Drain the
+    // queue before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 
@@ -404,6 +407,10 @@ auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
                 queue
             );
         }
+        // Drain the col2im (fill + atomic-accumulate) kernels before reading
+        // output_f32 in the narrowing cast — otherwise .to() races the in-flight
+        // accumulation and may narrow a partially-written buffer.
+        queue.wait_and_throw();
         output = output_f32.to(in_dt);
     }
     else {
@@ -411,6 +418,9 @@ auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
             "(supports Float32, Float64, Float16, BFloat16)");
     }
 
+    // The per-batch fill + atomic-accumulate kernels are enqueued without a wait.
+    // Drain the queue before the host reads the USM-shared output.
+    queue.wait_and_throw();
     return output;
 }
 

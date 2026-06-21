@@ -277,3 +277,57 @@ TEST(ModelFormatTest, UnknownSectionTagsAreSkipped) {
         EXPECT_EQ(graph->num_nodes(), 0u);
     });
 }
+
+// SECURITY/correctness: weight_data_offset must point AT or AFTER the end of
+// the parsed node table. A value inside (or before) the node-table region would
+// reinterpret node-record bytes as a TLV section table — a self-inconsistent
+// file. The reader must reject it.
+TEST(ModelFormatTest, WeightDataOffsetOverlappingNodeTableRejected) {
+    std::vector<uint8_t> buf;
+    auto push = [&](const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        buf.insert(buf.end(), b, b + n);
+    };
+
+    TZLiteHeader header{};
+    header.magic = TZLITE_MAGIC;
+    header.version = TZLITE_VERSION;
+    header.num_nodes = 0;
+    header.num_weights = 0;
+    // Point the TLV table INTO the header region (before the node-table end at
+    // sizeof(header)), which is < the post-node-table cursor.
+    header.weight_data_offset = sizeof(header) - 4;
+    push(&header, sizeof(header));
+
+    uint32_t section_count = 0;
+    push(&section_count, sizeof(section_count));
+
+    EXPECT_THROW(TZLiteReader::load(buf.data(), buf.size()), std::runtime_error)
+        << "weight_data_offset overlapping the node table must be rejected";
+}
+
+// SECURITY: the top-level TLV section_count must be bounded against the
+// remaining payload (each section is >= 12 bytes). A bogus count must be
+// rejected up front, not spun over until a read past EOF.
+TEST(ModelFormatTest, OversizedSectionCountRejected) {
+    std::vector<uint8_t> buf;
+    auto push = [&](const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        buf.insert(buf.end(), b, b + n);
+    };
+
+    TZLiteHeader header{};
+    header.magic = TZLITE_MAGIC;
+    header.version = TZLITE_VERSION;
+    header.num_nodes = 0;
+    header.num_weights = 0;
+    header.weight_data_offset = sizeof(header);
+    push(&header, sizeof(header));
+
+    // Claim a huge number of sections but provide no section bytes at all.
+    uint32_t section_count = 0xFFFFFFFFu;
+    push(&section_count, sizeof(section_count));
+
+    EXPECT_THROW(TZLiteReader::load(buf.data(), buf.size()), std::runtime_error)
+        << "an impossibly large TLV section_count must be rejected up front";
+}

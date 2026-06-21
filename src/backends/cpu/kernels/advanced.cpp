@@ -298,6 +298,11 @@ auto decompose_dim(const Tensor& t, int64_t dim) -> DimDecomp {
     const auto& shape = t.shape();
     int64_t ndim = t.ndim();
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range(
+            "dim " + std::to_string(dim) + " is out of range for tensor with " +
+            std::to_string(ndim) + " dimensions");
+    }
 
     DimDecomp d;
     d.dim_size = shape[dim];
@@ -1474,12 +1479,27 @@ static auto segment_reduce_impl(const T* data, const int64_t* offsets,
     T* out_ptr = output.data<T>();
     const int64_t out_numel = output.numel();
 
+    // Resolve the reduce mode to an enum ONCE up front, both to validate it (an
+    // unknown mode is a hard error, not a silent identity-fill) and to keep the
+    // hot inner loop free of repeated std::string comparisons.
+    enum class Mode { Sum, Mean, Prod, Max, Min };
+    Mode mode;
+    if (reduce == "sum")        mode = Mode::Sum;
+    else if (reduce == "mean")  mode = Mode::Mean;
+    else if (reduce == "prod")  mode = Mode::Prod;
+    else if (reduce == "max")   mode = Mode::Max;
+    else if (reduce == "min")   mode = Mode::Min;
+    else throw std::invalid_argument("segment_reduce: unsupported reduce mode '" + reduce + "'");
+
     // Determine identity values for each reduce mode
-    auto identity = [&]() -> T {
-        if (reduce == "sum" || reduce == "mean") return T(0);
-        if (reduce == "prod") return T(1);
-        if (reduce == "max") return std::numeric_limits<T>::lowest();
-        if (reduce == "min") return std::numeric_limits<T>::max();
+    const T identity = [&]() -> T {
+        switch (mode) {
+            case Mode::Sum:
+            case Mode::Mean: return T(0);
+            case Mode::Prod: return T(1);
+            case Mode::Max:  return std::numeric_limits<T>::lowest();
+            case Mode::Min:  return std::numeric_limits<T>::max();
+        }
         return T(0);
     }();
 
@@ -1503,18 +1523,16 @@ static auto segment_reduce_impl(const T* data, const int64_t* offsets,
                 for (int64_t d = seg_start; d < seg_end; ++d) {
                     int64_t in_idx = (outer * axis_size + d) * inner_size + inner;
                     T val = data[in_idx];
-                    if (reduce == "sum" || reduce == "mean") {
-                        acc += val;
-                    } else if (reduce == "prod") {
-                        acc *= val;
-                    } else if (reduce == "max") {
-                        acc = acc > val ? acc : val;
-                    } else if (reduce == "min") {
-                        acc = acc < val ? acc : val;
+                    switch (mode) {
+                        case Mode::Sum:
+                        case Mode::Mean: acc += val; break;
+                        case Mode::Prod: acc *= val; break;
+                        case Mode::Max:  acc = acc > val ? acc : val; break;
+                        case Mode::Min:  acc = acc < val ? acc : val; break;
                     }
                 }
 
-                if (reduce == "mean" && seg_len > 0) {
+                if (mode == Mode::Mean && seg_len > 0) {
                     acc /= static_cast<T>(seg_len);
                 }
 
@@ -1530,6 +1548,13 @@ auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
                            const std::string& reduce, int64_t axis) -> Tensor {
     auto cont = data.is_contiguous() ? data : data.contiguous();
     auto offs = offsets.is_contiguous() ? offsets : offsets.contiguous();
+
+    if (reduce != "sum" && reduce != "mean" && reduce != "prod" &&
+        reduce != "max" && reduce != "min") {
+        throw std::invalid_argument(
+            "segment_reduce: unsupported reduce mode '" + reduce +
+            "' (expected one of sum, mean, prod, max, min)");
+    }
 
     int64_t ndim = cont.ndim();
     if (axis < 0) axis += ndim;

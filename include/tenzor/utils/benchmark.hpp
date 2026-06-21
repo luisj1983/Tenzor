@@ -215,6 +215,16 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Compute statistics (mean/min/max/std_dev/median/p95/p99) from a
+     *        vector of timing samples (seconds).
+     *
+     * Pure, stateless utility — exposed so the percentile/interpolation math
+     * can be verified directly against a deterministic synthetic timing vector
+     * rather than relying on noisy wall-clock measurements.
+     */
+    static auto compute_stats(const std::vector<double>& times) -> BenchmarkStats;
+
 private:
     std::string name_;
     size_t num_warmup_;
@@ -222,11 +232,6 @@ private:
     size_t num_flops_{0};
     size_t num_bytes_{0};
     std::function<void()> workload_{};
-
-    /**
-     * @brief Compute statistics from timing samples
-     */
-    static auto compute_stats(const std::vector<double>& times) -> BenchmarkStats;
 };
 
 /**

@@ -211,12 +211,15 @@ auto FocalLoss::forward(const Variable& input, const Variable& target) -> Variab
     auto exponent_safe = clamp(exponent, -50.0f, 50.0f);
     Variable modulating_factor = exp(exponent_safe);
 
-    // Recompute log_probs from clamped probs for consistency
-    auto log_probs_clamped = log(probs_clamped);
+    // Use the original numerically-stable log_softmax output for the log(p_t)
+    // term. Recomputing log(exp(log_softmax) clamped) round-trips through exp
+    // and a re-log, introducing a small systematic bias (and an avoidable
+    // double-log). probs_clamped is only needed for the (1-p_t)^gamma
+    // modulating factor, never for log(p_t).
 
     // Compute focal loss: -alpha * (1-p)^gamma * log(p) * target
     auto alpha_var = scalar_var(static_cast<float>(alpha_), modulating_factor);
-    auto loss_unreduced = neg(modulating_factor * alpha_var * log_probs_clamped * target_f32);
+    auto loss_unreduced = neg(modulating_factor * alpha_var * log_probs * target_f32);
 
     // Sum over class dimension
     auto loss_per_sample = sum(loss_unreduced, 1, false);

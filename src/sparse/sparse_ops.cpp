@@ -5,6 +5,7 @@
 #include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include <algorithm>
+#include <complex>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -1371,9 +1372,19 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
         SparseTensor b_on_dev = (b.device() == a.device()) ? b : b.to(a.device());
         auto ac = extract_csr_on_device(a);
         auto bc = extract_csr_on_device(b_on_dev);
+        // Half-precision widen-narrow, matching the CPU path: backend SpGEMM
+        // kernels are typically only instantiated for F32/F64, so widen the
+        // F16/BF16 value buffers to F32 before dispatch and narrow the result
+        // back. Without this, half-precision sparse×sparse on GPU throws while
+        // the same op on CPU succeeds.
+        const DType orig_dtype = a.dtype();
+        const bool widen_half = (orig_dtype == DType::Float16 ||
+                                 orig_dtype == DType::BFloat16);
+        Tensor a_vals = widen_half ? ac.values.to(DType::Float32) : ac.values;
+        Tensor b_vals = widen_half ? bc.values.to(DType::Float32) : bc.values;
         std::vector<Tensor> inputs = {
-            ac.crow, ac.col, ac.values,
-            bc.crow, bc.col, bc.values,
+            ac.crow, ac.col, a_vals,
+            bc.crow, bc.col, b_vals,
         };
         OpAttributes attrs;
         attrs.set(AttrKey::M, M);
@@ -1387,8 +1398,9 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
                     "sparse::spgemm: dispatch must return 3 tensors "
                     "(crow, col, values), got " + std::to_string(results.size()));
             }
+            Tensor out_vals = widen_half ? results[2].to(orig_dtype) : results[2];
             return SparseTensor::sparse_csr(
-                results[0], results[1], results[2],
+                results[0], results[1], out_vals,
                 std::vector<int64_t>{M, N});
         }
         throw std::runtime_error(
@@ -1568,6 +1580,21 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
     }
     int64_t N = L_shape[0];
 
+    // Float16 / BFloat16 widen-narrow, matching spmm/spmv/spgemm/sddmm/softmax:
+    // the substitution kernels (and vendor sparse libraries) lack half-precision
+    // instantiations, so widen L's values and b to Float32, solve, then narrow
+    // the result back. Without this, half-precision sparse triangular solve
+    // throws while every other sparse op accepts it.
+    if (b.dtype() == DType::Float16 || b.dtype() == DType::BFloat16) {
+        const DType orig = b.dtype();
+        auto L_sh = std::vector<int64_t>(L.shape().begin(), L.shape().end());
+        SparseTensor L_w = SparseTensor::sparse_csr(
+            L.to_csr().crow_indices(), L.to_csr().col_indices(),
+            L.to_csr().values().to(DType::Float32), L_sh);
+        Tensor b_w = b.to(DType::Float32);
+        return sparse_triangular_solve(L_w, b_w, upper).to(orig);
+    }
+
     if (L.device().type != b.device().type) {
         throw std::runtime_error(
             "sparse_triangular_solve: L and b must be on the same device (L on " +
@@ -1629,6 +1656,10 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
             return cpu_sparse_trsv<float>(L_csr, b, upper, N);
         } else if (b.dtype() == DType::Float64) {
             return cpu_sparse_trsv<double>(L_csr, b, upper, N);
+        } else if (b.dtype() == DType::Complex64) {
+            return cpu_sparse_trsv<std::complex<float>>(L_csr, b, upper, N);
+        } else if (b.dtype() == DType::Complex128) {
+            return cpu_sparse_trsv<std::complex<double>>(L_csr, b, upper, N);
         } else {
             throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
                 std::string(dtype_name(b.dtype())));
@@ -1639,6 +1670,10 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
             return cpu_sparse_trsm<float>(L_csr, b, upper, N, K);
         } else if (b.dtype() == DType::Float64) {
             return cpu_sparse_trsm<double>(L_csr, b, upper, N, K);
+        } else if (b.dtype() == DType::Complex64) {
+            return cpu_sparse_trsm<std::complex<float>>(L_csr, b, upper, N, K);
+        } else if (b.dtype() == DType::Complex128) {
+            return cpu_sparse_trsm<std::complex<double>>(L_csr, b, upper, N, K);
         } else {
             throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
                 std::string(dtype_name(b.dtype())));

@@ -10,6 +10,9 @@
 
 #include "vulkan_helpers.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
+#include <cassert>
+#include <cstdint>
+#include <vector>
 #ifdef TENZOR_HAS_VMA
 // Emit the Vulkan Memory Allocator implementation in exactly this translation
 // unit. VMA is header-only; without VMA_IMPLEMENTATION the vma* symbols
@@ -239,42 +242,51 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
         return;
     }
 
-    // Determine device ID from allocations map
-    int32_t device_id = 0;
-    {
+    // Resolve the owning Vulkan device of a device pointer. A pointer may be the
+    // exact allocation base or a view into the middle of one (sliced / in-place
+    // target), so fall back to a range scan. Throws (never silently uses device
+    // 0) so a multi-GPU host can't submit on the wrong device's queue.
+    auto resolve_device = [this](const void* device_ptr) -> int32_t {
         std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
-        // For HostToDevice, dst is on device; for DeviceToHost, src is on device;
-        // for DeviceToDevice, either works
-        const void* device_ptr = (kind == CopyKind::DeviceToHost) ? src : dst;
         auto it = allocations_.find(const_cast<void*>(device_ptr));
         if (it != allocations_.end()) {
-            device_id = it->second.second;
-        } else {
-            // The pointer may be a view into the middle of an allocation
-            // (sliced / in-place target). Mirror getVulkanBufferAndOffset and
-            // memset: range-scan for the allocation whose [base, base+size)
-            // contains device_ptr and use its owning device.
-            const auto* view_ptr = static_cast<const char*>(device_ptr);
-            bool found = false;
-            for (const auto& [alloc_base, info] : allocations_) {
-                const auto* base = static_cast<const char*>(alloc_base);
-                size_t alloc_size = info.first;
-                if (view_ptr >= base && view_ptr < base + alloc_size) {
-                    device_id = info.second;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                // Don't silently fall back to device 0 — on a multi-GPU host
-                // that would submit the staging copy on the wrong device's
-                // queue.
-                throw std::runtime_error(
-                    "VulkanBackend::copy: device pointer not found in "
-                    "allocations; cannot determine the owning device");
+            return it->second.second;
+        }
+        const auto* view_ptr = static_cast<const char*>(device_ptr);
+        for (const auto& [alloc_base, info] : allocations_) {
+            const auto* base = static_cast<const char*>(alloc_base);
+            if (view_ptr >= base && view_ptr < base + info.first) {
+                return info.second;
             }
         }
+        throw std::runtime_error(
+            "VulkanBackend::copy: device pointer not found in "
+            "allocations; cannot determine the owning device");
+    };
+
+    // Cross-device DeviceToDevice must route through a host staging bounce: a
+    // single command buffer / vkCmdCopyBuffer may only reference buffers that
+    // live on the SAME VkDevice (a buffer can only be used on its owning
+    // device), so binding src (device A) and dst (device B) into one copy is
+    // undefined behaviour. Detect it BEFORE taking any per-device lock so the
+    // recursive D2H/H2D calls each lock only their own device (no two-device
+    // lock held at once → no cross-device lock-ordering deadlock).
+    if (kind == CopyKind::DeviceToDevice) {
+        const int32_t src_device = resolve_device(src);
+        const int32_t dst_device = resolve_device(dst);
+        if (src_device != dst_device) {
+            std::vector<uint8_t> host_staging(bytes);
+            copy(host_staging.data(), src, bytes, CopyKind::DeviceToHost);
+            copy(dst, host_staging.data(), bytes, CopyKind::HostToDevice);
+            return;
+        }
     }
+
+    // Determine device ID for the single-device path.
+    // For HostToDevice, dst is on device; for DeviceToHost, src is on device;
+    // for (same-device) DeviceToDevice, either works.
+    const void* device_ptr = (kind == CopyKind::DeviceToHost) ? src : dst;
+    int32_t device_id = resolve_device(device_ptr);
 
     // Lock per-device mutex for GPU command submission
     std::lock_guard<std::recursive_mutex> dev_lock(devices_[device_id].mutex);
@@ -365,6 +377,8 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             break;
         }
         case CopyKind::DeviceToDevice: {
+            // Same-device D2D only — the cross-device case was handled above via
+            // a host staging bounce before any per-device lock was taken.
             auto [src_buffer, src_offset] = getVulkanBufferAndOffset(src);
             auto [dst_buffer, dst_offset] = getVulkanBufferAndOffset(dst);
             VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -445,6 +459,16 @@ auto VulkanBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id
         if (found && aligned_bytes > avail) {
             // Clamp to the owning allocation boundary — the caller only needs
             // 'bytes' filled, but rounding up could overrun the buffer.
+            //
+            // Correctness invariant: the allocator rounds every allocation up to
+            // a multiple of 4 (allocate()), and views are sub-ranges of such
+            // allocations, so `avail` is always a multiple of 4 and the
+            // `avail & ~3` re-align below is a no-op that never drops requested
+            // fill bytes. Assert it so a future sub-4B-padded allocation path
+            // cannot silently start truncating the tail of a memset.
+            assert((avail % 4 == 0) &&
+                   "Vulkan memset: owning allocation size must be 4-byte aligned; "
+                   "otherwise the clamp would drop the last 1-3 fill bytes");
             aligned_bytes = avail;
             // Re-align down to 4-byte boundary (vkCmdFillBuffer requirement)
             aligned_bytes &= ~size_t(3);

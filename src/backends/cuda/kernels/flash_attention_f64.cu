@@ -188,54 +188,58 @@ __global__ void flash_attention_v2_kernel_f64(
         __syncthreads();
         double block_max = reduce_buf[0];
 
-        // All-masked tile early-out (matches FP32 kernel).
-        if (block_max == -INFINITY) {
-            __syncthreads();
-            continue;
-        }
-
-        // Step 2: exp(score - max) + per-tile sum.
-        double local_sum = 0.0;
-        for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
-            double exp_score = exp(scores_shared[j] - block_max);
-            scores_shared[j] = exp_score;
-            local_sum += exp_score;
-        }
-        __syncthreads();
-
-        local_sum = warp_sum_reduce_f64(local_sum);
-        if (lane_id == 0) reduce_buf[warp_id] = local_sum;
-        __syncthreads();
-
-        if (warp_id == 0) {
-            double val = (lane_id < num_warps) ? reduce_buf[lane_id] : 0.0;
-            val = warp_sum_reduce_f64(val);
-            if (lane_id == 0) reduce_buf[0] = val;
-        }
-        __syncthreads();
-        double block_sum = reduce_buf[0];
-
-        // Step 3: online-softmax merge.
-        double m_new    = (m_prev > block_max) ? m_prev : block_max;
-        double exp_prev = exp(m_prev - m_new);
-        double exp_curr = exp(block_max - m_new);
-        double l_new    = exp_prev * l_prev + exp_curr * block_sum;
-
-        // Step 4: rescale previous output and accumulate P @ V for this tile.
-        for (int i = 0; i < 4; ++i) {
-            int d = tid + i * BLOCK_SIZE;
-            if (d < HEAD_DIM) {
-                o_local[i] *= exp_prev;
-                double pv_sum = 0.0;
-                for (int j = 0; j < actual_Bc; ++j) {
-                    pv_sum += scores_shared[j] * V_tile[j * K_STRIDE + d];
-                }
-                o_local[i] += exp_curr * pv_sum;
+        // All-masked tile (fully causal-masked): skip the softmax/accumulate
+        // steps but DO NOT `continue` — falling through guarantees the loop
+        // body's terminal __syncthreads() at the bottom always executes, so the
+        // next iteration's K_tile/V_tile overwrite is correctly ordered against
+        // any prior smem use regardless of which branch ran. (Every thread sees
+        // the same block_max broadcast via reduce_buf[0], so the branch is
+        // warp-uniform — no divergence.) The previous `__syncthreads(); continue;`
+        // dropped the terminal sync on this path, a latent smem WAR race.
+        if (block_max != -INFINITY) {
+            // Step 2: exp(score - max) + per-tile sum.
+            double local_sum = 0.0;
+            for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
+                double exp_score = exp(scores_shared[j] - block_max);
+                scores_shared[j] = exp_score;
+                local_sum += exp_score;
             }
-        }
+            __syncthreads();
 
-        m_prev = m_new;
-        l_prev = l_new;
+            local_sum = warp_sum_reduce_f64(local_sum);
+            if (lane_id == 0) reduce_buf[warp_id] = local_sum;
+            __syncthreads();
+
+            if (warp_id == 0) {
+                double val = (lane_id < num_warps) ? reduce_buf[lane_id] : 0.0;
+                val = warp_sum_reduce_f64(val);
+                if (lane_id == 0) reduce_buf[0] = val;
+            }
+            __syncthreads();
+            double block_sum = reduce_buf[0];
+
+            // Step 3: online-softmax merge.
+            double m_new    = (m_prev > block_max) ? m_prev : block_max;
+            double exp_prev = exp(m_prev - m_new);
+            double exp_curr = exp(block_max - m_new);
+            double l_new    = exp_prev * l_prev + exp_curr * block_sum;
+
+            // Step 4: rescale previous output and accumulate P @ V for this tile.
+            for (int i = 0; i < 4; ++i) {
+                int d = tid + i * BLOCK_SIZE;
+                if (d < HEAD_DIM) {
+                    o_local[i] *= exp_prev;
+                    double pv_sum = 0.0;
+                    for (int j = 0; j < actual_Bc; ++j) {
+                        pv_sum += scores_shared[j] * V_tile[j * K_STRIDE + d];
+                    }
+                    o_local[i] += exp_curr * pv_sum;
+                }
+            }
+
+            m_prev = m_new;
+            l_prev = l_new;
+        }
         __syncthreads();
     }
 

@@ -2025,11 +2025,22 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::MaxPool2d:
             if (!input_vars.empty()) {
                 OpAttributes pool_attrs;
-                pool_attrs.set(AttrKey::KernelSize, node->get_int_attr("kernel_size"));
-                pool_attrs.set(AttrKey::Stride, node->has_attr("stride") ?
-                    node->get_int_attr("stride") : node->get_int_attr("kernel_size"));
-                pool_attrs.set(AttrKey::Padding, node->has_attr("padding") ?
-                    node->get_int_attr("padding") : static_cast<int64_t>(0));
+                const int64_t kh = node->get_int_attr("kernel_size");
+                const int64_t sh = node->has_attr("stride") ?
+                    node->get_int_attr("stride") : kh;
+                const int64_t ph = node->has_attr("padding") ?
+                    node->get_int_attr("padding") : static_cast<int64_t>(0);
+                pool_attrs.set(AttrKey::KernelSize, kh);
+                pool_attrs.set(AttrKey::Stride, sh);
+                pool_attrs.set(AttrKey::Padding, ph);
+                // Per-axis W attrs so non-square pools replay correctly; fall
+                // back to the H value (square) for legacy traces without them.
+                pool_attrs.set(AttrKey::KernelSizeW,
+                    node->has_attr("kernel_size_w") ? node->get_int_attr("kernel_size_w") : kh);
+                pool_attrs.set(AttrKey::StrideW,
+                    node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh);
+                pool_attrs.set(AttrKey::PaddingW,
+                    node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph);
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::MaxPool2dForward, inputs, pool_attrs);
                 if (!result.empty()) {
@@ -2041,11 +2052,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::AvgPool2d:
             if (!input_vars.empty()) {
                 OpAttributes pool_attrs;
-                pool_attrs.set(AttrKey::KernelSize, node->get_int_attr("kernel_size"));
-                pool_attrs.set(AttrKey::Stride, node->has_attr("stride") ?
-                    node->get_int_attr("stride") : node->get_int_attr("kernel_size"));
-                pool_attrs.set(AttrKey::Padding, node->has_attr("padding") ?
-                    node->get_int_attr("padding") : static_cast<int64_t>(0));
+                const int64_t kh = node->get_int_attr("kernel_size");
+                const int64_t sh = node->has_attr("stride") ?
+                    node->get_int_attr("stride") : kh;
+                const int64_t ph = node->has_attr("padding") ?
+                    node->get_int_attr("padding") : static_cast<int64_t>(0);
+                pool_attrs.set(AttrKey::KernelSize, kh);
+                pool_attrs.set(AttrKey::Stride, sh);
+                pool_attrs.set(AttrKey::Padding, ph);
+                pool_attrs.set(AttrKey::KernelSizeW,
+                    node->has_attr("kernel_size_w") ? node->get_int_attr("kernel_size_w") : kh);
+                pool_attrs.set(AttrKey::StrideW,
+                    node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh);
+                pool_attrs.set(AttrKey::PaddingW,
+                    node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph);
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::AvgPool2dForward, inputs, pool_attrs);
                 if (!result.empty()) {

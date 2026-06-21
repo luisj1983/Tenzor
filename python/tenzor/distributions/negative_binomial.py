@@ -88,7 +88,12 @@ class NegativeBinomial(Distribution):
     def entropy(self, n_samples: int = 10000, rng=None):
         """Monte-Carlo entropy estimate (no closed form)."""
         if rng is None:
-            rng = np.random.default_rng()
+            # Derive the Monte-Carlo generator's seed from the most recent
+            # tz.manual_seed() so this estimate is reproducible; fall back to
+            # fresh entropy when manual_seed() has not been called.
+            import tenzor as _tz
+            _seed = _tz.initial_seed()
+            rng = np.random.default_rng(_seed)
         # Sample n_samples and compute empirical entropy via -E[log p(x)].
         # Thread the Generator through so results are reproducible and the
         # global numpy RNG state is left untouched.

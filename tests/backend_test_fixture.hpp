@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include <cmath>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -33,6 +34,11 @@ namespace testing {
 // Call this from BackendTest::SetUp, any TestEnvironment::SetUp, or any
 // custom fixture's SetUp / SetUpTestSuite. Never call `tenzor::initialize()`
 // directly from a test (see header banner above).
+// Guarded so this header and multi_backend_dtype_fixture.hpp can both be
+// included in one TU without an ODR redefinition of this inline function.
+// Whichever header is processed first provides the (identical) definition.
+#ifndef TENZOR_TESTING_ENSURE_INITIALIZED_DEFINED
+#define TENZOR_TESTING_ENSURE_INITIALIZED_DEFINED
 inline void EnsureInitialized() {
     static std::once_flag flag;
     std::call_once(flag, []() {
@@ -44,6 +50,7 @@ inline void EnsureInitialized() {
         tenzor::initialize();
     });
 }
+#endif // TENZOR_TESTING_ENSURE_INITIALIZED_DEFINED
 
 // Forward declarations for parsing utilities (defined in multi_backend_dtype_fixture.hpp).
 // Duplicated here to keep this header self-contained.
@@ -248,7 +255,7 @@ protected:
         }
     }
 
-    // Helper to compare tensors across devices
+    // Helper to compare tensors across devices (absolute tolerance only).
     void expectTensorNear(const Tensor& a, const Tensor& b, float tolerance = 1e-5f) {
         ASSERT_EQ(a.numel(), b.numel()) << "Tensors have different number of elements";
 
@@ -263,6 +270,31 @@ protected:
             EXPECT_NEAR(a_data[i], b_data[i], tolerance)
                 << "Mismatch at index " << i
                 << " on device " << device.to_string();
+        }
+    }
+
+    // Combined relative+absolute tolerance, matching tensors_close:
+    //   |a - b| <= atol + rtol * |b|
+    // Use this for gradient/value parity so large-magnitude elements get a
+    // relative band instead of being judged only by an absolute bound (which
+    // silently tolerates magnitude-proportional error). `b` is treated as the
+    // reference (CPU) tensor for the relative term.
+    void expectTensorNear(const Tensor& a, const Tensor& b, float rtol, float atol) {
+        ASSERT_EQ(a.numel(), b.numel()) << "Tensors have different number of elements";
+
+        auto a_cpu = a.to(Device::cpu());
+        auto b_cpu = b.to(Device::cpu());
+
+        auto* a_data = a_cpu.data<float>();
+        auto* b_data = b_cpu.data<float>();
+
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            const float allowed = atol + rtol * std::abs(b_data[i]);
+            EXPECT_LE(std::abs(a_data[i] - b_data[i]), allowed)
+                << "Mismatch at index " << i << " on device "
+                << device.to_string() << " (|a-b|=" << std::abs(a_data[i] - b_data[i])
+                << " > atol+rtol*|b|=" << allowed << ", a=" << a_data[i]
+                << " b=" << b_data[i] << ", rtol=" << rtol << " atol=" << atol << ")";
         }
     }
 };

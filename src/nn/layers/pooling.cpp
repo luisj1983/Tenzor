@@ -179,9 +179,17 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
             auto out_id = tracer.register_new_tensor(output);
             ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::MaxPool2d,
                                        {in_id}, {out_id});
+            // Scalar H-axis attrs retained for backward compatibility with
+            // square-pool consumers.
             op.int_attrs["kernel_size"] = kernel_size_h_;
             op.int_attrs["stride"]      = stride_h_;
             op.int_attrs["padding"]     = padding_h_;
+            // Per-axis attrs so a non-square pool (e.g. kernel {2,3}) replays /
+            // exports with the correct W-axis values instead of collapsing to
+            // square. Mirrors AdaptiveAvgPool2d's vec_attrs.
+            op.int_attrs["kernel_size_w"] = kernel_size_w_;
+            op.int_attrs["stride_w"]      = stride_w_;
+            op.int_attrs["padding_w"]     = padding_w_;
             tracer.record_op(std::move(op));
         }
     }
@@ -364,9 +372,15 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
             auto out_id = tracer.register_new_tensor(output);
             ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::AvgPool2d,
                                        {in_id}, {out_id});
+            // Scalar H-axis attrs retained for backward compatibility with
+            // square-pool consumers.
             op.int_attrs["kernel_size"] = kernel_size_h_;
             op.int_attrs["stride"]      = stride_h_;
             op.int_attrs["padding"]     = padding_h_;
+            // Per-axis attrs so a non-square pool replays/exports correctly.
+            op.int_attrs["kernel_size_w"] = kernel_size_w_;
+            op.int_attrs["stride_w"]      = stride_w_;
+            op.int_attrs["padding_w"]     = padding_w_;
             tracer.record_op(std::move(op));
         }
     }

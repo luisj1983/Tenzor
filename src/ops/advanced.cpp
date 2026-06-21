@@ -16,6 +16,7 @@
 #include "tenzor/ops/math.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -1156,6 +1157,13 @@ auto kron(const Tensor& a, const Tensor& b) -> Tensor {
     int64_t m = a.shape()[0], n = a.shape()[1];
     int64_t p = b.shape()[0], q = b.shape()[1];
 
+    // Overflow guard on the output extents m*p and n*q before they feed
+    // reshape(); a wrapped-negative extent is undefined downstream.
+    if ((p != 0 && m > std::numeric_limits<int64_t>::max() / p) ||
+        (q != 0 && n > std::numeric_limits<int64_t>::max() / q)) {
+        throw std::overflow_error("kron: output dimensions overflow int64_t");
+    }
+
     // kron(A, B) = A ⊗ B
     // Reshape A to (m, 1, n, 1), B to (1, p, 1, q), multiply, reshape to (m*p, n*q)
     auto a4 = a.reshape({m, 1, n, 1});
@@ -1252,10 +1260,15 @@ auto cartesian_prod(std::span<const Tensor> tensors) -> Tensor {
         return tensors[0].reshape({tensors[0].shape()[0], 1});
     }
 
-    // Compute total number of rows
+    // Compute total number of rows, guarding against int64 overflow (a wrapped
+    // negative total would feed a corrupt extent into zeros()).
     int64_t total = 1;
     for (const auto& t : tensors) {
-        total *= t.shape()[0];
+        int64_t dim0 = t.shape()[0];
+        if (dim0 != 0 && total > std::numeric_limits<int64_t>::max() / dim0) {
+            throw std::overflow_error("cartesian_prod: number of rows overflows int64_t");
+        }
+        total *= dim0;
     }
 
     // If any input is empty, the cartesian product is empty. Returning before
@@ -1319,6 +1332,34 @@ auto combinations(const Tensor& input, int64_t r, bool with_replacement) -> Tens
     // the same pattern the rest of the codebase uses for host-built strides
     // / offsets / topology metadata; the *output* tensor is produced on the
     // input device by a real GPU kernel.
+    // Bound the number of combinations BEFORE enumerating them into a flat
+    // vector — otherwise a large (n, r) silently allocates an enormous buffer
+    // (OOM/DoS). Compute C(n,r) (or, with replacement, C(n+r-1, r)) with
+    // overflow detection and reject anything that overflows int64.
+    {
+        int64_t nn = with_replacement ? (n + r - 1) : n;
+        // With replacement is always valid; without, r > n yields zero combos.
+        if (with_replacement || r <= n) {
+            int64_t kk = std::min(r, nn - r);
+            int64_t count = 1;
+            bool overflow = false;
+            for (int64_t i = 0; i < kk && !overflow; ++i) {
+                // count = count * (nn - kk + 1 + i) / (i + 1), kept exact.
+                int64_t factor = nn - kk + 1 + i;
+                if (factor != 0 && count > std::numeric_limits<int64_t>::max() / factor) {
+                    overflow = true;
+                    break;
+                }
+                count = count * factor / (i + 1);
+            }
+            if (overflow ||
+                (count != 0 && count > std::numeric_limits<int64_t>::max() / r)) {
+                throw std::overflow_error(
+                    "combinations: number of combinations is too large to enumerate");
+            }
+        }
+    }
+
     std::vector<int64_t> flat_indices;
     {
         std::vector<int64_t> current;

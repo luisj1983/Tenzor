@@ -379,10 +379,18 @@ TEST_P(BackendStressParity, Performance_MatMul_Benchmark) {
     }
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    const double avg_ms = static_cast<double>(duration) / iterations;
     std::cout << "Backend " << backend_name(device)
               << " MatMul " << shape[0] << "x" << shape[1]
-              << " average time: " << (duration / iterations) << " ms\n";
-    SUCCEED();
+              << " average time: " << avg_ms << " ms\n";
+    // Generous catastrophic-regression floor: a 1024x1024 FP32 matmul is well
+    // under a second per iteration on any healthy backend. A SUCCEED()-only
+    // body let a 1000x regression or a deadlock pass silently; assert the
+    // average iteration time is below an absurd ceiling no backend approaches.
+    EXPECT_GE(avg_ms, 0.0);
+    EXPECT_LT(avg_ms, 5000.0)
+        << "catastrophic MatMul regression on " << backend_name(device)
+        << ": " << avg_ms << " ms/iter";
 }
 
 TEST_P(BackendStressParity, Performance_MatMul_Large_Benchmark) {
@@ -402,9 +410,13 @@ TEST_P(BackendStressParity, Performance_MatMul_Large_Benchmark) {
     }
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    const double avg_ms = static_cast<double>(duration) / iterations;
     std::cout << "Backend " << backend_name(device)
-              << " MatMul 512x512 average time: " << (duration / iterations) << " ms\n";
-    SUCCEED();
+              << " MatMul 512x512 average time: " << avg_ms << " ms\n";
+    EXPECT_GE(avg_ms, 0.0);
+    EXPECT_LT(avg_ms, 5000.0)
+        << "catastrophic MatMul regression on " << backend_name(device)
+        << ": " << avg_ms << " ms/iter";
 }
 
 TEST_P(BackendStressParity, StabilityUnderLoad_Repeated) {

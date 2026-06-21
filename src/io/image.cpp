@@ -3,6 +3,24 @@
  * @brief Image I/O implementation using stb_image and stb_image_write.
  */
 
+// This translation unit decodes UNTRUSTED image bytes. stb sniffs the format
+// by content (not by the caller's intent), so without these guards a caller
+// that thinks it is decoding a PNG would happily run an attacker-supplied
+// GIF/PSD/PIC/HDR/PNM through the corresponding (historically memory-unsafe,
+// CVE-prone) C decoder. Compile in ONLY the formats this library actually
+// supports end-to-end (JPEG/PNG/BMP/TGA — the same set write_image emits) and
+// exclude the dangerous decoders entirely so they are not even reachable.
+#define STBI_NO_GIF
+#define STBI_NO_PSD
+#define STBI_NO_PIC
+#define STBI_NO_HDR
+#define STBI_NO_PNM
+// Cap the maximum accepted image dimension well below stb's 32768 default so a
+// tiny crafted header cannot declare a multi-gigapixel image and force a
+// multi-GB decode/transpose allocation (amplification DoS). 16384 covers any
+// realistic photo/dataset image; see decode_from_memory/read_image for the
+// application-level pixel-count ceiling that backs this up.
+#define STBI_MAX_DIMENSIONS 16384
 #define STB_IMAGE_IMPLEMENTATION
 #include "tenzor/io/stb/stb_image.h"
 
@@ -160,6 +178,43 @@ void stbi_write_to_vec(void* context, void* data, int size) {
     vec->insert(vec->end(), bytes, bytes + size);
 }
 
+// Application-level ceiling on the total decoded pixel count (across all
+// channels). STBI_MAX_DIMENSIONS bounds each axis, but width*height*channels
+// can still be large; reject anything beyond this so a crafted header cannot
+// force a multi-GB allocation in stb and again in hwc_to_chw_tensor.
+constexpr int64_t kMaxDecodedElements = 256LL * 1024 * 1024;  // 256M elements (~256 MB u8)
+
+void validate_decoded_dims(int width, int height, int channels) {
+    if (width <= 0 || height <= 0 || channels <= 0) {
+        throw std::runtime_error("decode: decoder returned non-positive dimensions");
+    }
+    const int64_t total =
+        static_cast<int64_t>(width) * static_cast<int64_t>(height) * static_cast<int64_t>(channels);
+    if (total > kMaxDecodedElements) {
+        throw std::runtime_error(
+            "decode: decoded image too large (" + std::to_string(total) +
+            " elements exceeds limit " + std::to_string(kMaxDecodedElements) + ")");
+    }
+}
+
+// Enforce the expected container format on the raw bytes so a caller asking for
+// a JPEG/PNG cannot be silently handed a different (content-sniffed) format.
+enum class ExpectFormat { JPEG, PNG };
+
+void check_magic(const uint8_t* data, size_t len, ExpectFormat fmt) {
+    if (fmt == ExpectFormat::JPEG) {
+        // SOI marker: FF D8 FF
+        if (len < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF) {
+            throw std::runtime_error("decode_jpeg: input is not a JPEG (bad magic)");
+        }
+    } else {  // PNG
+        static const uint8_t sig[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+        if (len < 8 || std::memcmp(data, sig, 8) != 0) {
+            throw std::runtime_error("decode_png: input is not a PNG (bad magic)");
+        }
+    }
+}
+
 auto decode_from_memory(const uint8_t* data, size_t len, ImageMode mode) -> Tensor {
     int width, height, actual_channels;
     int desired = mode_to_channels(mode);
@@ -182,6 +237,12 @@ auto decode_from_memory(const uint8_t* data, size_t len, ImageMode mode) -> Tens
     }
 
     int out_channels = (desired > 0) ? desired : actual_channels;
+    try {
+        validate_decoded_dims(width, height, out_channels);
+    } catch (...) {
+        stbi_image_free(pixels);
+        throw;
+    }
     auto tensor = hwc_to_chw_tensor(pixels, width, height, out_channels);
     stbi_image_free(pixels);
     return tensor;
@@ -202,6 +263,12 @@ auto read_image(const std::string& path, ImageMode mode) -> Tensor {
     }
 
     int out_channels = (desired > 0) ? desired : actual_channels;
+    try {
+        validate_decoded_dims(width, height, out_channels);
+    } catch (...) {
+        stbi_image_free(pixels);
+        throw;
+    }
     auto tensor = hwc_to_chw_tensor(pixels, width, height, out_channels);
     stbi_image_free(pixels);
     return tensor;
@@ -251,10 +318,12 @@ void write_image(const Tensor& tensor, const std::string& path, int quality) {
 }
 
 auto decode_jpeg(const std::vector<uint8_t>& data, ImageMode mode) -> Tensor {
+    check_magic(data.data(), data.size(), ExpectFormat::JPEG);
     return decode_from_memory(data.data(), data.size(), mode);
 }
 
 auto decode_png(const std::vector<uint8_t>& data, ImageMode mode) -> Tensor {
+    check_magic(data.data(), data.size(), ExpectFormat::PNG);
     return decode_from_memory(data.data(), data.size(), mode);
 }
 

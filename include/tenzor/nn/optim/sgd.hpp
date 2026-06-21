@@ -138,6 +138,12 @@ private:
     bool nesterov_;
 
     std::vector<Tensor> velocity_buffers_;
+    // Tracks whether each velocity buffer has received its first momentum
+    // update. On the first step PyTorch sets buf = grad (no dampening); only on
+    // subsequent steps does it apply buf = buf*momentum + grad*(1-dampening).
+    // Zero-initialised buffers cannot encode this distinction, so we track it
+    // explicitly. Index-aligned with velocity_buffers_/parameters_.
+    std::vector<bool> velocity_initialized_;
 
     auto initialize_buffers() -> void;
 };

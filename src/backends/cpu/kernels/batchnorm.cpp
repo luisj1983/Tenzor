@@ -2,7 +2,6 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backends/cpu/simd.hpp"
 #include "tenzor/backend/runtime_simd.hpp"
-#include "half_operators.hpp"
 #include <bit>
 #include <cmath>
 #include <vector>
@@ -192,8 +191,11 @@ void batchnorm_mean_var_impl(const T* input,
     // (Float16/BFloat16); running the mean/variance recurrence in half loses
     // precision and can overflow (Float16 max ~65504), diverging from the CPU
     // float reference. For float/double, Acc == T (behavior unchanged).
-    using Acc = std::conditional_t<
-        std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, T>;
+    // Accumulate in double for all input types. float (T=float or the F16/BF16
+    // float accumulator) is exact for integer counts only up to 2^24, so
+    // static_cast<float>(count) collapses consecutive counts past 16.7M elements
+    // per channel and stalls the Welford mean update. double is exact to 2^53.
+    using Acc = double;
 
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
@@ -651,10 +653,20 @@ static bool batchnorm2d_forward_affine_onednn(
         auto src_mem = dnnl::memory(cached->src_md, engine,
                                     const_cast<void*>(input.storage()->data()));
         auto dst_mem = dnnl::memory(cached->src_md, engine, output.storage()->data());
-        auto scale_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(gamma.data<float>()));
-        auto shift_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(beta.data<float>()));
-        auto mean_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(mean.data<float>()));
-        auto var_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(variance.data<float>()));
+        // oneDNN requires F32 scale/shift/stats (sc_md is f32). When the input
+        // is F16/BF16 the caller may pass gamma/beta/mean/var in that same
+        // 16-bit dtype; reading their storage as float32 would reinterpret the
+        // bit patterns as garbage. Convert to F32 when needed. These temporaries
+        // live until function return (after stream.wait()), so the wrapped
+        // pointers stay valid for the execute() call below.
+        Tensor gamma_f32 = gamma.dtype() == DType::Float32 ? gamma : gamma.to(DType::Float32);
+        Tensor beta_f32  = beta.dtype()  == DType::Float32 ? beta  : beta.to(DType::Float32);
+        Tensor mean_f32  = mean.dtype()  == DType::Float32 ? mean  : mean.to(DType::Float32);
+        Tensor var_f32   = variance.dtype() == DType::Float32 ? variance : variance.to(DType::Float32);
+        auto scale_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(gamma_f32.data<float>()));
+        auto shift_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(beta_f32.data<float>()));
+        auto mean_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(mean_f32.data<float>()));
+        auto var_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(var_f32.data<float>()));
 
         // Execute cached primitive
         cached->prim.execute(stream, {
@@ -1026,7 +1038,7 @@ void batchnorm_backward_impl(const T* grad_output,
     for (int64_t c = 0; c < C; c++) {
         Acc channel_mean = static_cast<Acc>(mean[c]);
         Acc channel_var = static_cast<Acc>(variance[c]);
-        Acc invstd = Acc(1.0) / std::sqrt(channel_var + static_cast<Acc>(epsilon));
+        Acc invstd = Acc(1.0) / safe_sqrt(channel_var + static_cast<Acc>(epsilon));
 
         // Compute grad_gamma = sum(grad_output * normalized)
         // Compute grad_beta = sum(grad_output)
@@ -1057,7 +1069,7 @@ void batchnorm_backward_impl(const T* grad_output,
     for (int64_t c = 0; c < C; c++) {
         Acc channel_mean = static_cast<Acc>(mean[c]);
         Acc channel_var = static_cast<Acc>(variance[c]);
-        Acc invstd = Acc(1.0) / std::sqrt(channel_var + static_cast<Acc>(epsilon));
+        Acc invstd = Acc(1.0) / safe_sqrt(channel_var + static_cast<Acc>(epsilon));
         Acc channel_gamma = static_cast<Acc>(gamma[c]);
 
         // Compute auxiliary statistics in Acc precision

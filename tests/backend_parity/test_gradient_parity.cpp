@@ -42,7 +42,7 @@ protected:
         auto backend_grad_cpu = backend_grad.to(Device::cpu());
         device.synchronize();
 
-        expectTensorNear(cpu_grad, backend_grad_cpu, atol);
+        expectTensorNear(cpu_grad, backend_grad_cpu, rtol, atol);
     }
 
     // Run a gradient test on the current device and compare to CPU reference
@@ -194,9 +194,15 @@ TEST_P(GradientParityBackendTest, GELUBackward) {
 }
 
 TEST_P(GradientParityBackendTest, SoftmaxBackward) {
+    // sum(softmax(x, dim=1)) is identically the batch size (each row sums to
+    // 1), so its gradient w.r.t. x is exactly zero — that exercises the
+    // softmax-backward kernel with a zero upstream grad, which a backend that
+    // returns zeros without running the kernel would pass. Use sum(sm*sm) so
+    // the upstream gradient is the non-constant 2*sm, forcing the real
+    // softmax-backward Jacobian (diag(sm) - sm sm^T) to be exercised.
     testUnaryGradient([](const Variable& x) {
         auto sm = tenzor::softmax(x, 1);
-        return tenzor::sum(sm);
+        return tenzor::sum(sm * sm);
     }, {4, 8}, 1e-4f);
 }
 
@@ -241,11 +247,42 @@ TEST_P(GradientParityBackendTest, Conv2dBackward) {
 }
 
 TEST_P(GradientParityBackendTest, BatchNormBackward) {
-    // Test gradient flow through a simple chain instead - batch norm needs module state
-    testUnaryGradient([](const Variable& x) {
-        auto m = tenzor::mean(x);
-        return m;
-    }, {4, 8});
+    // Real BatchNorm2d backward parity. The previous version substituted
+    // tenzor::mean(x) ("batch norm needs module state"), so a BatchNorm
+    // backward bug on any backend was invisible and mean was already covered
+    // by MeanReduction. Exercise the actual BN2d backward in train mode.
+    nn::BatchNorm2d bn(8);
+    auto input_data = randn({2, 8, 4, 4}, DType::Float32, Device::cpu());
+
+    bn.train();
+    bn.to(Device::cpu());
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto out_cpu = bn.forward(x_cpu);
+    auto loss_cpu = tenzor::sum(out_cpu);
+    loss_cpu.backward();
+
+    if (device.type == Device::Type::CPU) {
+        EXPECT_GRAD_FLOWS(x_cpu);
+        return;
+    }
+
+    nn::BatchNorm2d bn_dev(8);
+    bn_dev.train();
+    auto params = bn.parameters();
+    auto dev_params = bn_dev.parameters();
+    for (size_t p = 0; p < params.size(); ++p)
+        dev_params[p]->tensor() = params[p]->tensor().clone();
+    bn_dev.to(device);
+
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = bn_dev.forward(x_dev);
+    auto loss_dev = tenzor::sum(out_dev);
+    loss_dev.backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(x_cpu.grad().value(), x_dev.grad().value(),
+                           1e-5f, 1e-3f);
 }
 
 // ============================================================================

@@ -937,7 +937,12 @@ __global__ void pow_kernel_f16(const __half* input, __half* output, __half expon
 __global__ void clamp_kernel_f16(const __half* input, __half* output, __half min_val, __half max_val, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         __half val = input[idx];
-        output[idx] = __hmax(__hmin(val, max_val), min_val);
+        // Preserve NaN (CPU/PyTorch semantics). __hmin/__hmax return the
+        // non-NaN operand when one input is NaN, silently replacing a NaN
+        // element with min_val/max_val; widen to float, guard, narrow back.
+        float v = __half2float(val);
+        output[idx] = ::isnan(v) ? val
+            : __float2half(fminf(fmaxf(v, __half2float(min_val)), __half2float(max_val)));
     }
 }
 
@@ -993,7 +998,10 @@ __global__ void pow_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outpu
 __global__ void clamp_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16 min_val, __nv_bfloat16 max_val, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         __nv_bfloat16 val = input[idx];
-        output[idx] = __hmax(__hmin(val, max_val), min_val);
+        // Preserve NaN (CPU/PyTorch semantics): __hmin/__hmax drop a NaN operand.
+        float v = __bfloat162float(val);
+        output[idx] = ::isnan(v) ? val
+            : __float2bfloat16(fminf(fmaxf(v, __bfloat162float(min_val)), __bfloat162float(max_val)));
     }
 }
 
@@ -1221,10 +1229,19 @@ __global__ void add_kernel_shared(const T* a, const T* b, T* c, int64_t n) {
 // ============================================================================
 
 // Add kernel launcher
-auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto add_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // The same-shape fast path and the broadcast path both index the operand
+    // buffers as if their strides are the shape-derived contiguous strides
+    // (compute_broadcast_strides walks shape, not a.strides()). The op layer
+    // already contiguifies, but make the kernel self-defending so a direct
+    // caller with a non-contiguous (transposed/sliced) view reads the right
+    // physical elements.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -1452,10 +1469,15 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 }
 
 // Subtract kernel launcher
-auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto sub_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // Self-defending contiguity guard (see add_kernel): the index math assumes
+    // shape-derived contiguous strides for both operands.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -1642,10 +1664,15 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 }
 
 // Multiply kernel launcher
-auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto mul_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // Self-defending contiguity guard (see add_kernel): the index math assumes
+    // shape-derived contiguous strides for both operands.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -1846,10 +1873,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 }
 
 // Divide kernel launcher
-auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto div_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // Self-defending contiguity guard (see add_kernel): the index math assumes
+    // shape-derived contiguous strides for both operands.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -1992,7 +2024,11 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 }
 
 // Negate kernel launcher
-auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto neg_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2042,7 +2078,11 @@ auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // Absolute value kernel launcher
-auto abs_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto abs_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 
@@ -2105,7 +2145,11 @@ auto abs_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // Square root kernel launcher
-auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto sqrt_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2149,7 +2193,11 @@ auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // Exponential kernel launcher
-auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto exp_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2193,7 +2241,11 @@ auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // Natural logarithm kernel launcher
-auto log_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto log_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2324,7 +2376,11 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, cudaStrea
 }
 
 // Sign kernel launcher
-auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto sign_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2360,18 +2416,26 @@ auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-// Trigonometric functions
+// Trigonometric functions.
+//
+// Float32 sin/cos compute the transcendental in double then narrow. Device
+// sinf/cosf carry ~1-2 ULP error, which diverges from the high-accuracy CPU
+// reference (MKL vsSin/vdSin) by ~2.5e-7 — above the 1e-7 transcendental atol —
+// and fails MathOperationParity.Sin/Cos. Evaluating in double brings the result
+// to <1 ULP of Float32, matching the CPU reference within tolerance. This
+// template is only instantiated for float and double (Float16/BFloat16 widen to
+// Float32 on the host above), so the double cast is a no-op for the double path.
 template<typename T>
 __global__ void sin_kernel_impl(const T* input, T* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = sin(input[idx]);
+        output[idx] = static_cast<T>(sin(static_cast<double>(input[idx])));
     }
 }
 
 template<typename T>
 __global__ void cos_kernel_impl(const T* input, T* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = cos(input[idx]);
+        output[idx] = static_cast<T>(cos(static_cast<double>(input[idx])));
     }
 }
 
@@ -2483,7 +2547,11 @@ auto name##_kernel(const Tensor& input, cudaStream_t stream) -> Tensor { \
 // alongside the standard float paths. Other trig ops (tan/asin/acos/atan/
 // sinh/cosh) stick with the DEFINE_TRIG_KERNEL macro because their complex
 // branches aren't implemented here.
-auto sin_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto sin_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         Tensor f32_input = input.to(DType::Float32);
@@ -2514,7 +2582,11 @@ auto sin_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-auto cos_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto cos_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         Tensor f32_input = input.to(DType::Float32);
@@ -4285,10 +4357,15 @@ __global__ void broadcast_compare_kernel(
 
 // Generic comparison launcher
 template<typename Op>
-auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stream, Op op) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto compare_kernel_launcher(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream, Op op) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype for comparison");
     }
+
+    // Self-defending contiguity guard (see add_kernel): the same-shape fast path
+    // and the shape-derived broadcast strides assume contiguous operand layout.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -7535,7 +7612,11 @@ __global__ void log2_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outp
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(log2f(__bfloat162float(input[idx]))); }
 }
 
-auto log2_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto log2_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7577,7 +7658,11 @@ __global__ void log10_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* out
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(log10f(__bfloat162float(input[idx]))); }
 }
 
-auto log10_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto log10_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7619,7 +7704,11 @@ __global__ void log1p_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* out
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(log1pf(__bfloat162float(input[idx]))); }
 }
 
-auto log1p_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto log1p_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7661,7 +7750,11 @@ __global__ void exp2_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outp
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(exp2f(__bfloat162float(input[idx]))); }
 }
 
-auto exp2_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto exp2_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7703,7 +7796,11 @@ __global__ void expm1_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* out
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(expm1f(__bfloat162float(input[idx]))); }
 }
 
-auto expm1_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto expm1_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7745,7 +7842,11 @@ __global__ void erf_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outpu
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(erff(__bfloat162float(input[idx]))); }
 }
 
-auto erf_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto erf_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7787,7 +7888,11 @@ __global__ void erfc_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outp
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(erfcf(__bfloat162float(input[idx]))); }
 }
 
-auto erfc_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto erfc_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -7833,7 +7938,11 @@ __global__ void isnan_kernel_bf16(const __nv_bfloat16* input, uint8_t* output, i
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = static_cast<uint8_t>(isnan(__bfloat162float(input[idx])) ? 1 : 0); }
 }
 
-auto isnan_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto isnan_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Bool, input.device());
@@ -7873,7 +7982,11 @@ __global__ void isinf_kernel_bf16(const __nv_bfloat16* input, uint8_t* output, i
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = static_cast<uint8_t>(isinf(__bfloat162float(input[idx])) ? 1 : 0); }
 }
 
-auto isinf_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto isinf_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Bool, input.device());
@@ -7919,7 +8032,11 @@ __global__ void isfinite_kernel_bf16(const __nv_bfloat16* input, uint8_t* output
     }
 }
 
-auto isfinite_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto isfinite_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Bool, input.device());
@@ -7949,6 +8066,27 @@ auto isfinite_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 // Binary Math Kernels: atan2, fmod, remainder
 // ============================================================================
 
+// These flat binary kernels read a[idx]/b[idx] for idx < a.numel() and allocate
+// the result as a.shape(); they assume a and b already share one shape. The op
+// layer validates broadcastability and contiguifies, but does NOT expand to a
+// common shape (unlike the CPU minimum/maximum kernels, which call
+// compute_broadcast_shape + broadcast_op). Expand both operands to the broadcast
+// shape and materialize contiguous copies so the kernels see identical-shape,
+// contiguous inputs — matching CPU semantics and removing the OOB read.
+static std::pair<Tensor, Tensor> broadcast_binary_operands(const Tensor& a, const Tensor& b) {
+    if (detail::have_same_shape(a, b)) {
+        Tensor ac = a.is_contiguous() ? a : a.contiguous();
+        Tensor bc = b.is_contiguous() ? b : b.contiguous();
+        return {ac, bc};
+    }
+    std::vector<int64_t> a_shape(a.shape().begin(), a.shape().end());
+    std::vector<int64_t> b_shape(b.shape().begin(), b.shape().end());
+    std::vector<int64_t> out_shape = detail::compute_broadcast_shape(a_shape, b_shape);
+    Tensor ae = a.expand(out_shape).contiguous();
+    Tensor be = b.expand(out_shape).contiguous();
+    return {ae, be};
+}
+
 // --- atan2 ---
 __global__ void atan2_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = atan2f(a[idx], b[idx]); }
@@ -7963,8 +8101,9 @@ __global__ void atan2_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(atan2f(__bfloat162float(a[idx]), __bfloat162float(b[idx]))); }
 }
 
-auto atan2_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) throw std::runtime_error("atan2: tensors must have the same dtype");
+auto atan2_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) throw std::runtime_error("atan2: tensors must have the same dtype");
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     int64_t n = a.numel();
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device());
@@ -8008,8 +8147,9 @@ __global__ void fmod_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b,
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(fmodf(__bfloat162float(a[idx]), __bfloat162float(b[idx]))); }
 }
 
-auto fmod_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) throw std::runtime_error("fmod: tensors must have the same dtype");
+auto fmod_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) throw std::runtime_error("fmod: tensors must have the same dtype");
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     int64_t n = a.numel();
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device());
@@ -8053,8 +8193,9 @@ __global__ void remainder_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat1
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(remainderf(__bfloat162float(a[idx]), __bfloat162float(b[idx]))); }
 }
 
-auto remainder_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) throw std::runtime_error("remainder: tensors must have the same dtype");
+auto remainder_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) throw std::runtime_error("remainder: tensors must have the same dtype");
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     int64_t n = a.numel();
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device());
@@ -8283,7 +8424,11 @@ DEFINE_BINARY_LOGICAL_KERNEL(logical_xor)
 
 #undef DEFINE_BINARY_LOGICAL_KERNEL
 
-auto logical_not_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto logical_not_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Bool, input.device());
@@ -8346,8 +8491,9 @@ __global__ void minimum_kernel_int(const T* a, const T* b, T* output, int64_t n)
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = (a[idx] < b[idx]) ? a[idx] : b[idx]; }
 }
 
-auto minimum_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) throw std::runtime_error("minimum: tensors must have the same dtype");
+auto minimum_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) throw std::runtime_error("minimum: tensors must have the same dtype");
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     int64_t n = a.numel();
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device());
@@ -8401,8 +8547,9 @@ __global__ void maximum_kernel_int(const T* a, const T* b, T* output, int64_t n)
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = (a[idx] > b[idx]) ? a[idx] : b[idx]; }
 }
 
-auto maximum_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) throw std::runtime_error("maximum: tensors must have the same dtype");
+auto maximum_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) throw std::runtime_error("maximum: tensors must have the same dtype");
+    auto [a, b] = broadcast_binary_operands(a_in, b_in);
     int64_t n = a.numel();
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device());
@@ -8552,7 +8699,11 @@ __global__ void conj_kernel_c128(const double* input, double* output, int64_t n)
     }
 }
 
-auto conj_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto conj_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 
@@ -8596,7 +8747,11 @@ __global__ void real_kernel_c128(const double* input, double* output, int64_t n)
     }
 }
 
-auto real_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto real_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 
@@ -8639,7 +8794,11 @@ __global__ void imag_kernel_c128(const double* input, double* output, int64_t n)
     }
 }
 
-auto imag_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto imag_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 
@@ -8690,7 +8849,11 @@ __global__ void angle_kernel_f64(const double* input, double* output, int64_t n)
     }
 }
 
-auto angle_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto angle_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     dim3 grid, block;
@@ -9608,7 +9771,11 @@ __global__ void frac_kernel_f32(const float* in, float* out, int64_t n) {
 __global__ void frac_kernel_f64(const double* in, double* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - trunc(in[idx]); }
 }
-auto frac_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto frac_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -9730,7 +9897,11 @@ __global__ void log_sigmoid_kernel_f64(const double* in, double* out, int64_t n)
         out[idx] = (x >= 0.0) ? -log1p(exp(-x)) : x - log1p(exp(x));
     }
 }
-auto log_sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto log_sigmoid_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -9862,7 +10033,11 @@ __global__ void bitwise_not_i32(const int32_t* in, int32_t* out, int64_t n) {
 __global__ void bitwise_not_i64(const int64_t* in, int64_t* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; }
 }
-auto bitwise_not_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto bitwise_not_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -9958,7 +10133,11 @@ __global__ void rsqrt_kernel_f16(const __half* in, __half* out, int64_t n) {
 __global__ void rsqrt_kernel_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = __float2bfloat16(rsqrtf(__bfloat162float(in[idx]))); }
 }
-auto rsqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto rsqrt_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -10008,7 +10187,11 @@ __global__ void square_kernel_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, 
         out[idx] = __float2bfloat16(x * x);
     }
 }
-auto square_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto square_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -10052,7 +10235,11 @@ __global__ void asinh_kernel_f16(const __half* in, __half* out, int64_t n) {
 __global__ void asinh_kernel_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = __float2bfloat16(asinhf(__bfloat162float(in[idx]))); }
 }
-auto asinh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto asinh_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -10096,7 +10283,11 @@ __global__ void acosh_kernel_f16(const __half* in, __half* out, int64_t n) {
 __global__ void acosh_kernel_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = __float2bfloat16(acoshf(__bfloat162float(in[idx]))); }
 }
-auto acosh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto acosh_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -10140,7 +10331,11 @@ __global__ void atanh_kernel_f16(const __half* in, __half* out, int64_t n) {
 __global__ void atanh_kernel_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = __float2bfloat16(atanhf(__bfloat162float(in[idx]))); }
 }
-auto atanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto atanh_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -10659,7 +10854,11 @@ __global__ void signbit_kernel_bf16(const __nv_bfloat16* input, uint8_t* output,
     TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = static_cast<uint8_t>(signbit(__bfloat162float(input[idx])) ? 1 : 0); }
 }
 
-auto signbit_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto signbit_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Bool, input.device());
@@ -10711,7 +10910,11 @@ __global__ void isposinf_kernel_bf16(const __nv_bfloat16* input, uint8_t* output
     }
 }
 
-auto isposinf_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto isposinf_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Bool, input.device());
@@ -10763,7 +10966,11 @@ __global__ void isneginf_kernel_bf16(const __nv_bfloat16* input, uint8_t* output
     }
 }
 
-auto isneginf_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto isneginf_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Self-defending contiguity guard: unary kernels read input.data() flat,
+    // so a non-contiguous (transposed/sliced) view must be materialized first
+    // (the op-layer unary_op dispatch does NOT contiguify).
+    Tensor input = input_raw.is_contiguous() ? input_raw : input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Bool, input.device());
@@ -11238,13 +11445,74 @@ __global__ void nanvar_all_f32(const float* input, float* output, int64_t n, flo
     }
 }
 
+// Float64 specialization: double accumulators throughout so a Float64 input
+// keeps native double precision, matching the CPU reference (which accumulates
+// nanmean / sum-of-squared-deviations in double). Upcasting to Float32 here
+// would silently drop ~7 digits versus CPU/ROCm.
+__global__ void nanvar_all_f64(const double* input, double* output, int64_t n, double correction) {
+    __shared__ double ssum;
+    __shared__ int64_t scount;
+    if (threadIdx.x == 0) { ssum = 0.0; scount = 0; }
+    __syncthreads();
+
+    // Pass 1: sum + count
+    double local_sum = 0.0;
+    int64_t local_count = 0;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double v = input[idx];
+        if (!isnan(v)) { local_sum += v; local_count++; }
+    }
+    atomicAdd(&ssum, local_sum);
+    atomicAdd(reinterpret_cast<unsigned long long*>(&scount), static_cast<unsigned long long>(local_count));
+    __syncthreads();
+
+    double mean = (scount > 0) ? ssum / static_cast<double>(scount) : 0.0;
+    int64_t count = scount;
+
+    __shared__ double svar;
+    if (threadIdx.x == 0) svar = 0.0;
+    __syncthreads();
+
+    // Pass 2: sum of squared deviations
+    double local_var = 0.0;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double v = input[idx];
+        if (!isnan(v)) {
+            double diff = v - mean;
+            local_var += diff * diff;
+        }
+    }
+    atomicAdd(&svar, local_var);
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        double denom = static_cast<double>(count) - correction;
+        output[0] = (denom > 0.0) ? svar / denom : 0.0;
+    }
+}
+
 Tensor nanvar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     const auto& input_orig = inputs[0];
-    float correction = static_cast<float>(attrs.get_int(AttrKey::Correction, 1));
+    int64_t correction_i = attrs.get_int(AttrKey::Correction, 1);
 
-    // Upcast to Float32 for computation
+    // Float64 keeps native double precision (CPU/ROCm parity). Float16/BFloat16
+    // legitimately round-trip through Float32.
+    if (input_orig.dtype() == DType::Float64) {
+        int64_t n = input_orig.numel();
+        Tensor result({1}, DType::Float64, input_orig.device());
+        if (n == 0) return result;
+        Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+        nanvar_all_f64<<<1, 256, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n, static_cast<double>(correction_i));
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+
+    float correction = static_cast<float>(correction_i);
+    // Upcast (Float16/BFloat16) to Float32 for computation
     Tensor input = (input_orig.dtype() != DType::Float32) ? input_orig.to(DType::Float32) : input_orig;
+    input = input.is_contiguous() ? input : input.contiguous();
     int64_t n = input.numel();
 
     Tensor result({1}, DType::Float32, input.device());
@@ -11260,16 +11528,29 @@ __global__ void sqrt_scalar_f32(const float* input, float* output) {
     if (threadIdx.x == 0) output[0] = sqrtf(input[0]);
 }
 
+__global__ void sqrt_scalar_f64(const double* input, double* output) {
+    if (threadIdx.x == 0) output[0] = sqrt(input[0]);
+}
+
 Tensor nanstd_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     // Compute nanvar first
     Tensor var = nanvar_dispatch(inputs, attrs);
+    DType orig_dtype = inputs[0].dtype();
+
+    // Float64: take the sqrt in double to preserve native precision.
+    if (orig_dtype == DType::Float64) {
+        Tensor result({1}, DType::Float64, var.device());
+        sqrt_scalar_f64<<<1, 1, 0, stream>>>(var.data<double>(), result.data<double>());
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+
     // Then sqrt
     Tensor result({1}, DType::Float32, var.device());
     Tensor var_f32 = (var.dtype() != DType::Float32) ? var.to(DType::Float32) : var;
     sqrt_scalar_f32<<<1, 1, 0, stream>>>(var_f32.data<float>(), result.data<float>());
     CUDA_CHECK(cudaGetLastError());
-    DType orig_dtype = inputs[0].dtype();
     return (orig_dtype != DType::Float32) ? result.to(orig_dtype) : result;
 }
 

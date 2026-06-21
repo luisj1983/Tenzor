@@ -12,12 +12,28 @@
 #include <cstring>
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <sstream>
 #include <chrono>
 #include <complex>
 
 namespace tenzor {
+
+// Saturating double->integer conversion. A plain static_cast<intT>(double)
+// is undefined behaviour when the source is NaN/Inf or outside the target
+// range (platform-dependent garbage). This clamps to the target's
+// representable range and maps NaN to 0, matching a defined fill semantics
+// for full()/arange()/linspace() integer outputs.
+template <typename IntT>
+static inline IntT saturate_to_int(double value) {
+    if (std::isnan(value)) return IntT(0);
+    constexpr double lo = static_cast<double>(std::numeric_limits<IntT>::lowest());
+    constexpr double hi = static_cast<double>(std::numeric_limits<IntT>::max());
+    if (value <= lo) return std::numeric_limits<IntT>::lowest();
+    if (value >= hi) return std::numeric_limits<IntT>::max();
+    return static_cast<IntT>(value);
+}
 
 // Thread-local RNG — each thread has independent random state
 static thread_local std::mt19937 global_rng(std::random_device{}());
@@ -49,7 +65,18 @@ void manual_seed(unsigned int seed) {
     manual_seed_value = seed;
 }
 
-// Get a seed for backend RNG: returns the manual seed if set, otherwise a time-based seed
+// Get a seed for backend RNG: returns the manual seed if set, otherwise a
+// time-based seed.
+//
+// CONTRACT (consume-on-read): when a manual seed is active this function
+// CONSUMES one seed value per call and advances the stored manual seed. This
+// keeps successive backend RNG draws deterministic-but-distinct, but it also
+// means the stored manual seed is mutated as a side effect: a snapshot taken
+// after manual_seed(s) plus some GPU creation ops will NOT reproduce the
+// original state s. Callers that need to reproduce a specific manual_seed
+// snapshot must re-issue manual_seed() rather than relying on the stored
+// value remaining equal to s. CPU and GPU runs seeded identically diverge for
+// the same reason; this is intentional, not a bug.
 uint64_t get_global_seed() {
     if (manual_seed_set) {
         // Increment so successive calls get different but deterministic seeds
@@ -290,42 +317,42 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
         }
         case DType::Int32: {
             int32_t* ptr = static_cast<int32_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int32_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<int32_t>(value));
             break;
         }
         case DType::Int64: {
             int64_t* ptr = static_cast<int64_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int64_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<int64_t>(value));
             break;
         }
         case DType::UInt8: {
             uint8_t* ptr = static_cast<uint8_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<uint8_t>(value));
             break;
         }
         case DType::UInt16: {
             uint16_t* ptr = static_cast<uint16_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint16_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<uint16_t>(value));
             break;
         }
         case DType::UInt32: {
             uint32_t* ptr = static_cast<uint32_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint32_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<uint32_t>(value));
             break;
         }
         case DType::UInt64: {
             uint64_t* ptr = static_cast<uint64_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<uint64_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<uint64_t>(value));
             break;
         }
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<int8_t>(value));
             break;
         }
         case DType::Int16: {
             int16_t* ptr = static_cast<int16_t*>(data);
-            std::fill(ptr, ptr + numel, static_cast<int16_t>(value));
+            std::fill(ptr, ptr + numel, saturate_to_int<int16_t>(value));
             break;
         }
         case DType::Bool: {
@@ -646,14 +673,14 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
         case DType::Int32: {
             int32_t* ptr = static_cast<int32_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<int32_t>(start + i * step);
+                ptr[i] = saturate_to_int<int32_t>(start + i * step);
             }
             break;
         }
         case DType::Int64: {
             int64_t* ptr = static_cast<int64_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<int64_t>(start + i * step);
+                ptr[i] = saturate_to_int<int64_t>(start + i * step);
             }
             break;
         }
@@ -824,33 +851,33 @@ auto linspace(double start, double end, int64_t steps, DType dtype, Device devic
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
             for (int64_t i = 0; i < steps; ++i) {
-                ptr[i] = static_cast<int8_t>(start + i * step_size);
+                ptr[i] = saturate_to_int<int8_t>(start + i * step_size);
             }
-            if (steps > 1) ptr[steps - 1] = static_cast<int8_t>(end);
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<int8_t>(end);
             break;
         }
         case DType::Int16: {
             int16_t* ptr = static_cast<int16_t*>(data);
             for (int64_t i = 0; i < steps; ++i) {
-                ptr[i] = static_cast<int16_t>(start + i * step_size);
+                ptr[i] = saturate_to_int<int16_t>(start + i * step_size);
             }
-            if (steps > 1) ptr[steps - 1] = static_cast<int16_t>(end);
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<int16_t>(end);
             break;
         }
         case DType::Int32: {
             int32_t* ptr = static_cast<int32_t*>(data);
             for (int64_t i = 0; i < steps; ++i) {
-                ptr[i] = static_cast<int32_t>(start + i * step_size);
+                ptr[i] = saturate_to_int<int32_t>(start + i * step_size);
             }
-            if (steps > 1) ptr[steps - 1] = static_cast<int32_t>(end);
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<int32_t>(end);
             break;
         }
         case DType::Int64: {
             int64_t* ptr = static_cast<int64_t*>(data);
             for (int64_t i = 0; i < steps; ++i) {
-                ptr[i] = static_cast<int64_t>(start + i * step_size);
+                ptr[i] = saturate_to_int<int64_t>(start + i * step_size);
             }
-            if (steps > 1) ptr[steps - 1] = static_cast<int64_t>(end);
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<int64_t>(end);
             break;
         }
         case DType::Complex64: {
@@ -1020,7 +1047,11 @@ auto randn_like(const Tensor& tensor) -> Tensor {
 auto randperm(int64_t n, Device device) -> Tensor {
     if (device.type == Device::Type::CPU) {
         // CPU: sequential range shuffled in place with the global RNG.
-        auto tensor = arange(0.0f, static_cast<float>(n), 1.0f, DType::Int64, device);
+        // Use double endpoints: a float endpoint cannot represent every
+        // integer beyond 2^24, which would yield a permutation with
+        // duplicate/missing indices for large n (the generator overload
+        // already uses double).
+        auto tensor = arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
         if (n > 1) {
             auto data = tensor.data<int64_t>();
             auto& gen = get_rng();
@@ -1529,12 +1560,15 @@ auto complex(const Tensor& real, const Tensor& imag) -> Tensor {
 
         const double* r_data = r.data<double>();
         const double* i_data = im.data<double>();
-        auto* c_data = reinterpret_cast<std::complex<double>*>(result.storage()->data());
-        int64_t offset = result.offset();
+        // Write through data<>() which already applies the tensor's offset,
+        // consistent with the offset-applied reads above (the previous
+        // raw-storage + manual offset write was fragile if empty() ever
+        // returned a non-zero-offset view).
+        auto* c_data = result.data<std::complex<double>>();
 
         int64_t numel = r.numel();
         for (int64_t idx = 0; idx < numel; ++idx) {
-            c_data[offset + idx] = std::complex<double>(r_data[idx], i_data[idx]);
+            c_data[idx] = std::complex<double>(r_data[idx], i_data[idx]);
         }
         return result;
     }
@@ -1546,12 +1580,13 @@ auto complex(const Tensor& real, const Tensor& imag) -> Tensor {
 
     const float* r_data = r.data<float>();
     const float* i_data = im.data<float>();
-    auto* c_data = reinterpret_cast<std::complex<float>*>(result.storage()->data());
-    int64_t offset = result.offset();
+    // Write through data<>() which already applies the tensor's offset,
+    // consistent with the offset-applied reads above.
+    auto* c_data = result.data<std::complex<float>>();
 
     int64_t numel = r.numel();
     for (int64_t idx = 0; idx < numel; ++idx) {
-        c_data[offset + idx] = std::complex<float>(r_data[idx], i_data[idx]);
+        c_data[idx] = std::complex<float>(r_data[idx], i_data[idx]);
     }
 
     return result;

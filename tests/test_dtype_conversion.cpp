@@ -7,6 +7,8 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <cmath>
+#include <complex>
+#include <vector>
 
 using namespace tenzor;
 
@@ -305,3 +307,142 @@ TEST_P(DTypeConversionTest, FP8CrossConversion) {
 }
 
 INSTANTIATE_BACKEND_TESTS(DTypeConversionTest);
+
+// ============================================================================
+// CPU-only all-pairs Tensor::to(DType) value-correctness regression.
+//
+// Regression for the silent all-zeros cast bug: Tensor::to(DType) previously
+// had `default: break;` in both the src-dtype and dst-dtype switches, so any
+// unhandled pair returned a zero-initialized tensor instead of converting or
+// throwing. This sweeps every (src, dst) pair over the full enum, casts a
+// known value, and asserts the VALUE survives (not just that no exception is
+// thrown). A regressed dispatch would yield 0 and fail these checks loudly.
+// ============================================================================
+namespace {
+
+// All "real" (non-quantized) dtypes Tensor::to() must handle.
+const std::vector<DType> kAllRealDTypes = {
+    DType::Float32, DType::Float64, DType::Float16, DType::BFloat16,
+    DType::Int8,    DType::Int16,   DType::Int32,   DType::Int64,
+    DType::UInt8,   DType::UInt16,  DType::UInt32,  DType::UInt64,
+    DType::Bool,    DType::Complex64, DType::Complex128,
+    DType::FP8_E4M3, DType::FP8_E5M2, DType::FP8_E4M3FNUZ, DType::FP8_E5M2FNUZ,
+};
+
+// Read element 0 of a CPU tensor of arbitrary dtype as a double (real part for
+// complex). Mirrors the conversion semantics of Tensor::to.
+double read0_as_double(const Tensor& t) {
+    Tensor c = t.to(Device::cpu());
+    switch (c.dtype()) {
+        case DType::Float32:  return static_cast<double>(c.data<float>()[0]);
+        case DType::Float64:  return c.data<double>()[0];
+        case DType::Float16:  return static_cast<double>(static_cast<float>(c.data<Float16>()[0]));
+        case DType::BFloat16: return static_cast<double>(static_cast<float>(c.data<BFloat16>()[0]));
+        case DType::Int8:     return static_cast<double>(c.data<int8_t>()[0]);
+        case DType::Int16:    return static_cast<double>(c.data<int16_t>()[0]);
+        case DType::Int32:    return static_cast<double>(c.data<int32_t>()[0]);
+        case DType::Int64:    return static_cast<double>(c.data<int64_t>()[0]);
+        case DType::UInt8:    return static_cast<double>(c.data<uint8_t>()[0]);
+        case DType::UInt16:   return static_cast<double>(c.data<uint16_t>()[0]);
+        case DType::UInt32:   return static_cast<double>(c.data<uint32_t>()[0]);
+        case DType::UInt64:   return static_cast<double>(c.data<uint64_t>()[0]);
+        case DType::Bool:     return c.data<bool>()[0] ? 1.0 : 0.0;
+        case DType::Complex64:  return static_cast<double>(c.data<std::complex<float>>()[0].real());
+        case DType::Complex128: return c.data<std::complex<double>>()[0].real();
+        case DType::FP8_E4M3:     return static_cast<double>(static_cast<float>(c.data<FP8_E4M3>()[0]));
+        case DType::FP8_E5M2:     return static_cast<double>(static_cast<float>(c.data<FP8_E5M2>()[0]));
+        case DType::FP8_E4M3FNUZ: return static_cast<double>(static_cast<float>(c.data<FP8_E4M3FNUZ>()[0]));
+        case DType::FP8_E5M2FNUZ: return static_cast<double>(static_cast<float>(c.data<FP8_E5M2FNUZ>()[0]));
+        default: ADD_FAILURE() << "read0_as_double: unhandled dtype in test helper"; return 0.0;
+    }
+}
+
+} // namespace
+
+// CPU-only fixture: initialize the runtime once, no backend parametrization.
+class DTypeConversionAllPairs : public ::testing::Test {
+protected:
+    void SetUp() override { ::tenzor::testing::EnsureInitialized(); }
+};
+
+TEST_F(DTypeConversionAllPairs, ValueSurvivesEveryPair) {
+    // Value 3 is exactly representable in every listed dtype (incl. Bool->1,
+    // and all FP8 variants), so the cast must reproduce it for ALL pairs.
+    const double kVal = 3.0;
+    for (DType src : kAllRealDTypes) {
+        // Build a 1-element source tensor holding kVal (or 1 for Bool).
+        Tensor base = tenzor::ones({1}, DType::Float32, Device::cpu());
+        base.data<float>()[0] = (src == DType::Bool) ? 1.0f : static_cast<float>(kVal);
+        Tensor src_t = base.to(src);
+        const double expected_src = (src == DType::Bool) ? 1.0 : kVal;
+        ASSERT_NEAR(read0_as_double(src_t), expected_src, 1e-6)
+            << "Source materialization failed for src=" << dtype_name(src);
+
+        for (DType dst : kAllRealDTypes) {
+            Tensor dst_t = src_t.to(dst);
+            ASSERT_EQ(dst_t.dtype(), dst)
+                << "Wrong dtype after cast " << dtype_name(src) << "->" << dtype_name(dst);
+            const double expected_dst =
+                (src == DType::Bool || dst == DType::Bool) ? 1.0 : kVal;
+            EXPECT_NEAR(read0_as_double(dst_t), expected_dst, 1e-6)
+                << "Cast " << dtype_name(src) << "->" << dtype_name(dst)
+                << " produced wrong value (silent-zero regression?)";
+        }
+    }
+}
+
+// Regression for the per-channel quantization OOB-read bug: transpose/permute
+// previously copied q_axis_ verbatim while reordering the shape, so after a
+// transpose dequantize() indexed scales[]/zero_points[] against the wrong
+// dimension (heap OOB read / wrong values). The axis must be remapped.
+TEST_F(DTypeConversionAllPairs, PerChannelDequantizeAfterTranspose) {
+    // 2x3 QInt8 tensor, per-channel on axis 0 (2 channels).
+    Tensor q = tenzor::zeros({2, 3}, DType::QInt8, Device::cpu());
+    // int_repr is Int8; populate raw quantized values.
+    {
+        auto ir = q.int_repr();
+        int8_t* p = ir.data<int8_t>();
+        // row 0: 10,10,10 ; row 1: 20,20,20
+        p[0] = 10; p[1] = 10; p[2] = 10;
+        p[3] = 20; p[4] = 20; p[5] = 20;
+    }
+    // Channel 0 scale 0.5 zp 0; channel 1 scale 2.0 zp 0.
+    q.set_per_channel_quantization_params({0.5, 2.0}, {0, 0}, /*axis=*/0);
+
+    // Sanity: dequantize before transpose. value = (raw - zp) * scale.
+    {
+        Tensor d = q.dequantize().cpu();
+        const float* f = d.data<float>();
+        for (int i = 0; i < 3; ++i) EXPECT_NEAR(f[i], 10 * 0.5f, 1e-5f);   // ch0
+        for (int i = 3; i < 6; ++i) EXPECT_NEAR(f[i], 20 * 2.0f, 1e-5f);   // ch1
+    }
+
+    // Transpose to 3x2: channel dim moves from axis 0 to axis 1. Without the
+    // q_axis_ remap this dequantize() would read scales[] OOB / wrong-indexed.
+    Tensor qt = q.transpose(0, 1);
+    ASSERT_EQ(qt.shape().size(), 2u);
+    EXPECT_EQ(qt.shape()[0], 3);
+    EXPECT_EQ(qt.shape()[1], 2);
+    Tensor dt = qt.dequantize().cpu();
+    const float* ft = dt.data<float>();
+    // Layout now [3,2]: element (r, c) where c is the channel.
+    for (int r = 0; r < 3; ++r) {
+        EXPECT_NEAR(ft[r * 2 + 0], 10 * 0.5f, 1e-5f) << "ch0 at row " << r;
+        EXPECT_NEAR(ft[r * 2 + 1], 20 * 2.0f, 1e-5f) << "ch1 at row " << r;
+    }
+}
+
+TEST_F(DTypeConversionAllPairs, NegativeAndFractionalRoundTrip) {
+    // Float->Float pairs must preserve sign and fractional magnitude.
+    Tensor f = tenzor::ones({1}, DType::Float32, Device::cpu());
+    f.data<float>()[0] = -2.5f;
+    for (DType dst : {DType::Float64, DType::Float16, DType::BFloat16,
+                      DType::Complex64, DType::Complex128}) {
+        Tensor d = f.to(dst);
+        EXPECT_NEAR(read0_as_double(d), -2.5, 0.05)
+            << "Float32->" << dtype_name(dst) << " lost value";
+        Tensor back = d.to(DType::Float32);
+        EXPECT_NEAR(static_cast<double>(back.cpu().data<float>()[0]), -2.5, 0.05)
+            << "round trip via " << dtype_name(dst) << " lost value";
+    }
+}

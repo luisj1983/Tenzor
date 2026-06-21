@@ -66,12 +66,20 @@ static thread_local ThreadLocalPoolWrapper tl_pool_wrapper_;
 // Defined before deallocate() which calls them.
 // ---------------------------------------------------------------------------
 
+// Merges `block` with adjacent siblings found in `free_map`. Operates purely on
+// the (thread-confined) free_map plus a SNAPSHOT of the root extent (root_size);
+// it does NOT touch any shared RootAllocation. The number of sibling merges is
+// returned via `fragments_merged` so the caller can decrement the live root's
+// fragment_count under the appropriate lock. Decoupling the merge from the live
+// root lets the per-root coalescing path run the O(N) merge without holding the
+// global allocator mutex (and without ever taking two locks while blocking).
 static void merge_adjacent_in_map(
     std::multimap<size_t, CPUCachingAllocator::Block>& free_map,
     CPUCachingAllocator::Block& block,
-    CPUCachingAllocator::RootAllocation& root,
-    size_t& /*stats_cached_delta*/  // no net change in cached bytes during merging
+    size_t root_size,
+    int& fragments_merged
 ) {
+    fragments_merged = 0;
     bool merged = true;
     while (merged) {
         merged = false;
@@ -102,10 +110,10 @@ static void merge_adjacent_in_map(
             // would record the shrunken size instead of the true cudaMalloc/
             // posix_memalign extent, corrupting the field for any future code
             // that trusts it to recover the root extent.
-            block.is_split    = (new_size < root.size);
+            block.is_split    = (new_size < root_size);
 
             free_map.erase(it);
-            root.fragment_count = std::max(1, root.fragment_count - 1);
+            ++fragments_merged;
             merged = true;
             break;
         }
@@ -136,7 +144,27 @@ static void coalesce_local_block(
         return;
     }
 
-    // Merge adjacent siblings in the local pool.
+    // Per-root coalescing. This replaces holding global_mutex_ across the whole
+    // O(N) sibling merge with a per-root lock so coalescing of DIFFERENT roots
+    // proceeds in parallel. The locking discipline is what makes this safe
+    // without a concurrency stress harness:
+    //
+    //   * Lock order is ALWAYS global_mutex_ -> per-root mutex.
+    //   * We NEVER hold both locks at once, and never block on one while holding
+    //     the other, so deadlock is impossible.
+    //   * The O(N) merge runs against a SNAPSHOT of the root extent
+    //     (root_size_snapshot) and ONLY the thread-confined local.free_blocks —
+    //     it mutates no shared state, so no shared field can race during it.
+    //   * Every shared-state mutation (fragment_count, the global free pool)
+    //     happens in a brief global_mutex_-guarded commit that RE-VALIDATES the
+    //     root, so a concurrent shrink/erase between phases is detected and the
+    //     commit is safely skipped rather than acting on stale data.
+    //
+    // Phase 1 (global_mutex_, brief): resolve the root, snapshot its extent, and
+    // take a shared_ptr to its per-root lock. The shared_ptr keeps the mutex
+    // alive even if the root is erased after we release global_mutex_.
+    std::shared_ptr<std::mutex> root_lock;
+    size_t root_size_snapshot = 0;
     {
         std::lock_guard<std::mutex> lock(global_mutex);
         auto root_it = root_map.find(block.root_ptr);
@@ -144,19 +172,42 @@ static void coalesce_local_block(
             local.free_blocks.insert({block.size, block});
             return;
         }
-        size_t delta = 0;
-        merge_adjacent_in_map(local.free_blocks, block, root_it->second, delta);
-
-        // If fully coalesced, migrate to global pool for OS-return under pressure.
-        if (block.size == root_it->second.size &&
-            root_it->second.freed_size == root_it->second.size) {
-            local.cached_bytes -= block.size;
-            global_free.insert({block.size, block});
-            return;
-        }
+        root_lock = root_it->second.lock;
+        root_size_snapshot = root_it->second.size;
     }
 
-    // Not fully coalesced: put the (possibly enlarged) block back.
+    // Phase 2 (per-root mutex only; global released): merge adjacent siblings.
+    // Serialises any other thread coalescing the SAME root; different roots run
+    // in parallel. Operates on thread-confined local.free_blocks + the snapshot.
+    int fragments_merged = 0;
+    {
+        std::lock_guard<std::mutex> rlock(*root_lock);
+        merge_adjacent_in_map(local.free_blocks, block, root_size_snapshot,
+                              fragments_merged);
+    }
+
+    // Phase 3 (global_mutex_, brief): commit the merge result. Apply the
+    // fragment_count decrement and decide migration under a fresh, re-validated
+    // view of the live root (it may have shrunk or been erased meanwhile).
+    {
+        std::lock_guard<std::mutex> lock(global_mutex);
+        auto root_it = root_map.find(block.root_ptr);
+        if (root_it != root_map.end()) {
+            if (fragments_merged > 0) {
+                root_it->second.fragment_count =
+                    std::max(1, root_it->second.fragment_count - fragments_merged);
+            }
+            // If fully coalesced against the CURRENT root state, migrate to the
+            // global pool so check_memory_pressure() can return it to the OS.
+            if (block.size == root_it->second.size &&
+                root_it->second.freed_size == root_it->second.size) {
+                local.cached_bytes -= block.size;
+                global_free.insert({block.size, block});
+                return;
+            }
+        }
+    }
+    // Not fully coalesced (or root changed/erased): keep the merged block local.
     local.free_blocks.insert({block.size, block});
 }
 
@@ -390,11 +441,20 @@ void CPUCachingAllocator::deallocate(void* ptr) {
             }
 
             // Add to global free pool, then attempt sibling coalescing.
+            // This runs under global_mutex_ on the GLOBAL free pool, so we merge
+            // against the live root size and apply the fragment-count decrement
+            // directly (the new merge helper reports merges via fragments_merged
+            // rather than mutating the root itself).
             if (block.is_split) {
                 auto root_it2 = global_root_allocations_.find(block.root_ptr);
                 if (root_it2 != global_root_allocations_.end()) {
-                    size_t delta = 0;
-                    merge_adjacent_in_map(global_free_blocks_, block, root_it2->second, delta);
+                    int fragments_merged = 0;
+                    merge_adjacent_in_map(global_free_blocks_, block,
+                                          root_it2->second.size, fragments_merged);
+                    if (fragments_merged > 0) {
+                        root_it2->second.fragment_count =
+                            std::max(1, root_it2->second.fragment_count - fragments_merged);
+                    }
                 }
             }
             global_free_blocks_.insert({block.size, block});
@@ -547,10 +607,13 @@ size_t parse_env_size_t(const char* name, size_t fallback) {
     char* end = nullptr;
     errno = 0;
     unsigned long long v = std::strtoull(raw, &end, 10);
-    if (errno != 0 || end == raw || v == 0) {
-        // Unparseable or explicit zero: ignore (zero would disable the cache).
+    if (errno != 0 || end == raw) {
+        // Unparseable: keep the current value.
         return fallback;
     }
+    // An explicit 0 is honored: for the byte-cap vars it disables the cache
+    // (matching set_max_cached_bytes(0)); for the min-split var it means
+    // "always split". This mirrors the programmatic setters, which all accept 0.
     return static_cast<size_t>(v);
 }
 }  // namespace

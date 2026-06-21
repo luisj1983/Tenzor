@@ -29,7 +29,8 @@ void configure_omp_threads();
 /**
  * @brief Return the thread count that was configured by configure_omp_threads().
  *
- * Returns 0 if configure_omp_threads() has not been called yet.
+ * Returns 1 (not 0) if configure_omp_threads() has not been called yet, so
+ * callers can safely use the result as a divisor / buffer count pre-init.
  */
 int get_configured_threads();
 

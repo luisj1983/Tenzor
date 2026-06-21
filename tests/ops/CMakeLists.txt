@@ -206,6 +206,14 @@ add_executable(test_scatter_reduce test_scatter_reduce.cpp)
 target_link_libraries(test_scatter_reduce PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_scatter_reduce LABELS "ops" DISCOVERY_TIMEOUT 60)
 
+add_executable(test_scatter_oob_contract test_scatter_oob_contract.cpp)
+target_link_libraries(test_scatter_oob_contract PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_scatter_oob_contract LABELS "ops" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_argmax_tie_parity test_argmax_tie_parity.cpp)
+target_link_libraries(test_argmax_tie_parity PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_argmax_tie_parity LABELS "ops" DISCOVERY_TIMEOUT 60)
+
 # Logcumsumexp, bincount, index_reduce
 add_executable(test_logcumsumexp_bincount_index_reduce test_logcumsumexp_bincount_index_reduce.cpp)
 target_link_libraries(test_logcumsumexp_bincount_index_reduce PRIVATE tenzor_core GTest::gtest_main)

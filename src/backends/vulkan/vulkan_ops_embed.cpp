@@ -261,11 +261,17 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
                                           bool include_last_offset) -> std::vector<Tensor> {
     int32_t device_id = embeddings.device().index;
 
-    // Select shader based on dtype
+    // Select shader based on dtype. embedding_bag_f16/_f64 declare native
+    // float16_t/double SSBO members and require the device shaderFloat16/
+    // shaderFloat64 features; gate so a missing feature throws cleanly instead of
+    // a device-lost deep in the op (mirrors dispatchCast/dispatchWhere). The bf16
+    // variant uses raw packed uint and needs no extension.
     std::string shader_name = "embedding_bag";
     if (embeddings.dtype() == DType::Float64) {
+        vulkan::ensure_fp64_supported(device_id, "EmbeddingBag");
         shader_name = "embedding_bag_f64";
     } else if (embeddings.dtype() == DType::Float16) {
+        vulkan::ensure_fp16_supported(device_id, "EmbeddingBag");
         shader_name = "embedding_bag_f16";
     } else if (embeddings.dtype() == DType::BFloat16) {
         shader_name = "embedding_bag_bf16";

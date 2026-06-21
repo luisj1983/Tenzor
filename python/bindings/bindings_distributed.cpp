@@ -5,6 +5,7 @@
 
 #include "register.hpp"
 #include "future_binding.hpp"  // TensorListFuture (audit C.6)
+#include "gil_safe_pyobject.hpp"  // GIL-safe holder for off-thread copy/destroy
 
 #include <pybind11/stl.h>
 
@@ -439,14 +440,22 @@ void register_distributed(py::module_& m) {
     rpc.def("register_function",
         [](const std::string& name, py::function fn) {
             // Wrap the Python callable so it can be invoked from the C++
-            // RPC handler thread. We acquire the GIL before calling in.
-            auto py_fn = fn.cast<py::object>();
+            // RPC handler thread. The registry copies/destroys the stored
+            // std::function (and thus this captured object) on the RPC agent's
+            // receive thread, which does NOT hold the GIL — so a raw
+            // py::object capture would Py_INCREF/Py_DECREF off-GIL and abort
+            // ("inc_ref() called while the GIL is not held"). GilSafePyObject
+            // acquires the GIL inside its copy-ctor/dtor, making every
+            // off-thread lifetime operation safe.
+            GilSafePyObject py_fn{fn.cast<py::object>()};
             tenzor::distributed::rpc::FunctionRegistry::instance()
                 .register_function(name,
                     [py_fn](const std::vector<tenzor::Tensor>& args)
                         -> std::vector<tenzor::Tensor> {
                         py::gil_scoped_acquire gil;
-                        py::object result = py_fn(args);
+                        py::object result =
+                            py::reinterpret_borrow<py::object>(
+                                py_fn.handle())(args);
                         // HH.18: registered callables that return
                         // List[Variable] previously triggered a py::cast_error
                         // here because the cast<List[Tensor]> path doesn't
@@ -483,6 +492,19 @@ void register_distributed(py::module_& m) {
         },
         py::arg("name"),
         "Check whether a function is registered.");
+
+    rpc.def("unregister_function",
+        [](const std::string& name) -> bool {
+            // Drop the registered Python callable. The captured object's
+            // refcount is released here under the GIL (the holder reacquires
+            // it). Provides an explicit way to release callables instead of
+            // leaking them for the whole process lifetime.
+            return tenzor::distributed::rpc::FunctionRegistry::instance()
+                .unregister_function(name);
+        },
+        py::arg("name"),
+        "Unregister a previously registered RPC function. Returns True if a "
+        "function was removed.");
 }
 
 } // namespace tenzor::python

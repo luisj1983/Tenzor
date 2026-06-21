@@ -57,8 +57,13 @@ jobs:
           # GCC 13+ toolchain for C++23.
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           # CPU-only wheel: GPU SDKs are not available in manylinux images.
+          # TENZOR_PORTABLE=ON forces the runtime-dispatched baseline CPU build
+          # so the published wheel does NOT bake the CI runner's -march=native
+          # ISA (AVX-512/BMI2/...) into every TU — otherwise users on older CPUs
+          # SIGILL on `import tenzor`. The *_avx512.cpp TUs stay runtime-gated.
           CIBW_ENVIRONMENT: >-
-            CMAKE_ARGS="-DTENZOR_BUILD_CUDA=OFF
+            CMAKE_ARGS="-DTENZOR_PORTABLE=ON
+            -DTENZOR_BUILD_CUDA=OFF
             -DTENZOR_BUILD_ROCM=OFF
             -DTENZOR_BUILD_ONEAPI=OFF
             -DTENZOR_BUILD_VULKAN=OFF"

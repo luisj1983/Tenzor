@@ -204,6 +204,9 @@ auto cudnn_sdpa_forward(
  * @param seq_len_q Query sequence length
  * @param seq_len_k Key/Value sequence length
  * @param head_dim Head dimension (must be 32, 64, 128, or 256)
+ * @param device_index CUDA device the tensors live on. Pass the operand's
+ *        device().index so the arch check targets the right GPU on a
+ *        heterogeneous multi-GPU host. -1 (default) means "current device".
  * @return true if supported, false otherwise
  */
 auto cudnn_sdpa_supported(
@@ -211,7 +214,8 @@ auto cudnn_sdpa_supported(
     int64_t num_heads,
     int64_t seq_len_q,
     int64_t seq_len_k,
-    int64_t head_dim
+    int64_t head_dim,
+    int device_index = -1
 ) -> bool;
 
 /**
@@ -276,6 +280,7 @@ auto fused_sgd_step_cuda(
     float weight_decay,
     float dampening,
     bool nesterov,
+    bool first_step,
     cudaStream_t stream = nullptr
 ) -> void;
 

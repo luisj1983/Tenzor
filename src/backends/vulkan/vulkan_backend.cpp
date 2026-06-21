@@ -5,7 +5,12 @@
 
 #include "vulkan_helpers.hpp"
 #include "tenzor/core/shape.hpp"
-#include "tenzor/backend/loader.hpp"
+// loader_fwd.hpp (not loader.hpp): this TU only needs is_backend_registry_alive(),
+// and the Vulkan target is compiled as C++20 (cxx_std_20). The full loader.hpp
+// pulls in <expected> (C++23), which does not exist under a strict C++20 standard
+// library and would fail to compile. ROCm TUs already use loader_fwd.hpp for the
+// same reason; this matches them.
+#include "tenzor/backend/loader_fwd.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
 #include "tenzor/utils/log.hpp"
@@ -202,6 +207,35 @@ void VulkanBackend::initVulkan() {
         shaderPath_ = shaderEnv;
     } else {
         shaderPath_ = "shaders/vulkan/";
+    }
+
+    // The library was built WITHOUT embedded shaders (glslc absent at build
+    // time). If no compiled .spv files are resolvable from shaderPath_ either,
+    // the backend cannot execute a single kernel — every op would throw
+    // "Failed to load Vulkan shader '<name>'" deep inside a model while
+    // is_available() still reported true. Fail fast at construction instead, so
+    // the backend registration cleanly rejects this device and callers fall
+    // through to another backend with a clear message.
+    {
+        bool any_spv = false;
+        std::error_code ec;
+        if (std::filesystem::is_directory(shaderPath_, ec)) {
+            for (const auto& entry : std::filesystem::directory_iterator(
+                     shaderPath_, std::filesystem::directory_options::skip_permission_denied, ec)) {
+                if (entry.is_regular_file(ec) && entry.path().extension() == ".spv") {
+                    any_spv = true;
+                    break;
+                }
+            }
+        }
+        if (!any_spv) {
+            throw std::runtime_error(
+                "Vulkan backend was built without embedded shaders and no compiled "
+                "shaders were found at '" + shaderPath_ + "'. Install the Vulkan SDK "
+                "(glslc) and rebuild, or set TENZOR_VULKAN_SHADER_PATH to a directory "
+                "of compiled .spv shaders. The Vulkan backend cannot run any kernel "
+                "in this configuration.");
+        }
     }
 #endif
 }

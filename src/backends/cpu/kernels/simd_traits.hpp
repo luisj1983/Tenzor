@@ -132,14 +132,14 @@ struct SimdTrait<Op, BFloat16> {
 template<> struct SimdTrait<AddOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
         // Runtime dispatch: table populated at startup by simd_dispatch.cpp
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.add(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<AddOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.add_f64(a, b, c, n);
     }
 };
@@ -187,14 +187,14 @@ template<> struct SimdTrait<AddOp, Float16> {
 
 template<> struct SimdTrait<SubOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.sub(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<SubOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.sub_f64(a, b, c, n);
     }
 };
@@ -224,14 +224,14 @@ template<> struct SimdTrait<MulOp, uint8_t> {
 
 template<> struct SimdTrait<MulOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.mul(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<MulOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.mul_f64(a, b, c, n);
     }
 };
@@ -249,14 +249,14 @@ template<> struct SimdTrait<MulOp, Float16> {
 
 template<> struct SimdTrait<DivOp, float> {
     static void apply(const float* a, const float* b, float* c, size_t n) {
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.div(a, b, c, n);
     }
 };
 
 template<> struct SimdTrait<DivOp, double> {
     static void apply(const double* a, const double* b, double* c, size_t n) {
-        if (!dispatch::g_dispatch.initialized) dispatch::init_dispatch();
+        if (!dispatch::g_dispatch.initialized.load(std::memory_order_acquire)) dispatch::init_dispatch();
         dispatch::g_dispatch.div_f64(a, b, c, n);
     }
 };

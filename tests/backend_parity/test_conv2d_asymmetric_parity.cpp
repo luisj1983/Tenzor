@@ -22,6 +22,8 @@
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/nn/layers/conv.hpp>
 #include <tenzor/autograd/variable.hpp>
+#include <tenzor/utils/error.hpp>
+#include <string>
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -70,6 +72,18 @@ auto random_tensor(std::vector<int64_t> shape, Device dev) -> Tensor {
 // honoured on CPU (the eager path treats per-axis as a GPU optimisation).
 // Helper to swallow the CPU-not-supported path without polluting the test
 // with raw skip lines.
+// Returns true if `msg` looks like an intentional "this backend does not
+// implement this configuration" signal, as opposed to a genuine bug surfacing
+// as an exception. Only these are allowed to silently skip the assertion.
+bool is_intentional_gap(const std::string& msg) {
+    auto contains = [&](const char* needle) {
+        return msg.find(needle) != std::string::npos;
+    };
+    return contains("not implemented") || contains("not supported") ||
+           contains("unsupported") || contains("only supports") ||
+           contains("not yet");
+}
+
 bool maybe_dispatch(OpId opid, const std::vector<Tensor>& inputs,
                     const OpAttributes& attrs, Tensor& out_first) {
     try {
@@ -77,7 +91,20 @@ bool maybe_dispatch(OpId opid, const std::vector<Tensor>& inputs,
         if (outs.empty()) return false;
         out_first = outs[0];
         return true;
-    } catch (const std::exception&) {
+    } catch (const ::tenzor::NotImplementedError&) {
+        // Typed "feature gap" — intentional, skip the assertion.
+        return false;
+    } catch (const std::exception& e) {
+        // A genuine backend bug must NOT be silently swallowed as an intended
+        // feature gap. Only messages that clearly indicate an intentional
+        // unimplemented path are tolerated; anything else fails the test loudly
+        // so a real crash/throw in a conv kernel is caught instead of passing.
+        if (is_intentional_gap(e.what())) {
+            return false;
+        }
+        ADD_FAILURE() << "Conv dispatch (op " << static_cast<int>(opid)
+                      << ") threw an unexpected exception (not an intentional "
+                         "feature gap): " << e.what();
         return false;
     }
 }
@@ -278,9 +305,12 @@ TEST_P(Conv2dAsymmetricParity, NN_FConv2d_AsymmetricStride_Shape) {
                                      /*padding=*/{0, 0},
                                      /*dilation=*/{1, 1},
                                      /*groups=*/1);
-    } catch (const std::exception&) {
+    } catch (const ::tenzor::NotImplementedError&) {
         // Backend doesn't yet support asymmetric stride via F:: surface.
         return;
+    } catch (const std::exception& e) {
+        if (is_intentional_gap(e.what())) return;
+        FAIL() << "F::conv2d asymmetric stride threw unexpectedly: " << e.what();
     }
     auto shape = out.shape();
     ASSERT_EQ(shape.size(), 4u);

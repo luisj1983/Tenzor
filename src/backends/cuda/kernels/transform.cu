@@ -257,6 +257,16 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
 
 // Transpose kernel - metadata manipulation (swap dimensions)
 auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, cudaStream_t stream) -> Tensor {
+    // Normalize negative dims and range-check before indexing the shape/stride
+    // vectors. The public Tensor::transpose normalizes, but the OpId::Transpose
+    // dispatch path forwards AttrKey::Dim0/Dim1 verbatim, so a negative dim from
+    // a lazy/JIT/jvp graph would index out of bounds (UB) without this guard.
+    const int64_t ndim = input.ndim();
+    if (dim0 < 0) dim0 += ndim;
+    if (dim1 < 0) dim1 += ndim;
+    if (dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim) {
+        throw std::out_of_range("transpose: dimension out of range");
+    }
     // Transpose just swaps dimensions in metadata
     Tensor result;
     CUDAKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*CUDAKernelAccess::get_impl(input));
@@ -277,9 +287,21 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, cudaS
     std::vector<int64_t> new_shape(ndim);
     std::vector<int64_t> new_strides(ndim);
 
+    // Normalize negative dims and range-check before indexing shape/strides.
+    // The public Tensor::permute normalizes, but the OpId::Permute dispatch path
+    // forwards AttrKey::Dims verbatim, so a negative/out-of-range dim from a
+    // lazy/JIT/jvp graph would index out of bounds (UB) without this guard.
+    if (static_cast<int64_t>(dims.size()) != ndim) {
+        throw std::invalid_argument("permute: dims size must equal tensor rank");
+    }
     for (int64_t i = 0; i < ndim; ++i) {
-        new_shape[i] = input.shape()[dims[i]];
-        new_strides[i] = input.strides()[dims[i]];
+        int64_t d = dims[i];
+        if (d < 0) d += ndim;
+        if (d < 0 || d >= ndim) {
+            throw std::out_of_range("permute: dimension out of range");
+        }
+        new_shape[i] = input.shape()[d];
+        new_strides[i] = input.strides()[d];
     }
 
     result.mutable_shape() = std::move(new_shape);
@@ -853,21 +875,25 @@ __global__ void slice_kernel_impl(
     int64_t ndim,
     int64_t total_elements) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total_elements) return;
+    // Grid-stride loop so an output with > INT_MAX*BLOCK elements (a clamped
+    // grid that cannot cover all elements in one pass) is fully written rather
+    // than leaving the tail uninitialized.
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total_elements;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        // Convert linear output index to multi-dimensional index
+        int64_t input_offset = 0;
+        int64_t remaining = idx;
+        for (int64_t d = 0; d < ndim; ++d) {
+            int64_t dim_idx = remaining / meta.output_strides[d];
+            remaining %= meta.output_strides[d];
+            // Map output index to input index: input_idx = start + output_idx * step
+            int64_t input_dim_idx = meta.starts[d] + dim_idx * meta.steps[d];
+            input_offset += input_dim_idx * meta.input_strides[d];
+        }
 
-    // Convert linear output index to multi-dimensional index
-    int64_t input_offset = 0;
-    int64_t remaining = idx;
-    for (int64_t d = 0; d < ndim; ++d) {
-        int64_t dim_idx = remaining / meta.output_strides[d];
-        remaining %= meta.output_strides[d];
-        // Map output index to input index: input_idx = start + output_idx * step
-        int64_t input_dim_idx = meta.starts[d] + dim_idx * meta.steps[d];
-        input_offset += input_dim_idx * meta.input_strides[d];
+        output[idx] = input[input_offset];
     }
-
-    output[idx] = input[input_offset];
 }
 
 auto slice_kernel(
@@ -950,7 +976,10 @@ auto slice_kernel(
     }
 
     int block_size = 256;
-    int num_blocks = (total + block_size - 1) / block_size;
+    // get_num_blocks clamps the grid to the device max; combined with the
+    // kernel's grid-stride loop this covers an arbitrarily large int64 total
+    // without narrowing to a negative/garbage int block count.
+    int num_blocks = get_num_blocks(total, block_size);
 
     // slice is pure data movement (index-based element copy), so dispatch by
     // element size like tile/contiguous/cat rather than by semantic dtype.
@@ -2105,6 +2134,19 @@ __global__ void roll_kernel_impl(
 
 auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t stream) -> Tensor {
     auto shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+
+    // Normalize the dim and shift before they index the shape / drive the
+    // kernel's modulo. The public roll() op normalizes both, but the OpId::Roll
+    // dispatch path forwards AttrKey::Shift/Dim verbatim, so a negative dim
+    // would index shape[] out of bounds (UB) and a shift outside [0, dim_size)
+    // makes the kernel's (dim_idx - shift + dim_size) % dim_size go negative,
+    // producing a negative src_idx and an out-of-bounds device read.
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("roll: dimension out of range");
+    }
+
     auto cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
 
     auto output = Tensor::empty_uninitialized(
@@ -2115,6 +2157,13 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t s
     if (total == 0) return output;
 
     int64_t dim_size = shape[dim];
+    // Reduce shift into [0, dim_size) so the kernel's wrap-around modulo never
+    // produces a negative source index.
+    if (dim_size > 0) {
+        shift = ((shift % dim_size) + dim_size) % dim_size;
+    } else {
+        shift = 0;
+    }
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < static_cast<int64_t>(shape.size()); ++d) {
         inner_size *= shape[d];

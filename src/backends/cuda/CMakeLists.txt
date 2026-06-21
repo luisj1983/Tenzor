@@ -201,7 +201,14 @@ else()
     message(WARNING "CUDA Backend: Building without cuDNN. Conv2d, pooling, softmax, batchnorm, and layernorm will use custom CUDA kernels with reduced performance. Install cuDNN for optimal performance.")
 endif()
 
-# CUDA architecture flags - auto-detect when possible
+# CUDA architecture flags - auto-detect when possible.
+# Supported arch floor is Volta (sm_70): Pascal (sm_60, P100/P40) and older are
+# intentionally not in the fallback fat-binary list (they predate the Tensor-Core
+# / Float64-atomic features several kernels rely on). NOTE: the explicit
+# "70;75;80;86;89;90;120" list is ONLY a last-resort fallback used when both
+# CMake-native detection (3.24+) and nvidia-smi fail; with a GPU present the
+# build compiles for the detected arch alone, so the fat-binary stays small.
+# Override with -DCMAKE_CUDA_ARCHITECTURES=... to target other GPUs (incl. sm_60).
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     # Priority 1: CMake 3.24+ native detection
     if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
@@ -262,6 +269,26 @@ target_compile_options(tenzor_backend_cuda PRIVATE
         --generate-line-info
     >
 )
+
+# Per-file precision exemptions (mirrors ROCm activations/fused_ops -fno-fast-math
+# at rocm/CMakeLists.txt:130-132 and OneAPI -fp-model=precise at
+# oneapi/CMakeLists.txt:249-254). The transcendental / softmax / normalization
+# kernels feed Sin/Cos/exp/softmax/RMSNorm/BatchNorm/LayerNorm parity tests. With
+# the target-wide --prec-div=false --prec-sqrt=false, nvcc emits approximate
+# division/sqrt (and, combined with --fmad, approximate-grade transcendental
+# codegen) which makes e.g. MathOperationParity.Sin/Cos diverge ~2.5e-7 vs the
+# 1e-7 CPU reference. Re-enable precise div/sqrt for these TUs (the later flags
+# win over the earlier --prec-div=false/--prec-sqrt=false), keeping --ftz=false.
+if(TENZOR_CUDA_FAST_MATH)
+    set_source_files_properties(
+        kernels/math.cu
+        kernels/activations.cu
+        kernels/fused_ops.cu
+        kernels/batchnorm.cu
+        kernels/reduction.cu
+        PROPERTIES COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--prec-div=true;--prec-sqrt=true>"
+    )
+endif()
 
 # Set compute capability definitions
 foreach(ARCH ${CMAKE_CUDA_ARCHITECTURES})

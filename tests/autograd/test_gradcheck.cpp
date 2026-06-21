@@ -160,13 +160,13 @@ TEST_P(GradCheckBackendTest, DetailedResult) {
     EXPECT_LT(result.max_rel_error, 5e-2);  // Float32 needs looser tolerance
 }
 
-// Test with Float64 for higher precision (CPU only due to backend support)
+// Test with Float64 for higher precision. The tight bounds below (1e-6/1e-5)
+// are the point of this test: a backend that silently downcasts Float64 to
+// Float32 would only reach Float32-class accuracy (~5e-2, see Float32Precision
+// above) and FAIL these assertions, so this test actively catches a silent
+// downcast rather than skipping the backend. It therefore runs on every
+// instantiated backend with no per-backend skip.
 TEST_P(GradCheckBackendTest, Float64Precision) {
-    // Skip if not CPU - Float64 support varies by backend
-    //if (device.type != Device::Type::CPU) {
-    //    GTEST_SKIP() << "Float64 test only on CPU backend";
-    //}
-
     auto f = [](const Variable& x) -> Variable {
         return x * x + x * 2.0;
     };

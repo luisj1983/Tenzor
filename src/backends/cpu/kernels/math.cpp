@@ -1774,23 +1774,29 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             // So pass B as the first matrix and A as the second, both 'N' (no-transpose),
             // with dimensions m=N, n=M, k=K and leading dims lda=N, ldb=K, ldc=N.
             {
-                std::vector<float> c_fp32(static_cast<size_t>(M) * N);
+                std::vector<float> c_fp32(static_cast<size_t>(M) * K);
                 const char transa = 'N', transb = 'N';
-                MKL_INT im = static_cast<MKL_INT>(M);
-                MKL_INT ik = static_cast<MKL_INT>(K);
-                MKL_INT in = static_cast<MKL_INT>(N);
+                MKL_INT im = static_cast<MKL_INT>(M);   // rows of A/C (=1)
+                MKL_INT ik = static_cast<MKL_INT>(K);   // cols of B/C (output width)
+                MKL_INT in = static_cast<MKL_INT>(N);   // shared/contraction dim
                 float alpha = 1.0f, beta = 0.0f;
-                // col-major: C^T(N×M) = B^T(N×K) * A^T(K×M)
-                // m_arg=N, n_arg=M, k_arg=K, lda=N (leading dim of B), ldb=K, ldc=N
+                // 1D×2D: A is (M=1,N), B is (N,K), C is (M=1,K). N is the
+                // contraction dim, K the output width (result shape {K}). The
+                // prior code used the 2D convention (contraction=K, output=N),
+                // computing the wrong product and, when N>K, writing N values
+                // into a K-length buffer (heap overflow).
+                // row-major C(M×K)=A(M×N)·B(N×K) ↔ col-major
+                // C^T(K×M)=B^T(K×N)·A^T(N×M): m_arg=K, n_arg=M, k_arg=N,
+                // lda=K (leading dim of B), ldb=N (leading dim of A), ldc=K.
                 gemm_bf16bf16f32(&transa, &transb,
-                                 &in, &im, &ik,
+                                 &ik, &im, &in,
                                  &alpha,
-                                 reinterpret_cast<const MKL_BF16*>(b_data), &in,
-                                 reinterpret_cast<const MKL_BF16*>(a_data), &ik,
-                                 &beta, c_fp32.data(), &in);
+                                 reinterpret_cast<const MKL_BF16*>(b_data), &ik,
+                                 reinterpret_cast<const MKL_BF16*>(a_data), &in,
+                                 &beta, c_fp32.data(), &ik);
                 // Narrow F32 → BF16
                 bfloat16_simd::convert_f32_to_bf16_batch(c_fp32.data(), c_data,
-                                                          static_cast<size_t>(M) * N);
+                                                          static_cast<size_t>(M) * K);
             }
 #else
             matmul_blocked_bfloat16(a_data, b_data, c_data, M, K, N);
@@ -2379,7 +2385,11 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 // Square root kernel (OpenMP + SIMD optimized with chunking)
-auto sqrt_kernel(const Tensor& input) -> Tensor {
+auto sqrt_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify: data<T>() returns storage+offset without applying strides, so a
+    // non-contiguous view would otherwise be read as if contiguous (wrong data).
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2561,7 +2571,10 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
     return result;
 }
 
-auto neg_kernel(const Tensor& input) -> Tensor {
+auto neg_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify (see sqrt_kernel): data<T>() does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2685,7 +2698,10 @@ auto neg_kernel(const Tensor& input) -> Tensor {
     return result;
 }
 
-auto abs_kernel(const Tensor& input) -> Tensor {
+auto abs_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify (see sqrt_kernel): data<T>() does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     size_t n = static_cast<size_t>(input.numel());
 
@@ -2883,6 +2899,7 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor
         __m256d min_vec = _mm256_set1_pd(min_val_d);
         __m256d max_vec = _mm256_set1_pd(max_val_d);
 
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             // Clamp: max(min(v, max), min)
@@ -2934,7 +2951,12 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor
         auto run = [&]<typename T>() {
             const T* in_data = input.data<T>();
             T* out_data = result.data<T>();
-            T lo = static_cast<T>(min_val), hi = static_cast<T>(max_val);
+            // Saturate the double bounds into [lowest, max] of T before the cast:
+            // a double outside T's range is UB when narrowed directly to T.
+            const double t_lo = static_cast<double>(std::numeric_limits<T>::lowest());
+            const double t_hi = static_cast<double>(std::numeric_limits<T>::max());
+            T lo = static_cast<T>(std::max(t_lo, std::min(min_val, t_hi)));
+            T hi = static_cast<T>(std::max(t_lo, std::min(max_val, t_hi)));
             for (size_t i = 0; i < n; ++i)
                 out_data[i] = std::max(std::min(in_data[i], hi), lo);
         };
@@ -3002,6 +3024,7 @@ auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
         size_t simd_end = (n / 4) * 4;
         __m256d min_vec = _mm256_set1_pd(min_val_d);
 
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             __m256d clamped = _mm256_max_pd(v, min_vec);
@@ -3046,7 +3069,11 @@ auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
         auto run = [&]<typename T>() {
             const T* in_data = input.data<T>();
             T* out_data = result.data<T>();
-            T lo = static_cast<T>(min_val);
+            // Saturate the double bound into [lowest, max] of T before the cast:
+            // a double outside T's range is UB when narrowed directly to T.
+            double clamped = std::max(static_cast<double>(std::numeric_limits<T>::lowest()),
+                                      std::min(min_val, static_cast<double>(std::numeric_limits<T>::max())));
+            T lo = static_cast<T>(clamped);
             for (size_t i = 0; i < n; ++i) out_data[i] = std::max(in_data[i], lo);
         };
         switch (input.dtype()) {
@@ -3113,6 +3140,7 @@ auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
         size_t simd_end = (n / 4) * 4;
         __m256d max_vec = _mm256_set1_pd(max_val_d);
 
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             __m256d clamped = _mm256_min_pd(v, max_vec);
@@ -3157,7 +3185,11 @@ auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
         auto run = [&]<typename T>() {
             const T* in_data = input.data<T>();
             T* out_data = result.data<T>();
-            T hi = static_cast<T>(max_val);
+            // Saturate the double bound into [lowest, max] of T before the cast:
+            // a double outside T's range is UB when narrowed directly to T.
+            double clamped = std::max(static_cast<double>(std::numeric_limits<T>::lowest()),
+                                      std::min(max_val, static_cast<double>(std::numeric_limits<T>::max())));
+            T hi = static_cast<T>(clamped);
             for (size_t i = 0; i < n; ++i) out_data[i] = std::min(in_data[i], hi);
         };
         switch (input.dtype()) {
@@ -3215,57 +3247,12 @@ auto log_kernel(const Tensor& input) -> Tensor {
 #endif
 
     } else if (input.dtype() == DType::Float16) {
-        const Float16* in_data = input.data<Float16>();
-        Float16* out_data = result.data<Float16>();
-
-        if (n < OMP_THRESHOLD_MEDIUM) {
-#ifdef __F16C__
-            size_t i = 0;
-            for (; i + 8 <= n; i += 8) {
-                __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
-                __m256 fp32 = _mm256_cvtph_ps(packed);
-                __m256 result_v = fast_math::log_avx2(fp32);
-                __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
-                _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
-            }
-            for (; i < n; ++i) {
-                out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
-            }
-#else
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
-            }
-#endif
-        } else {
-            #pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                int nthreads = omp_get_num_threads();
-
-                size_t chunk_size = (n + nthreads - 1) / nthreads;
-                size_t start = tid * chunk_size;
-                size_t end = std::min(start + chunk_size, n);
-
-#ifdef __F16C__
-                size_t i = start;
-                for (; i + 8 <= end; i += 8) {
-                    __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
-                    __m256 fp32 = _mm256_cvtph_ps(packed);
-                    __m256 result_v = fast_math::log_avx2(fp32);
-                    __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
-                    _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
-                }
-                for (; i < end; ++i) {
-                    out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
-                }
-#else
-                for (size_t i = start; i < end; ++i) {
-                    out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
-                }
-#endif
-            }
-        }
-
+        // Float16: widen to Float32, compute via the libm F32 path, narrow back.
+        // (Previously used fast_math::log_avx2, the ~10-20 ULP polynomial that the
+        // F32/F64 paths deliberately abandoned and which returns finite garbage for
+        // +Inf/NaN; widen_narrow routes through std::log for exact Inf/NaN handling.)
+        return tenzor::utils::widen_narrow_compute(input,
+            [](const Tensor& x) { return log_kernel(x); });
     } else if (input.dtype() == DType::Complex64) {
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
@@ -5205,13 +5192,20 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
+                // Serial: integer divide-by-zero must throw, which is UB across an
+                // OpenMP parallel region, so this path is intentionally not parallelized.
                 for (int64_t i = 0; i < n; i++) {
+                    if (b_data[i] == 0) {
+                        throw std::runtime_error("Integer division by zero");
+                    }
                     a_data[i] /= b_data[i];
                 }
             } else {
                 detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
-                    [](int32_t x, int32_t y) { return x / y; });
+                    [](int32_t x, int32_t y) {
+                        if (y == 0) throw std::runtime_error("Integer division by zero");
+                        return x / y;
+                    });
             }
             break;
         }
@@ -5219,13 +5213,19 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             if (same_shape) {
-                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
+                // Serial: see Int32 note above (throw is UB across an OpenMP region).
                 for (int64_t i = 0; i < n; i++) {
+                    if (b_data[i] == 0) {
+                        throw std::runtime_error("Integer division by zero");
+                    }
                     a_data[i] /= b_data[i];
                 }
             } else {
                 detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
-                    [](int64_t x, int64_t y) { return x / y; });
+                    [](int64_t x, int64_t y) {
+                        if (y == 0) throw std::runtime_error("Integer division by zero");
+                        return x / y;
+                    });
             }
             break;
         }
@@ -6088,7 +6088,10 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
         const T* b_data = b.data<T>();
 
         if (p == 2.0) {
-            // Euclidean: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a*b^T
+            // Euclidean distance. Use the direct sum-of-squared-differences form
+            // Sigma_k (a_k - b_k)^2 accumulated in double rather than the
+            // cancellation-prone ||a||^2 + ||b||^2 - 2*a.b expansion, which loses
+            // precision (and can go slightly negative) for large-magnitude inputs.
             for (int64_t batch = 0; batch < batch_size; ++batch) {
                 int64_t b1 = (batch1 == 1) ? 0 : batch;
                 int64_t b2 = (batch2 == 1) ? 0 : batch;
@@ -6097,34 +6100,16 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
                 const T* b_batch = b_data + b2 * R * M;
                 T* o_batch = out_data + batch * P * R;
 
-                std::vector<T> a_sq(static_cast<size_t>(P));
-                for (int64_t i = 0; i < P; ++i) {
-                    T sum = T(0);
-                    for (int64_t k = 0; k < M; ++k) {
-                        T v = a_batch[i * M + k];
-                        sum += v * v;
-                    }
-                    a_sq[static_cast<size_t>(i)] = sum;
-                }
-                std::vector<T> b_sq(static_cast<size_t>(R));
-                for (int64_t j = 0; j < R; ++j) {
-                    T sum = T(0);
-                    for (int64_t k = 0; k < M; ++k) {
-                        T v = b_batch[j * M + k];
-                        sum += v * v;
-                    }
-                    b_sq[static_cast<size_t>(j)] = sum;
-                }
                 #pragma omp parallel for collapse(2) if(P * R > ::tenzor::OmpThresholds::complex())
                 for (int64_t i = 0; i < P; ++i) {
                     for (int64_t j = 0; j < R; ++j) {
-                        T dot = T(0);
+                        double dist_sq = 0.0;
                         for (int64_t k = 0; k < M; ++k) {
-                            dot += a_batch[i * M + k] * b_batch[j * M + k];
+                            double diff = static_cast<double>(a_batch[i * M + k])
+                                        - static_cast<double>(b_batch[j * M + k]);
+                            dist_sq += diff * diff;
                         }
-                        T dist_sq = a_sq[static_cast<size_t>(i)] + b_sq[static_cast<size_t>(j)]
-                                    - T(2) * dot;
-                        o_batch[i * R + j] = std::sqrt(std::max(T(0), dist_sq));
+                        o_batch[i * R + j] = static_cast<T>(std::sqrt(std::max(0.0, dist_sq)));
                     }
                 }
             }
@@ -6490,11 +6475,22 @@ auto bessel_y0_kernel(const Tensor& input) -> Tensor {
         [](float x) { return static_cast<float>(std::cyl_neumann(0, static_cast<double>(x))); },
         [](double x) { return std::cyl_neumann(0, x); }, "bessel_y0");
 #else
-    auto y0_approx = [](double x) -> double {
+    // J0(x) polynomial (Abramowitz & Stegun 9.4.1, valid for |x| <= 3), used by
+    // the small-x Y0 series below. The fallback branch must NOT call
+    // std::cyl_bessel_j (the C++17 special function this branch replaces).
+    auto j0_small = [](double x) -> double {
+        double y = x * x;
+        double num = 57568490574.0 + y * (-13362590354.0 + y * (651619640.7
+                   + y * (-11214424.18 + y * (77392.33017 + y * (-184.9052456)))));
+        double den = 57568490411.0 + y * (1029532985.0 + y * (9494680.718
+                   + y * (59272.64853 + y * (267.8532712 + y * 1.0))));
+        return num / den;
+    };
+    auto y0_approx = [&j0_small](double x) -> double {
         if (x <= 0.0) return -std::numeric_limits<double>::infinity();
         if (x <= 3.0) {
             double y = x * x / 9.0;
-            return (2.0 / M_PI) * std::log(x / 2.0) * std::cyl_bessel_j(0, x)
+            return (2.0 / M_PI) * std::log(x / 2.0) * j0_small(x)
                    + 0.36746691 + y * (0.60559366 - y * (0.74350384 - y * (0.25300117
                    - y * (0.04261214 - y * (0.00427916 - y * 0.00024846)))));
         }
@@ -6518,11 +6514,23 @@ auto bessel_y1_kernel(const Tensor& input) -> Tensor {
         [](float x) { return static_cast<float>(std::cyl_neumann(1, static_cast<double>(x))); },
         [](double x) { return std::cyl_neumann(1, x); }, "bessel_y1");
 #else
-    auto y1_approx = [](double x) -> double {
+    // J1(x) polynomial (Abramowitz & Stegun 9.4.4, valid for |x| <= 3), used by
+    // the small-x Y1 series below. The fallback branch must NOT call
+    // std::cyl_bessel_j, which is the very C++17 special function this branch
+    // exists to replace (it would not compile on toolchains lacking it).
+    auto j1_small = [](double x) -> double {
+        double y = x * x;
+        double num = x * (72362614232.0 + y * (-7895059235.0 + y * (242396853.1
+                   + y * (-2972611.439 + y * (15704.48260 + y * (-30.16036606))))));
+        double den = 144725228442.0 + y * (2300535178.0 + y * (18583304.74
+                   + y * (99447.43394 + y * (376.9991397 + y * 1.0))));
+        return num / den;
+    };
+    auto y1_approx = [&j1_small](double x) -> double {
         if (x <= 0.0) return -std::numeric_limits<double>::infinity();
         if (x <= 3.0) {
             double y = x * x / 9.0;
-            return (2.0 / M_PI) * (std::log(x / 2.0) * std::cyl_bessel_j(1, x) - 1.0 / x)
+            return (2.0 / M_PI) * (std::log(x / 2.0) * j1_small(x) - 1.0 / x)
                    + x * (0.02635537 + y * (-0.04985710 + y * (-0.00121547 + y * (0.00127120
                    - y * (0.00023895 + y * (0.00002535))))));
         }
@@ -6907,49 +6915,39 @@ auto rrelu_backward_kernel(const Tensor& grad, const Tensor& input, float lower,
 // ============================================================================
 
 auto bitwise_and_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<int64_t> shape_vec(a.shape().begin(), a.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, a.dtype(), a.device());
-    int64_t n = a.numel();
+    // Broadcast-aware: the op layer validates shapes are broadcastable but does
+    // not materialize the broadcast, so a and b may have different (broadcastable)
+    // shapes. Flat indexing over a.numel() would read b out of bounds; use the
+    // strided broadcast helper instead (mirrors the comparison kernels).
+    std::vector<int64_t> shape_a_vec(a.shape().begin(), a.shape().end());
+    std::vector<int64_t> shape_b_vec(b.shape().begin(), b.shape().end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    auto output = Tensor::empty_uninitialized(output_shape, a.dtype(), a.device());
 
     switch (a.dtype()) {
         case DType::Int32: {
-            const int32_t* a_d = a.data<int32_t>();
-            const int32_t* b_d = b.data<int32_t>();
-            int32_t* o_d = output.data<int32_t>();
-            _Pragma("omp parallel for if(n > 10000)")
-            for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] & b_d[i];
+            detail::broadcast_op<int32_t>(a.data<int32_t>(), b.data<int32_t>(), output.data<int32_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int32_t x, int32_t y) { return x & y; });
             break;
         }
         case DType::Int64: {
-            const int64_t* a_d = a.data<int64_t>();
-            const int64_t* b_d = b.data<int64_t>();
-            int64_t* o_d = output.data<int64_t>();
-            _Pragma("omp parallel for if(n > 10000)")
-            for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] & b_d[i];
+            detail::broadcast_op<int64_t>(a.data<int64_t>(), b.data<int64_t>(), output.data<int64_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int64_t x, int64_t y) { return x & y; });
             break;
         }
         case DType::Int8: {
-            const int8_t* a_d = a.data<int8_t>();
-            const int8_t* b_d = b.data<int8_t>();
-            int8_t* o_d = output.data<int8_t>();
-            _Pragma("omp parallel for if(n > 10000)")
-            for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] & b_d[i];
+            detail::broadcast_op<int8_t>(a.data<int8_t>(), b.data<int8_t>(), output.data<int8_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int8_t x, int8_t y) -> int8_t { return x & y; });
             break;
         }
         case DType::Int16: {
-            const int16_t* a_d = a.data<int16_t>();
-            const int16_t* b_d = b.data<int16_t>();
-            int16_t* o_d = output.data<int16_t>();
-            _Pragma("omp parallel for if(n > 10000)")
-            for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] & b_d[i];
+            detail::broadcast_op<int16_t>(a.data<int16_t>(), b.data<int16_t>(), output.data<int16_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int16_t x, int16_t y) -> int16_t { return x & y; });
             break;
         }
         case DType::Bool: {
-            const bool* a_d = a.data<bool>();
-            const bool* b_d = b.data<bool>();
-            bool* o_d = output.data<bool>();
-            _Pragma("omp parallel for if(n > 10000)")
-            for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] && b_d[i];
+            detail::broadcast_op<bool>(a.data<bool>(), b.data<bool>(), output.data<bool>(),
+                shape_a_vec, shape_b_vec, output_shape, [](bool x, bool y) { return x && y; });
             break;
         }
         default:
@@ -6959,62 +6957,64 @@ auto bitwise_and_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto bitwise_or_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<int64_t> shape_vec(a.shape().begin(), a.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, a.dtype(), a.device());
-    int64_t n = a.numel();
+    std::vector<int64_t> shape_a_vec(a.shape().begin(), a.shape().end());
+    std::vector<int64_t> shape_b_vec(b.shape().begin(), b.shape().end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    auto output = Tensor::empty_uninitialized(output_shape, a.dtype(), a.device());
 
     switch (a.dtype()) {
-        case DType::Int32: {
-            const int32_t* a_d = a.data<int32_t>(); const int32_t* b_d = b.data<int32_t>(); int32_t* o_d = output.data<int32_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] | b_d[i]; break;
-        }
-        case DType::Int64: {
-            const int64_t* a_d = a.data<int64_t>(); const int64_t* b_d = b.data<int64_t>(); int64_t* o_d = output.data<int64_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] | b_d[i]; break;
-        }
-        case DType::Int8: {
-            const int8_t* a_d = a.data<int8_t>(); const int8_t* b_d = b.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] | b_d[i]; break;
-        }
-        case DType::Int16: {
-            const int16_t* a_d = a.data<int16_t>(); const int16_t* b_d = b.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] | b_d[i]; break;
-        }
-        case DType::Bool: {
-            const bool* a_d = a.data<bool>(); const bool* b_d = b.data<bool>(); bool* o_d = output.data<bool>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] || b_d[i]; break;
-        }
+        case DType::Int32:
+            detail::broadcast_op<int32_t>(a.data<int32_t>(), b.data<int32_t>(), output.data<int32_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int32_t x, int32_t y) { return x | y; });
+            break;
+        case DType::Int64:
+            detail::broadcast_op<int64_t>(a.data<int64_t>(), b.data<int64_t>(), output.data<int64_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int64_t x, int64_t y) { return x | y; });
+            break;
+        case DType::Int8:
+            detail::broadcast_op<int8_t>(a.data<int8_t>(), b.data<int8_t>(), output.data<int8_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int8_t x, int8_t y) -> int8_t { return x | y; });
+            break;
+        case DType::Int16:
+            detail::broadcast_op<int16_t>(a.data<int16_t>(), b.data<int16_t>(), output.data<int16_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int16_t x, int16_t y) -> int16_t { return x | y; });
+            break;
+        case DType::Bool:
+            detail::broadcast_op<bool>(a.data<bool>(), b.data<bool>(), output.data<bool>(),
+                shape_a_vec, shape_b_vec, output_shape, [](bool x, bool y) { return x || y; });
+            break;
         default: throw std::runtime_error("bitwise_or: unsupported dtype");
     }
     return output;
 }
 
 auto bitwise_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<int64_t> shape_vec(a.shape().begin(), a.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, a.dtype(), a.device());
-    int64_t n = a.numel();
+    std::vector<int64_t> shape_a_vec(a.shape().begin(), a.shape().end());
+    std::vector<int64_t> shape_b_vec(b.shape().begin(), b.shape().end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    auto output = Tensor::empty_uninitialized(output_shape, a.dtype(), a.device());
 
     switch (a.dtype()) {
-        case DType::Int32: {
-            const int32_t* a_d = a.data<int32_t>(); const int32_t* b_d = b.data<int32_t>(); int32_t* o_d = output.data<int32_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] ^ b_d[i]; break;
-        }
-        case DType::Int64: {
-            const int64_t* a_d = a.data<int64_t>(); const int64_t* b_d = b.data<int64_t>(); int64_t* o_d = output.data<int64_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] ^ b_d[i]; break;
-        }
-        case DType::Int8: {
-            const int8_t* a_d = a.data<int8_t>(); const int8_t* b_d = b.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] ^ b_d[i]; break;
-        }
-        case DType::Int16: {
-            const int16_t* a_d = a.data<int16_t>(); const int16_t* b_d = b.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] ^ b_d[i]; break;
-        }
-        case DType::Bool: {
-            const bool* a_d = a.data<bool>(); const bool* b_d = b.data<bool>(); bool* o_d = output.data<bool>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = a_d[i] != b_d[i]; break;
-        }
+        case DType::Int32:
+            detail::broadcast_op<int32_t>(a.data<int32_t>(), b.data<int32_t>(), output.data<int32_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int32_t x, int32_t y) { return x ^ y; });
+            break;
+        case DType::Int64:
+            detail::broadcast_op<int64_t>(a.data<int64_t>(), b.data<int64_t>(), output.data<int64_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int64_t x, int64_t y) { return x ^ y; });
+            break;
+        case DType::Int8:
+            detail::broadcast_op<int8_t>(a.data<int8_t>(), b.data<int8_t>(), output.data<int8_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int8_t x, int8_t y) -> int8_t { return x ^ y; });
+            break;
+        case DType::Int16:
+            detail::broadcast_op<int16_t>(a.data<int16_t>(), b.data<int16_t>(), output.data<int16_t>(),
+                shape_a_vec, shape_b_vec, output_shape, [](int16_t x, int16_t y) -> int16_t { return x ^ y; });
+            break;
+        case DType::Bool:
+            detail::broadcast_op<bool>(a.data<bool>(), b.data<bool>(), output.data<bool>(),
+                shape_a_vec, shape_b_vec, output_shape, [](bool x, bool y) { return x != y; });
+            break;
         default: throw std::runtime_error("bitwise_xor: unsupported dtype");
     }
     return output;
@@ -7052,54 +7052,95 @@ auto bitwise_not_kernel(const Tensor& input) -> Tensor {
 }
 
 auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift) -> Tensor {
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    // Broadcast-aware (op layer validates but does not materialize the broadcast)
+    // and shift-range-safe: a shift count outside [0, bitwidth) is undefined
+    // behavior in C++, so we define out-of-range shifts to produce 0 (matching the
+    // common hardware-masked result for >= width and avoiding negative-shift UB).
+    std::vector<int64_t> shape_i_vec(input.shape().begin(), input.shape().end());
+    std::vector<int64_t> shape_s_vec(shift.shape().begin(), shift.shape().end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_i_vec, shape_s_vec);
+    auto output = Tensor::empty_uninitialized(output_shape, input.dtype(), input.device());
 
     switch (input.dtype()) {
-        case DType::Int32: {
-            const int32_t* i_d = input.data<int32_t>(); const int32_t* s_d = shift.data<int32_t>(); int32_t* o_d = output.data<int32_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] << s_d[i]; break;
-        }
-        case DType::Int64: {
-            const int64_t* i_d = input.data<int64_t>(); const int64_t* s_d = shift.data<int64_t>(); int64_t* o_d = output.data<int64_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] << s_d[i]; break;
-        }
-        case DType::Int8: {
-            const int8_t* i_d = input.data<int8_t>(); const int8_t* s_d = shift.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] << s_d[i]; break;
-        }
-        case DType::Int16: {
-            const int16_t* i_d = input.data<int16_t>(); const int16_t* s_d = shift.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] << s_d[i]; break;
-        }
+        case DType::Int32:
+            detail::broadcast_op<int32_t>(input.data<int32_t>(), shift.data<int32_t>(), output.data<int32_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int32_t x, int32_t s) -> int32_t {
+                    if (s < 0 || s >= 32) return 0;
+                    return static_cast<int32_t>(static_cast<uint32_t>(x) << s);
+                });
+            break;
+        case DType::Int64:
+            detail::broadcast_op<int64_t>(input.data<int64_t>(), shift.data<int64_t>(), output.data<int64_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int64_t x, int64_t s) -> int64_t {
+                    if (s < 0 || s >= 64) return 0;
+                    return static_cast<int64_t>(static_cast<uint64_t>(x) << s);
+                });
+            break;
+        case DType::Int8:
+            detail::broadcast_op<int8_t>(input.data<int8_t>(), shift.data<int8_t>(), output.data<int8_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int8_t x, int8_t s) -> int8_t {
+                    if (s < 0 || s >= 8) return 0;
+                    return static_cast<int8_t>(static_cast<uint8_t>(x) << s);
+                });
+            break;
+        case DType::Int16:
+            detail::broadcast_op<int16_t>(input.data<int16_t>(), shift.data<int16_t>(), output.data<int16_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int16_t x, int16_t s) -> int16_t {
+                    if (s < 0 || s >= 16) return 0;
+                    return static_cast<int16_t>(static_cast<uint16_t>(x) << s);
+                });
+            break;
         default: throw std::runtime_error("bitwise_left_shift: unsupported dtype (expected integer)");
     }
     return output;
 }
 
 auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift) -> Tensor {
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    // Broadcast-aware and shift-range-safe. Right shift is arithmetic (sign-
+    // preserving) for signed types; a shift count outside [0, bitwidth) is UB in
+    // C++, so we define it to saturate: non-negative -> 0, negative -> -1.
+    std::vector<int64_t> shape_i_vec(input.shape().begin(), input.shape().end());
+    std::vector<int64_t> shape_s_vec(shift.shape().begin(), shift.shape().end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_i_vec, shape_s_vec);
+    auto output = Tensor::empty_uninitialized(output_shape, input.dtype(), input.device());
 
     switch (input.dtype()) {
-        case DType::Int32: {
-            const int32_t* i_d = input.data<int32_t>(); const int32_t* s_d = shift.data<int32_t>(); int32_t* o_d = output.data<int32_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] >> s_d[i]; break;
-        }
-        case DType::Int64: {
-            const int64_t* i_d = input.data<int64_t>(); const int64_t* s_d = shift.data<int64_t>(); int64_t* o_d = output.data<int64_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] >> s_d[i]; break;
-        }
-        case DType::Int8: {
-            const int8_t* i_d = input.data<int8_t>(); const int8_t* s_d = shift.data<int8_t>(); int8_t* o_d = output.data<int8_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] >> s_d[i]; break;
-        }
-        case DType::Int16: {
-            const int16_t* i_d = input.data<int16_t>(); const int16_t* s_d = shift.data<int16_t>(); int16_t* o_d = output.data<int16_t>();
-            _Pragma("omp parallel for if(n > 10000)") for (int64_t i = 0; i < n; i++) o_d[i] = i_d[i] >> s_d[i]; break;
-        }
+        case DType::Int32:
+            detail::broadcast_op<int32_t>(input.data<int32_t>(), shift.data<int32_t>(), output.data<int32_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int32_t x, int32_t s) -> int32_t {
+                    if (s < 0 || s >= 32) return x < 0 ? -1 : 0;
+                    return x >> s;
+                });
+            break;
+        case DType::Int64:
+            detail::broadcast_op<int64_t>(input.data<int64_t>(), shift.data<int64_t>(), output.data<int64_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int64_t x, int64_t s) -> int64_t {
+                    if (s < 0 || s >= 64) return x < 0 ? -1 : 0;
+                    return x >> s;
+                });
+            break;
+        case DType::Int8:
+            detail::broadcast_op<int8_t>(input.data<int8_t>(), shift.data<int8_t>(), output.data<int8_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int8_t x, int8_t s) -> int8_t {
+                    if (s < 0 || s >= 8) return x < 0 ? -1 : 0;
+                    return static_cast<int8_t>(x >> s);
+                });
+            break;
+        case DType::Int16:
+            detail::broadcast_op<int16_t>(input.data<int16_t>(), shift.data<int16_t>(), output.data<int16_t>(),
+                shape_i_vec, shape_s_vec, output_shape,
+                [](int16_t x, int16_t s) -> int16_t {
+                    if (s < 0 || s >= 16) return x < 0 ? -1 : 0;
+                    return static_cast<int16_t>(x >> s);
+                });
+            break;
         default: throw std::runtime_error("bitwise_right_shift: unsupported dtype (expected integer)");
     }
     return output;
@@ -7300,6 +7341,9 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::pair
 
     if (dim < 0) {
         int64_t n = input.numel();
+        if (n == 0) {
+            throw std::runtime_error("aminmax(): cannot compute aminmax over an empty tensor");
+        }
         Tensor min_out({1}, input.dtype(), input.device());
         Tensor max_out({1}, input.dtype(), input.device());
         TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "aminmax", [&]() {
@@ -7318,7 +7362,13 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::pair
     auto shape = input.shape();
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("aminmax(): dim out of range");
+    }
     int64_t reduce_size = shape[dim];
+    if (reduce_size == 0) {
+        throw std::runtime_error("aminmax(): cannot compute aminmax over a zero-size dimension");
+    }
 
     std::vector<int64_t> out_shape;
     for (int64_t d = 0; d < ndim; d++) {
@@ -8186,6 +8236,12 @@ auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
         return result_f32.to(orig_dtype);
     }
 
+    if (tensor1.numel() != input.numel() || tensor2.numel() != input.numel()) {
+        throw std::invalid_argument(
+            "addcmul: tensor1/tensor2 must have the same number of elements as input "
+            "(broadcast at the op layer before dispatch)");
+    }
+
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(result.numel());
@@ -8213,6 +8269,12 @@ auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
                                          tensor1.to(DType::Float32),
                                          tensor2.to(DType::Float32), alpha);
         return result_f32.to(orig_dtype);
+    }
+
+    if (tensor1.numel() != input.numel() || tensor2.numel() != input.numel()) {
+        throw std::invalid_argument(
+            "addcdiv: tensor1/tensor2 must have the same number of elements as input "
+            "(broadcast at the op layer before dispatch)");
     }
 
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
@@ -8917,7 +8979,7 @@ auto pdist_kernel(const Tensor& input, double p) -> Tensor {
 // ============================================================================
 auto logaddexp_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return binary_math_kernel(a, b,
-        [](float x, float y) { float m = std::max(x,y); return m + std::log1pf(std::expf(-(std::abs(x-y)))); },
+        [](float x, float y) { float m = std::max(x,y); return m + std::log1p(std::exp(-(std::abs(x-y)))); },
         [](double x, double y) { double m = std::max(x,y); return m + std::log1p(std::exp(-(std::abs(x-y)))); },
         "logaddexp");
 }
@@ -8927,7 +8989,7 @@ auto logaddexp_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 // ============================================================================
 auto logaddexp2_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return binary_math_kernel(a, b,
-        [](float x, float y) { float m = std::max(x,y); return m + std::log2f(1.0f + std::exp2f(-(std::abs(x-y)))); },
+        [](float x, float y) { float m = std::max(x,y); return m + std::log2(1.0f + std::exp2(-(std::abs(x-y)))); },
         [](double x, double y) { double m = std::max(x,y); return m + std::log2(1.0 + std::exp2(-(std::abs(x-y)))); },
         "logaddexp2");
 }
@@ -8937,7 +8999,7 @@ auto logaddexp2_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 // ============================================================================
 auto xlogy_kernel(const Tensor& x, const Tensor& y) -> Tensor {
     return binary_math_kernel(x, y,
-        [](float a, float b) { return a == 0.0f ? 0.0f : a * std::logf(b); },
+        [](float a, float b) { return a == 0.0f ? 0.0f : a * std::log(b); },
         [](double a, double b) { return a == 0.0 ? 0.0 : a * std::log(b); },
         "xlogy");
 }
@@ -8999,7 +9061,7 @@ auto i1e_kernel(const Tensor& input) -> Tensor {
 auto entr_kernel(const Tensor& input) -> Tensor {
     return unary_math_kernel(input,
         [](float x) -> float {
-            if (x > 0.0f) return -x * std::logf(x);
+            if (x > 0.0f) return -x * std::log(x);
             if (x == 0.0f) return 0.0f;
             return -std::numeric_limits<float>::infinity();
         },
@@ -9016,7 +9078,7 @@ auto entr_kernel(const Tensor& input) -> Tensor {
 // ============================================================================
 auto spherical_bessel_j0_kernel(const Tensor& input) -> Tensor {
     return unary_math_kernel(input,
-        [](float x) -> float { return x == 0.0f ? 1.0f : std::sinf(x) / x; },
+        [](float x) -> float { return x == 0.0f ? 1.0f : std::sin(x) / x; },
         [](double x) -> double { return x == 0.0 ? 1.0 : std::sin(x) / x; },
         "spherical_bessel_j0");
 }
@@ -9038,19 +9100,20 @@ auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm) -
     auto dispatch_typed = [&]<typename T>(T*) {
         T* data = result.data<T>();
         for (int64_t d = 0; d < dim_size; d++) {
-            // Compute p-norm of slice
-            T norm_val = 0;
+            // Compute p-norm of slice (accumulate in double to avoid precision
+            // loss summing many std::pow terms into a float accumulator).
+            double norm_acc = 0.0;
             for (int64_t o = 0; o < outer; o++) {
                 for (int64_t i = 0; i < inner; i++) {
                     int64_t idx = (o * dim_size + d) * inner + i;
-                    norm_val += std::pow(std::abs(static_cast<double>(data[idx])), p);
+                    norm_acc += std::pow(std::abs(static_cast<double>(data[idx])), p);
                 }
             }
-            norm_val = static_cast<T>(std::pow(static_cast<double>(norm_val), 1.0 / p));
+            double norm_val = std::pow(norm_acc, 1.0 / p);
 
             // Scale if norm exceeds maxnorm
-            if (static_cast<double>(norm_val) > maxnorm) {
-                T scale = static_cast<T>(maxnorm / static_cast<double>(norm_val));
+            if (norm_val > maxnorm) {
+                T scale = static_cast<T>(maxnorm / norm_val);
                 for (int64_t o = 0; o < outer; o++) {
                     for (int64_t i = 0; i < inner; i++) {
                         int64_t idx = (o * dim_size + d) * inner + i;

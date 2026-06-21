@@ -730,6 +730,14 @@ auto LBFGS::state_dict() const -> std::unordered_map<std::string, Tensor> {
     if (has_prev_state_ && prev_flat_grad_.numel() > 0) {
         state["prev_flat_grad"] = prev_flat_grad_.clone();
     }
+    // prev_flat_params_ is required to reconstruct the curvature pair
+    // s = gather_flat_params() - prev_flat_params_ on the first post-reload
+    // step. Persist it alongside prev_flat_grad_ under the same gating so a
+    // checkpointed L-BFGS run can resume without throwing or poisoning the
+    // (s, y) history.
+    if (has_prev_state_ && prev_flat_params_.numel() > 0) {
+        state["prev_flat_params"] = prev_flat_params_.clone();
+    }
 
     return state;
 }
@@ -790,6 +798,18 @@ auto LBFGS::load_state_dict(const std::unordered_map<std::string, Tensor>& state
     } else if (has_prev_state_) {
         throw std::invalid_argument(
             "LBFGS::load_state_dict: has_prev_state is true but 'prev_flat_grad' is missing");
+    }
+
+    // prev_flat_params is gated identically to prev_flat_grad: state_dict()
+    // only writes it when has_prev_state_ is true and the cached parameters
+    // were non-empty. Restoring it is mandatory when resuming with prior state
+    // so the first post-reload step can form s = params - prev_flat_params_.
+    auto it_pp = state.find("prev_flat_params");
+    if (it_pp != state.end()) {
+        prev_flat_params_ = it_pp->second.clone();
+    } else if (has_prev_state_) {
+        throw std::invalid_argument(
+            "LBFGS::load_state_dict: has_prev_state is true but 'prev_flat_params' is missing");
     }
 
     // The s/y/rho history block is tolerated as absent: state_dict() only

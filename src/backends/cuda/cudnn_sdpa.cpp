@@ -638,7 +638,8 @@ auto cudnn_sdpa_supported(
     int64_t num_heads,
     int64_t seq_len_q,
     int64_t seq_len_k,
-    int64_t head_dim
+    int64_t head_dim,
+    int device_index
 ) -> bool {
     // cuDNN SDPA requirements:
     // - Head dim must be 64 or 128 (some versions support 32, 256)
@@ -649,9 +650,13 @@ auto cudnn_sdpa_supported(
         return false;
     }
 
-    // Check GPU architecture (requires Ampere or newer)
-    int device;
-    cudaGetDevice(&device);
+    // Check GPU architecture (requires Ampere or newer). Query the tensors'
+    // device, not just the calling thread's current device — on a multi-GPU
+    // host they can differ. -1 means "use current device".
+    int device = device_index;
+    if (device < 0) {
+        cudaGetDevice(&device);
+    }
     cudaDeviceProp props;
     cudaGetDeviceProperties(&props, device);
     int sm_version = props.major * 10 + props.minor;

@@ -48,7 +48,10 @@ namespace cpu {
 ///   hash_combine(h, alpha);
 ///   return h;
 inline void hash_combine(size_t& seed, size_t value) {
-    seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    // 64-bit golden-ratio constant so the upper 32 bits of a 64-bit size_t are
+    // mixed (the old 0x9e3779b9 left them poorly distributed). On 32-bit
+    // platforms this truncates to a valid odd mixing constant.
+    seed ^= value + static_cast<size_t>(0x9e3779b97f4a7c15ULL) + (seed << 6) + (seed >> 2);
 }
 
 /// Convenience overload that hashes the value before combining.

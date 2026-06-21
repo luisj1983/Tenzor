@@ -284,8 +284,10 @@ __global__ void sum_along_dim_kernel(
         tmp /= dim_size_d;
     }
 
-    // Sum along the reduction dimension
-    T sum = 0;
+    // Sum along the reduction dimension. Accumulate in the higher-precision
+    // reduction_accum type (double for float input) to match the full-reduction
+    // sum path and the Kahan-compensated CPU reference; narrow on store.
+    reduction_accum_t<T> sum = reduction_accum_t<T>(0);
     for (int64_t i = 0; i < dim_size; i++) {
         indices[dim] = i;
 
@@ -295,10 +297,10 @@ __global__ void sum_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
 
-        sum += input[in_idx];
+        sum += static_cast<reduction_accum_t<T>>(input[in_idx]);
     }
 
-    output[out_idx] = sum;
+    output[out_idx] = static_cast<T>(sum);
 }
 
 /**
@@ -346,10 +348,11 @@ __global__ void var_along_dim_kernel(
 
     int64_t denom = count - correction;
     // Variance is undefined (NaN) when count <= correction, matching CPU/
-    // PyTorch instead of returning 0. Build the NaN from its IEEE-754 bit
-    // pattern (ROCm's NaN conversion intrinsics are unreliable).
+    // PyTorch instead of returning 0. Build the NaN directly in T's native bit
+    // width (make_qnan) rather than casting a float32 NaN to T — the float->T
+    // conversion is the one ROCm's NaN helpers exist to distrust.
     output[out_idx] = denom > 0 ? m2 / T(denom)
-                                : static_cast<T>(__int_as_float(0x7fc00000));
+                                : tenzor::rocm::make_qnan<T>();
 }
 
 /**
@@ -1909,15 +1912,20 @@ __global__ void prod_kernel(const T* input, T* output, int64_t n) {
 
 template<typename T>
 __global__ void var_kernel(const T* input, const T* mean_ptr, T* output, int64_t n) {
-    __shared__ T sdata[REDUCTION_BLOCK_SIZE];
+    // Accumulate sum-of-squared-deviations in the higher-precision accum type
+    // (double for float input) to match the sum-reduce path and the Kahan CPU
+    // reference; sum-of-squares is especially prone to ULP drift over long
+    // reductions. Narrow only when writing the per-block partial.
+    using Acc = reduction_accum_t<T>;
+    __shared__ Acc sdata[REDUCTION_BLOCK_SIZE];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    T mean = *mean_ptr;
+    Acc mean = static_cast<Acc>(*mean_ptr);
 
-    T sum = T(0);
+    Acc sum = Acc(0);
     while (idx < n) {
-        T diff = input[idx] - mean;
+        Acc diff = static_cast<Acc>(input[idx]) - mean;
         sum += diff * diff;
         idx += blockDim.x * gridDim.x;
     }
@@ -1933,22 +1941,26 @@ __global__ void var_kernel(const T* input, const T* mean_ptr, T* output, int64_t
     }
 
     if (tid == 0) {
-        output[blockIdx.x] = sdata[0];
+        output[blockIdx.x] = static_cast<T>(sdata[0]);
     }
 }
 
 template<typename T>
 __global__ void norm_kernel(const T* input, T* output, int64_t n, T p) {
-    __shared__ T sdata[REDUCTION_BLOCK_SIZE];
+    // Accumulate sum of |x|^p in the higher-precision accum type (double for
+    // float input), matching the sum-reduce contract; narrow on store.
+    using Acc = reduction_accum_t<T>;
+    __shared__ Acc sdata[REDUCTION_BLOCK_SIZE];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    Acc pa = static_cast<Acc>(p);
 
-    T sum = T(0);
+    Acc sum = Acc(0);
     while (idx < n) {
-        T val = input[idx];
-        if (val < T(0)) val = -val;  // abs
-        sum += pow(val, p);
+        Acc val = static_cast<Acc>(input[idx]);
+        if (val < Acc(0)) val = -val;  // abs
+        sum += pow(val, pa);
         idx += blockDim.x * gridDim.x;
     }
 
@@ -1963,7 +1975,7 @@ __global__ void norm_kernel(const T* input, T* output, int64_t n, T p) {
     }
 
     if (tid == 0) {
-        output[blockIdx.x] = sdata[0];
+        output[blockIdx.x] = static_cast<T>(sdata[0]);
     }
 }
 

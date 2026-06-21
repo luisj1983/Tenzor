@@ -851,15 +851,26 @@ template<typename T>
 auto sum_impl(const T* input_data, int64_t n) -> T {
     if (n == 0) return T(0);
 
-    T sum = 0;
+    // Accumulate integer reductions in a 64-bit accumulator. With a narrow
+    // accumulator (int8/int16/int32) the running sum overflows after as few as
+    // 128 elements, and for *signed* integers that overflow is undefined
+    // behavior (not merely a wrapped value the compiler may keep). Widening to
+    // int64_t/uint64_t makes the accumulation well-defined; the final cast back
+    // to T preserves the documented kernel contract (output dtype == input
+    // dtype — the public `tenzor::sum()` op promotes narrow ints to Int64
+    // before dispatch, so any narrowing here only affects direct kernel calls).
+    using Acc = std::conditional_t<
+        std::is_integral_v<T>,
+        std::conditional_t<std::is_signed_v<T>, int64_t, uint64_t>,
+        T>;
+    Acc sum = Acc(0);
 
-    // Use OpenMP reduction clause for non-float types
     #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
     for (int64_t i = 0; i < n; i++) {
-        sum += input_data[i];
+        sum += static_cast<Acc>(input_data[i]);
     }
 
-    return sum;
+    return static_cast<T>(sum);
 }
 
 // Specialization for float - uses SIMD vectorized reduction
@@ -913,6 +924,16 @@ void sum_along_dim(const T* input_data,
         }
     }
 
+    // Integer reductions accumulate in a 64-bit accumulator to avoid signed
+    // overflow UB / narrow-type wraparound; floating-point uses Kahan
+    // compensation in T. (See sum_impl for the rationale and the output-dtype
+    // contract.)
+    using Acc = std::conditional_t<
+        std::is_integral_v<T>,
+        std::conditional_t<std::is_signed_v<T>, int64_t, uint64_t>,
+        T>;
+    constexpr bool kUseKahan = std::is_floating_point_v<T>;
+
     // Reduction along dimension - each output element is independent
     // Use higher threshold since inner loop work is proportional to dim_size
     const int64_t total_work = output_size * dim_size;
@@ -930,22 +951,28 @@ void sum_along_dim(const T* input_data,
             tmp /= input_shape[d];
         }
 
-        // Sum along the reduction dimension with Kahan compensation
-        // for improved numerical precision on Float32/Float64
-        T sum = 0;
-        T compensation = 0;
+        Acc sum = Acc(0);
+        Acc compensation = Acc(0);
         for (int64_t i = 0; i < dim_size; i++) {
             indices[dim] = i;
             int64_t in_idx = 0;
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * input_strides[d];
             }
-            T y = input_data[in_idx] - compensation;
-            T t = sum + y;
-            compensation = (t - sum) - y;
-            sum = t;
+            if constexpr (kUseKahan) {
+                // Kahan compensated sum for improved precision on Float32/Float64.
+                Acc y = static_cast<Acc>(input_data[in_idx]) - compensation;
+                Acc t = sum + y;
+                compensation = (t - sum) - y;
+                sum = t;
+            } else {
+                // Integer / complex: plain accumulation in the (possibly widened)
+                // accumulator. Kahan is meaningless for these types and its
+                // compensation arithmetic would itself overflow narrow ints.
+                sum += static_cast<Acc>(input_data[in_idx]);
+            }
         }
-        output_data[out_idx] = sum;
+        output_data[out_idx] = static_cast<T>(sum);
     }
 }
 

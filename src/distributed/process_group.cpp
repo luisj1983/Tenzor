@@ -18,6 +18,7 @@
 #include <memory>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #ifdef TENZOR_HAS_MPI
 #include "tenzor/distributed/mpi_backend.hpp"
@@ -213,13 +214,15 @@ auto GlooProcessGroup::all_to_all_single(Tensor& output, const Tensor& input) ->
     }
 
     // Assemble: peer-ordered concatenation along dim 0.
-    // H5 fix: write into the caller's pre-allocated `output` storage
-    // in-place instead of rebinding (which would orphan any autograd
-    // Variable / view aliased to it). Matches NCCL/MPI semantics.
-    auto assembled = cat(per_peer, 0);
-    auto src_bytes = static_cast<size_t>(assembled.numel())
-                   * static_cast<size_t>(dtype_size(assembled.dtype()));
-    std::memcpy(output.data_ptr(), assembled.data_ptr(), src_bytes);
+    // H5 fix: write into the caller's pre-allocated `output` storage in-place
+    // instead of rebinding (which would orphan any autograd Variable / view
+    // aliased to it). Use the stride-aware zero_()/+= pair rather than a flat
+    // std::memcpy so a non-contiguous (strided) output is written correctly
+    // through its own strides instead of being corrupted as if contiguous.
+    auto assembled = cat(per_peer, 0).reshape(
+        std::vector<int64_t>(output.shape().begin(), output.shape().end()));
+    output.zero_();
+    output += assembled;
 }
 
 // Inf-F4: collective sub-PG creation. Builds a fresh GlooProcessGroup on
@@ -395,11 +398,16 @@ auto ProcessGroupBase::all_to_all_single(Tensor& output, const Tensor& input) ->
     for (int r = 0; r < ws; ++r) {
         per_peer[r] = gathered[r].slice(0, my_rank * chunk, (my_rank + 1) * chunk);
     }
-    // H5 fix: in-place writeback so autograd aliases survive.
-    auto assembled_b = cat(per_peer, 0);
-    auto src_bytes_b = static_cast<size_t>(assembled_b.numel())
-                     * static_cast<size_t>(dtype_size(assembled_b.dtype()));
-    std::memcpy(output.data_ptr(), assembled_b.data_ptr(), src_bytes_b);
+    // H5 fix: in-place writeback so autograd aliases survive. Write THROUGH the
+    // caller's storage with the stride-aware zero_()/+= pair (operator+= honours
+    // output's strides) instead of a flat std::memcpy: a non-contiguous output
+    // (a strided view) would otherwise have the assembled bytes written into it
+    // as if contiguous, corrupting the view and any aliasing tensor. Reshape the
+    // 1-D assembled buffer to the output shape so the elementwise add lines up.
+    auto assembled_b = cat(per_peer, 0).reshape(
+        std::vector<int64_t>(output.shape().begin(), output.shape().end()));
+    output.zero_();
+    output += assembled_b;
 }
 
 // ============================================================================
@@ -412,8 +420,10 @@ auto ProcessGroupBase::all_to_all_single(Tensor& output, const Tensor& input) ->
 // ncclComm_t produced by `ncclCommSplit`. Skips the TCP bootstrap — the
 // caller (`NCCLProcessGroup::split`) has already done the synchronous
 // collective that constructs the new communicator.
-NCCLProcessGroup::NCCLProcessGroup(int rank, int world_size, void* comm)
-    : rank_(rank), world_size_(world_size), comm_(comm) {
+NCCLProcessGroup::NCCLProcessGroup(int rank, int world_size, void* comm,
+                                   int comm_device)
+    : rank_(rank), world_size_(world_size), comm_(comm),
+      comm_device_(comm_device) {
     if (rank < 0 || rank >= world_size) {
         throw std::invalid_argument(
             "NCCLProcessGroup(split): rank " + std::to_string(rank) +
@@ -450,10 +460,14 @@ NCCLProcessGroup::NCCLProcessGroup(int rank, int world_size,
     // in comm_ for us to retrieve here.
     bootstrap_unique_id(master_addr, master_port);
 
-    // Step 2: Create the NCCL communicator on the current GPU
+    // Step 2: Create the NCCL communicator on the current GPU and RECORD that
+    // device. All later collectives/barrier are bound to this device; using the
+    // ambient cudaGetDevice() at call time could pick a different device than
+    // the comm is bound to (undefined NCCL behaviour).
     int device_id = 0;
     NCCL_PG_GPU_CHECK(cudaGetDevice(&device_id));
     NCCL_PG_GPU_CHECK(cudaSetDevice(device_id));
+    comm_device_ = device_id;
 
     // Extract the bootstrapped unique ID, then replace comm_ with the
     // real NCCL communicator
@@ -688,6 +702,19 @@ auto NCCLProcessGroup::validate_gpu_tensor(const Tensor& tensor) const -> void {
             tensor.device().to_string()
         );
     }
+    // The communicator is bound to exactly one device (comm_device_). Running a
+    // collective on a tensor located on a different device is undefined NCCL
+    // behaviour (the comm rank is bound to comm_device_), so reject it loudly
+    // instead of silently corrupting/hanging. comm_device_ == -1 only for a
+    // not-yet-initialized instance, which the collectives never reach.
+    if (comm_device_ >= 0 && tensor.device().index != comm_device_) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup: tensor is on device " +
+            std::to_string(tensor.device().index) +
+            " but this process group's communicator is bound to device " +
+            std::to_string(comm_device_) +
+            ". Use one NCCLProcessGroup per device.");
+    }
 }
 
 auto NCCLProcessGroup::get_device_id(const Tensor& tensor) const -> int {
@@ -732,7 +759,16 @@ auto NCCLProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
         work /= scalar;
     }
 
-    if (staged) tensor = work;
+    if (staged) {
+        // Write back THROUGH the caller's storage rather than rebinding
+        // `tensor = work`. A plain rebind swaps the intrusive_ptr to a fresh
+        // contiguous impl, detaching any aliased Variable/view/grad that shares
+        // the original strided storage (H6 aliasing hazard — the NCCLBackend and
+        // MPIProcessGroup paths avoid it the same way). zero_() += writes through
+        // the original strides/storage.
+        tensor.zero_();
+        tensor += work;
+    }
 #else
     (void)tensor;
     (void)op;
@@ -800,7 +836,12 @@ auto NCCLProcessGroup::broadcast(Tensor& tensor, int src_rank) -> void {
 
     NCCL_PG_GPU_CHECK(cudaDeviceSynchronize());
 
-    if (staged) tensor = work;
+    if (staged) {
+        // Write back through the caller's storage (see all_reduce) to preserve
+        // aliased Variables/views instead of rebinding `tensor = work`.
+        tensor.zero_();
+        tensor += work;
+    }
 #else
     (void)tensor;
     (void)src_rank;
@@ -887,6 +928,8 @@ auto NCCLProcessGroup::reduce_scatter(Tensor& output,
     const bool staged = !output.is_contiguous();
     Tensor work = staged ? output.contiguous() : output;
 
+    // SUM-only by interface contract (see ProcessGroupBase::reduce_scatter);
+    // averaging is performed caller-side by dividing the output by world_size.
     NCCL_PG_CHECK(ncclReduceScatter(
         concatenated.data_ptr(),
         work.data_ptr(),
@@ -899,7 +942,12 @@ auto NCCLProcessGroup::reduce_scatter(Tensor& output,
 
     NCCL_PG_GPU_CHECK(cudaDeviceSynchronize());
 
-    if (staged) output = work;
+    if (staged) {
+        // Write back through the caller's storage (see all_reduce) to preserve
+        // aliased Variables/views instead of rebinding `output = work`.
+        output.zero_();
+        output += work;
+    }
 #else
     (void)output;
     (void)input;
@@ -912,8 +960,10 @@ auto NCCLProcessGroup::barrier() -> void {
     // NCCL has no native barrier; perform an all-reduce on a dummy tensor.
     // L7 fix: cache the dummy tensor per-instance to avoid the per-call
     // allocation on the hot path. Lazy-init keyed on (device_id, dtype).
-    int device_id = 0;
-    NCCL_PG_GPU_CHECK(cudaGetDevice(&device_id));
+    // Use the communicator's OWN device (comm_device_), not the ambient
+    // cudaGetDevice(): the comm is bound to one device, and a dummy on a
+    // different current device would mismatch the comm and be undefined.
+    const int device_id = comm_device_;
     if (!barrier_dummy_.has_value() ||
         barrier_dummy_->device().index != device_id) {
         barrier_dummy_.emplace(zeros({1}, DType::Float32, Device::cuda(device_id)));
@@ -1002,6 +1052,13 @@ auto NCCLProcessGroup::split(int color, int key)
         ncclComm_t new_comm = nullptr;
         NCCL_PG_CHECK(ncclCommSplit(parent, NCCL_SPLIT_NOCOLOR, key,
                                     &new_comm, /*config=*/nullptr));
+        // With NCCL_SPLIT_NOCOLOR, NCCL is documented to return a null
+        // communicator for the opting-out rank, so there is nothing to destroy.
+        // Guard the contract: if a future runtime ever returns a real comm here,
+        // destroy it rather than leaking it.
+        if (new_comm != nullptr) {
+            ncclCommDestroy(new_comm);
+        }
         return nullptr;
     }
 
@@ -1020,9 +1077,10 @@ auto NCCLProcessGroup::split(int color, int key)
     NCCL_PG_CHECK(ncclCommCount(new_comm, &new_size));
 
     // `std::make_shared` can't access the private constructor, so use
-    // shared_ptr directly with a fresh allocation.
+    // shared_ptr directly with a fresh allocation. The child communicator is
+    // bound to the same GPU device as this parent communicator.
     return std::shared_ptr<NCCLProcessGroup>(
-        new NCCLProcessGroup(new_rank, new_size, new_comm));
+        new NCCLProcessGroup(new_rank, new_size, new_comm, comm_device_));
 #else
     (void)color; (void)key;
     throw NotImplementedError("NCCLProcessGroup::split: NCCL not available");
@@ -1101,6 +1159,45 @@ inline auto validate_mpi_reducible_dtype(DType dtype, const char* op) -> void {
         } \
     } while (0)
 
+// MPI's classic collective APIs take the per-rank element count as an `int`.
+// tensor.numel() is int64; for tensors with >2^31 elements the narrowing cast
+// would silently truncate (or wrap negative) and MPI would transfer the wrong
+// element count, silently corrupting the result. Validate the range and throw a
+// clear message instead. (Mirrors MPIBackend::checked_mpi_count.)
+inline auto checked_mpi_pg_count(int64_t numel, const char* op) -> int {
+    if (numel < 0 || numel > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            std::string("MPIProcessGroup::") + op + ": element count " +
+            std::to_string(numel) + " exceeds INT_MAX; tensors with more than " +
+            std::to_string(std::numeric_limits<int>::max()) +
+            " elements require MPI large-count APIs or chunking");
+    }
+    return static_cast<int>(numel);
+}
+
+// MPI reads/writes the buffer as flat-contiguous. A CUDA (or other non-CPU)
+// tensor's data_ptr() is a device pointer that non-CUDA-aware MPI would
+// dereference on the host (crash/garbage); a non-contiguous tensor would be
+// transferred as if contiguous (corruption). MPIProcessGroup uses MPI_COMM_WORLD
+// directly without the CUDA-aware staging the MPIBackend performs, so require
+// the tensor to be a contiguous CPU tensor and fail loudly otherwise. Callers
+// must stage GPU tensors to host (tensor.to(cpu())) and make views contiguous
+// before invoking these collectives.
+inline auto require_mpi_pg_buffer(const Tensor& t, const char* op) -> void {
+    if (t.device().type != Device::Type::CPU) {
+        throw std::invalid_argument(
+            std::string("MPIProcessGroup::") + op +
+            ": tensor must be on CPU (MPI_COMM_WORLD path is not CUDA-aware here); "
+            "stage GPU tensors to host before reducing");
+    }
+    if (!t.is_contiguous()) {
+        throw std::invalid_argument(
+            std::string("MPIProcessGroup::") + op +
+            ": tensor must be contiguous; MPI transfers the buffer as flat "
+            "contiguous and would corrupt a strided view");
+    }
+}
+
 }  // anonymous namespace
 
 MPIProcessGroup::MPIProcessGroup(int rank, int world_size,
@@ -1156,9 +1253,10 @@ auto MPIProcessGroup::validate_initialized() const -> void {
 auto MPIProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     validate_initialized();
     validate_mpi_reducible_dtype(tensor.dtype(), "all_reduce");
+    require_mpi_pg_buffer(tensor, "all_reduce");
     auto comm = reinterpret_cast<MPI_Comm>(comm_);
     MPI_PG_CHECK(MPI_Allreduce(MPI_IN_PLACE, tensor.data_ptr(),
-                               static_cast<int>(tensor.numel()),
+                               checked_mpi_pg_count(tensor.numel(), "all_reduce"),
                                dtype_to_mpi(tensor.dtype()),
                                reduce_op_to_mpi(op), comm));
     if (op == ReduceOp::AVG && world_size_ > 1) {
@@ -1173,9 +1271,10 @@ auto MPIProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 
 auto MPIProcessGroup::broadcast(Tensor& tensor, int src_rank) -> void {
     validate_initialized();
+    require_mpi_pg_buffer(tensor, "broadcast");
     auto comm = reinterpret_cast<MPI_Comm>(comm_);
     MPI_PG_CHECK(MPI_Bcast(tensor.data_ptr(),
-                           static_cast<int>(tensor.numel()),
+                           checked_mpi_pg_count(tensor.numel(), "broadcast"),
                            dtype_to_mpi(tensor.dtype()),
                            src_rank, comm));
 }
@@ -1187,16 +1286,18 @@ auto MPIProcessGroup::all_gather(std::vector<Tensor>& output,
         throw std::invalid_argument(
             "MPIProcessGroup::all_gather: output.size() must equal world_size");
     }
+    require_mpi_pg_buffer(input, "all_gather");
     auto comm = reinterpret_cast<MPI_Comm>(comm_);
     // Use a flat contiguous buffer for the gather, then slice into output[].
     int64_t per_rank_numel = input.numel();
+    const int gather_count = checked_mpi_pg_count(per_rank_numel, "all_gather");
     Tensor flat = zeros({static_cast<int64_t>(world_size_) * per_rank_numel},
                         input.dtype(), input.device());
     MPI_PG_CHECK(MPI_Allgather(input.data_ptr(),
-                               static_cast<int>(per_rank_numel),
+                               gather_count,
                                dtype_to_mpi(input.dtype()),
                                flat.data_ptr(),
-                               static_cast<int>(per_rank_numel),
+                               gather_count,
                                dtype_to_mpi(input.dtype()),
                                comm));
     auto in_shape = input.shape();
@@ -1210,18 +1311,37 @@ auto MPIProcessGroup::reduce_scatter(Tensor& output,
                                      std::span<const Tensor> input) -> void {
     validate_initialized();
     validate_mpi_reducible_dtype(output.dtype(), "reduce_scatter");
+    require_mpi_pg_buffer(output, "reduce_scatter");
     if (static_cast<int>(input.size()) != world_size_) {
         throw std::invalid_argument(
             "MPIProcessGroup::reduce_scatter: input.size() must equal world_size");
+    }
+    for (const auto& chunk : input) {
+        if (chunk.dtype() != output.dtype()) {
+            throw std::invalid_argument(
+                "MPIProcessGroup::reduce_scatter: input chunk dtype must match output dtype");
+        }
     }
     auto comm = reinterpret_cast<MPI_Comm>(comm_);
     // MPI_Reduce_scatter_block expects a contiguous send buffer with one
     // chunk per peer. Concatenate input[] along dim 0 first.
     std::vector<Tensor> in_vec(input.begin(), input.end());
-    Tensor send_buf = cat(in_vec, 0);
+    Tensor send_buf = cat(in_vec, 0).contiguous();
+    // The send buffer must hold exactly output.numel() * world_size elements;
+    // a caller-contract violation would otherwise yield an out-of-bounds read.
+    if (send_buf.numel() != output.numel() * world_size_) {
+        throw std::invalid_argument(
+            "MPIProcessGroup::reduce_scatter: concatenated input numel " +
+            std::to_string(send_buf.numel()) +
+            " must equal output numel * world_size (" +
+            std::to_string(output.numel()) + " * " +
+            std::to_string(world_size_) + ")");
+    }
+    // SUM-only by interface contract (see ProcessGroupBase::reduce_scatter);
+    // averaging is performed caller-side by dividing the output by world_size.
     MPI_PG_CHECK(MPI_Reduce_scatter_block(
         send_buf.data_ptr(), output.data_ptr(),
-        static_cast<int>(output.numel()),
+        checked_mpi_pg_count(output.numel(), "reduce_scatter"),
         dtype_to_mpi(output.dtype()),
         MPI_SUM, comm));
 }
@@ -1250,8 +1370,11 @@ auto MPIProcessGroup::all_to_all_single(Tensor& output,
         throw std::invalid_argument(
             "MPIProcessGroup::all_to_all_single: output must match input shape and dtype");
     }
+    require_mpi_pg_buffer(input, "all_to_all_single");
+    require_mpi_pg_buffer(output, "all_to_all_single");
     auto comm = reinterpret_cast<MPI_Comm>(comm_);
-    const int chunk_elems = static_cast<int>(input.numel() / world_size_);
+    const int chunk_elems =
+        checked_mpi_pg_count(input.numel() / world_size_, "all_to_all_single");
     // Equal-size chunks → MPI_Alltoall suffices and avoids per-peer displs.
     MPI_PG_CHECK(MPI_Alltoall(input.data_ptr(),  chunk_elems,
                               dtype_to_mpi(input.dtype()),

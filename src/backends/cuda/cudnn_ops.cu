@@ -546,6 +546,13 @@ auto cudnn_conv2d_forward(
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // cuDNN descriptors below are built with packed NCHW/NCHW-filter strides
+    // derived from shape, so a non-contiguous (channels-last / transposed /
+    // sliced) input or weight would be read with the wrong strides. Materialize
+    // contiguous copies and read the data pointers from those.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+
     // Make the tensor's device current so the (device-keyed) cuDNN handle and
     // workspace are fetched/allocated on the GPU the op runs on. Restored on exit.
     CudaDeviceGuard dev_guard(input.device().index);
@@ -630,9 +637,9 @@ auto cudnn_conv2d_forward(
         cudnnStatus_t find_status = cudnnFindConvolutionForwardAlgorithmEx(
             handle,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             filter_desc.get(),
-            weight.data_ptr(),
+            weight_c.data_ptr(),
             conv_desc.get(),
             output_desc.get(),
             output.data_ptr(),
@@ -651,6 +658,7 @@ auto cudnn_conv2d_forward(
                 handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
                 output_desc.get(), 1, &heuristic_count, &heuristic_result
             ));
+            if (heuristic_count <= 0) { throw std::runtime_error("cuDNN Conv2d forward: no convolution algorithm available for this descriptor"); }
             algo = heuristic_result.algo;
             CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
                 handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
@@ -738,9 +746,9 @@ auto cudnn_conv2d_forward(
             handle,
             &alpha,
             input_desc.get(),
-            input.data<float>(),
+            input_c.data<float>(),
             filter_desc.get(),
-            weight.data<float>(),
+            weight_c.data<float>(),
             conv_desc.get(),
             algo,
             workspace,
@@ -756,9 +764,9 @@ auto cudnn_conv2d_forward(
             handle,
             &alpha_d,
             input_desc.get(),
-            input.data<double>(),
+            input_c.data<double>(),
             filter_desc.get(),
-            weight.data<double>(),
+            weight_c.data<double>(),
             conv_desc.get(),
             algo,
             workspace,
@@ -774,9 +782,9 @@ auto cudnn_conv2d_forward(
             handle,
             &alpha,
             input_desc.get(),
-            input.data<Float16>(),
+            input_c.data<Float16>(),
             filter_desc.get(),
-            weight.data<Float16>(),
+            weight_c.data<Float16>(),
             conv_desc.get(),
             algo,
             workspace,
@@ -797,9 +805,9 @@ auto cudnn_conv2d_forward(
                 handle,
                 &alpha,
                 input_desc.get(),
-                input.data<Float16>(),
+                input_c.data<Float16>(),
                 filter_desc.get(),
-                weight.data<Float16>(),
+                weight_c.data<Float16>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -817,9 +825,9 @@ auto cudnn_conv2d_forward(
             handle,
             &alpha,
             input_desc.get(),
-            input.data<BFloat16>(),
+            input_c.data<BFloat16>(),
             filter_desc.get(),
-            weight.data<BFloat16>(),
+            weight_c.data<BFloat16>(),
             conv_desc.get(),
             algo,
             workspace,
@@ -840,9 +848,9 @@ auto cudnn_conv2d_forward(
                 handle,
                 &alpha,
                 input_desc.get(),
-                input.data<BFloat16>(),
+                input_c.data<BFloat16>(),
                 filter_desc.get(),
-                weight.data<BFloat16>(),
+                weight_c.data<BFloat16>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1047,6 +1055,7 @@ auto cudnn_fused_conv2d_activation_forward(
         handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
         output_desc.get(), 1, &heuristic_count, &heuristic_result
     ));
+            if (heuristic_count <= 0) { throw std::runtime_error("cuDNN Conv2d forward: no convolution algorithm available for this descriptor"); }
     algo = heuristic_result.algo;
     CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
         handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
@@ -1267,6 +1276,13 @@ auto cudnn_conv2d_backward(
     Tensor grad_weight({out_channels, in_channels / groups, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    // cuDNN reads input/weight/grad_output with packed NCHW strides derived from
+    // shape; a non-contiguous view would feed wrong strides. Materialize
+    // contiguous copies for the data pointers.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor& grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
     CudaDeviceGuard dev_guard(input.device().index);
     // Use singleton cuDNN handle
     cudnnHandle_t handle = CuDNNHandle::get();
@@ -1347,6 +1363,7 @@ auto cudnn_conv2d_backward(
                 perf_results
             ));
 
+            if (returned_algo_count <= 0) { throw std::runtime_error("cuDNN Conv2d backward-data: no algorithm available for this descriptor"); }
             algo = perf_results[0].algo;
             workspace_size = 0;
             float best_time = std::numeric_limits<float>::max();
@@ -1403,9 +1420,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 filter_desc.get(),
-                weight.data<float>(),
+                weight_c.data<float>(),
                 grad_output_desc.get(),
-                grad_output.data<float>(),
+                grad_output_c.data<float>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1421,9 +1438,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha_d,
                 filter_desc.get(),
-                weight.data<double>(),
+                weight_c.data<double>(),
                 grad_output_desc.get(),
-                grad_output.data<double>(),
+                grad_output_c.data<double>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1437,9 +1454,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 filter_desc.get(),
-                weight.data<Float16>(),
+                weight_c.data<Float16>(),
                 grad_output_desc.get(),
-                grad_output.data<Float16>(),
+                grad_output_c.data<Float16>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1455,9 +1472,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 filter_desc.get(),
-                weight.data<BFloat16>(),
+                weight_c.data<BFloat16>(),
                 grad_output_desc.get(),
-                grad_output.data<BFloat16>(),
+                grad_output_c.data<BFloat16>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1497,6 +1514,7 @@ auto cudnn_conv2d_backward(
                 perf_results
             ));
 
+            if (returned_algo_count <= 0) { throw std::runtime_error("cuDNN Conv2d backward-filter: no algorithm available for this descriptor"); }
             algo = perf_results[0].algo;
             workspace_size = 0;
             float best_time = std::numeric_limits<float>::max();
@@ -1553,9 +1571,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 input_desc.get(),
-                input.data<float>(),
+                input_c.data<float>(),
                 grad_output_desc.get(),
-                grad_output.data<float>(),
+                grad_output_c.data<float>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1571,9 +1589,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha_d,
                 input_desc.get(),
-                input.data<double>(),
+                input_c.data<double>(),
                 grad_output_desc.get(),
-                grad_output.data<double>(),
+                grad_output_c.data<double>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1587,9 +1605,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 input_desc.get(),
-                input.data<Float16>(),
+                input_c.data<Float16>(),
                 grad_output_desc.get(),
-                grad_output.data<Float16>(),
+                grad_output_c.data<Float16>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1605,9 +1623,9 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 input_desc.get(),
-                input.data<BFloat16>(),
+                input_c.data<BFloat16>(),
                 grad_output_desc.get(),
-                grad_output.data<BFloat16>(),
+                grad_output_c.data<BFloat16>(),
                 conv_desc.get(),
                 algo,
                 workspace,
@@ -1629,7 +1647,7 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 grad_output_desc.get(),
-                grad_output.data<float>(),
+                grad_output_c.data<float>(),
                 &beta,
                 bias_desc.get(),
                 grad_bias.data<float>()
@@ -1641,7 +1659,7 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha_d,
                 grad_output_desc.get(),
-                grad_output.data<double>(),
+                grad_output_c.data<double>(),
                 &beta_d,
                 bias_desc.get(),
                 grad_bias.data<double>()
@@ -1651,7 +1669,7 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 grad_output_desc.get(),
-                grad_output.data<Float16>(),
+                grad_output_c.data<Float16>(),
                 &beta,
                 bias_desc.get(),
                 grad_bias.data<Float16>()
@@ -1661,7 +1679,7 @@ auto cudnn_conv2d_backward(
                 handle,
                 &alpha,
                 grad_output_desc.get(),
-                grad_output.data<BFloat16>(),
+                grad_output_c.data<BFloat16>(),
                 &beta,
                 bias_desc.get(),
                 grad_bias.data<BFloat16>()
@@ -1934,6 +1952,7 @@ auto cudnn_conv2d_forward_nhwc(
                 handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
                 output_desc.get(), 1, &heuristic_count, &heuristic_result
             ));
+            if (heuristic_count <= 0) { throw std::runtime_error("cuDNN Conv2d forward: no convolution algorithm available for this descriptor"); }
             algo = heuristic_result.algo;
             CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
                 handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
@@ -2219,6 +2238,7 @@ auto cudnn_conv2d_backward_nhwc(
                 kMaxAlgos, &returned_algo_count, perf_results
             ));
 
+            if (returned_algo_count <= 0) { throw std::runtime_error("cuDNN Conv2d backward-data: no algorithm available for this descriptor"); }
             algo = perf_results[0].algo;
             workspace_size = 0;
             float best_time = std::numeric_limits<float>::max();
@@ -2312,6 +2332,7 @@ auto cudnn_conv2d_backward_nhwc(
                 kMaxAlgos, &returned_algo_count, perf_results
             ));
 
+            if (returned_algo_count <= 0) { throw std::runtime_error("cuDNN Conv2d backward-filter: no algorithm available for this descriptor"); }
             algo = perf_results[0].algo;
             workspace_size = 0;
             float best_time = std::numeric_limits<float>::max();
@@ -2582,7 +2603,13 @@ auto cudnn_maxpool2d_forward(
     int64_t pad_h, int64_t pad_w,
     cudaStream_t stream
 ) -> std::pair<Tensor, Tensor> {
-    auto shape = input.shape();
+    // The cuDNN descriptors below are built with packed NCHW strides derived
+    // from shape, and the argmax recompute kernel indexes input flat as
+    // ((n*C+c)*H+h)*W+w — both assume contiguity. Materialize a contiguous
+    // copy so a non-contiguous (channels-last / sliced / permuted) view is not
+    // read with the wrong strides.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    auto shape = input_c.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t height = shape[2];
@@ -2593,17 +2620,17 @@ auto cudnn_maxpool2d_forward(
     int64_t out_w = (width + 2 * pad_w - kernel_w) / stride_w + 1;
 
     // Create output tensor
-    Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+    Tensor output({batch, channels, out_h, out_w}, input_c.dtype(), input_c.device());
     // cuDNN doesn't return indices directly, we'll compute them separately if needed
-    Tensor indices({batch, channels, out_h, out_w}, DType::Int64, input.device());
+    Tensor indices({batch, channels, out_h, out_w}, DType::Int64, input_c.device());
 
-    CudaDeviceGuard dev_guard(input.device().index);
+    CudaDeviceGuard dev_guard(input_c.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     // Setup descriptors
     cudnnDataType_t cudnn_dtype;
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2620,14 +2647,14 @@ auto cudnn_maxpool2d_forward(
     pool_desc.set_maxpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (input.dtype() == DType::Float64) {
+    if (input_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnPoolingForward(
             handle,
             pool_desc.get(),
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2639,7 +2666,7 @@ auto cudnn_maxpool2d_forward(
             pool_desc.get(),
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2652,11 +2679,11 @@ auto cudnn_maxpool2d_forward(
     // first-occurrence tie-break as the native cuda::maxpool2d_forward_impl).
     {
         const int64_t total = batch * channels * out_h * out_w;
-        switch (input.dtype()) {
+        switch (input_c.dtype()) {
             case DType::Float32: {
                 auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel<float>, total);
                 cudnn_maxpool2d_argmax_kernel<float><<<grid, block, 0, stream>>>(
-                    input.data<float>(), indices.data<int64_t>(),
+                    input_c.data<float>(), indices.data<int64_t>(),
                     batch, channels, height, width, out_h, out_w,
                     kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
                 break;
@@ -2664,7 +2691,7 @@ auto cudnn_maxpool2d_forward(
             case DType::Float64: {
                 auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel_f64, total);
                 cudnn_maxpool2d_argmax_kernel_f64<<<grid, block, 0, stream>>>(
-                    input.data<double>(), indices.data<int64_t>(),
+                    input_c.data<double>(), indices.data<int64_t>(),
                     batch, channels, height, width, out_h, out_w,
                     kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
                 break;
@@ -2672,7 +2699,7 @@ auto cudnn_maxpool2d_forward(
             case DType::Float16: {
                 auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel<__half>, total);
                 cudnn_maxpool2d_argmax_kernel<__half><<<grid, block, 0, stream>>>(
-                    reinterpret_cast<const __half*>(input.data<Float16>()), indices.data<int64_t>(),
+                    reinterpret_cast<const __half*>(input_c.data<Float16>()), indices.data<int64_t>(),
                     batch, channels, height, width, out_h, out_w,
                     kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
                 break;
@@ -2680,7 +2707,7 @@ auto cudnn_maxpool2d_forward(
             case DType::BFloat16: {
                 auto [grid, block] = optimal_launch_config(cudnn_maxpool2d_argmax_kernel<__nv_bfloat16>, total);
                 cudnn_maxpool2d_argmax_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
-                    reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()), indices.data<int64_t>(),
+                    reinterpret_cast<const __nv_bfloat16*>(input_c.data<BFloat16>()), indices.data<int64_t>(),
                     batch, channels, height, width, out_h, out_w,
                     kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
                 break;
@@ -2724,24 +2751,30 @@ auto cudnn_maxpool2d_backward(
     int64_t pad_h, int64_t pad_w,
     cudaStream_t stream
 ) -> Tensor {
-    auto in_shape = input.shape();
+    // Descriptors below assume packed NCHW; materialize contiguous copies so a
+    // non-contiguous input/output/grad_output view is not read with wrong strides.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& output_c = output.is_contiguous() ? output : output.contiguous();
+    const Tensor& grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
+    auto in_shape = input_c.shape();
     int64_t batch = in_shape[0];
     int64_t channels = in_shape[1];
     int64_t height = in_shape[2];
     int64_t width = in_shape[3];
 
-    auto out_shape = output.shape();
+    auto out_shape = output_c.shape();
     int64_t out_h = out_shape[2];
     int64_t out_w = out_shape[3];
 
-    Tensor grad_input({batch, channels, height, width}, input.dtype(), input.device());
+    Tensor grad_input({batch, channels, height, width}, input_c.dtype(), input_c.device());
 
-    CudaDeviceGuard dev_guard(input.device().index);
+    CudaDeviceGuard dev_guard(input_c.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     cudnnDataType_t cudnn_dtype;
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2758,18 +2791,18 @@ auto cudnn_maxpool2d_backward(
     pool_desc.set_maxpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (input.dtype() == DType::Float64) {
+    if (input_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnPoolingBackward(
             handle,
             pool_desc.get(),
             &alpha,
             output_desc.get(),
-            output.data_ptr(),
+            output_c.data_ptr(),
             output_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             input_desc.get(),
             grad_input.data_ptr()
@@ -2781,11 +2814,11 @@ auto cudnn_maxpool2d_backward(
             pool_desc.get(),
             &alpha,
             output_desc.get(),
-            output.data_ptr(),
+            output_c.data_ptr(),
             output_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             input_desc.get(),
             grad_input.data_ptr()
@@ -2824,7 +2857,9 @@ auto cudnn_avgpool2d_forward(
     bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor {
-    auto shape = input.shape();
+    // Descriptor below assumes packed NCHW; materialize a contiguous copy.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    auto shape = input_c.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t height = shape[2];
@@ -2833,14 +2868,14 @@ auto cudnn_avgpool2d_forward(
     int64_t out_h = (height + 2 * pad_h - kernel_h) / stride_h + 1;
     int64_t out_w = (width + 2 * pad_w - kernel_w) / stride_w + 1;
 
-    Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+    Tensor output({batch, channels, out_h, out_w}, input_c.dtype(), input_c.device());
 
-    CudaDeviceGuard dev_guard(input.device().index);
+    CudaDeviceGuard dev_guard(input_c.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     cudnnDataType_t cudnn_dtype;
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2857,14 +2892,14 @@ auto cudnn_avgpool2d_forward(
     pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w, count_include_pad);
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (input.dtype() == DType::Float64) {
+    if (input_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnPoolingForward(
             handle,
             pool_desc.get(),
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2876,7 +2911,7 @@ auto cudnn_avgpool2d_forward(
             pool_desc.get(),
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2917,24 +2952,28 @@ auto cudnn_avgpool2d_backward(
     bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor {
-    auto in_shape = input.shape();
+    // Descriptors below assume packed NCHW; materialize contiguous copies.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
+    auto in_shape = input_c.shape();
     int64_t batch = in_shape[0];
     int64_t channels = in_shape[1];
     int64_t height = in_shape[2];
     int64_t width = in_shape[3];
 
-    auto out_shape = grad_output.shape();
+    auto out_shape = grad_output_c.shape();
     int64_t out_h = out_shape[2];
     int64_t out_w = out_shape[3];
 
-    Tensor grad_input({batch, channels, height, width}, input.dtype(), input.device());
+    Tensor grad_input({batch, channels, height, width}, input_c.dtype(), input_c.device());
 
-    CudaDeviceGuard dev_guard(input.device().index);
+    CudaDeviceGuard dev_guard(input_c.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     cudnnDataType_t cudnn_dtype;
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2951,10 +2990,10 @@ auto cudnn_avgpool2d_backward(
     pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w, count_include_pad);
 
     // AvgPool backward doesn't need original output, but cuDNN API requires all params
-    Tensor dummy_output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+    Tensor dummy_output({batch, channels, out_h, out_w}, input_c.dtype(), input_c.device());
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (input.dtype() == DType::Float64) {
+    if (input_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnPoolingBackward(
             handle,
@@ -2963,9 +3002,9 @@ auto cudnn_avgpool2d_backward(
             output_desc.get(),
             dummy_output.data_ptr(),
             output_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             input_desc.get(),
             grad_input.data_ptr()
@@ -2979,9 +3018,9 @@ auto cudnn_avgpool2d_backward(
             output_desc.get(),
             dummy_output.data_ptr(),
             output_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             input_desc.get(),
             grad_input.data_ptr()
@@ -3705,17 +3744,13 @@ __global__ void layer_norm_backward_mixed_kernel(
         batch_grad_in[i] = static_cast<OutputT>(
             batch_inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm));
 
-        // Warp-level reduction before atomic to reduce cross-block contention
-        float grad_weight_val = static_cast<float>(batch_grad_out[i]) * normalized;
-        float grad_bias_val = static_cast<float>(batch_grad_out[i]);
-        for (int offset = warpSize/2; offset > 0; offset >>= 1) {
-            grad_weight_val += __shfl_down_sync(0xFFFFFFFF, grad_weight_val, offset);
-            grad_bias_val += __shfl_down_sync(0xFFFFFFFF, grad_bias_val, offset);
-        }
-        if (threadIdx.x % warpSize == 0) {
-            atomicAdd(&grad_weight[i], grad_weight_val);
-            atomicAdd(&grad_bias[i], grad_bias_val);
-        }
+        // grad_weight[i] / grad_bias[i] accumulate across batch instances (one
+        // block per instance), so each thread atomic-adds ITS OWN feature i.
+        // (The previous warp shfl_down reduced across lanes — which hold DIFFERENT
+        // feature indices — and only lane 0 stored, so features handled by other
+        // lanes got zero gradient, and for norm_size < 32 the shfl was undefined.)
+        atomicAdd(&grad_weight[i], static_cast<float>(batch_grad_out[i]) * normalized);
+        atomicAdd(&grad_bias[i], static_cast<float>(batch_grad_out[i]));
     }
 }
 
@@ -3873,17 +3908,13 @@ __global__ void layer_norm_backward_fp64_kernel(
 
         batch_grad_in[i] = batch_inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm);
 
-        // Warp-level reduction before atomic to reduce cross-block contention
-        double grad_weight_val = batch_grad_out[i] * normalized;
-        double grad_bias_val = batch_grad_out[i];
-        for (int offset = warpSize/2; offset > 0; offset >>= 1) {
-            grad_weight_val += __shfl_down_sync(0xFFFFFFFF, grad_weight_val, offset);
-            grad_bias_val += __shfl_down_sync(0xFFFFFFFF, grad_bias_val, offset);
-        }
-        if (threadIdx.x % warpSize == 0) {
-            atomicAdd(&grad_weight[i], grad_weight_val);
-            atomicAdd(&grad_bias[i], grad_bias_val);
-        }
+        // grad_weight[i] / grad_bias[i] accumulate across batch instances (one
+        // block per instance), so each thread atomic-adds ITS OWN feature i.
+        // (The previous warp shfl_down reduced across lanes — which hold DIFFERENT
+        // feature indices — and only lane 0 stored, so features handled by other
+        // lanes got zero gradient, and for norm_size < 32 the shfl was undefined.)
+        atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
+        atomicAdd(&grad_bias[i], batch_grad_out[i]);
     }
 }
 
@@ -3908,6 +3939,16 @@ auto cudnn_layer_norm_forward(
     }
 
     int64_t batch_size = input.numel() / norm_size;
+
+    // These kernels launch one block per normalized row (block index =
+    // blockIdx.x) with no grid-stride loop, so the grid dim must fit in the
+    // int gridDim.x. Reject row counts that would overflow int rather than
+    // silently wrapping to a negative/garbage launch dim and leaving the
+    // tail of the output unnormalized.
+    if (batch_size > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "cudnn_layer_norm_forward: normalized row count exceeds INT_MAX");
+    }
 
     // Create output tensors
     auto shape = input.shape();
@@ -4016,6 +4057,13 @@ auto cudnn_layer_norm_backward(
     }
 
     int64_t batch_size = input.numel() / norm_size;
+
+    // One block per normalized row, no grid-stride loop — see the matching
+    // guard in cudnn_layer_norm_forward.
+    if (batch_size > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "cudnn_layer_norm_backward: normalized row count exceeds INT_MAX");
+    }
 
     // Create gradient tensors
     auto shape = input.shape();
@@ -4149,6 +4197,20 @@ static cudnnDataType_t to_cudnn_dtype(DType dtype) {
         default:
             throw std::runtime_error("cuDNN Conv3d: unsupported dtype");
     }
+}
+
+// Range-check an int64 tensor dimension before narrowing to int for the cuDNN
+// Nd descriptor API (which takes int* arrays). The 4D TensorDescriptor path
+// routes every dim through TensorDescriptor::checked_dim(); the Nd path used
+// bare (int) casts that would silently truncate a > INT_MAX extent into a
+// wrong/negative descriptor. Mirror that guard here.
+static int checked_nd_dim(int64_t v, const char* name) {
+    if (v < 0 || v > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            std::string("cuDNN Nd conv: dimension '") + name + "' = " +
+            std::to_string(v) + " does not fit in int (cuDNN Nd descriptor limit)");
+    }
+    return static_cast<int>(v);
 }
 
 // Helper: dispatch cudnnConvolutionForward for the correct dtype
@@ -4536,6 +4598,12 @@ auto cudnn_conv3d_forward(
     std::vector<int64_t> output_shape = {batch, out_channels, out_d, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // TensorDescriptorNd builds packed NCDHW strides from shape; a non-contiguous
+    // 5D input/weight would be read with the wrong strides. Materialize
+    // contiguous copies for the data pointers.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+
     CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
@@ -4552,9 +4620,9 @@ auto cudnn_conv3d_forward(
     TensorDescriptorNd input_desc, output_desc;
     FilterDescriptorNd filter_desc;
 
-    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)depth, (int)height, (int)width};
-    std::vector<int> output_dims = {(int)batch, (int)out_channels, (int)out_d, (int)out_h, (int)out_w};
-    std::vector<int> filter_dims = {(int)out_channels, (int)(in_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+    std::vector<int> input_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(in_channels, "C"), checked_nd_dim(depth, "D"), checked_nd_dim(height, "H"), checked_nd_dim(width, "W")};
+    std::vector<int> output_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(out_channels, "C_out"), checked_nd_dim(out_d, "D_out"), checked_nd_dim(out_h, "H_out"), checked_nd_dim(out_w, "W_out")};
+    std::vector<int> filter_dims = {checked_nd_dim(out_channels, "out_channels"), checked_nd_dim(in_channels / groups, "in_per_group"), checked_nd_dim(kernel_d, "kD"), checked_nd_dim(kernel_h, "kH"), checked_nd_dim(kernel_w, "kW")};
 
     input_desc.set(cudnn_dtype, input_dims);
     output_desc.set(cudnn_dtype, output_dims);
@@ -4628,6 +4696,14 @@ auto cudnn_conv3d_forward(
             handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
             output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
+        // cuDNN's contract permits returning 0 algorithms for an unsupported
+        // descriptor; perf_results[0] would then be uninitialized stack →
+        // garbage algo enum. Guard before dereferencing.
+        if (returned_algo_count <= 0) {
+            throw std::runtime_error(
+                "cuDNN Conv3d forward: no convolution algorithm available for this descriptor");
+        }
+
         algo = perf_results[0].algo;
 
         // Pick fastest algorithm that fits in workspace, excluding Winograd
@@ -4675,7 +4751,7 @@ auto cudnn_conv3d_forward(
     void* workspace = CuDNNWorkspace::get(workspace_size);
 
     dispatch_conv_forward(
-        handle, input_desc.desc, input.data_ptr(), filter_desc.desc, weight.data_ptr(),
+        handle, input_desc.desc, input_c.data_ptr(), filter_desc.desc, weight_c.data_ptr(),
         conv_desc.handle(), algo, workspace, workspace_size,
         output_desc.desc, output.data_ptr(), input.dtype());
 
@@ -4735,6 +4811,12 @@ auto cudnn_conv3d_backward(
     Tensor grad_weight({out_channels, in_channels / groups, kernel_d, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    // TensorDescriptorNd builds packed NCDHW strides from shape; contiguify the
+    // read-side tensors so non-contiguous views are not read with wrong strides.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor& grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
     CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
@@ -4748,9 +4830,9 @@ auto cudnn_conv3d_backward(
     TensorDescriptorNd input_desc, grad_output_desc;
     FilterDescriptorNd filter_desc;
 
-    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)depth, (int)height, (int)width};
-    std::vector<int> grad_output_dims = {(int)batch, (int)out_channels, (int)out_d, (int)out_h, (int)out_w};
-    std::vector<int> filter_dims = {(int)out_channels, (int)(in_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+    std::vector<int> input_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(in_channels, "C"), checked_nd_dim(depth, "D"), checked_nd_dim(height, "H"), checked_nd_dim(width, "W")};
+    std::vector<int> grad_output_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(out_channels, "C_out"), checked_nd_dim(out_d, "D_out"), checked_nd_dim(out_h, "H_out"), checked_nd_dim(out_w, "W_out")};
+    std::vector<int> filter_dims = {checked_nd_dim(out_channels, "out_channels"), checked_nd_dim(in_channels / groups, "in_per_group"), checked_nd_dim(kernel_d, "kD"), checked_nd_dim(kernel_h, "kH"), checked_nd_dim(kernel_w, "kW")};
 
     input_desc.set(cudnn_dtype, input_dims);
     grad_output_desc.set(cudnn_dtype, grad_output_dims);
@@ -4806,6 +4888,10 @@ auto cudnn_conv3d_backward(
             handle, filter_desc.desc, grad_output_desc.desc, conv_desc.handle(),
             input_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
+        if (returned_algo_count <= 0) {
+            throw std::runtime_error(
+                "cuDNN Conv3d backward-data: no algorithm available for this descriptor");
+        }
         cudnnConvolutionBwdDataAlgo_t algo = perf_results[0].algo;
         size_t workspace_size = 0;
         float best_time = std::numeric_limits<float>::max();
@@ -4848,7 +4934,7 @@ auto cudnn_conv3d_backward(
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_bwd_data(
-            handle, filter_desc.desc, weight.data_ptr(), grad_output_desc.desc, grad_output.data_ptr(),
+            handle, filter_desc.desc, weight_c.data_ptr(), grad_output_desc.desc, grad_output_c.data_ptr(),
             conv_desc.handle(), algo, workspace, workspace_size,
             input_desc.desc, grad_input.data_ptr(), input.dtype());
     }
@@ -4863,6 +4949,10 @@ auto cudnn_conv3d_backward(
             handle, input_desc.desc, grad_output_desc.desc, conv_desc.handle(),
             filter_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
+        if (returned_algo_count <= 0) {
+            throw std::runtime_error(
+                "cuDNN Conv3d backward-filter: no algorithm available for this descriptor");
+        }
         cudnnConvolutionBwdFilterAlgo_t algo = perf_results[0].algo;
         size_t workspace_size = 0;
         float best_time = std::numeric_limits<float>::max();
@@ -4905,7 +4995,7 @@ auto cudnn_conv3d_backward(
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_bwd_filter(
-            handle, input_desc.desc, input.data_ptr(), grad_output_desc.desc, grad_output.data_ptr(),
+            handle, input_desc.desc, input_c.data_ptr(), grad_output_desc.desc, grad_output_c.data_ptr(),
             conv_desc.handle(), algo, workspace, workspace_size,
             filter_desc.desc, grad_weight.data_ptr(), input.dtype());
     }
@@ -4916,7 +5006,7 @@ auto cudnn_conv3d_backward(
         std::vector<int> bias_dims = {1, (int)out_channels, 1, 1, 1};
         bias_desc.set(cudnn_dtype, bias_dims);
         dispatch_conv_bwd_bias(
-            handle, grad_output_desc.desc, grad_output.data_ptr(),
+            handle, grad_output_desc.desc, grad_output_c.data_ptr(),
             bias_desc.desc, grad_bias.data_ptr(), input.dtype());
     }
 
@@ -4955,13 +5045,49 @@ auto cudnn_conv_transpose3d_forward(
     int64_t kernel_h = weight_shape[3];
     int64_t kernel_w = weight_shape[4];
 
-    // Output dimensions for transposed convolution
+    // Output dimensions for transposed convolution (full, including
+    // output_padding).
     int64_t d_out = (d_in - 1) * stride[0] - 2 * padding[0] + dilation[0] * (kernel_d - 1) + output_padding[0] + 1;
     int64_t h_out = (h_in - 1) * stride[1] - 2 * padding[1] + dilation[1] * (kernel_h - 1) + output_padding[1] + 1;
     int64_t w_out = (w_in - 1) * stride[2] - 2 * padding[2] + dilation[2] * (kernel_w - 1) + output_padding[2] + 1;
 
-    std::vector<int64_t> output_shape = {batch, out_channels, d_out, h_out, w_out};
-    Tensor output(output_shape, input.dtype(), input.device());
+    // output_padding support (mirrors the CPU conv_transpose3d path):
+    //
+    // cuDNN's ConvolutionBackwardData expresses a transposed conv whose output
+    // extent is exactly the base size (output_padding == 0):
+    //     base = (in-1)*stride - 2*padding + dilation*(k-1) + 1
+    // output_padding only ENLARGES the output by `op` rows/cols on the HIGH
+    // side of each spatial axis. Crucially, the transposed-conv scatter never
+    // writes those extra positions: the largest written index along an axis is
+    //     (in-1)*stride - padding + (k-1)*dilation  ==  base - 1
+    // which is < base <= every output_padding index. So the output_padding
+    // region is provably all-zero (this is exactly PyTorch's semantics, and
+    // matches our CPU kernel which sizes the output with op and leaves the
+    // extra border at the memset-zero value).
+    //
+    // Therefore the correct, cuDNN-only (NO CPU fallback) implementation is:
+    //   1. run cuDNN BackwardData at the BASE extent into a contiguous tensor,
+    //   2. if any output_padding != 0, embed that base result into the leading
+    //      sub-volume of a zero-initialized full-size output (device-to-device).
+    const int64_t d_base = d_out - output_padding[0];
+    const int64_t h_base = h_out - output_padding[1];
+    const int64_t w_base = w_out - output_padding[2];
+    const bool has_output_padding =
+        output_padding[0] != 0 || output_padding[1] != 0 || output_padding[2] != 0;
+
+    // cuDNN always writes the BASE-sized output; `output` is what we return.
+    std::vector<int64_t> base_shape = {batch, out_channels, d_base, h_base, w_base};
+    std::vector<int64_t> full_shape = {batch, out_channels, d_out, h_out, w_out};
+    Tensor base_output(base_shape, input.dtype(), input.device());
+    // For the descriptor / cuDNN write target below, "output" names the base
+    // tensor; we only construct the padded full tensor at the very end.
+    Tensor& output = base_output;
+    // The descriptor must describe the BASE extent that cuDNN actually computes.
+    int64_t d_out_desc = d_base, h_out_desc = h_base, w_out_desc = w_base;
+
+    // TensorDescriptorNd builds packed NCDHW strides from shape; contiguify reads.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& weight_c = weight.is_contiguous() ? weight : weight.contiguous();
 
     CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
@@ -4980,11 +5106,11 @@ auto cudnn_conv_transpose3d_forward(
     FilterDescriptorNd filter_desc;
 
     // input_desc describes our input (which is the "grad_output" in cuDNN backward data terms)
-    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)d_in, (int)h_in, (int)w_in};
+    std::vector<int> input_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(in_channels, "C"), checked_nd_dim(d_in, "D"), checked_nd_dim(h_in, "H"), checked_nd_dim(w_in, "W")};
     // output_desc describes our output (which is the "grad_input" in cuDNN backward data terms)
-    std::vector<int> output_dims = {(int)batch, (int)out_channels, (int)d_out, (int)h_out, (int)w_out};
+    std::vector<int> output_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(out_channels, "C_out"), checked_nd_dim(d_out_desc, "D_out"), checked_nd_dim(h_out_desc, "H_out"), checked_nd_dim(w_out_desc, "W_out")};
     // Filter: [C_in, C_out/groups, kD, kH, kW]
-    std::vector<int> filter_dims = {(int)in_channels, (int)(out_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+    std::vector<int> filter_dims = {checked_nd_dim(in_channels, "C_in"), checked_nd_dim(out_channels / groups, "out_per_group"), checked_nd_dim(kernel_d, "kD"), checked_nd_dim(kernel_h, "kH"), checked_nd_dim(kernel_w, "kW")};
 
     input_desc.set(cudnn_dtype, input_dims);
     output_desc.set(cudnn_dtype, output_dims);
@@ -5026,6 +5152,10 @@ auto cudnn_conv_transpose3d_forward(
         handle, filter_desc.desc, input_desc.desc, conv_desc.handle(),
         output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
+    if (returned_algo_count <= 0) {
+        throw std::runtime_error(
+            "cuDNN ConvTranspose3d forward: no algorithm available for this descriptor");
+    }
     const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
     cudnnConvolutionBwdDataAlgo_t algo = perf_results[0].algo;
     size_t workspace_size = 0;
@@ -5055,7 +5185,7 @@ auto cudnn_conv_transpose3d_forward(
 
     // BackwardData: filter * input -> output (transposed conv forward)
     dispatch_conv_bwd_data(
-        handle, filter_desc.desc, weight.data_ptr(), input_desc.desc, input.data_ptr(),
+        handle, filter_desc.desc, weight_c.data_ptr(), input_desc.desc, input_c.data_ptr(),
         conv_desc.handle(), algo, workspace, workspace_size,
         output_desc.desc, output.data_ptr(), input.dtype());
 
@@ -5071,7 +5201,49 @@ auto cudnn_conv_transpose3d_forward(
         fp16_saturate(output.data<Float16>(), output.numel(), stream);
     }
 
-    return output;
+    if (!has_output_padding) {
+        return base_output;
+    }
+
+    // Embed the base result into the leading sub-volume of a zero-initialized
+    // full-size output. The output_padding border stays zero (proven above).
+    // This is a pure device-to-device copy — no host bounce, no CPU fallback.
+    Tensor full_output(full_shape, input.dtype(), input.device());
+    const size_t elem = input.dtype_size();
+    // Zero the whole full output first so the output_padding border is 0.
+    CUDA_CHECK(cudaMemsetAsync(full_output.data_ptr(), 0,
+                                      static_cast<size_t>(full_output.numel()) * elem,
+                                      stream));
+
+    // Copy each (n, c, d) plane [h_base x w_base] from the contiguous base
+    // tensor into the matching corner of the strided full tensor. cudaMemcpy2D
+    // handles the H/W pitch difference (w_base -> w_out); we loop the leading
+    // N*C*d_base planes (d only runs over d_base, so the op-D border is skipped
+    // and stays zero).
+    const auto* src_base = static_cast<const uint8_t*>(base_output.data_ptr());
+    auto* dst_base = static_cast<uint8_t*>(full_output.data_ptr());
+    const int64_t nc = batch * out_channels;
+    const size_t src_plane = static_cast<size_t>(h_base) * w_base * elem;       // contiguous base D-plane
+    const size_t dst_plane = static_cast<size_t>(h_out) * w_out * elem;          // strided full D-plane
+    const size_t src_pitch = static_cast<size_t>(w_base) * elem;
+    const size_t dst_pitch = static_cast<size_t>(w_out) * elem;
+    const size_t row_bytes = static_cast<size_t>(w_base) * elem;
+    for (int64_t p = 0; p < nc; ++p) {
+        // p indexes a (n,c); within it, d runs 0..d_base-1 (skipping op-D rows).
+        const uint8_t* src_nc = src_base + static_cast<size_t>(p) * d_base * src_plane;
+        // In the full tensor, the (n,c) block has d_out planes; leading d_base
+        // are written, the rest stay zero.
+        uint8_t* dst_nc = dst_base + static_cast<size_t>(p) * d_out * dst_plane;
+        for (int64_t d = 0; d < d_base; ++d) {
+            CUDA_CHECK(cudaMemcpy2DAsync(
+                dst_nc + static_cast<size_t>(d) * dst_plane, dst_pitch,
+                src_nc + static_cast<size_t>(d) * src_plane, src_pitch,
+                row_bytes, static_cast<size_t>(h_base),
+                cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+
+    return full_output;
 }
 
 // ============================================================================
@@ -5115,6 +5287,11 @@ auto cudnn_conv_transpose3d_backward(
     Tensor grad_weight({in_channels, out_channels / groups, kernel_d, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    // TensorDescriptorNd builds packed NCDHW strides from shape; contiguify reads.
+    const Tensor& input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor& weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor& grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
     CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
@@ -5129,9 +5306,9 @@ auto cudnn_conv_transpose3d_backward(
     TensorDescriptorNd input_desc, grad_output_desc;
     FilterDescriptorNd filter_desc;
 
-    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)d_in, (int)h_in, (int)w_in};
-    std::vector<int> grad_output_dims = {(int)batch, (int)out_channels, (int)d_out, (int)h_out, (int)w_out};
-    std::vector<int> filter_dims = {(int)in_channels, (int)(out_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+    std::vector<int> input_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(in_channels, "C"), checked_nd_dim(d_in, "D"), checked_nd_dim(h_in, "H"), checked_nd_dim(w_in, "W")};
+    std::vector<int> grad_output_dims = {checked_nd_dim(batch, "N"), checked_nd_dim(out_channels, "C_out"), checked_nd_dim(d_out, "D_out"), checked_nd_dim(h_out, "H_out"), checked_nd_dim(w_out, "W_out")};
+    std::vector<int> filter_dims = {checked_nd_dim(in_channels, "C_in"), checked_nd_dim(out_channels / groups, "out_per_group"), checked_nd_dim(kernel_d, "kD"), checked_nd_dim(kernel_h, "kH"), checked_nd_dim(kernel_w, "kW")};
 
     input_desc.set(cudnn_dtype, input_dims);
     grad_output_desc.set(cudnn_dtype, grad_output_dims);
@@ -5177,6 +5354,10 @@ auto cudnn_conv_transpose3d_backward(
             handle, grad_output_desc.desc, filter_desc.desc, conv_desc.handle(),
             input_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
+        if (returned_algo_count <= 0) {
+            throw std::runtime_error(
+                "cuDNN ConvTranspose3d backward-input: no algorithm available for this descriptor");
+        }
         cudnnConvolutionFwdAlgo_t algo = perf_results[0].algo;
         size_t workspace_size = 0;
         float best_time = std::numeric_limits<float>::max();
@@ -5203,7 +5384,7 @@ auto cudnn_conv_transpose3d_backward(
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_forward(
-            handle, grad_output_desc.desc, grad_output.data_ptr(), filter_desc.desc, weight.data_ptr(),
+            handle, grad_output_desc.desc, grad_output_c.data_ptr(), filter_desc.desc, weight_c.data_ptr(),
             conv_desc.handle(), algo, workspace, workspace_size,
             input_desc.desc, grad_input.data_ptr(), input.dtype());
     }
@@ -5219,6 +5400,10 @@ auto cudnn_conv_transpose3d_backward(
             handle, grad_output_desc.desc, input_desc.desc, conv_desc.handle(),
             filter_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
 
+        if (returned_algo_count <= 0) {
+            throw std::runtime_error(
+                "cuDNN ConvTranspose3d backward-filter: no algorithm available for this descriptor");
+        }
         cudnnConvolutionBwdFilterAlgo_t algo = perf_results[0].algo;
         size_t workspace_size = 0;
         float best_time = std::numeric_limits<float>::max();
@@ -5245,7 +5430,7 @@ auto cudnn_conv_transpose3d_backward(
 
         void* workspace = CuDNNWorkspace::get(workspace_size);
         dispatch_conv_bwd_filter(
-            handle, grad_output_desc.desc, grad_output.data_ptr(), input_desc.desc, input.data_ptr(),
+            handle, grad_output_desc.desc, grad_output_c.data_ptr(), input_desc.desc, input_c.data_ptr(),
             conv_desc.handle(), algo, workspace, workspace_size,
             filter_desc.desc, grad_weight.data_ptr(), input.dtype());
     }
@@ -5256,7 +5441,7 @@ auto cudnn_conv_transpose3d_backward(
         std::vector<int> bias_dims = {1, (int)out_channels, 1, 1, 1};
         bias_desc.set(cudnn_dtype, bias_dims);
         dispatch_conv_bwd_bias(
-            handle, grad_output_desc.desc, grad_output.data_ptr(),
+            handle, grad_output_desc.desc, grad_output_c.data_ptr(),
             bias_desc.desc, grad_bias.data_ptr(), input.dtype());
     }
 

@@ -38,7 +38,7 @@ protected:
                                float rtol = 1e-5f, float atol = 1e-7f) {
         auto backend_grad_cpu = backend_grad.to(Device::cpu());
         device.synchronize();
-        expectTensorNear(cpu_grad, backend_grad_cpu, atol);
+        expectTensorNear(cpu_grad, backend_grad_cpu, rtol, atol);
     }
 
     void testUnaryGradient(

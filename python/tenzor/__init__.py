@@ -98,12 +98,79 @@ def from_numpy(array, requires_grad: bool = False):
     Mirrors ``torch.from_numpy``: zero-copy when the dtype and stride layout
     allow it, otherwise materialises a host copy. The returned tensor lives
     on CPU; move it explicitly with ``.to(device)``.
+
+    .. warning::
+        When the zero-copy path is taken, the returned tensor **shares
+        memory with** the input NumPy array. With ``requires_grad=True``
+        this aliasing extends into the autograd graph: the resulting leaf
+        Variable's value is backed by the same buffer as ``array``. Mutating
+        ``array`` in place afterwards (e.g. ``array[:] = ...``) silently
+        changes the leaf's value out from under autograd, corrupting any
+        forward results already computed and the gradients derived from
+        them. This matches ``torch.from_numpy`` behaviour. If you intend to
+        keep mutating the NumPy array, pass a copy (``array.copy()``) or
+        detach the leaf before mutating.
     """
     from .tenzor_core import Tensor as _Tensor, Variable as _Variable
     t = _Tensor.from_numpy(array)
     if requires_grad:
         return _Variable(t, True)
     return t
+
+
+# ---------------------------------------------------------------------------
+# Reproducible seeding across the C++ RNG *and* the Python-side RNGs.
+#
+# ``from .tenzor_core import *`` above bound ``manual_seed`` to the C++
+# ``tenzor::manual_seed``, which only seeds Tenzor's own (C++) generators.
+# Several Python-side code paths draw randomness outside that generator:
+#
+#   * the ``tenzor.distributions`` samplers call ``np.random.*`` on NumPy's
+#     *global* RNG;
+#   * ``tenzor.data`` samplers / DataLoader worker seeding use Python's
+#     ``random`` module global RNG.
+#
+# Before this wrapper, ``tz.manual_seed(0)`` left those global RNGs untouched,
+# so distribution sampling and data shuffling were non-reproducible. Wrap the
+# C++ entry point so a single ``manual_seed`` call seeds *all three* RNGs and
+# record the value so other Python modules can derive reproducible sub-seeds.
+from .tenzor_core import manual_seed as _cpp_manual_seed
+
+_last_manual_seed = None  # set by manual_seed(); read via initial_seed()
+
+
+def manual_seed(seed: int) -> None:
+    """Seed Tenzor's C++ RNG and the Python-side global RNGs.
+
+    Seeds, in order:
+
+    * the C++ Tenzor generators (via ``tenzor_core.manual_seed``), governing
+      ops such as ``tz.rand`` / ``tz.randn`` and dropout masks;
+    * NumPy's global RNG (``numpy.random.seed``), used by the
+      ``tenzor.distributions`` samplers;
+    * Python's ``random`` module global RNG, used by the ``tenzor.data``
+      samplers and ``DataLoader`` worker seeding.
+
+    After ``tz.manual_seed(s)`` the full sampling pipeline is reproducible.
+    """
+    global _last_manual_seed
+    seed = int(seed)
+    _cpp_manual_seed(seed)
+    # NumPy's legacy global RNG requires a 32-bit unsigned seed.
+    import numpy as _np
+    _np.random.seed(seed & 0xFFFFFFFF)
+    import random as _random
+    _random.seed(seed)
+    _last_manual_seed = seed
+
+
+def initial_seed():
+    """Return the seed passed to the most recent ``tz.manual_seed`` call.
+
+    Returns ``None`` if ``manual_seed`` has not been called. Intended for
+    Python-side modules that need to derive a reproducible sub-seed.
+    """
+    return _last_manual_seed
 
 
 # Import the nn submodule from C++ (keep reference for internal use)
@@ -733,6 +800,7 @@ __all__ = [
     "dtype",
     "tensor",
     "manual_seed",
+    "initial_seed",
 
     # Autograd
     "is_grad_enabled",

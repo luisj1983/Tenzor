@@ -178,6 +178,13 @@ private:
     /// Math-intrinsic name for compute_type(): e.g. fn_for("exp", dt) returns
     /// "exp" for double and "expf" for float.
     static auto fn_for(const std::string& base, DType dtype) -> std::string;
+
+    /// Emit a scalar operand as a valid floating literal at FULL round-trip
+    /// (max_digits10) precision plus the dtype's literal suffix. A plain
+    /// `ss << scalar << F` uses the default ostream precision (~6 digits), so a
+    /// Float64 kernel bakes in a single-precision-rounded constant and diverges
+    /// from the eager/CPU result. Mirrors KernelCodegen::emit_op's fmt_double.
+    static auto fmt_scalar(double v, DType dtype) -> std::string;
 };
 
 // ============================================================================

@@ -187,7 +187,9 @@ if(TENZOR_USE_MLIR_JIT)
         include(FetchContent)
         FetchContent_Declare(iree_src
             GIT_REPOSITORY https://github.com/iree-org/iree.git
-            GIT_TAG iree-3.11.0
+            # Pinned to the immutable commit of tag iree-3.11.0 (supply-chain
+            # hardening: a retag upstream must not change the ~10 GB JIT build).
+            GIT_TAG ca60cabdcd1615499706a6a2c951b41f541e969b
             GIT_SUBMODULES_RECURSE TRUE)
         set(IREE_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
         set(IREE_BUILD_SAMPLES         OFF CACHE BOOL "" FORCE)
@@ -432,8 +434,13 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-# Use $ORIGIN to find libraries in same directory as executable
-set(CMAKE_BUILD_RPATH "$ORIGIN:${CMAKE_SOURCE_DIR}/bin")
+# Use $ORIGIN to find libraries in the same directory as the executable. All
+# build outputs (binaries, backend .so, archives) land in ${CMAKE_SOURCE_DIR}/bin
+# (CMAKE_*_OUTPUT_DIRECTORY above), so $ORIGIN already resolves to that dir for
+# any in-tree binary — the previous absolute ${CMAKE_SOURCE_DIR}/bin entry was
+# redundant and only leaked the build-machine source path into every binary's
+# RPATH (and could let another user's bin/ be searched on a shared host).
+set(CMAKE_BUILD_RPATH "$ORIGIN")
 
 # Find required packages
 find_package(Threads REQUIRED)
@@ -449,7 +456,9 @@ if(NOT spdlog_FOUND)
     FetchContent_Declare(
         spdlog
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
-        GIT_TAG        v1.14.1
+        # Pinned to the immutable commit of tag v1.14.1 (a retag upstream must
+        # not silently change build inputs — supply-chain hardening).
+        GIT_TAG        27cb4c76708608465c413f6d0e6b8d99a4d84302
     )
     set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
     set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)

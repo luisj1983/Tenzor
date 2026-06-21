@@ -627,6 +627,15 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
             ", elements " + std::to_string(total_elements) +
             "); exceeds INT32_MAX/UINT32_MAX");
     }
+    // The strided_copy push constants only carry shape[0..7]/strides[0..7] and
+    // the shader bails out (`if (ndims > 8) return;`) for higher rank — which
+    // would leave `result` Vulkan-default-zeroed and silently return an all-zeros
+    // tensor. Reject >8-D up front (mirrors the AdvancedIndex ndim guard).
+    if (ndims > 8) {
+        throw std::runtime_error(
+            "Vulkan strided copy (contiguous): ndim " + std::to_string(ndims) +
+            " > 8 is unsupported");
+    }
 
     size_t input_buffer_size = (max_offset + 1) * input.dtype_size();
     size_t output_buffer_size = total_elements * input.dtype_size();

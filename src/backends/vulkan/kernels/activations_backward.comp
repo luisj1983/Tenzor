@@ -19,6 +19,13 @@ layout(push_constant) uniform PushConstants {
 const float SELU_ALPHA = 1.6732632423543772848170429916717;
 const float SELU_SCALE = 1.0507009873554804934193349852946;
 
+// Numerically-stable tanh via 2*sigmoid(2x)-1. The forward mish uses this same
+// form (the GLSL intrinsic tanh() drifts from std::tanh on NVIDIA/RADV), so the
+// mish backward must use it too for forward/backward and CPU consistency.
+float tanh_stable(float x) {
+    return 2.0 / (1.0 + exp(-2.0 * x)) - 1.0;
+}
+
 // erf via Abramowitz & Stegun 7.1.26 (max abs error ~1.5e-7) — GLSL has no
 // built-in erf; exact erf GELU matches the forward and the other backends.
 float erf_approx(float x) {
@@ -91,7 +98,7 @@ void main() {
             // val is the input
             float x = val;
             float sp = x > 20.0 ? x : (x < -20.0 ? exp(x) : log(1.0 + exp(x)));
-            float tanh_sp = tanh(sp);
+            float tanh_sp = tanh_stable(sp);
             float sigmoid_x = 1.0 / (1.0 + exp(-x));
             float derivative = tanh_sp + x * sigmoid_x * (1.0 - tanh_sp * tanh_sp);
             grad_input[idx] = g_out * derivative;

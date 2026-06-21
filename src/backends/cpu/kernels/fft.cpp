@@ -1467,6 +1467,17 @@ auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t
         int64_t pad = n_fft / 2;
         padded_length = signal_length + 2 * pad;
 
+        // Reflect padding requires the pad width to be strictly less than the
+        // signal length (a reflection cannot reach past the opposite edge).
+        // PyTorch errors in this case; clamping the index would silently degrade
+        // reflect into edge/clamp padding and return wrong STFT frames.
+        if (pad >= signal_length) {
+            throw std::runtime_error(
+                "stft: cannot reflect-pad signal of length " +
+                std::to_string(signal_length) + " by " + std::to_string(pad) +
+                " (center=True requires n_fft/2 < signal_length)");
+        }
+
         padded_data.resize(static_cast<size_t>(batch_size * padded_length));
         const float* in_ptr = input_f32.data<float>();
 

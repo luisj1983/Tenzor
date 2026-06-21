@@ -96,5 +96,41 @@ def test_tenzor_error_is_python_exception():
     assert issubclass(tz.TenzorError, Exception)
 
 
+def test_specific_subclass_is_raised_not_base():
+    """REGRESSION for the catch-all exception translator shadowing bug.
+
+    pybind registers translators LIFO and applies them front-to-back, so the
+    catch-all (base TenzorException) had been running FIRST and converting every
+    TenzorException subclass into the bare base TenzorError — making
+    `except tz.AutogradError` (etc.) unreachable. A non-scalar backward without
+    an explicit grad seed throws a C++ AutogradException; with the translator
+    ordering fixed it must surface as the SPECIFIC tz.AutogradError, not the
+    base tz.TenzorError. Before the fix `type(e)` would be the base class.
+    """
+    x = tz.Variable(tz.randn([4]), requires_grad=True)
+    y = x * 2.0  # non-scalar output
+    try:
+        y.backward()  # no grad_output -> AutogradException in C++
+    except tz.TenzorError as e:
+        assert type(e) is tz.AutogradError, (
+            f"expected the concrete tz.AutogradError, got {type(e).__name__}; "
+            "the catch-all translator is shadowing the typed translator")
+    else:
+        pytest.fail("non-scalar backward without grad seed did not raise")
+
+
+def test_specific_subclass_matches_in_except_clause():
+    """`except tz.AutogradError` must actually catch the typed error (the
+    user-visible symptom of the catch-all-shadowing bug)."""
+    x = tz.Variable(tz.randn([4]), requires_grad=True)
+    y = x * 2.0
+    caught = False
+    try:
+        y.backward()
+    except tz.AutogradError:
+        caught = True
+    assert caught, "except tz.AutogradError failed to catch the typed error"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))

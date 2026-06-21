@@ -69,10 +69,23 @@ TEST_P(LionMultiDTypeTest, StateDictRoundtrip) {
     EXPECT_EQ(state.count("lr"), 1u);
     EXPECT_EQ(state.count("momentum_0"), 1u);
 
-    auto params2 = make_params();
+    auto params2 = std::vector<std::shared_ptr<Variable>>{
+        std::make_shared<Variable>(params[0]->tensor().clone(), true)};
     optim::Lion opt2(params2, 1e-5);
     opt2.load_state_dict(state);
     EXPECT_DOUBLE_EQ(opt2.get_lr(), 0.01);
+
+    // Strong round-trip check: one identical unit-gradient step on both,
+    // started from identical param values, must yield identical params if
+    // momentum_0 and step_count were restored. Same dtype path → deterministic.
+    step_with_unit_grad(params, opt);
+    step_with_unit_grad(params2, opt2);
+    auto a = params[0]->tensor().to(Device::cpu()).to(DType::Float64);
+    auto b = params2[0]->tensor().to(Device::cpu()).to(DType::Float64);
+    double max_diff = ::tenzor::max(::tenzor::abs(a - b)).item<double>();
+    EXPECT_LT(max_diff, 1e-6)
+        << "Post-load step diverged (max param diff " << max_diff
+        << ") — load_state_dict did not restore the momentum buffer";
 }
 
 TEST_P(LionMultiDTypeTest, SignBasedUpdateMagnitude) {

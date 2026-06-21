@@ -456,18 +456,25 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                                 // dropout mask is bit-identical across float and
                                 // double paths.
                                 if (apply_dropout) {
-                                    // Counter words hold (b,h,qi,ki) truncated to
-                                    // uint32. This bounds each index to < 2^32; a
-                                    // single dimension at that size is physically
-                                    // unreachable (petabytes), and the backward
-                                    // (Step 3b) truncates identically so the masks
-                                    // stay bit-consistent. Documented limit, not a
-                                    // correctness gap.
+                                    // Counter words hold (bh=b*num_heads+h, qi,
+                                    // ki, 0) truncated to uint32 — the SAME
+                                    // bh-combined convention used by the
+                                    // CUDA/ROCm/OneAPI/Vulkan FA kernels and by
+                                    // the host replay helper
+                                    // tenzor::philox_dropout_mask. Folding batch
+                                    // and head into one counter word (rather than
+                                    // two separate b/h words) is required so the
+                                    // dropout backward — which replays the mask
+                                    // via philox_dropout_mask's (bh,qi,ki,0)
+                                    // counter — enumerates the identical Philox
+                                    // stream for B>1 / H>1. Each index is < 2^32
+                                    // (a single dim at that size is physically
+                                    // unreachable), so the truncation is lossless.
                                     Philox4x32 philox;
-                                    philox.counter[0] = static_cast<uint32_t>(b);
-                                    philox.counter[1] = static_cast<uint32_t>(h);
-                                    philox.counter[2] = static_cast<uint32_t>(qi);
-                                    philox.counter[3] = static_cast<uint32_t>(ki);
+                                    philox.counter[0] = static_cast<uint32_t>(b * num_heads + h);
+                                    philox.counter[1] = static_cast<uint32_t>(qi);
+                                    philox.counter[2] = static_cast<uint32_t>(ki);
+                                    philox.counter[3] = 0u;
                                     philox.key[0] = rng_seed;
                                     philox.key[1] = rng_seed ^ 0x1BD11BDAU;  // secondary key
 
@@ -684,15 +691,18 @@ static auto flash_attention_backward_typed(
                 }
             }
 
-            // Step 3b: Replay forward dropout via Philox(seed; counter=b,h,i,j).
+            // Step 3b: Replay forward dropout via Philox(seed; counter=
+            // bh=b*num_heads+h, i, j, 0) — the bh-combined convention shared by
+            // the forward kernel and philox_dropout_mask. Must match the
+            // forward exactly or the replayed mask diverges for B>1 / H>1.
             if (apply_dropout) {
                 for (int64_t i = 0; i < N; ++i) {
                     for (int64_t j = 0; j < M; ++j) {
                         Philox4x32 philox;
-                        philox.counter[0] = static_cast<uint32_t>(b);
-                        philox.counter[1] = static_cast<uint32_t>(h);
-                        philox.counter[2] = static_cast<uint32_t>(i);
-                        philox.counter[3] = static_cast<uint32_t>(j);
+                        philox.counter[0] = static_cast<uint32_t>(b * num_heads + h);
+                        philox.counter[1] = static_cast<uint32_t>(i);
+                        philox.counter[2] = static_cast<uint32_t>(j);
+                        philox.counter[3] = 0u;
                         philox.key[0] = rng_seed;
                         philox.key[1] = rng_seed ^ 0x1BD11BDAU;
                         uint32_t rng_out[4];
@@ -964,15 +974,17 @@ static auto flash_attention_backward_half(
                 }
             }
 
-            // Step 3b: dropout replay
+            // Step 3b: dropout replay — bh-combined counter
+            // (bh=b*num_heads+h, i, j, 0) matching the forward kernel and
+            // philox_dropout_mask.
             if (apply_dropout) {
                 for (int64_t i = 0; i < N; ++i) {
                     for (int64_t j = 0; j < M; ++j) {
                         Philox4x32 philox;
-                        philox.counter[0] = static_cast<uint32_t>(b);
-                        philox.counter[1] = static_cast<uint32_t>(h);
-                        philox.counter[2] = static_cast<uint32_t>(i);
-                        philox.counter[3] = static_cast<uint32_t>(j);
+                        philox.counter[0] = static_cast<uint32_t>(b * num_heads + h);
+                        philox.counter[1] = static_cast<uint32_t>(i);
+                        philox.counter[2] = static_cast<uint32_t>(j);
+                        philox.counter[3] = 0u;
                         philox.key[0] = rng_seed;
                         philox.key[1] = rng_seed ^ 0x1BD11BDAU;
                         uint32_t rng_out[4];

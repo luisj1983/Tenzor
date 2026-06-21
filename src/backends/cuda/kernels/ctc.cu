@@ -50,27 +50,33 @@ namespace {
 // batch-element loops (each thread iterates over s within its t).
 constexpr int CTC_THREADS_PER_BLOCK = 128;
 
-__device__ __forceinline__ float log_add(float a, float b) {
-    constexpr float NEG_INF = -INFINITY;
+// Numerically-stable log-domain addition. Templated on the compute type so the
+// Float64 path keeps full double precision (matching the CPU reference, which
+// runs the DP natively in double for Float64 inputs) while Float32/half inputs
+// use single precision.
+template<typename T>
+__device__ __forceinline__ T ctc_log_add(T a, T b) {
+    const T NEG_INF = -std::numeric_limits<T>::infinity();
     if (a == NEG_INF) return b;
     if (b == NEG_INF) return a;
-    float m = fmaxf(a, b);
-    return m + log1pf(expf(-fabsf(a - b)));
+    T m = a > b ? a : b;
+    return m + ::log1p(::exp(-::fabs(a - b)));
 }
 
 // Forward DP: fills alpha[t, s] for one batch element n.
 // Each thread handles a stride of positions s within each timestep.
 // Block-wide __syncthreads() separates timesteps.
+template<typename T>
 __global__ void ctc_forward_backward_kernel(
-    const float* __restrict__ log_probs,   // (T_max, N, C)
+    const T* __restrict__ log_probs,       // (T_max, N, C)
     const int32_t* __restrict__ targets,   // (N, S_max)
     const int32_t* __restrict__ input_lengths,   // (N,)
     const int32_t* __restrict__ target_lengths,  // (N,)
-    float* __restrict__ alpha_buf,         // (N, T_max, L_max) workspace
-    float* __restrict__ beta_buf,          // (N, T_max, L_max) workspace
-    float* __restrict__ post_scratch,      // (N, T_max, C) per-block log-posterior scratch
-    float* __restrict__ loss_out,          // (N,)
-    float* __restrict__ grad_out,          // (T_max, N, C)
+    T* __restrict__ alpha_buf,             // (N, T_max, L_max) workspace
+    T* __restrict__ beta_buf,              // (N, T_max, L_max) workspace
+    T* __restrict__ post_scratch,          // (N, T_max, C) per-block log-posterior scratch
+    T* __restrict__ loss_out,              // (N,)
+    T* __restrict__ grad_out,              // (T_max, N, C)
     int64_t T_max,
     int64_t N,
     int64_t C,
@@ -88,11 +94,11 @@ __global__ void ctc_forward_backward_kernel(
     const int32_t S_n = target_lengths[n];
     const int64_t L_n = 2 * S_n + 1;
 
-    constexpr float NEG_INF = -INFINITY;
+    const T NEG_INF = -std::numeric_limits<T>::infinity();
 
     // Compute per-batch base pointers.
-    float* alpha = alpha_buf + n * T_max * L_max;
-    float* beta  = beta_buf  + n * T_max * L_max;
+    T* alpha = alpha_buf + n * T_max * L_max;
+    T* beta  = beta_buf  + n * T_max * L_max;
     const int32_t* tgt_n = targets + n * S_max;
 
     // Helper: ext_label[s].
@@ -102,11 +108,11 @@ __global__ void ctc_forward_backward_kernel(
 
     if (T_n <= 0 || S_n <= 0 || L_n > L_max) {
         // Degenerate case: zero loss, zero grad.
-        if (tid == 0) loss_out[n] = 0.0f;
+        if (tid == 0) loss_out[n] = T(0);
         for (int64_t idx = tid; idx < T_max * C; idx += nthreads) {
             int64_t t = idx / C;
             int64_t c = idx % C;
-            grad_out[t * N * C + n * C + c] = 0.0f;
+            grad_out[t * N * C + n * C + c] = T(0);
         }
         return;
     }
@@ -130,13 +136,13 @@ __global__ void ctc_forward_backward_kernel(
     // Recurrence over t.
     for (int64_t t = 1; t < T_n; ++t) {
         for (int64_t s = tid; s < L_n; s += nthreads) {
-            float a = alpha[(t - 1) * L_max + s];
+            T a = alpha[(t - 1) * L_max + s];
             if (s > 0) {
-                a = log_add(a, alpha[(t - 1) * L_max + (s - 1)]);
+                a = ctc_log_add(a, alpha[(t - 1) * L_max + (s - 1)]);
             }
             int32_t c_s = ext_label(s);
             if (s > 1 && c_s != blank && c_s != ext_label(s - 2)) {
-                a = log_add(a, alpha[(t - 1) * L_max + (s - 2)]);
+                a = ctc_log_add(a, alpha[(t - 1) * L_max + (s - 2)]);
             }
             alpha[t * L_max + s] = a + log_probs[t * N * C + n * C + c_s];
         }
@@ -144,14 +150,14 @@ __global__ void ctc_forward_backward_kernel(
     }
 
     // Total log-probability.
-    __shared__ float s_logZ;
+    __shared__ T s_logZ;
     if (tid == 0) {
-        float term1 = alpha[(T_n - 1) * L_max + (L_n - 1)];
-        float term2 = (L_n > 1) ? alpha[(T_n - 1) * L_max + (L_n - 2)] : NEG_INF;
-        s_logZ = log_add(term1, term2);
+        T term1 = alpha[(T_n - 1) * L_max + (L_n - 1)];
+        T term2 = (L_n > 1) ? alpha[(T_n - 1) * L_max + (L_n - 2)] : NEG_INF;
+        s_logZ = ctc_log_add(term1, term2);
     }
     __syncthreads();
-    float logZ = s_logZ;
+    T logZ = s_logZ;
 
     // ----------------------------------------------------------------
     // Backward pass: beta[t, s]
@@ -160,7 +166,7 @@ __global__ void ctc_forward_backward_kernel(
     // Initialise beta at t = T_n - 1.
     for (int64_t s = tid; s < L_n; s += nthreads) {
         if (s == L_n - 1 || (s == L_n - 2 && L_n > 1)) {
-            beta[(T_n - 1) * L_max + s] = 0.0f;  // log(1)
+            beta[(T_n - 1) * L_max + s] = T(0);  // log(1)
         } else {
             beta[(T_n - 1) * L_max + s] = NEG_INF;
         }
@@ -170,18 +176,18 @@ __global__ void ctc_forward_backward_kernel(
     for (int64_t t = T_n - 2; t >= 0; --t) {
         for (int64_t s = tid; s < L_n; s += nthreads) {
             int32_t c_s = ext_label(s);
-            float b = beta[(t + 1) * L_max + s] + log_probs[(t + 1) * N * C + n * C + c_s];
+            T b = beta[(t + 1) * L_max + s] + log_probs[(t + 1) * N * C + n * C + c_s];
             if (s < L_n - 1) {
                 int32_t c_s1 = ext_label(s + 1);
-                float term = beta[(t + 1) * L_max + (s + 1)]
-                           + log_probs[(t + 1) * N * C + n * C + c_s1];
-                b = log_add(b, term);
+                T term = beta[(t + 1) * L_max + (s + 1)]
+                       + log_probs[(t + 1) * N * C + n * C + c_s1];
+                b = ctc_log_add(b, term);
             }
             if (s < L_n - 2 && c_s != blank && c_s != ext_label(s + 2)) {
                 int32_t c_s2 = ext_label(s + 2);
-                float term = beta[(t + 1) * L_max + (s + 2)]
-                           + log_probs[(t + 1) * N * C + n * C + c_s2];
-                b = log_add(b, term);
+                T term = beta[(t + 1) * L_max + (s + 2)]
+                       + log_probs[(t + 1) * N * C + n * C + c_s2];
+                b = ctc_log_add(b, term);
             }
             beta[t * L_max + s] = b;
         }
@@ -195,10 +201,10 @@ __global__ void ctc_forward_backward_kernel(
     // PyTorch reports per-sample loss as -logZ. zero_infinity replaces
     // infinite losses (which arise when no alignment exists, e.g. T < S)
     // by 0 and zeroes their gradients.
-    float per_sample_loss = -logZ;
-    bool is_inf = !isfinite(per_sample_loss);
+    T per_sample_loss = -logZ;
+    bool is_inf = !isfinite(static_cast<double>(per_sample_loss));
     if (zero_infinity && is_inf) {
-        per_sample_loss = 0.0f;
+        per_sample_loss = T(0);
     }
     if (tid == 0) {
         loss_out[n] = per_sample_loss;
@@ -227,13 +233,13 @@ __global__ void ctc_forward_backward_kernel(
         for (int64_t idx = tid; idx < T_max * C; idx += nthreads) {
             int64_t t = idx / C;
             int64_t c = idx % C;
-            grad_out[t * N * C + n * C + c] = 0.0f;
+            grad_out[t * N * C + n * C + c] = T(0);
         }
         return;
     }
 
     // Per-block scratch slice [(t, c)] inside post_scratch[n, *, *].
-    float* post_n = post_scratch + n * T_max * C;
+    T* post_n = post_scratch + n * T_max * C;
 
     // First, zero the grad slice for this batch element (handles t >= T_n
     // padding) and seed the scratch with NEG_INF so log_add picks up the
@@ -241,7 +247,7 @@ __global__ void ctc_forward_backward_kernel(
     for (int64_t idx = tid; idx < T_max * C; idx += nthreads) {
         int64_t t = idx / C;
         int64_t c = idx % C;
-        grad_out[t * N * C + n * C + c] = 0.0f;
+        grad_out[t * N * C + n * C + c] = T(0);
         post_n[t * C + c] = NEG_INF;
     }
     __syncthreads();
@@ -253,13 +259,13 @@ __global__ void ctc_forward_backward_kernel(
     // per t because several s can map to the same c (their log_add must be
     // ordered), exactly matching the CPU reference's per-t accumulation.
     for (int64_t t = tid; t < T_n; t += nthreads) {
-        float* post_t = post_n + t * C;
-        const float* alpha_t = alpha + t * L_max;
-        const float* beta_t = beta + t * L_max;
+        T* post_t = post_n + t * C;
+        const T* alpha_t = alpha + t * L_max;
+        const T* beta_t = beta + t * L_max;
         for (int64_t s = 0; s < L_n; ++s) {
             int32_t c = ext_label(s);
-            float posterior = alpha_t[s] + beta_t[s];
-            post_t[c] = log_add(post_t[c], posterior);
+            T posterior = alpha_t[s] + beta_t[s];
+            post_t[c] = ctc_log_add(post_t[c], posterior);
         }
     }
     __syncthreads();
@@ -269,10 +275,10 @@ __global__ void ctc_forward_backward_kernel(
     for (int64_t idx = tid; idx < T_n * C; idx += nthreads) {
         int64_t t = idx / C;
         int64_t c = idx % C;
-        float lp = log_probs[t * N * C + n * C + c];
-        float post = post_n[t * C + c];
-        float prob = expf(lp);
-        float post_prob = (post == NEG_INF) ? 0.0f : expf(post - logZ);
+        T lp = log_probs[t * N * C + n * C + c];
+        T post = post_n[t * C + c];
+        T prob = ::exp(lp);
+        T post_prob = (post == NEG_INF) ? T(0) : ::exp(post - logZ);
         grad_out[t * N * C + n * C + c] = prob - post_prob;
     }
 
@@ -291,10 +297,13 @@ auto ctc_loss_forward_kernel(
     bool zero_infinity,
     cudaStream_t stream
 ) -> std::vector<Tensor> {
-    // The CTC compute kernel runs in Float32. Match the CPU CTC dtype surface by
-    // widening F64/F16/BF16 log_probs to Float32 on device, computing, and narrowing
-    // the float outputs (loss, raw_grad) back. targets/lengths remain Int32.
-    if (log_probs.dtype() != DType::Float32) {
+    // Compute dtype follows the CPU CTC reference (S13 dtype-preservation):
+    //   Float32: native single precision.
+    //   Float64: native DOUBLE precision DP (no silent downcast) — the kernel is
+    //            instantiated with T=double below.
+    //   Float16/BFloat16/other: widen to Float32 (CTC is precision-sensitive and
+    //            half-precision logZ saturates quickly), compute, narrow outputs.
+    if (log_probs.dtype() != DType::Float32 && log_probs.dtype() != DType::Float64) {
         const DType orig = log_probs.dtype();
         auto outs = ctc_loss_forward_kernel(
             log_probs.to(DType::Float32), targets, input_lengths, target_lengths,
@@ -323,34 +332,78 @@ auto ctc_loss_forward_kernel(
                   : (tgt_shape.size() == 1) ? tgt_shape[0] : 0;
     int64_t L_max = 2 * S_max + 1;
 
-    // Outputs.
-    Tensor loss_out({N}, DType::Float32, log_probs.device());
-    Tensor grad_out({T_max, N, C}, DType::Float32, log_probs.device());
+    // Native compute dtype: Float64 stays double, Float32 stays float.
+    const DType compute_dtype = log_probs.dtype();
+    const bool native_f64 = (compute_dtype == DType::Float64);
+
+    // ----------------------------------------------------------------
+    // Validate the blank label and every active target label up front.
+    // ext_label[i] (== blank or a target label) is used directly as a channel
+    // index into log_probs / grad inside the kernel; an out-of-range value
+    // would cause an OOB device read of log_probs or an OOB device write into
+    // grad. The CPU reference performs the same validation host-side; mirror it
+    // here by copying the (small) Int32 targets / length tensors to host. This
+    // matches CPU parity and prevents user-data-driven memory corruption.
+    // ----------------------------------------------------------------
+    if (blank < 0 || blank >= C) {
+        throw std::invalid_argument(
+            "ctc_loss_forward (CUDA): blank index " + std::to_string(blank) +
+            " out of range [0, " + std::to_string(C) + ")");
+    }
+    if (N > 0 && S_max > 0) {
+        Tensor tgt_cpu = targets.to(Device::cpu()).contiguous();
+        Tensor il_cpu  = input_lengths.to(Device::cpu()).contiguous();
+        Tensor tl_cpu  = target_lengths.to(Device::cpu()).contiguous();
+        const int32_t* tgt_data = tgt_cpu.data<int32_t>();
+        const int32_t* il_data  = il_cpu.data<int32_t>();
+        const int32_t* tl_data  = tl_cpu.data<int32_t>();
+        for (int64_t n = 0; n < N; ++n) {
+            int64_t T_n = il_data[n];
+            int64_t S_n = tl_data[n];
+            if (T_n <= 0 || S_n <= 0 || T_n > T_max || S_n > S_max) {
+                continue;  // inactive sample; skipped by the compute kernel too
+            }
+            const int32_t* tgt_n = tgt_data + n * S_max;
+            for (int64_t s = 0; s < S_n; ++s) {
+                const int64_t label = static_cast<int64_t>(tgt_n[s]);
+                if (label < 0 || label >= C) {
+                    throw std::invalid_argument(
+                        "ctc_loss_forward (CUDA): target label " +
+                        std::to_string(label) + " out of range [0, " +
+                        std::to_string(C) + ")");
+                }
+            }
+        }
+    }
+
+    // Outputs (in the native compute dtype).
+    Tensor loss_out({N}, compute_dtype, log_probs.device());
+    Tensor grad_out({T_max, N, C}, compute_dtype, log_probs.device());
 
     // Workspace.
-    // alpha and beta are (N, T_max, L_max) Float32. For T*N*L_max large
-    // this can be substantial, but matches the algorithm's natural
+    // alpha and beta are (N, T_max, L_max) in the compute dtype. For T*N*L_max
+    // large this can be substantial, but matches the algorithm's natural
     // working set.
     int64_t alpha_elems = N * T_max * L_max;
-    Tensor alpha_buf({alpha_elems}, DType::Float32, log_probs.device());
-    Tensor beta_buf({alpha_elems}, DType::Float32, log_probs.device());
+    Tensor alpha_buf({alpha_elems}, compute_dtype, log_probs.device());
+    Tensor beta_buf({alpha_elems}, compute_dtype, log_probs.device());
     // AA.10: per-block (T_max, C) scratch for log-space posterior
     // accumulation — must not alias grad_out, or partial writes from
     // iteration t leak into iteration t+1's readers.
     int64_t post_elems = N * T_max * C;
-    Tensor post_scratch({post_elems}, DType::Float32, log_probs.device());
+    Tensor post_scratch({post_elems}, compute_dtype, log_probs.device());
 
     if (N == 0 || T_max == 0 || C == 0) {
         // Zero-sized tensors: nothing to do. Zero out outputs for safety.
         if (loss_out.numel() > 0) {
             TENZOR_CUDA_CHECK(cudaMemsetAsync(
                 loss_out.data_ptr(), 0,
-                loss_out.numel() * sizeof(float), stream));
+                loss_out.numel() * dtype_size(compute_dtype), stream));
         }
         if (grad_out.numel() > 0) {
             TENZOR_CUDA_CHECK(cudaMemsetAsync(
                 grad_out.data_ptr(), 0,
-                grad_out.numel() * sizeof(float), stream));
+                grad_out.numel() * dtype_size(compute_dtype), stream));
         }
         return {loss_out, grad_out};
     }
@@ -359,19 +412,35 @@ auto ctc_loss_forward_kernel(
     dim3 grid(static_cast<unsigned>(N));
     dim3 block(CTC_THREADS_PER_BLOCK);
 
-    ctc_forward_backward_kernel<<<grid, block, 0, stream>>>(
-        log_probs.data<float>(),
-        targets.data<int32_t>(),
-        input_lengths.data<int32_t>(),
-        target_lengths.data<int32_t>(),
-        alpha_buf.data<float>(),
-        beta_buf.data<float>(),
-        post_scratch.data<float>(),
-        loss_out.data<float>(),
-        grad_out.data<float>(),
-        T_max, N, C, S_max, L_max,
-        blank, zero_infinity
-    );
+    if (native_f64) {
+        ctc_forward_backward_kernel<double><<<grid, block, 0, stream>>>(
+            log_probs.data<double>(),
+            targets.data<int32_t>(),
+            input_lengths.data<int32_t>(),
+            target_lengths.data<int32_t>(),
+            alpha_buf.data<double>(),
+            beta_buf.data<double>(),
+            post_scratch.data<double>(),
+            loss_out.data<double>(),
+            grad_out.data<double>(),
+            T_max, N, C, S_max, L_max,
+            blank, zero_infinity
+        );
+    } else {
+        ctc_forward_backward_kernel<float><<<grid, block, 0, stream>>>(
+            log_probs.data<float>(),
+            targets.data<int32_t>(),
+            input_lengths.data<int32_t>(),
+            target_lengths.data<int32_t>(),
+            alpha_buf.data<float>(),
+            beta_buf.data<float>(),
+            post_scratch.data<float>(),
+            loss_out.data<float>(),
+            grad_out.data<float>(),
+            T_max, N, C, S_max, L_max,
+            blank, zero_infinity
+        );
+    }
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return {loss_out, grad_out};

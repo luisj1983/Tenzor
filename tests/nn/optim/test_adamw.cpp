@@ -121,12 +121,13 @@ TEST_P(AdamWTest, LrGetSet) {
 }
 
 TEST_P(AdamWTest, StateDictNonEmptyAndRoundtrippable) {
-    // Exercise the serialize / deserialize surface: after a few steps the
-    // state dict must be non-empty (step count, first/second moments), and
-    // load_state_dict on a fresh optimizer must accept it without throwing.
-    // Not asserting exact trajectory match — the fixture's sensitivity to
-    // storage-layout differences between the two optimizers is its own
-    // integration concern and is covered by the full training-loop tests.
+    // Exercise the serialize / deserialize surface and verify the moment
+    // buffers actually survive a save/load: after a few steps the state dict
+    // must be non-empty (step count, first/second moments), load_state_dict
+    // on a fresh optimizer must accept it, and a subsequent identical step on
+    // both optimizers — started from identical param values — must produce
+    // identical params. A save/load that drops or zeroes exp_avg/exp_avg_sq
+    // diverges here.
     auto params = make_params();
     optim::AdamW opt(params, /*lr=*/1e-2);
 
@@ -139,9 +140,24 @@ TEST_P(AdamWTest, StateDictNonEmptyAndRoundtrippable) {
     EXPECT_FALSE(state.empty())
         << "AdamW state_dict must include moments + step count after stepping";
 
-    auto fresh_params = make_params();
+    // Fresh optimizer over params that clone opt's current values so the next
+    // step is governed only by the restored optimizer state.
+    auto fresh_params = std::vector<std::shared_ptr<Variable>>{
+        std::make_shared<Variable>(params[0]->tensor().clone(), /*requires_grad=*/true)};
     optim::AdamW fresh_opt(fresh_params, /*lr=*/1e-2);
-    EXPECT_NO_THROW(fresh_opt.load_state_dict(state));
+    ASSERT_NO_THROW(fresh_opt.load_state_dict(state));
+
+    seed_unit_grad(params);
+    opt.step();
+    seed_unit_grad(fresh_params);
+    fresh_opt.step();
+
+    auto a = params[0]->tensor().to(DType::Float64).cpu();
+    auto b = fresh_params[0]->tensor().to(DType::Float64).cpu();
+    double max_diff = ::tenzor::max(::tenzor::abs(a - b)).item<double>();
+    EXPECT_LT(max_diff, 1e-6)
+        << "Post-load step diverged (max param diff " << max_diff
+        << ") — load_state_dict did not restore the AdamW moment buffers";
 }
 
 INSTANTIATE_BACKEND_TESTS(AdamWTest);

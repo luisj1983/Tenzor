@@ -152,6 +152,24 @@ protected:
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(1), "TopK smallest value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(2), "TopK smallest value 1");
     }
+
+    // Regression: the default dim=-1 (last axis) must be normalized inside the
+    // kernel. The ROCm topk_kernel previously indexed shape[-1] directly (OOB
+    // read on the shape vector) when dim was left at its -1 default.
+    template<typename T>
+    void testTopKDefaultDimNeg1(DType dtype) {
+        auto t = make_tensor<T>({5}, dtype, device,
+            {static_cast<T>(3), static_cast<T>(1), static_cast<T>(4), static_cast<T>(2), static_cast<T>(5)});
+
+        auto [values, indices] = topk(t, 3);  // dim defaults to -1
+
+        ASSERT_EQ(values.shape()[0], 3);
+        auto vals = values.to(Device::cpu());
+        auto* v = vals.template data<T>();
+        TypedVerifier<T>::expectEq(v[0], static_cast<T>(5), "TopK(-1) value 0");
+        TypedVerifier<T>::expectEq(v[1], static_cast<T>(4), "TopK(-1) value 1");
+        TypedVerifier<T>::expectEq(v[2], static_cast<T>(3), "TopK(-1) value 2");
+    }
 };
 
 TEST_P(TopKMultiDTypeTest, TopKLargestFloat32) { testTopKLargest<float>(DType::Float32); }
@@ -162,6 +180,8 @@ TEST_P(TopKMultiDTypeTest, TopKSmallestFloat32) { testTopKSmallest<float>(DType:
 TEST_P(TopKMultiDTypeTest, TopKSmallestFloat64) { testTopKSmallest<double>(DType::Float64); }
 TEST_P(TopKMultiDTypeTest, TopKSmallestInt32) { testTopKSmallest<int32_t>(DType::Int32); }
 TEST_P(TopKMultiDTypeTest, TopKSmallestInt64) { testTopKSmallest<int64_t>(DType::Int64); }
+TEST_P(TopKMultiDTypeTest, TopKDefaultDimNeg1Float32) { testTopKDefaultDimNeg1<float>(DType::Float32); }
+TEST_P(TopKMultiDTypeTest, TopKDefaultDimNeg1Int64) { testTopKDefaultDimNeg1<int64_t>(DType::Int64); }
 
 INSTANTIATE_BACKEND_TESTS(TopKMultiDTypeTest);
 
@@ -204,6 +224,22 @@ protected:
         TypedVerifier<T>::expectEq(vals[2], static_cast<T>(2), "Sort descending value 2");
         TypedVerifier<T>::expectEq(vals[3], static_cast<T>(1), "Sort descending value 3");
     }
+
+    // Regression: default dim=-1 must be normalized in the kernel (ROCm
+    // sort_kernel previously indexed shape[-1] directly -> OOB shape read).
+    template<typename T>
+    void testSortDefaultDimNeg1(DType dtype) {
+        auto t = make_tensor<T>({4}, dtype, device,
+            {static_cast<T>(3), static_cast<T>(1), static_cast<T>(4), static_cast<T>(2)});
+
+        auto [sorted, indices] = sort(t);  // dim defaults to -1, ascending
+
+        auto vals = sorted.to(Device::cpu()).template data<T>();
+        TypedVerifier<T>::expectEq(vals[0], static_cast<T>(1), "Sort(-1) value 0");
+        TypedVerifier<T>::expectEq(vals[1], static_cast<T>(2), "Sort(-1) value 1");
+        TypedVerifier<T>::expectEq(vals[2], static_cast<T>(3), "Sort(-1) value 2");
+        TypedVerifier<T>::expectEq(vals[3], static_cast<T>(4), "Sort(-1) value 3");
+    }
 };
 
 TEST_P(SortMultiDTypeTest, SortAscendingFloat32) { testSortAscending<float>(DType::Float32); }
@@ -214,6 +250,8 @@ TEST_P(SortMultiDTypeTest, SortDescendingFloat32) { testSortDescending<float>(DT
 TEST_P(SortMultiDTypeTest, SortDescendingFloat64) { testSortDescending<double>(DType::Float64); }
 TEST_P(SortMultiDTypeTest, SortDescendingInt32) { testSortDescending<int32_t>(DType::Int32); }
 TEST_P(SortMultiDTypeTest, SortDescendingInt64) { testSortDescending<int64_t>(DType::Int64); }
+TEST_P(SortMultiDTypeTest, SortDefaultDimNeg1Float32) { testSortDefaultDimNeg1<float>(DType::Float32); }
+TEST_P(SortMultiDTypeTest, SortDefaultDimNeg1Int64) { testSortDefaultDimNeg1<int64_t>(DType::Int64); }
 
 INSTANTIATE_BACKEND_TESTS(SortMultiDTypeTest);
 

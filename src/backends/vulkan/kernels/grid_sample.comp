@@ -52,6 +52,21 @@ float safe_get(int n, int c, int y, int x) {
     return 0.0;
 }
 
+// Bilinear corner fetch honoring the padding mode PER CORNER. With zeros padding
+// (mode 0) an out-of-range corner contributes 0. With border (1) / reflection
+// (2) the corner index is clamped to the edge — otherwise the +1 neighbour of a
+// clamped/reflected center that lands on the last row/col would wrongly fetch 0
+// instead of the edge value (matches bicubic_get and the CUDA/CPU reference).
+float bilinear_get(int n, int c, int y, int x) {
+    if (params.padding_mode == 0) {
+        if (y < 0 || y >= params.H_in || x < 0 || x >= params.W_in) return 0.0;
+    } else {
+        y = clamp(y, 0, params.H_in - 1);
+        x = clamp(x, 0, params.W_in - 1);
+    }
+    return input_data[((n * params.C + c) * params.H_in + y) * params.W_in + x];
+}
+
 // Bicubic neighbour fetch: zeros padding returns 0 out of range; border /
 // reflection clamp the neighbour to the edge (matches CUDA/CPU bicubic).
 float bicubic_get(int n, int c, int y, int x) {
@@ -138,10 +153,10 @@ void main() {
         float wx0 = 1.0 - wx1;
         float wy0 = 1.0 - wy1;
 
-        val = wy0 * wx0 * safe_get(n, c, y0, x0) +
-              wy0 * wx1 * safe_get(n, c, y0, x1) +
-              wy1 * wx0 * safe_get(n, c, y1, x0) +
-              wy1 * wx1 * safe_get(n, c, y1, x1);
+        val = wy0 * wx0 * bilinear_get(n, c, y0, x0) +
+              wy0 * wx1 * bilinear_get(n, c, y0, x1) +
+              wy1 * wx0 * bilinear_get(n, c, y1, x0) +
+              wy1 * wx1 * bilinear_get(n, c, y1, x1);
     }
 
     output_data[((n * params.C + c) * params.H_out + h) * params.W_out + w] = val;

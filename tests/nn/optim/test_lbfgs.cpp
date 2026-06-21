@@ -226,6 +226,77 @@ TEST_P(LBFGSTest, StrongWolfeHandlesSteepCurvature) {
     EXPECT_LT(final_loss, 1e-8);
 }
 
+// ---------------------------------------------------------------------------
+// Regression: a checkpointed L-BFGS run must resume correctly. state_dict()
+// previously dropped prev_flat_params_, so the first post-reload step formed
+// the curvature pair s = params - prev_flat_params_ against an empty tensor,
+// either throwing on the shape mismatch or poisoning the (s, y) history. This
+// test takes a few steps, snapshots, reloads into a fresh optimizer, and
+// asserts the resumed run keeps making progress (and never throws / NaNs).
+// ---------------------------------------------------------------------------
+TEST_P(LBFGSTest, StateDictRoundTripResumesAfterStep) {
+    auto make_x = [&]() {
+        return std::make_shared<Variable>(
+            tenzor::full({3}, 1.5, DType::Float64, device),
+            /*requires_grad=*/true);
+    };
+
+    auto make_closure = [&](std::shared_ptr<Variable> x) {
+        return [x, this]() -> Variable {
+            x->zero_grad();
+            auto coef_cpu = tenzor::full({3}, 0.0, DType::Float64, Device::cpu());
+            coef_cpu.data<double>()[0] = 0.5;
+            coef_cpu.data<double>()[1] = 1.0;
+            coef_cpu.data<double>()[2] = 1.5;
+            auto coef_v = Variable(coef_cpu.to(device), false);
+            auto loss = sum(coef_v * (*x) * (*x));
+            loss.backward();
+            return loss;
+        };
+    };
+
+    auto x = make_x();
+    auto closure = make_closure(x);
+
+    optim::LBFGS opt({x}, /*lr=*/1.0, /*max_iter=*/5, /*max_eval=*/-1,
+                     /*tolerance_grad=*/1e-12, /*tolerance_change=*/1e-14,
+                     /*history_size=*/10,
+                     optim::LBFGSLineSearch::StrongWolfe);
+
+    // A couple of steps to populate prev_flat_params_/prev_flat_grad_ + history.
+    opt.step(closure);
+    double loss_before_save = to_double(opt.step(closure));
+
+    // Snapshot, then reload into a fresh optimizer over a parameter that we set
+    // to the same current value as the live one.
+    auto state = opt.state_dict();
+    ASSERT_GT(state.count("prev_flat_params"), 0u)
+        << "state_dict() must persist prev_flat_params for a resumable checkpoint";
+
+    auto x2 = std::make_shared<Variable>(x->tensor().clone(), /*requires_grad=*/true);
+    auto closure2 = make_closure(x2);
+    optim::LBFGS opt2({x2}, /*lr=*/1.0, /*max_iter=*/5, /*max_eval=*/-1,
+                      /*tolerance_grad=*/1e-12, /*tolerance_change=*/1e-14,
+                      /*history_size=*/10,
+                      optim::LBFGSLineSearch::StrongWolfe);
+    ASSERT_NO_THROW(opt2.load_state_dict(state));
+
+    // First post-reload step must not throw and must keep improving the loss.
+    double resumed_loss = 1e9;
+    ASSERT_NO_THROW({ resumed_loss = to_double(opt2.step(closure2)); });
+    ASSERT_TRUE(std::isfinite(resumed_loss));
+    EXPECT_LT(resumed_loss, loss_before_save + 1e-9)
+        << "Resumed L-BFGS step regressed the loss (curvature pair corrupted by "
+        << "missing prev_flat_params_)";
+
+    // Drive to convergence to confirm the resumed run is healthy.
+    for (int k = 0; k < 10 && resumed_loss > 1e-12; ++k) {
+        resumed_loss = to_double(opt2.step(closure2));
+        ASSERT_TRUE(std::isfinite(resumed_loss));
+    }
+    EXPECT_LT(resumed_loss, 1e-10);
+}
+
 INSTANTIATE_BACKEND_TESTS(LBFGSTest);
 
 } // namespace

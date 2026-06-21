@@ -88,9 +88,12 @@ TEST_P(LionTest, StateDictRoundtrip) {
     EXPECT_EQ(state.count("weight_decay"), 1u);
     EXPECT_EQ(state.count("momentum_0"), 1u);
 
-    // Round-trip: load into a fresh optimizer with a different lr, then
-    // confirm that reading the state back matches what we loaded.
-    auto params2 = make_params();
+    // Round-trip: load into a fresh optimizer whose params clone opt's current
+    // values, so a subsequent identical step is governed only by the restored
+    // optimizer state (momentum_0 / step_count), then confirm both step the
+    // same.
+    auto params2 = std::vector<std::shared_ptr<Variable>>{
+        std::make_shared<Variable>(params[0]->tensor().clone(), /*requires_grad=*/true)};
     optim::Lion opt2(params2, /*lr=*/1e-5);
     opt2.load_state_dict(state);
 
@@ -98,6 +101,17 @@ TEST_P(LionTest, StateDictRoundtrip) {
 
     auto state2 = opt2.state_dict();
     EXPECT_EQ(state.size(), state2.size());
+
+    // Strong round-trip check: one identical unit-gradient step on both. If
+    // momentum_0 and step_count were restored, the sign-based updates match.
+    step_with_unit_grad(params, opt);
+    step_with_unit_grad(params2, opt2);
+    auto a = params[0]->tensor().to(DType::Float64).cpu();
+    auto b = params2[0]->tensor().to(DType::Float64).cpu();
+    double max_diff = ::tenzor::max(::tenzor::abs(a - b)).item<double>();
+    EXPECT_LT(max_diff, 1e-6)
+        << "Post-load step diverged (max param diff " << max_diff
+        << ") — load_state_dict did not restore the momentum buffer";
 }
 
 TEST_P(LionTest, SignBasedUpdateMagnitudeIsLr) {

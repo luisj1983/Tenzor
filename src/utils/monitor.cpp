@@ -43,7 +43,15 @@ auto Stat::add(double value) -> void {
             count_.fetch_add(1, std::memory_order_relaxed);
             break;
         case Aggregation::MinMax: {
-            count_.fetch_add(1, std::memory_order_relaxed);
+            // Publish min_/max_ BEFORE bumping count_ (release the count last),
+            // mirroring the Sum/Mean path. get()/get_min() guard the
+            // uninitialized sentinels (+/-1.8e308) solely via count_ == 0 and do
+            // NOT take mutex_. If count_ were incremented first, a lock-free
+            // reader could observe count_ == 1 after the increment but before the
+            // first min_/max_ store, pass the count==0 guard, and return the raw
+            // sentinel as a real metric. Storing min_/max_ first and releasing
+            // count_ afterwards guarantees a reader that sees count_ >= 1 also
+            // sees at least one real min_/max_ store.
             // Update min
             double old_min = min_.load(std::memory_order_relaxed);
             while (value < old_min &&
@@ -58,6 +66,8 @@ auto Stat::add(double value) -> void {
                        old_max, value,
                        std::memory_order_release, std::memory_order_relaxed)) {
             }
+            // Release count_ only after min_/max_ are visible.
+            count_.fetch_add(1, std::memory_order_release);
             break;
         }
         case Aggregation::Value:

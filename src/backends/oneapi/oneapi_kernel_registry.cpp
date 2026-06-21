@@ -656,7 +656,8 @@ namespace oneapi {
                                       const std::string& mode, bool include_last_offset,
                                       sycl::queue& queue) -> std::vector<Tensor>;
     auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
-                                       const Tensor& offsets, const OpAttributes& attrs,
+                                       const Tensor& offsets, const Tensor& max_indices,
+                                       const OpAttributes& attrs,
                                        sycl::queue& queue) -> Tensor;
 
     // ---- Im2col/Col2im operations (kernels/im2col.cpp) ----
@@ -1994,7 +1995,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Squeeze,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            // Default to a sentinel that cannot collide with a real (possibly
+            // negative) axis, so squeeze(-1)/squeeze(-2) are NOT mistaken for
+            // squeeze-all. Matches the CPU dispatch (cpu_kernel_registry.cpp).
+            int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
             return {oneapi::squeeze_kernel(inputs[0], dim, get_q(inputs))};
         });
 
@@ -4546,9 +4550,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::EmbeddingBagBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [grad_output, indices (Int64), offsets]
+            // inputs: [grad_output, indices (Int64), offsets, (max_indices for mode=max)]
+            // The autograd node appends max_indices as the 4th input for mode="max";
+            // pass an empty Tensor otherwise so the kernel's max branch can detect it.
+            Tensor max_indices = inputs.size() > 3 ? inputs[3] : Tensor{};
             return {oneapi::embedding_bag_backward_kernel(
-                inputs[0], inputs[1], inputs[2], attrs, get_q(inputs))};
+                inputs[0], inputs[1], inputs[2], max_indices, attrs, get_q(inputs))};
         });
 
     table.register_kernel(OpId::DepthwiseConv2d,
@@ -6090,7 +6097,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Quantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::quantile_kernel(inputs[0], q, dim, keepdim, get_q(inputs))};
@@ -6098,7 +6105,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Nanquantile,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            double q = attrs.get_float(AttrKey::Q, 0.5);
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::nanquantile_kernel(inputs[0], q, dim, keepdim, get_q(inputs))};
@@ -6112,9 +6119,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Histc,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t bins = attrs.get_int(AttrKey::N, 100);
-            double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
-            double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+            int64_t bins = attrs.get_int(AttrKey::NumBins, 100);
+            double min_val = attrs.get_float(AttrKey::Min, 0.0);
+            double max_val = attrs.get_float(AttrKey::Max, 0.0);
             return {oneapi::histc_kernel(inputs[0], bins, min_val, max_val, get_q(inputs))};
         });
 

@@ -230,6 +230,28 @@ auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
     // require the n3->n4 (denominator) edge.
     if (!consumes_output(n3, n4)) return std::nullopt;
 
+    // The fused softmax kernel runs over a SINGLE reduction axis (it copies the
+    // Max node's `dim`). A numerically-stable softmax always reduces Max (n0)
+    // and Sum (n3) over the same axis, but a hand-built or atypically-decomposed
+    // graph could reduce them over different axes and still match purely on
+    // op-type/connectivity — fusing it would silently use Max's axis for both,
+    // computing a denominator summed over the wrong axis. Require Max and Sum to
+    // carry the same reduction axis (and keepdim) before accepting the match.
+    // Absent `dim`/`keepdim` attrs mean the op's canonical default, so two nodes
+    // both lacking the attr agree.
+    auto reduce_dim = [](const std::shared_ptr<Node>& n) -> std::optional<int64_t> {
+        return n->has_int_attr("dim")
+                   ? std::optional<int64_t>{n->get_int_attr("dim")}
+                   : std::nullopt;
+    };
+    auto reduce_keepdim = [](const std::shared_ptr<Node>& n) -> bool {
+        return n->has_attr("keepdim") ? n->get_bool_attr("keepdim") : false;
+    };
+    if (reduce_dim(n0) != reduce_dim(n3) ||
+        reduce_keepdim(n0) != reduce_keepdim(n3)) {
+        return std::nullopt;
+    }
+
     FusionMatch match;
     match.kind = FusionKind::Softmax;
     match.nodes = {n0, n1, n2, n3, n4};

@@ -1,13 +1,14 @@
 #version 450
-#extension GL_EXT_shader_atomic_float : enable
 
-// Max Pooling 3D Backward Pass for BFloat16 using pre-computed indices
+// Max Pooling 3D Backward Pass for BFloat16 using pre-computed indices.
+// grad_input is PACKED-BF16 (2 bytes/elem); a float32 atomicAdd would write 4
+// bytes per element index (OOB + misrouted gradients). Accumulate via CAS.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };
 // Indices come from MaxPool3dForward as Int32, regardless of data dtype.
 layout(binding = 1) buffer Indices { int indices_data[]; };
-layout(binding = 2) buffer GradInput { float grad_input[]; };
+layout(binding = 2) buffer GradInput { uint grad_input[]; };  // Packed BF16, CAS-accumulated
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -18,6 +19,30 @@ layout(push_constant) uniform PushConstants {
 // Matches the forward kernel (max_pool3d_bf16.comp readBF16Element).
 float bf16_to_float(uint b) {
     return uintBitsToFloat((b & 0xFFFFu) << 16);
+}
+
+// Pack a float to BF16 (round-to-nearest-even).
+uint float_to_bf16(float f) {
+    uint b = floatBitsToUint(f);
+    return (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+}
+
+void atomicAddBF16(uint flat_idx, float add_val) {
+    uint word_idx = flat_idx / 2u;
+    uint half_idx = flat_idx % 2u;
+    uint mask = 0xFFFFu << (half_idx * 16u);
+    uint old_val = grad_input[word_idx];
+    uint expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        uint bits = (expected >> (half_idx * 16u)) & 0xFFFFu;
+        float current = bf16_to_float(bits);
+        float updated = current + add_val;
+        uint new_bits = float_to_bf16(updated) & 0xFFFFu;
+        uint new_val = (expected & ~mask) | (new_bits << (half_idx * 16u));
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
 }
 
 void main() {
@@ -33,6 +58,6 @@ void main() {
     int target_idx = indices_data[idx];
 
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
-        atomicAdd(grad_input[target_idx], grad);
+        atomicAddBF16(uint(target_idx), grad);
     }
 }

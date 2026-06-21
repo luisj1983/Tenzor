@@ -144,7 +144,15 @@ auto AWQQuantizer::find_optimal_scales(const Tensor& weight, const Tensor& act_s
             // Second pass: quantize, dequantize, unscale, measure error
             for (int64_t j = group_start; j < group_end; ++j) {
                 float act_val = act_ptr[j];
-                float s = std::pow(std::max(act_val, 1e-8f), alpha);
+                // Dead channels (act_val <= 0, never activated across the
+                // calibration set) get NO scaling (s = 1). AWQ's per-channel
+                // scaling exists to protect salient (high-activation) channels;
+                // a never-activated channel needs no protection. Using
+                // pow(1e-8, alpha) here would make its act_scale a tiny denormal
+                // and the inference-time divide-by-act_scale would amplify that
+                // channel's weights by ~1e8, a silent blow-up the MSE objective
+                // (weighted by act_val == 0) cannot even see.
+                float s = (act_val > 0.0f) ? std::pow(act_val, alpha) : 1.0f;
                 float s_inv = 1.0f / s;
 
                 float w_orig = w_ptr[row * in_features + j];
@@ -176,7 +184,10 @@ auto AWQQuantizer::find_optimal_scales(const Tensor& weight, const Tensor& act_s
 
     for (int64_t j = 0; j < group_size; ++j) {
         float act_val = act_ptr[group_start + j];
-        s_ptr[j] = std::pow(std::max(act_val, 1e-8f), best_alpha);
+        // Match the search loop: dead channels get s = 1 (no scaling) so the
+        // recorded act_scale never collapses to a denormal that explodes the
+        // weights when divided out at inference.
+        s_ptr[j] = (act_val > 0.0f) ? std::pow(act_val, best_alpha) : 1.0f;
     }
 
     return optimal_scales;
@@ -325,16 +336,13 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
     // Pack INT4 weights if using 4-bit quantization
     Tensor packed;
     if (config_.bits == 4) {
-        // Shift to unsigned range for packing: for symmetric, shift by -qmin
-        // so values are in [0, 15] for INT4
-        if (config_.sym) {
-            auto shift = ops::full({out_features, in_features},
-                                   static_cast<double>(-qmin), DType::Int32, Q.device());
-            auto Q_unsigned = Q + shift;
-            packed = pack_int4(Q_unsigned);
-        } else {
-            packed = pack_int4(Q);
-        }
+        // pack_int4 masks each value with & 0xF. For SYMMETRIC codes (signed
+        // [-8,7], zeros recorded as 0) pack the TWO'S-COMPLEMENT nibble directly
+        // so the canonical sign-extending unpacker (cpu::unpack_int4) round-trips
+        // the original signed value. The previous +8 offset-binary shift left a
+        // sign-extending consumer off by +8 with zeros=0 giving no hint of it.
+        // Asymmetric codes are already unsigned [0,15]; pack as-is.
+        packed = pack_int4(Q);
     } else {
         // 8-bit: store as Int8 directly
         packed = Q.to(DType::Int8);

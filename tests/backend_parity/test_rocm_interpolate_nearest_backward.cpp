@@ -74,11 +74,12 @@ TEST_F(RocmInterpolateNearestBackward, Nearest_MatchesCPU) {
     }
 }
 
-TEST_F(RocmInterpolateNearestBackward, Bilinear_PathExecutes) {
-    // Wave H4 regression check: bilinear backward path still executes and
-    // returns a tensor of the correct shape. (Pre-existing CPU↔ROCm bilinear
-    // numerical divergence is out of scope for this wave — see
-    // existing test_interpolate_parity for the parity check.)
+TEST_F(RocmInterpolateNearestBackward, Bilinear_MatchesCPU) {
+    // Wave H4 regression check: the bilinear backward gradient on ROCm must
+    // match the CPU reference, not merely return a correctly-shaped tensor.
+    // A shape-only check gave false confidence given this file's history of
+    // ROCm silently routing nearest through the bilinear kernel — a value
+    // comparison is what actually catches a wrong-kernel/wrong-gradient bug.
     if (!has_rocm()) GTEST_SKIP() << "ROCm not available";
 
     auto grad_out_cpu = seq_f32({1, 2, 4, 4});
@@ -88,16 +89,27 @@ TEST_F(RocmInterpolateNearestBackward, Bilinear_PathExecutes) {
     attrs.set(AttrKey::Mode, "bilinear");
     attrs.set(AttrKey::AlignCorners, false);
 
+    // CPU reference (same dispatch path, CPU device). A CPU failure is a real
+    // bug and must propagate, not be skipped.
+    std::vector<Tensor> cpu_inputs = {grad_out_cpu};
+    Tensor cpu_out = dispatch(OpId::InterpolateBackward, cpu_inputs, attrs)[0];
+
     auto grad_out_rocm = grad_out_cpu.to(Device::rocm(0));
     std::vector<Tensor> rocm_inputs = {grad_out_rocm};
-    Tensor rocm_out;
-    ASSERT_NO_THROW({
-        rocm_out = dispatch(OpId::InterpolateBackward, rocm_inputs, attrs)[0]
-                       .to(Device::cpu());
-    });
-    ASSERT_EQ(rocm_out.shape().size(), 4u);
-    EXPECT_EQ(rocm_out.shape()[0], 1);
-    EXPECT_EQ(rocm_out.shape()[1], 2);
-    EXPECT_EQ(rocm_out.shape()[2], 2);
-    EXPECT_EQ(rocm_out.shape()[3], 2);
+    Tensor rocm_out = dispatch(OpId::InterpolateBackward, rocm_inputs, attrs)[0]
+                          .to(Device::cpu());
+
+    ASSERT_EQ(cpu_out.shape().size(), rocm_out.shape().size());
+    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
+        EXPECT_EQ(cpu_out.shape()[i], rocm_out.shape()[i]) << " dim " << i;
+    }
+    ASSERT_EQ(cpu_out.numel(), rocm_out.numel());
+    auto* cp = cpu_out.data<float>();
+    auto* rp = rocm_out.data<float>();
+    // Generous tolerance for the bilinear backward scatter (atomicAdd ordering
+    // on GPU vs sequential accumulation on CPU), but tight enough that a
+    // wrong-kernel routing or zeroed gradient fails.
+    for (int64_t i = 0; i < cpu_out.numel(); ++i) {
+        EXPECT_NEAR(cp[i], rp[i], 1e-3f) << " elem " << i;
+    }
 }

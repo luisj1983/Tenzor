@@ -44,12 +44,14 @@ protected:
      * @param input_data Input tensor (CPU, Float32)
      * @param eps Finite difference step size
      * @param atol Absolute tolerance for gradient comparison
+     * @param rtol Relative tolerance for gradient comparison
      */
     void runGradcheck(
         std::function<Variable(const Variable&)> fn,
         const Tensor& input_data,
         float eps = 1e-3f,
-        float atol = 1e-2f)
+        float atol = 1e-3f,
+        float rtol = 1e-3f)
     {
         // Analytical gradient via autograd
         auto x = Variable(input_data.to(device), true);
@@ -87,7 +89,7 @@ protected:
             flat_x.data<float>()[i] = orig;  // restore
         }
 
-        EXPECT_TRUE(tensors_close(analytical, numerical, 1e-2f, atol))
+        EXPECT_TRUE(tensors_close(analytical, numerical, rtol, atol))
             << "Gradcheck failed on " << backend_name(device)
             << " (max diff: " << max_abs_diff(analytical, numerical) << ")";
     }
@@ -185,7 +187,10 @@ TEST_P(GradcheckParityTest, Conv2dGradcheck) {
         }
         conv_local.to(x.tensor().device());
         return tenzor::sum(conv_local.forward(x));
-    }, input, 1e-3f, 5e-2f);
+    }, input, /*eps=*/1e-3f, /*atol=*/2e-3f, /*rtol=*/1e-3f);
+    // conv with frozen weights is linear in x, so central differences are
+    // exact up to Float32 roundoff: atol=5e-2 (the old value) tolerated ~5%
+    // error on a frozen-weight linear map and masked real backward bugs.
 }
 
 TEST_P(GradcheckParityTest, Cubic) {

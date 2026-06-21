@@ -34,8 +34,14 @@ auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
     auto q_contig = Q.contiguous();
     auto k_contig = K.contiguous();
     auto v_contig = V.contiguous();
-    auto q_off_contig = q_offsets.contiguous();
-    auto kv_off_contig = kv_offsets.contiguous();
+    // Offsets are read as int64_t below; normalize an Int32 offset tensor to
+    // Int64 first so it is not misread as 64-bit garbage.
+    auto q_off_contig = (q_offsets.dtype() == DType::Int64)
+                        ? q_offsets.contiguous()
+                        : q_offsets.to(DType::Int64).contiguous();
+    auto kv_off_contig = (kv_offsets.dtype() == DType::Int64)
+                        ? kv_offsets.contiguous()
+                        : kv_offsets.to(DType::Int64).contiguous();
 
     if (q_contig.dtype() != DType::Float32) {
         // Widen reduced/double precision to Float32 on device, compute, narrow back
@@ -162,8 +168,13 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
     auto q_contig = Q.contiguous();
     auto k_contig = K.contiguous();
     auto v_contig = V.contiguous();
-    auto q_off_contig = q_offsets.contiguous();
-    auto kv_off_contig = kv_offsets.contiguous();
+    // Normalize offsets to Int64 (read as int64_t below; Int32 would be misread).
+    auto q_off_contig = (q_offsets.dtype() == DType::Int64)
+                        ? q_offsets.contiguous()
+                        : q_offsets.to(DType::Int64).contiguous();
+    auto kv_off_contig = (kv_offsets.dtype() == DType::Int64)
+                        ? kv_offsets.contiguous()
+                        : kv_offsets.to(DType::Int64).contiguous();
 
     if (q_contig.dtype() != DType::Float32) {
         // Widen reduced/double precision to Float32 on device, compute, narrow each

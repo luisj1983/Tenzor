@@ -4,7 +4,9 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include <algorithm>
+#include <type_traits>
 #include <complex>
 #include <numeric>
 #include <unordered_map>  // B.5: direct CSR→BSR block index
@@ -33,6 +35,26 @@ SparseTensor rocm_coo_to_csc(const SparseTensor& sparse);
 
 namespace tenzor {
 
+namespace {
+// In-place accumulate used by the host to_dense scatter loops. Written so the
+// same loop body compiles for every dtype produced by
+// TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX: plain `dst += src` is ill-formed for
+// `bool`, so bool accumulates via logical-or (sparse entries are distinct
+// positions, so this matches the additive semantics for 0/1 values).
+template <typename T>
+inline void sparse_accumulate(T& dst, const T& src) {
+    if constexpr (std::is_same_v<T, bool>) {
+        dst = dst || src;
+    } else if constexpr (std::is_same_v<T, Float16> ||
+                         std::is_same_v<T, BFloat16>) {
+        // Half-precision types lack a native operator+=; accumulate in float.
+        dst = T(static_cast<float>(dst) + static_cast<float>(src));
+    } else {
+        dst += src;
+    }
+}
+}  // namespace
+
 auto SparseTensor::sparse_coo(const Tensor& indices, const Tensor& values,
                                std::vector<int64_t> shape) -> SparseTensor {
     if (indices.ndim() != 2) {
@@ -59,9 +81,15 @@ auto SparseTensor::sparse_coo(const Tensor& indices, const Tensor& values,
             std::to_string(nnz) + ")");
     }
 
-    // Bounds-check indices on CPU
-    if (indices.device().type == Device::Type::CPU && nnz > 0) {
-        auto* idx_ptr = indices.data<int64_t>();
+    // Bounds-check indices device-agnostically. On GPU the index tensor is
+    // small relative to the values; stage it to host so a GPU-constructed
+    // sparse tensor cannot smuggle an out-of-range row/col index into the
+    // on-device scatter/spmm kernels (OOB device read/write).
+    if (nnz > 0) {
+        Tensor idx_host = (indices.device().type == Device::Type::CPU)
+            ? indices : indices.to(Device::cpu());
+        idx_host = idx_host.contiguous();
+        auto* idx_ptr = idx_host.data<int64_t>();
         for (int64_t d = 0; d < sparse_dim; ++d) {
             for (int64_t i = 0; i < nnz; ++i) {
                 int64_t idx = idx_ptr[d * nnz + i];
@@ -94,6 +122,13 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
     if (crow_indices.dtype() != DType::Int64 || col_indices.dtype() != DType::Int64) {
         throw std::runtime_error("sparse_csr: indices must be Int64");
     }
+    // CSR stores exactly one scalar value per entry (dense_dim_ == 0). A
+    // multi-dimensional values buffer would make nnz = values.numel() count
+    // sub-elements (or sneak a 2-D buffer through with dense_dim wrongly 0).
+    if (values.numel() > 0 && values.ndim() != 1) {
+        throw std::runtime_error("sparse_csr: values must be 1-D, got " +
+                                 std::to_string(values.ndim()) + "-D");
+    }
 
     int64_t nrows = shape[0];
     int64_t ncols = shape[1];
@@ -113,12 +148,16 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
             std::to_string(nnz) + ")");
     }
 
-    // Bounds-check on CPU. Structural validation of crow_indices (monotonicity,
-    // crow[0]==0, crow[nrows]==nnz) must run for any nnz, including nnz==0, so a
-    // malformed crow array is still rejected when there are no values. Only the
-    // per-element column-bounds loop is gated on nnz>0.
-    if (crow_indices.device().type == Device::Type::CPU) {
-        auto* crow_ptr = crow_indices.data<int64_t>();
+    // Structural validation runs device-agnostically: the crow_indices checks
+    // (monotonicity, crow[0]==0, crow[nrows]==nnz) must run for any nnz,
+    // including nnz==0. On GPU the index tensors are staged to host so a
+    // GPU-constructed CSR cannot smuggle a malformed crow array or an
+    // out-of-range column index into the on-device scatter/spmm kernels.
+    {
+        Tensor crow_host = (crow_indices.device().type == Device::Type::CPU)
+            ? crow_indices : crow_indices.to(Device::cpu());
+        crow_host = crow_host.contiguous();
+        auto* crow_ptr = crow_host.data<int64_t>();
 
         // Monotonicity check on crow_indices
         for (int64_t i = 0; i < nrows; ++i) {
@@ -137,7 +176,10 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
 
         // Column bounds check (only meaningful when there are stored values)
         if (nnz > 0) {
-            auto* col_ptr = col_indices.data<int64_t>();
+            Tensor col_host = (col_indices.device().type == Device::Type::CPU)
+                ? col_indices : col_indices.to(Device::cpu());
+            col_host = col_host.contiguous();
+            auto* col_ptr = col_host.data<int64_t>();
             for (int64_t i = 0; i < nnz; ++i) {
                 if (col_ptr[i] < 0 || col_ptr[i] >= ncols) {
                     throw std::runtime_error("sparse_csr: col_index " + std::to_string(col_ptr[i]) +
@@ -459,27 +501,21 @@ auto SparseTensor::to_dense() const -> Tensor {
         if (sparse_dim_ == 2 && shape_.size() == 2) {
             // 2D COO -> Dense
             int64_t ncols = shape_[1];
-            if (vals.dtype() == DType::Float32) {
-                auto* v = vals.data<float>();
-                auto* r = result.data<float>();
+            TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX(vals.dtype(),
+                "SparseTensor::to_dense (host COO)", [&] {
+                auto* v = vals.data<scalar_t>();
+                auto* r = result.data<scalar_t>();
                 for (int64_t i = 0; i < nnz_count; ++i) {
                     int64_t row = idx_ptr[i];
                     int64_t col = idx_ptr[nnz_count + i];
-                    r[row * ncols + col] += v[i];
+                    // Defensive bounds guard (matches the BSR branch): the CPU
+                    // factory validates indices at construction, but
+                    // with_values/coalesce/transpose reconstruct tensors and a
+                    // future path could feed unvalidated indices here.
+                    if (row < 0 || row >= shape_[0] || col < 0 || col >= ncols) continue;
+                    sparse_accumulate(r[row * ncols + col], v[i]);
                 }
-            } else if (vals.dtype() == DType::Float64) {
-                auto* v = vals.data<double>();
-                auto* r = result.data<double>();
-                for (int64_t i = 0; i < nnz_count; ++i) {
-                    int64_t row = idx_ptr[i];
-                    int64_t col = idx_ptr[nnz_count + i];
-                    r[row * ncols + col] += v[i];
-                }
-            } else {
-                throw std::runtime_error(
-                    "SparseTensor::to_dense (host COO): unsupported value dtype " +
-                    std::string(dtype_name(vals.dtype())));
-            }
+            });
         } else {
             // General / partial-sparse COO: sparse_dim_ leading index rows
             // select a position in the leading slab; the remaining dense_dim_
@@ -507,20 +543,14 @@ auto SparseTensor::to_dense() const -> Tensor {
                     }
                     const auto* vblk = v + i * block;
                     for (int64_t e = 0; e < block; ++e) {
-                        r[base + e] += vblk[e];
+                        sparse_accumulate(r[base + e], vblk[e]);
                     }
                 }
             };
-            if (vals.dtype() == DType::Float32) {
-                scatter_blocks(result.data<float>(), vals.data<float>());
-            } else if (vals.dtype() == DType::Float64) {
-                scatter_blocks(result.data<double>(), vals.data<double>());
-            } else {
-                throw std::runtime_error(
-                    "SparseTensor::to_dense (host partial-sparse COO): "
-                    "unsupported value dtype " +
-                    std::string(dtype_name(vals.dtype())));
-            }
+            TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX(vals.dtype(),
+                "SparseTensor::to_dense (host partial-sparse COO)", [&] {
+                scatter_blocks(result.data<scalar_t>(), vals.data<scalar_t>());
+            });
         }
     } else if (layout_ == SparseLayout::CSR) {
         auto crow = crow_indices_.contiguous();
@@ -531,27 +561,18 @@ auto SparseTensor::to_dense() const -> Tensor {
         int64_t nrows = shape_[0];
         int64_t ncols = shape_[1];
 
-        if (vals.dtype() == DType::Float32) {
-            auto* v = vals.data<float>();
-            auto* r = result.data<float>();
+        TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX(vals.dtype(),
+            "SparseTensor::to_dense (host CSR)", [&] {
+            auto* v = vals.data<scalar_t>();
+            auto* r = result.data<scalar_t>();
             for (int64_t row = 0; row < nrows; ++row) {
                 for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                    r[row * ncols + col_ptr[j]] += v[j];
+                    int64_t c = col_ptr[j];
+                    if (c < 0 || c >= ncols) continue;  // defensive bounds guard
+                    sparse_accumulate(r[row * ncols + c], v[j]);
                 }
             }
-        } else if (vals.dtype() == DType::Float64) {
-            auto* v = vals.data<double>();
-            auto* r = result.data<double>();
-            for (int64_t row = 0; row < nrows; ++row) {
-                for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                    r[row * ncols + col_ptr[j]] += v[j];
-                }
-            }
-        } else {
-            throw std::runtime_error(
-                "SparseTensor::to_dense (host CSR): unsupported value dtype " +
-                std::string(dtype_name(vals.dtype())));
-        }
+        });
     } else if (layout_ == SparseLayout::CSC) {
         auto ccol = ccol_indices_.contiguous();
         auto row = row_indices_.contiguous();
@@ -560,27 +581,16 @@ auto SparseTensor::to_dense() const -> Tensor {
         auto* row_ptr = row.data<int64_t>();
         int64_t ncols = shape_[1];
 
-        if (vals.dtype() == DType::Float32) {
-            auto* v = vals.data<float>();
-            auto* r = result.data<float>();
+        TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX(vals.dtype(),
+            "SparseTensor::to_dense (host CSC)", [&] {
+            auto* v = vals.data<scalar_t>();
+            auto* r = result.data<scalar_t>();
             for (int64_t col = 0; col < ncols; ++col) {
                 for (int64_t j = ccol_ptr[col]; j < ccol_ptr[col + 1]; ++j) {
-                    r[row_ptr[j] * ncols + col] += v[j];
+                    sparse_accumulate(r[row_ptr[j] * ncols + col], v[j]);
                 }
             }
-        } else if (vals.dtype() == DType::Float64) {
-            auto* v = vals.data<double>();
-            auto* r = result.data<double>();
-            for (int64_t col = 0; col < ncols; ++col) {
-                for (int64_t j = ccol_ptr[col]; j < ccol_ptr[col + 1]; ++j) {
-                    r[row_ptr[j] * ncols + col] += v[j];
-                }
-            }
-        } else {
-            throw std::runtime_error(
-                "SparseTensor::to_dense (host CSC): unsupported value dtype " +
-                std::string(dtype_name(vals.dtype())));
-        }
+        });
     } else if (layout_ == SparseLayout::BSR) {
         auto rp = bsr_row_ptr_.contiguous();
         auto ci = bsr_col_ind_.contiguous();
@@ -592,9 +602,10 @@ auto SparseTensor::to_dense() const -> Tensor {
         int64_t ncols = shape_[1];
         int64_t nblockrows = (nrows + bh - 1) / bh;
 
-        if (vals.dtype() == DType::Float32) {
-            auto* v = vals.data<float>();
-            auto* r = result.data<float>();
+        TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX(vals.dtype(),
+            "SparseTensor::to_dense (host BSR)", [&] {
+            auto* v = vals.data<scalar_t>();
+            auto* r = result.data<scalar_t>();
             for (int64_t br = 0; br < nblockrows; ++br) {
                 for (int64_t j = rp_ptr[br]; j < rp_ptr[br + 1]; ++j) {
                     int64_t bc = ci_ptr[j];
@@ -603,34 +614,14 @@ auto SparseTensor::to_dense() const -> Tensor {
                             int64_t row = br * bh + bi;
                             int64_t col = bc * bw + bj;
                             if (row < nrows && col < ncols) {
-                                r[row * ncols + col] += v[j * bh * bw + bi * bw + bj];
+                                sparse_accumulate(r[row * ncols + col],
+                                                  v[j * bh * bw + bi * bw + bj]);
                             }
                         }
                     }
                 }
             }
-        } else if (vals.dtype() == DType::Float64) {
-            auto* v = vals.data<double>();
-            auto* r = result.data<double>();
-            for (int64_t br = 0; br < nblockrows; ++br) {
-                for (int64_t j = rp_ptr[br]; j < rp_ptr[br + 1]; ++j) {
-                    int64_t bc = ci_ptr[j];
-                    for (int64_t bi = 0; bi < bh; ++bi) {
-                        for (int64_t bj = 0; bj < bw; ++bj) {
-                            int64_t row = br * bh + bi;
-                            int64_t col = bc * bw + bj;
-                            if (row < nrows && col < ncols) {
-                                r[row * ncols + col] += v[j * bh * bw + bi * bw + bj];
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error(
-                "SparseTensor::to_dense (host BSR): unsupported value dtype " +
-                std::string(dtype_name(vals.dtype())));
-        }
+        });
     }
 
     return result;
@@ -1043,6 +1034,11 @@ auto SparseTensor::sparse_csc(const Tensor& ccol_indices, const Tensor& row_indi
     if (ccol_indices.dtype() != DType::Int64 || row_indices.dtype() != DType::Int64) {
         throw std::runtime_error("sparse_csc: indices must be Int64");
     }
+    // CSC, like CSR, stores exactly one scalar value per entry (dense_dim_ == 0).
+    if (values.numel() > 0 && values.ndim() != 1) {
+        throw std::runtime_error("sparse_csc: values must be 1-D, got " +
+                                 std::to_string(values.ndim()) + "-D");
+    }
 
     int64_t nrows = shape[0];
     int64_t ncols = shape[1];
@@ -1057,10 +1053,17 @@ auto SparseTensor::sparse_csc(const Tensor& ccol_indices, const Tensor& row_indi
         throw std::runtime_error("sparse_csc: row_indices length must match values length");
     }
 
-    // Bounds-check on CPU
-    if (ccol_indices.device().type == Device::Type::CPU && nnz > 0) {
-        auto* ccol_ptr = ccol_indices.data<int64_t>();
-        auto* row_ptr = row_indices.data<int64_t>();
+    // Bounds-check device-agnostically (stage GPU indices to host) so a
+    // GPU-constructed CSC cannot smuggle malformed pointers into device kernels.
+    if (nnz > 0) {
+        Tensor ccol_host = (ccol_indices.device().type == Device::Type::CPU)
+            ? ccol_indices : ccol_indices.to(Device::cpu());
+        Tensor row_host = (row_indices.device().type == Device::Type::CPU)
+            ? row_indices : row_indices.to(Device::cpu());
+        ccol_host = ccol_host.contiguous();
+        row_host = row_host.contiguous();
+        auto* ccol_ptr = ccol_host.data<int64_t>();
+        auto* row_ptr = row_host.data<int64_t>();
 
         for (int64_t i = 0; i < ncols; ++i) {
             if (ccol_ptr[i] > ccol_ptr[i + 1]) {
@@ -1122,10 +1125,17 @@ auto SparseTensor::sparse_bsr(const Tensor& bsr_row_ptr, const Tensor& bsr_col_i
         throw std::runtime_error("sparse_bsr: values.shape()[0] must match bsr_col_ind length");
     }
 
-    // Bounds-check on CPU
-    if (bsr_row_ptr.device().type == Device::Type::CPU && nnzb > 0) {
-        auto* rp = bsr_row_ptr.data<int64_t>();
-        auto* ci = bsr_col_ind.data<int64_t>();
+    // Bounds-check device-agnostically (stage GPU indices to host) so a
+    // GPU-constructed BSR cannot smuggle malformed pointers into device kernels.
+    if (nnzb > 0) {
+        Tensor rp_host = (bsr_row_ptr.device().type == Device::Type::CPU)
+            ? bsr_row_ptr : bsr_row_ptr.to(Device::cpu());
+        Tensor ci_host = (bsr_col_ind.device().type == Device::Type::CPU)
+            ? bsr_col_ind : bsr_col_ind.to(Device::cpu());
+        rp_host = rp_host.contiguous();
+        ci_host = ci_host.contiguous();
+        auto* rp = rp_host.data<int64_t>();
+        auto* ci = ci_host.data<int64_t>();
 
         if (rp[0] != 0 || rp[nblockrows] != nnzb) {
             throw std::runtime_error("sparse_bsr: bsr_row_ptr[0] must be 0, bsr_row_ptr[-1] must equal nnzb");

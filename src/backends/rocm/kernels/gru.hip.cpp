@@ -35,9 +35,17 @@ namespace rocm {
          i += blockDim.x * gridDim.x)
 
 constexpr int BLOCK_SIZE = 256;
+// HIP grid x-dimension limit.
+constexpr int64_t MAX_GRID_DIM_X = 2147483647LL;
 
-inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    return (n + block_size - 1) / block_size;
+// Keep the element count 64-bit until the clamp, then return an unsigned block
+// count. The previous `int` return narrowed (n + bs - 1)/bs for n > ~5.5e11,
+// silently launching too few blocks; clamp to the grid limit instead.
+inline unsigned int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
+    int64_t num_blocks = (n + block_size - 1) / block_size;
+    if (num_blocks < 1) num_blocks = 1;
+    if (num_blocks > MAX_GRID_DIM_X) num_blocks = MAX_GRID_DIM_X;
+    return static_cast<unsigned int>(num_blocks);
 }
 
 // RAII wrapper for rocBLAS handle to prevent leaks on exceptions
@@ -924,6 +932,15 @@ auto gru_forward_miopen(
 
 #endif // USE_MIOPEN
 
+static auto gru_forward_kernel_impl(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0,
+    const Tensor& bias_hh,
+    hipStream_t stream) -> std::vector<Tensor>;
+
 auto gru_forward_kernel(
     const Tensor& input,
     const Tensor& W_ih,
@@ -933,8 +950,12 @@ auto gru_forward_kernel(
     const Tensor& bias_hh,
     hipStream_t stream) -> std::vector<Tensor> {
 
-    // BFloat16 upcast: convert to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // BFloat16/Float16 upcast: convert to Float32, compute, convert back. The
+    // Float16 sequence path otherwise uses rocblas_hgemm, which accumulates the
+    // gate matmul reductions over input_size/hidden entirely in fp16 (precision
+    // loss / overflow). Upcasting keeps the GEMM in Float32 like BFloat16.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        const DType orig = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto W_ih_f32 = W_ih.to(DType::Float32);
         auto W_hh_f32 = W_hh.to(DType::Float32);
@@ -942,10 +963,26 @@ auto gru_forward_kernel(
         auto bias_hh_f32 = (bias_hh.numel() > 0) ? bias_hh.to(DType::Float32) : bias_hh;
         auto h0_f32 = h0.to(DType::Float32);
         auto results = gru_forward_kernel(input_f32, W_ih_f32, W_hh_f32, bias_f32, h0_f32, bias_hh_f32, stream);
-        results[0] = results[0].to(DType::BFloat16);  // output
-        results[1] = results[1].to(DType::BFloat16);  // h_n
+        results[0] = results[0].to(orig);  // output
+        results[1] = results[1].to(orig);  // h_n
         return results;
     }
+
+    // input/weights/h0 feed rocBLAS GEMMs and per-timestep slices with
+    // shape-derived leading dims/offsets, so non-contiguous views would be
+    // misread. Materialize contiguous copies before delegating.
+    auto mc = [](const Tensor& t) { return t.numel() == 0 ? t : (t.is_contiguous() ? t : t.contiguous()); };
+    return gru_forward_kernel_impl(mc(input), mc(W_ih), mc(W_hh), mc(bias), mc(h0), mc(bias_hh), stream);
+}
+
+static auto gru_forward_kernel_impl(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0,
+    const Tensor& bias_hh,
+    hipStream_t stream) -> std::vector<Tensor> {
 
 #ifdef USE_MIOPEN
     // Use MIOpen for Float32 GRU forward (optimized fused kernels).

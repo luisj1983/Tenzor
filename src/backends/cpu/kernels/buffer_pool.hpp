@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <memory>
 #include <unordered_map>
+#include <stdexcept>
+#include <limits>
 
 #ifdef _WIN32
     #include <malloc.h>
@@ -58,6 +60,25 @@ constexpr size_t MIN_BUFFER_SIZE = 1024; // 1KB minimum
 constexpr size_t MAX_BUFFER_SIZE = 256 * 1024 * 1024; // 256MB maximum
 constexpr size_t MAX_CACHED_PER_CLASS = 32; // Max raw pointers cached per bucket
 
+// Overflow-checked size_t multiply: throws std::overflow_error if a*b wraps.
+// Used for buffer element/byte counts so a pathological shape cannot wrap to a
+// tiny allocation that downstream code then overruns.
+inline size_t checked_mul_size(size_t a, size_t b) {
+    if (a != 0 && b > (std::numeric_limits<size_t>::max() / a)) {
+        throw std::overflow_error("buffer_pool: size multiplication overflow");
+    }
+    return a * b;
+}
+
+// Round a size up to BUFFER_ALIGNMENT, throwing rather than wrapping to a small
+// value when size is within (alignment-1) of SIZE_MAX.
+inline size_t align_up_checked(size_t size) {
+    if (size > std::numeric_limits<size_t>::max() - (BUFFER_ALIGNMENT - 1)) {
+        throw std::overflow_error("buffer_pool: aligned size overflow");
+    }
+    return (size + BUFFER_ALIGNMENT - 1) & ~(BUFFER_ALIGNMENT - 1);
+}
+
 // ============================================================================
 // Aligned Buffer Wrapper
 // ============================================================================
@@ -71,8 +92,8 @@ public:
 
     explicit AlignedBuffer(size_t size) : size_(size) {
         if (size > 0) {
-            // Round up to alignment
-            size_t aligned_size = (size + BUFFER_ALIGNMENT - 1) & ~(BUFFER_ALIGNMENT - 1);
+            // Round up to alignment (overflow-checked)
+            size_t aligned_size = align_up_checked(size);
             data_ = ALIGNED_ALLOC(BUFFER_ALIGNMENT, aligned_size);
         } else {
             data_ = nullptr;
@@ -169,7 +190,7 @@ public:
         if (size == 0) return nullptr;
 
         // std::aligned_alloc requires size to be a multiple of alignment
-        size_t aligned_size = (size + BUFFER_ALIGNMENT - 1) & ~(BUFFER_ALIGNMENT - 1);
+        size_t aligned_size = align_up_checked(size);
 
         if (aligned_size > MAX_BUFFER_SIZE) {
             // Too large for pool, allocate directly
@@ -294,7 +315,7 @@ public:
     PooledBuffer() : data_(nullptr), size_(0) {}
 
     explicit PooledBuffer(size_t count)
-        : size_(count * sizeof(T)) {
+        : size_(checked_mul_size(count, sizeof(T))) {
         data_ = static_cast<T*>(get_buffer_pool().acquire(size_));
     }
 
@@ -372,9 +393,16 @@ inline PooledBuffer<T> acquire_im2col_buffer(
     int64_t batch, int64_t out_h, int64_t out_w,
     int64_t in_channels, int64_t kernel_h, int64_t kernel_w
 ) {
-    size_t col_rows = batch * out_h * out_w;
-    size_t col_cols = in_channels * kernel_h * kernel_w;
-    return PooledBuffer<T>(col_rows * col_cols);
+    // Guard against negative dims and multiply overflow before sizing the buffer.
+    if (batch < 0 || out_h < 0 || out_w < 0 ||
+        in_channels < 0 || kernel_h < 0 || kernel_w < 0) {
+        throw std::invalid_argument("acquire_im2col_buffer: negative dimension");
+    }
+    size_t col_rows = checked_mul_size(checked_mul_size(
+        static_cast<size_t>(batch), static_cast<size_t>(out_h)), static_cast<size_t>(out_w));
+    size_t col_cols = checked_mul_size(checked_mul_size(
+        static_cast<size_t>(in_channels), static_cast<size_t>(kernel_h)), static_cast<size_t>(kernel_w));
+    return PooledBuffer<T>(checked_mul_size(col_rows, col_cols));
 }
 
 /**
@@ -382,7 +410,11 @@ inline PooledBuffer<T> acquire_im2col_buffer(
  */
 template<typename T>
 inline PooledBuffer<T> acquire_pack_buffer(int64_t rows, int64_t cols) {
-    return PooledBuffer<T>(rows * cols);
+    if (rows < 0 || cols < 0) {
+        throw std::invalid_argument("acquire_pack_buffer: negative dimension");
+    }
+    return PooledBuffer<T>(checked_mul_size(
+        static_cast<size_t>(rows), static_cast<size_t>(cols)));
 }
 
 } // namespace cpu

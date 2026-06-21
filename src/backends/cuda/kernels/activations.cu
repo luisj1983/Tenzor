@@ -987,8 +987,7 @@ extern "C" {
 
 template<typename T>
 __global__ void elu_forward_kernel(const T* input, T* output, int64_t n, float alpha) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
         if constexpr (std::is_same_v<T, double>) {
             output[idx] = (x > 0.0) ? x : static_cast<double>(alpha) * (exp(x) - 1.0);
@@ -1003,8 +1002,7 @@ __global__ void elu_forward_kernel(const T* input, T* output, int64_t n, float a
 template<typename T>
 __global__ void elu_backward_kernel(const T* grad_output, const T* input,
                                      T* grad_input, int64_t n, float alpha) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
         // Keep exp() in the native precision T — prior code narrowed to float
         // before the exp, silently dropping Float64 precision and failing
@@ -1061,8 +1059,7 @@ constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
 
 template<typename T>
 __global__ void selu_forward_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if constexpr (std::is_same_v<T, double>) {
             constexpr double ALPHA = 1.6732632423543772848170429916717;
             constexpr double SCALE = 1.0507009873554804934193349852946;
@@ -1080,8 +1077,7 @@ __global__ void selu_forward_kernel(const T* input, T* output, int64_t n) {
 template<typename T>
 __global__ void selu_backward_kernel(const T* grad_output, const T* input,
                                       T* grad_input, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         // Compute in native precision T where possible so Float64 gradcheck
         // doesn't silently lose precision through a Float32 intermediate.
         if constexpr (std::is_same_v<T, double>) {
@@ -1136,8 +1132,7 @@ extern "C" {
 
 template<typename T>
 __global__ void mish_forward_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if constexpr (std::is_same_v<T, double>) {
             double x = static_cast<double>(input[idx]);
             double softplus;
@@ -1159,8 +1154,7 @@ __global__ void mish_forward_kernel(const T* input, T* output, int64_t n) {
 template<typename T>
 __global__ void mish_backward_kernel(const T* grad_output, const T* input,
                                       T* grad_input, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if constexpr (std::is_same_v<T, double>) {
             double x = static_cast<double>(input[idx]);
             double softplus;
@@ -1234,8 +1228,7 @@ extern "C" {
 template<typename T>
 __global__ void softplus_forward_kernel(const T* input, T* output, int64_t n,
                                          float beta, float threshold) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if constexpr (std::is_same_v<T, double>) {
             double in = static_cast<double>(input[idx]);
             double b = static_cast<double>(beta);
@@ -1265,8 +1258,7 @@ template<typename T>
 __global__ void softplus_backward_kernel(const T* grad_output, const T* input,
                                           T* grad_input, int64_t n,
                                           float beta, float threshold) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if constexpr (std::is_same_v<T, double>) {
             double x = static_cast<double>(input[idx]) * static_cast<double>(beta);
             double sigmoid_x;
@@ -3686,8 +3678,7 @@ Tensor mish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes
 // ============================================================================
 template<typename T>
 __global__ void hardswish_forward_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if constexpr (std::is_same_v<T, double>) {
             double x = static_cast<double>(input[idx]);
             double t = fmin(fmax(x + 3.0, 0.0), 6.0);
@@ -3702,8 +3693,7 @@ __global__ void hardswish_forward_kernel(const T* input, T* output, int64_t n) {
 
 template<typename T>
 __global__ void hardsigmoid_forward_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if constexpr (std::is_same_v<T, double>) {
             double x = static_cast<double>(input[idx]);
             double t = fmin(fmax(x + 3.0, 0.0), 6.0);
@@ -3795,17 +3785,17 @@ __global__ void dropout_forward_kernel_impl(
     float scale,
     uint64_t seed) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        // Initialize cuRAND state per element index (not per thread) so the mask
+        // stays reproducible regardless of grid size / grid-stride iteration.
+        curandStatePhilox4_32_10_t state;
+        curand_init(seed, idx, 0, &state);
 
-    // Initialize cuRAND state per thread
-    curandStatePhilox4_32_10_t state;
-    curand_init(seed, idx, 0, &state);
-
-    float rand_val = curand_uniform(&state);
-    bool keep = rand_val >= p;
-    mask[idx] = keep ? 1 : 0;
-    output[idx] = keep ? static_cast<T>(static_cast<float>(input[idx]) * scale) : T(0);
+        float rand_val = curand_uniform(&state);
+        bool keep = rand_val >= p;
+        mask[idx] = keep ? 1 : 0;
+        output[idx] = keep ? static_cast<T>(static_cast<float>(input[idx]) * scale) : T(0);
+    }
 }
 
 __global__ void dropout_forward_kernel_f16(
@@ -3817,17 +3807,16 @@ __global__ void dropout_forward_kernel_f16(
     float scale,
     uint64_t seed) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        curandStatePhilox4_32_10_t state;
+        curand_init(seed, idx, 0, &state);
 
-    curandStatePhilox4_32_10_t state;
-    curand_init(seed, idx, 0, &state);
-
-    float rand_val = curand_uniform(&state);
-    bool keep = rand_val >= p;
-    mask[idx] = keep ? 1 : 0;
-    float val = keep ? __half2float(input[idx]) * scale : 0.0f;
-    output[idx] = float2half_sat(val);
+        float rand_val = curand_uniform(&state);
+        bool keep = rand_val >= p;
+        mask[idx] = keep ? 1 : 0;
+        float val = keep ? __half2float(input[idx]) * scale : 0.0f;
+        output[idx] = float2half_sat(val);
+    }
 }
 
 template<typename T>
@@ -3838,10 +3827,9 @@ __global__ void dropout_backward_kernel_impl(
     int64_t n,
     float scale) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-
-    grad_input[idx] = mask[idx] ? static_cast<T>(static_cast<float>(grad_output[idx]) * scale) : T(0);
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        grad_input[idx] = mask[idx] ? static_cast<T>(static_cast<float>(grad_output[idx]) * scale) : T(0);
+    }
 }
 
 __global__ void dropout_backward_kernel_f16(
@@ -3851,11 +3839,10 @@ __global__ void dropout_backward_kernel_f16(
     int64_t n,
     float scale) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-
-    float val = mask[idx] ? __half2float(grad_output[idx]) * scale : 0.0f;
-    grad_input[idx] = float2half_sat(val);
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float val = mask[idx] ? __half2float(grad_output[idx]) * scale : 0.0f;
+        grad_input[idx] = float2half_sat(val);
+    }
 }
 
 // Dropout forward: returns {output, mask}
@@ -3885,7 +3872,7 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
     Tensor mask(shape, DType::UInt8, input.device());
 
     int block_size = 256;
-    int num_blocks = (n + block_size - 1) / block_size;
+    int num_blocks = compute_grid_size(n, block_size);
 
     // Seed from the library's global RNG so manual_seed is honored / dropout is
     // reproducible. Fold in a process-wide monotonic counter so two invocations
@@ -3952,7 +3939,7 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     Tensor grad_input(grad_shape, grad_output.dtype(), grad_output.device());
 
     int block_size = 256;
-    int num_blocks = (n + block_size - 1) / block_size;
+    int num_blocks = compute_grid_size(n, block_size);
 
     switch (grad_output.dtype()) {
         case DType::Float32:
@@ -4168,32 +4155,31 @@ __global__ void count_nonzero_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, output_size) {
+        int64_t indices[DIM_META_MAX_RANK];
+        int64_t tmp = out_idx;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            if (d == dim) {
+                indices[d] = 0;
+                continue;
+            }
+            indices[d] = tmp % meta.shape[d];
+            tmp /= meta.shape[d];
+        }
 
-    int64_t indices[DIM_META_MAX_RANK];
-    int64_t tmp = out_idx;
-    for (int64_t d = ndim - 1; d >= 0; --d) {
-        if (d == dim) {
-            indices[d] = 0;
-            continue;
+        int64_t count = 0;
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            if (static_cast<float>(input[in_idx]) != 0.0f) {
+                count++;
+            }
         }
-        indices[d] = tmp % meta.shape[d];
-        tmp /= meta.shape[d];
+        output[out_idx] = count;
     }
-
-    int64_t count = 0;
-    for (int64_t i = 0; i < dim_size; i++) {
-        indices[dim] = i;
-        int64_t in_idx = 0;
-        for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * meta.strides[d];
-        }
-        if (static_cast<float>(input[in_idx]) != 0.0f) {
-            count++;
-        }
-    }
-    output[out_idx] = count;
 }
 
 template<typename T>
@@ -4202,7 +4188,8 @@ static void launch_dim_count_nonzero(
     int64_t* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -4212,8 +4199,8 @@ static void launch_dim_count_nonzero(
     }
     if (output_size == 0 || dim_size == 0) return;
     DimMeta meta = make_dim_meta(input_shape, input_strides);
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    count_nonzero_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
+    count_nonzero_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -4232,34 +4219,33 @@ __global__ void nansum_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, output_size) {
+        int64_t indices[DIM_META_MAX_RANK];
+        int64_t tmp = out_idx;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            if (d == dim) {
+                indices[d] = 0;
+                continue;
+            }
+            indices[d] = tmp % meta.shape[d];
+            tmp /= meta.shape[d];
+        }
 
-    int64_t indices[DIM_META_MAX_RANK];
-    int64_t tmp = out_idx;
-    for (int64_t d = ndim - 1; d >= 0; --d) {
-        if (d == dim) {
-            indices[d] = 0;
-            continue;
+        using Acc = typename AccumType<T>::type;
+        Acc sum = Acc(0);
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            Acc v = Acc(input[in_idx]);
+            if (!isnan(static_cast<float>(v))) {
+                sum = sum + v;
+            }
         }
-        indices[d] = tmp % meta.shape[d];
-        tmp /= meta.shape[d];
+        output[out_idx] = T(sum);
     }
-
-    using Acc = typename AccumType<T>::type;
-    Acc sum = Acc(0);
-    for (int64_t i = 0; i < dim_size; i++) {
-        indices[dim] = i;
-        int64_t in_idx = 0;
-        for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * meta.strides[d];
-        }
-        Acc v = Acc(input[in_idx]);
-        if (!isnan(static_cast<float>(v))) {
-            sum = sum + v;
-        }
-    }
-    output[out_idx] = T(sum);
 }
 
 template<typename T>
@@ -4268,7 +4254,8 @@ static void launch_dim_nansum(
     T* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -4278,8 +4265,8 @@ static void launch_dim_nansum(
     }
     if (output_size == 0 || dim_size == 0) return;
     DimMeta meta = make_dim_meta(input_shape, input_strides);
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    nansum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
+    nansum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -4349,13 +4336,13 @@ Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes
     auto strides_vec = std::vector<int64_t>(input.strides().begin(), input.strides().end());
 
     if (input.dtype() == DType::Float32) {
-        launch_dim_count_nonzero(input.data<float>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_count_nonzero(input.data<float>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
     } else if (input.dtype() == DType::Float64) {
-        launch_dim_count_nonzero(input.data<double>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_count_nonzero(input.data<double>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
     } else if (input.dtype() == DType::Int32) {
-        launch_dim_count_nonzero(input.data<int32_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_count_nonzero(input.data<int32_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
     } else if (input.dtype() == DType::Int64) {
-        launch_dim_count_nonzero(input.data<int64_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_count_nonzero(input.data<int64_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
     }
     CUDA_CHECK(cudaGetLastError());
     return result;
@@ -4439,9 +4426,9 @@ Tensor nansum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs
     auto strides_vec = std::vector<int64_t>(input.strides().begin(), input.strides().end());
 
     if (input.dtype() == DType::Float32) {
-        launch_dim_nansum(input.data<float>(), result.data<float>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_nansum(input.data<float>(), result.data<float>(), shape_vec, strides_vec, normalized_dim, stream);
     } else if (input.dtype() == DType::Float64) {
-        launch_dim_nansum(input.data<double>(), result.data<double>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_nansum(input.data<double>(), result.data<double>(), shape_vec, strides_vec, normalized_dim, stream);
     }
     CUDA_CHECK(cudaGetLastError());
     return (orig_dtype != input.dtype()) ? result.to(orig_dtype) : result;
@@ -4481,36 +4468,35 @@ __global__ void nanmean_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, output_size) {
+        int64_t indices[DIM_META_MAX_RANK];
+        int64_t tmp = out_idx;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            if (d == dim) {
+                indices[d] = 0;
+                continue;
+            }
+            indices[d] = tmp % meta.shape[d];
+            tmp /= meta.shape[d];
+        }
 
-    int64_t indices[DIM_META_MAX_RANK];
-    int64_t tmp = out_idx;
-    for (int64_t d = ndim - 1; d >= 0; --d) {
-        if (d == dim) {
-            indices[d] = 0;
-            continue;
+        using Acc = typename AccumType<T>::type;
+        Acc sum = Acc(0);
+        int64_t count = 0;
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            Acc v = Acc(input[in_idx]);
+            if (!isnan(static_cast<float>(v))) {
+                sum = sum + v;
+                count++;
+            }
         }
-        indices[d] = tmp % meta.shape[d];
-        tmp /= meta.shape[d];
+        output[out_idx] = (count > 0) ? T(sum / Acc(count)) : T(Acc(0));
     }
-
-    using Acc = typename AccumType<T>::type;
-    Acc sum = Acc(0);
-    int64_t count = 0;
-    for (int64_t i = 0; i < dim_size; i++) {
-        indices[dim] = i;
-        int64_t in_idx = 0;
-        for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * meta.strides[d];
-        }
-        Acc v = Acc(input[in_idx]);
-        if (!isnan(static_cast<float>(v))) {
-            sum = sum + v;
-            count++;
-        }
-    }
-    output[out_idx] = (count > 0) ? T(sum / Acc(count)) : T(Acc(0));
 }
 
 template<typename T>
@@ -4519,7 +4505,8 @@ static void launch_dim_nanmean(
     T* d_output,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -4529,8 +4516,8 @@ static void launch_dim_nanmean(
     }
     if (output_size == 0 || dim_size == 0) return;
     DimMeta meta = make_dim_meta(input_shape, input_strides);
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    nanmean_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
+    nanmean_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -4588,9 +4575,9 @@ Tensor nanmean_dispatch(std::span<const Tensor> inputs, const OpAttributes& attr
     auto strides_vec = std::vector<int64_t>(input.strides().begin(), input.strides().end());
 
     if (input.dtype() == DType::Float32) {
-        launch_dim_nanmean(input.data<float>(), result.data<float>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_nanmean(input.data<float>(), result.data<float>(), shape_vec, strides_vec, normalized_dim, stream);
     } else if (input.dtype() == DType::Float64) {
-        launch_dim_nanmean(input.data<double>(), result.data<double>(), shape_vec, strides_vec, normalized_dim);
+        launch_dim_nanmean(input.data<double>(), result.data<double>(), shape_vec, strides_vec, normalized_dim, stream);
     }
     CUDA_CHECK(cudaGetLastError());
     return (orig_dtype != input.dtype()) ? result.to(orig_dtype) : result;
@@ -4642,38 +4629,37 @@ __global__ void aminmax_along_dim_kernel(
     int64_t output_size,
     int64_t dim_size
 ) {
-    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (out_idx >= output_size) return;
-
-    int64_t indices[DIM_META_MAX_RANK];
-    int64_t tmp = out_idx;
-    for (int64_t d = ndim - 1; d >= 0; --d) {
-        if (d == dim) {
-            indices[d] = 0;
-            continue;
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, output_size) {
+        int64_t indices[DIM_META_MAX_RANK];
+        int64_t tmp = out_idx;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            if (d == dim) {
+                indices[d] = 0;
+                continue;
+            }
+            indices[d] = tmp % meta.shape[d];
+            tmp /= meta.shape[d];
         }
-        indices[d] = tmp % meta.shape[d];
-        tmp /= meta.shape[d];
-    }
 
-    auto offset_at = [&](int64_t i) -> int64_t {
-        int64_t in_idx = 0;
-        for (int64_t d = 0; d < ndim; d++) {
-            int64_t coord = (d == dim) ? i : indices[d];
-            in_idx += coord * meta.strides[d];
+        auto offset_at = [&](int64_t i) -> int64_t {
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                int64_t coord = (d == dim) ? i : indices[d];
+                in_idx += coord * meta.strides[d];
+            }
+            return in_idx;
+        };
+
+        T mn = input[offset_at(0)];
+        T mx = mn;
+        for (int64_t i = 1; i < dim_size; i++) {
+            T v = input[offset_at(i)];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
         }
-        return in_idx;
-    };
-
-    T mn = input[offset_at(0)];
-    T mx = mn;
-    for (int64_t i = 1; i < dim_size; i++) {
-        T v = input[offset_at(i)];
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
+        out_min[out_idx] = mn;
+        out_max[out_idx] = mx;
     }
-    out_min[out_idx] = mn;
-    out_max[out_idx] = mx;
 }
 
 template<typename T>
@@ -4683,7 +4669,8 @@ static void launch_dim_aminmax(
     T* d_max,
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& input_strides,
-    int64_t dim
+    int64_t dim,
+    cudaStream_t stream
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
@@ -4693,8 +4680,8 @@ static void launch_dim_aminmax(
     }
     if (output_size == 0 || dim_size == 0) return;
     DimMeta meta = make_dim_meta(input_shape, input_strides);
-    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
-    aminmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
+    aminmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_min, d_max, meta, ndim, dim, output_size, dim_size
     );
     CUDA_CHECK(cudaGetLastError());
@@ -4749,10 +4736,10 @@ std::vector<Tensor> aminmax_dispatch(std::span<const Tensor> inputs, const OpAtt
 
     if (input.dtype() == DType::Float32) {
         launch_dim_aminmax(input.data<float>(), min_result.data<float>(), max_result.data<float>(),
-                           shape_vec, strides_vec, normalized_dim);
+                           shape_vec, strides_vec, normalized_dim, stream);
     } else if (input.dtype() == DType::Float64) {
         launch_dim_aminmax(input.data<double>(), min_result.data<double>(), max_result.data<double>(),
-                           shape_vec, strides_vec, normalized_dim);
+                           shape_vec, strides_vec, normalized_dim, stream);
     }
     CUDA_CHECK(cudaGetLastError());
     if (orig_dtype != input.dtype()) {

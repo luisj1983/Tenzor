@@ -61,8 +61,10 @@ void main() {
     uint lid = gl_LocalInvocationID.x;
     uint wg_id = gl_WorkGroupID.x;
 
-    if (lid < 256) {
-        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    // Load the 256 per-bin base offsets via a strided loop (workgroup size is a
+    // spec constant that may be != 256).
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        local_offsets[b] = histos[b * n_wgs + wg_id];
     }
     barrier();
 
@@ -70,12 +72,20 @@ void main() {
     uint tile_start = wg_id * tile_size;
     uint tile_end = min(tile_start + tile_size, n);
 
-    for (uint i = tile_start + lid; i < tile_end; i += 256) {
-        uint bits16 = readF16Bits(i);
-        uint sortable = f16_to_sortable(bits16);
-        uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
-        uint dest = atomicAdd(local_offsets[digit_val], 1);
-        writeF16Bits(dest, bits16);
-        idx_out[dest] = idx_in[i];
+    // STABILITY (see radix_scatter.comp): scatter the tile in strict index
+    // order from a single lane so equal-digit elements keep ascending-index
+    // order. A parallel atomicAdd assigns slots in arbitration order, breaking
+    // LSD-radix stability and diverging from the stable CPU reference.
+    barrier();
+    if (lid == 0u) {
+        for (uint i = tile_start; i < tile_end; ++i) {
+            uint bits16 = readF16Bits(i);
+            uint sortable = f16_to_sortable(bits16);
+            uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
+            uint dest = local_offsets[digit_val];
+            local_offsets[digit_val] = dest + 1u;
+            writeF16Bits(dest, bits16);
+            idx_out[dest] = idx_in[i];
+        }
     }
 }

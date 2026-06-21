@@ -226,9 +226,14 @@ class Module(_CppModule):
         # Prefer the Python-side subclass reference if we stored one in
         # __setattr__ — this preserves the subclass identity that pybind11
         # loses when it round-trips a shared_ptr<Module> through C++.
-        py_submods = object.__getattribute__(self, '_py_submodules')
-        if name in py_submods:
-            return py_submods[name]
+        # Read under the lock: __setattr__ mutates _py_submodules under the
+        # same lock, so reading it unlocked risked observing a torn dict
+        # during a concurrent assignment. Pure dict ops don't re-enter
+        # __getattr__/__setattr__, so holding the lock here is deadlock-free.
+        with lock:
+            py_submods = object.__getattribute__(self, '_py_submodules')
+            if name in py_submods:
+                return py_submods[name]
 
         with lock:
             submodule_cache = object.__getattribute__(self, '_submodule_cache')

@@ -1,0 +1,66 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Radix sort: per-workgroup histogram of 8-bit digit (Float16 keys).
+// Keys are stored as packed uint16 pairs in a uint32 buffer, mirroring
+// radix_scatter_f16.comp. Reads each 16-bit half and applies the SAME
+// f16_to_sortable transform the scatter pass uses, so histogram digits and
+// scatter digits agree (the base float32 histogram would reinterpret the
+// 2-byte-packed storage as 4-byte floats — wrong digits + 2x OOB read).
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer Keys     { uint keys[];     };  // packed f16 pairs
+layout(set = 0, binding = 1) buffer Histograms         { uint histos[];   };  // [n_workgroups * 256]
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint digit;      // Which 8-bit digit (0=LSB, 1=MSB for 16-bit)
+    uint n_wgs;      // Number of workgroups
+    uint descending; // 0 = ascending, 1 = descending
+};
+
+shared uint local_histo[256];
+
+uint f16_to_sortable(uint bits16) {
+    uint mask = uint(-int(bits16 >> 15)) | 0x8000u;
+    uint sortable = (bits16 ^ mask) & 0xFFFFu;
+    if (descending != 0u) sortable = (~sortable) & 0xFFFFu;
+    return sortable;
+}
+
+uint readF16Bits(uint element_idx) {
+    uint pair_idx = element_idx / 2u;
+    uint offset = element_idx % 2u;
+    uint packed = keys[pair_idx];
+    return (packed >> (offset * 16u)) & 0xFFFFu;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    // Clear all 256 bins via a strided loop (workgroup size is a spec constant
+    // that may be <256 or >256).
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        local_histo[b] = 0u;
+    }
+    barrier();
+
+    uint tile_size = (n + n_wgs - 1u) / n_wgs;
+    uint tile_start = wg_id * tile_size;
+    uint tile_end = min(tile_start + tile_size, n);
+
+    for (uint i = tile_start + lid; i < tile_end; i += gl_WorkGroupSize.x) {
+        uint bits16 = readF16Bits(i);
+        uint sortable = f16_to_sortable(bits16);
+        uint digit_val = (sortable >> (digit * 8u)) & 0xFFu;
+        atomicAdd(local_histo[digit_val], 1u);
+    }
+    barrier();
+
+    // Write all 256 bins via a strided loop so wgSize<256 doesn't drop bins
+    // 128-255 and wgSize>256 doesn't write past the [256 * n_wgs] buffer.
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        histos[b * n_wgs + wg_id] = local_histo[b];
+    }
+}

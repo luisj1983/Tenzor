@@ -36,6 +36,22 @@ void avgpool2d_forward_f32(
     int64_t H_out, int64_t W_out,
     int64_t kernel_size, int64_t stride, int64_t padding)
 {
+    // PRECONDITION: padding == 0. This fast path always divides by
+    // kernel_size*kernel_size in its vector body and by the in-bounds valid
+    // count in its scalar fallback; with non-zero padding those two divisors
+    // disagree with each other *and* with the count_include_pad mode (which is
+    // not even passed here). The caller (avgpool2d_forward_kernel) gates on
+    // padding == 0; enforce it here so a future caller relaxing that gate fails
+    // loudly instead of silently producing wrong averages.
+    if (padding != 0) {
+        std::fprintf(stderr,
+            "tenzor: avx512::avgpool2d_forward_f32 requires padding == 0 "
+            "(got %lld); route padded average pooling through the scalar "
+            "count_include_pad-aware path.\n",
+            static_cast<long long>(padding));
+        std::abort();
+    }
+
     // For cases where the pooling window is fully inside the input (no padding effects),
     // we can vectorize across the W_out dimension using contiguous row reads.
     // For border cases with padding, fall back to scalar.

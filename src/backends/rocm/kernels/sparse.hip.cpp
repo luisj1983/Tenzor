@@ -320,16 +320,21 @@ __global__ void csr_sparse_add_kernel(
     T* __restrict__ out_ptr,
     int64_t nrows, int64_t ncols)
 {
-    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (row >= nrows) return;
-    int64_t row_start = crow_ptr[row];
-    int64_t row_end = crow_ptr[row + 1];
-    for (int64_t j = row_start; j < row_end; ++j) {
-        // Guard against malformed/untrusted CSR col indices: an out-of-range
-        // column would be an out-of-bounds device write into out_ptr.
-        int64_t c = col_ptr[j];
-        if (c < 0 || c >= ncols) continue;
-        out_ptr[row * ncols + c] += val_ptr[j];
+    // Grid-stride over rows so a clamped grid still covers every row when
+    // nrows > gridDim*blockDim (a plain one-row-per-thread early-return would
+    // silently drop the row tail at extreme nrows).
+    const int64_t row_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < nrows; row += row_stride) {
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            // Guard against malformed/untrusted CSR col indices: an out-of-range
+            // column would be an out-of-bounds device write into out_ptr.
+            int64_t c = col_ptr[j];
+            if (c < 0 || c >= ncols) continue;
+            out_ptr[row * ncols + c] += val_ptr[j];
+        }
     }
 }
 
@@ -1065,6 +1070,22 @@ SparseTensor rocm_spgemm_kernel(const SparseTensor& a, const SparseTensor& b) {
 
 // ============================================================================
 // SpSV — triangular solve L*x = b (single RHS) via rocsparse_spsv
+//
+// DEAD CODE / DO NOT RE-DISPATCH: rocm_sparse_trsv_kernel / rocm_sparse_trsm_kernel
+// and the SpSVLruCache above are UNREACHABLE. The dispatch registry routes BOTH
+// OpId::SparseTrsv and OpId::SparseTrsm to sparse_trsv_standalone_hip /
+// sparse_trsm_standalone_hip (the single-thread sequential GPU solver) in both
+// the TENZOR_HAS_ROCSPARSE and #else branches, precisely because rocSPARSE SpSV
+// hangs during preprocess on small triangular systems (see the registry comment
+// and sparse_trsv_standalone notes below). These functions are retained only as
+// reference; do NOT re-point dispatch at them.
+//
+// Note: the SpSVLruCache descriptor caches a COPY of the i32 index buffers but
+// points at the ORIGINAL L_vals device pointer, an ABA/dangling-values hazard
+// under a pooling allocator. That hazard is inert only because this path is
+// never dispatched; if it is ever revived, the values buffer must be copied/
+// pinned into the entry (like the index buffers) or the key must carry a Storage
+// generation/uuid rather than the bare pointer.
 // ============================================================================
 
 Tensor rocm_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper) {
@@ -1531,7 +1552,11 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    int blocks = static_cast<int>((M + threads - 1) / threads);
+    // Clamp the grid to the 2^31-1 block limit; the kernel grid-strides over
+    // rows, so M > gridDim*threads is still fully covered (instead of the int
+    // cast wrapping the launch dim at extreme M).
+    int64_t blocks64 = (M + threads - 1) / threads;
+    int blocks = static_cast<int>(blocks64 > 2147483647LL ? 2147483647LL : blocks64);
 
     if (dtype == DType::Float32) {
         csr_sparse_add_kernel<float><<<blocks, threads>>>(
@@ -1593,9 +1618,10 @@ __global__ void csr_spmv_kernel(
     T* __restrict__ y_ptr,
     int64_t nrows, int64_t ncols)
 {
-    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (row >= nrows) return;
-
+    // Grid-stride over rows (covers all rows when the grid is clamped).
+    const int64_t row_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < nrows; row += row_stride) {
     T sum = static_cast<T>(0);
     int64_t row_start = crow_ptr[row];
     int64_t row_end = crow_ptr[row + 1];
@@ -1608,6 +1634,7 @@ __global__ void csr_spmv_kernel(
         sum += val_ptr[j] * x_ptr[k];
     }
     y_ptr[row] = sum;
+    }
 }
 
 // CSR SpMM kernel: one thread per output element (row, col)
@@ -1620,10 +1647,14 @@ __global__ void csr_spmm_kernel(
     T* __restrict__ c_ptr,
     int64_t nrows, int64_t ncols_b, int64_t nrows_b)
 {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    // Grid-stride over the (row,col) output element space so a clamped grid
+    // covers every output when nrows*ncols_b > gridDim*blockDim.
+    const int64_t total = nrows * ncols_b;
+    const int64_t idx_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += idx_stride) {
     int64_t row = idx / ncols_b;
     int64_t col = idx % ncols_b;
-    if (row >= nrows) return;
 
     T sum = static_cast<T>(0);
     int64_t row_start = crow_ptr[row];
@@ -1637,6 +1668,7 @@ __global__ void csr_spmm_kernel(
         sum += val_ptr[j] * b_ptr[k * ncols_b + col];
     }
     c_ptr[row * ncols_b + col] = sum;
+    }
 }
 
 // CSR SparseAdd kernel: one thread per row, adds sparse values into dense output
@@ -1648,16 +1680,21 @@ __global__ void csr_sparse_add_kernel(
     T* __restrict__ out_ptr,
     int64_t nrows, int64_t ncols)
 {
-    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (row >= nrows) return;
-    int64_t row_start = crow_ptr[row];
-    int64_t row_end = crow_ptr[row + 1];
-    for (int64_t j = row_start; j < row_end; ++j) {
-        // Guard against malformed/untrusted CSR col indices: an out-of-range
-        // column would be an out-of-bounds device write into out_ptr.
-        int64_t c = col_ptr[j];
-        if (c < 0 || c >= ncols) continue;
-        out_ptr[row * ncols + c] += val_ptr[j];
+    // Grid-stride over rows so a clamped grid still covers every row when
+    // nrows > gridDim*blockDim (a plain one-row-per-thread early-return would
+    // silently drop the row tail at extreme nrows).
+    const int64_t row_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < nrows; row += row_stride) {
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            // Guard against malformed/untrusted CSR col indices: an out-of-range
+            // column would be an out-of-bounds device write into out_ptr.
+            int64_t c = col_ptr[j];
+            if (c < 0 || c >= ncols) continue;
+            out_ptr[row * ncols + c] += val_ptr[j];
+        }
     }
 }
 
@@ -1744,7 +1781,10 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
 
     int threads = 256;
     int64_t total = M * N;
-    int blocks = static_cast<int>((total + threads - 1) / threads);
+    // Clamp to the 2^31-1 block limit; the kernel grid-strides over the
+    // (row,col) output space, so total > gridDim*threads is fully covered.
+    int64_t blocks64 = (total + threads - 1) / threads;
+    int blocks = static_cast<int>(blocks64 > 2147483647LL ? 2147483647LL : blocks64);
 
     if (dtype == DType::Float32) {
         csr_spmm_kernel<float><<<blocks, threads>>>(
@@ -1829,7 +1869,11 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    int blocks = static_cast<int>((M + threads - 1) / threads);
+    // Clamp the grid to the 2^31-1 block limit; the kernel grid-strides over
+    // rows, so M > gridDim*threads is still fully covered (instead of the int
+    // cast wrapping the launch dim at extreme M).
+    int64_t blocks64 = (M + threads - 1) / threads;
+    int blocks = static_cast<int>(blocks64 > 2147483647LL ? 2147483647LL : blocks64);
 
     if (dtype == DType::Float32) {
         csr_spmv_kernel<float><<<blocks, threads>>>(
@@ -1867,7 +1911,11 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto vals = csr.values().contiguous();
 
     int threads = 256;
-    int blocks = static_cast<int>((M + threads - 1) / threads);
+    // Clamp the grid to the 2^31-1 block limit; the kernel grid-strides over
+    // rows, so M > gridDim*threads is still fully covered (instead of the int
+    // cast wrapping the launch dim at extreme M).
+    int64_t blocks64 = (M + threads - 1) / threads;
+    int blocks = static_cast<int>(blocks64 > 2147483647LL ? 2147483647LL : blocks64);
 
     if (dtype == DType::Float32) {
         csr_sparse_add_kernel<float><<<blocks, threads>>>(
@@ -1990,6 +2038,22 @@ __global__ void spgemm_compact_hip(
     for (int64_t i = 0; i < count; ++i) {
         new_col[dst + i] = old_col[src + i];
         new_vals[dst + i] = old_vals[src + i];
+    }
+    // The fill kernel appends columns in first-seen order, so each row's column
+    // indices are UNSORTED. Many CSR consumers (rocSPARSE descriptors, CSR->dense,
+    // parity vs the CPU reference) require ascending columns per row. Insertion-
+    // sort this row's (col,val) pairs in place; standalone-path rows are small.
+    for (int64_t i = dst + 1; i < dst + count; ++i) {
+        int64_t cj = new_col[i];
+        T vj = new_vals[i];
+        int64_t k = i - 1;
+        while (k >= dst && new_col[k] > cj) {
+            new_col[k + 1] = new_col[k];
+            new_vals[k + 1] = new_vals[k];
+            --k;
+        }
+        new_col[k + 1] = cj;
+        new_vals[k + 1] = vj;
     }
 }
 

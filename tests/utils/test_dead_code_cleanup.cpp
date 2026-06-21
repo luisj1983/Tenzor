@@ -21,13 +21,22 @@
 #include <gtest/gtest.h>
 
 #include "tenzor/tenzor.hpp"
+#include "tenzor/autograd/variable.hpp"
+#include "tenzor/nn/module.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/log.hpp"
 #include "tenzor/utils/logging.hpp"
 
+#include <memory>
+
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
+#include <unistd.h>  // getpid
 
 namespace {
 
@@ -62,28 +71,69 @@ TEST_F(DeadCodeCleanupTest, NotImplementedErrorIsAStdException) {
 TEST_F(DeadCodeCleanupTest, NotImplementedErrorIsThrownBySomeProductionPath) {
     // The S25 sweep converted ~38 throw sites. The most cleanly observable
     // ones are the abstract container forwards (`ModuleList::forward()`,
-    // `ModuleDict::forward()`, `ParameterList::forward()`,
-    // `ParameterDict::forward()`) in `src/nn/module.cpp`. Each used to throw
+    // `ModuleDict::forward()`) in `src/nn/module.cpp`. Each used to throw
     // `std::runtime_error("... does not implement forward(). ...")` and now
     // throws `NotImplementedError`.
     //
-    // We can't easily invoke them from here without dragging in the full
-    // pybind layout, so we exercise the path indirectly: construct a
-    // NotImplementedError ourselves, then catch it via the `std::exception`
-    // chain to confirm the typed-exception flow works.
+    // Invoke the REAL production path: a bare ModuleList has no forward, so
+    // calling forward() must throw NotImplementedError (not a bare
+    // runtime_error). This is the actual S25 conversion under test — not an
+    // in-test rethrow.
+    using tenzor::nn::ModuleList;
+    using tenzor::nn::ModuleDict;
+
+    tenzor::Variable input(tenzor::ones({2, 3}, tenzor::DType::Float32),
+                           /*requires_grad=*/false);
+
+    {
+        ModuleList list;
+        bool caught_typed = false;
+        bool caught_other = false;
+        try {
+            (void)list.forward(input);
+        } catch (const tenzor::NotImplementedError& e) {
+            caught_typed = true;
+            const std::string msg{e.what()};
+            EXPECT_NE(msg.find("does not implement forward"), std::string::npos)
+                << "ModuleList::forward() threw NotImplementedError but with an "
+                   "unexpected message: " << msg;
+        } catch (const std::exception&) {
+            caught_other = true;
+        }
+        EXPECT_TRUE(caught_typed)
+            << "ModuleList::forward() must throw the converted NotImplementedError.";
+        EXPECT_FALSE(caught_other)
+            << "ModuleList::forward() threw a non-NotImplementedError exception.";
+    }
+
+    {
+        ModuleDict dict;
+        bool caught_typed = false;
+        try {
+            (void)dict.forward(input);
+        } catch (const tenzor::NotImplementedError&) {
+            caught_typed = true;
+        } catch (const std::exception&) {
+            // fall through; caught_typed stays false
+        }
+        EXPECT_TRUE(caught_typed)
+            << "ModuleDict::forward() must throw the converted NotImplementedError.";
+    }
+
+    // NotImplementedError must be catchable as its concrete type, distinct from
+    // a bare std::runtime_error — a converted site that fell back to
+    // runtime_error would be caught by the runtime_error handler instead.
     bool caught_typed = false;
     bool caught_generic_runtime = false;
     try {
-        throw tenzor::NotImplementedError(
-            "S25 stub: simulating a converted runtime_error site");
+        ModuleList list;
+        (void)list.forward(input);
     } catch (const tenzor::NotImplementedError&) {
         caught_typed = true;
     } catch (const std::runtime_error&) {
         caught_generic_runtime = true;
     }
-    EXPECT_TRUE(caught_typed)
-        << "NotImplementedError should be catchable as its concrete type, "
-           "not just as std::runtime_error.";
+    EXPECT_TRUE(caught_typed);
     EXPECT_FALSE(caught_generic_runtime);
 }
 
@@ -96,16 +146,46 @@ TEST_F(DeadCodeCleanupTest, NotImplementedErrorIsThrownBySomeProductionPath) {
 TEST_F(DeadCodeCleanupTest, LegacyLoggerIsCallableAfterDedup) {
     auto& legacy = tenzor::Logger::instance();
 
+    // Route legacy output to a private temp file so we can verify the message
+    // was actually ROUTED, not just that the call didn't throw.
+    const std::string log_path =
+        (std::filesystem::temp_directory_path() /
+         ("tenzor_deadcode_legacy_" + std::to_string(::getpid()) + ".log"))
+            .string();
+    if (std::filesystem::exists(log_path)) std::filesystem::remove(log_path);
+
     // Set a known level — this also mirrors onto the spdlog logger.
     legacy.set_level(tenzor::LogLevel::Warning);
     EXPECT_EQ(legacy.get_level(), tenzor::LogLevel::Warning);
+    legacy.set_output_file(log_path);
+    legacy.enable_console(false);
 
     // Each severity method should be a no-throw forward to spdlog.
-    EXPECT_NO_THROW(legacy.debug("S25: debug, filtered by Warning level"));
-    EXPECT_NO_THROW(legacy.info("S25: info, filtered by Warning level"));
-    EXPECT_NO_THROW(legacy.warning("S25: warning, emitted to spdlog"));
-    EXPECT_NO_THROW(legacy.error("S25: error, emitted to spdlog"));
-    EXPECT_NO_THROW(legacy.fatal("S25: fatal, emitted to spdlog"));
+    EXPECT_NO_THROW(legacy.debug("DEADCODE_DEBUG_should_be_filtered"));
+    EXPECT_NO_THROW(legacy.info("DEADCODE_INFO_should_be_filtered"));
+    EXPECT_NO_THROW(legacy.warning("DEADCODE_WARNING_should_appear"));
+    EXPECT_NO_THROW(legacy.error("DEADCODE_ERROR_should_appear"));
+    EXPECT_NO_THROW(legacy.fatal("DEADCODE_FATAL_should_appear"));
+
+    // Restore default routing before reading back.
+    legacy.enable_console(true);
+
+    std::ifstream f(log_path);
+    ASSERT_TRUE(f.good()) << "legacy logger never created its output file";
+    const std::string contents((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+
+    // Warning/error/fatal (>= Warning threshold) must have been routed.
+    EXPECT_NE(contents.find("DEADCODE_WARNING_should_appear"), std::string::npos)
+        << "warning-level message was not routed to the legacy logger sink";
+    EXPECT_NE(contents.find("DEADCODE_ERROR_should_appear"), std::string::npos);
+    EXPECT_NE(contents.find("DEADCODE_FATAL_should_appear"), std::string::npos);
+    // Debug/info (below the Warning threshold) must have been filtered out.
+    EXPECT_EQ(contents.find("DEADCODE_DEBUG_should_be_filtered"), std::string::npos)
+        << "debug message leaked past the Warning level filter";
+    EXPECT_EQ(contents.find("DEADCODE_INFO_should_be_filtered"), std::string::npos);
+
+    if (std::filesystem::exists(log_path)) std::filesystem::remove(log_path);
 }
 
 TEST_F(DeadCodeCleanupTest, UnifiedSpdlogFacadeIsCallable) {

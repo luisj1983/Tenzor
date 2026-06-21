@@ -59,9 +59,11 @@ void main() {
     barrier();
 
     // Write local histogram to global histogram matrix (column-major for prefix
-    // sum). Only the first 256 lanes own a bin; guard so wgSize>256 lanes don't
-    // write past the [256 * n_wgs] global buffer.
-    if (lid < 256u) {
-        histos[lid * n_wgs + wg_id] = local_histo[lid];
+    // sum) via a strided loop. A one-bin-per-thread `if (lid < 256)` write drops
+    // bins 128-255 on a conformant device that reports wgSize=128 (Vulkan only
+    // guarantees maxComputeWorkGroupInvocations >= 128), corrupting the scatter.
+    // The strided loop also stays in-bounds for wgSize>256.
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        histos[b * n_wgs + wg_id] = local_histo[b];
     }
 }

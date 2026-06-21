@@ -144,9 +144,15 @@ TEST_P(ExtendedMathParity, Trunc) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    // trunc(x) = sign(x) * floor(abs(x))
+    // Call tenzor::trunc directly so a broken trunc kernel is actually exercised.
+    // Independent reference: trunc(x) == sign(x) * floor(abs(x)), asserted on CPU.
+    auto cpu_ref = sign(a) * floor(abs(a));
+    auto cpu_trunc = tenzor::trunc(a);
+    EXPECT_TRUE(tensors_close(cpu_ref, cpu_trunc, 0.0f, 0.0f))
+        << "CPU tenzor::trunc disagrees with sign(x)*floor(abs(x)) reference";
+
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-        return sign(inputs[0]) * floor(abs(inputs[0]));
+        return tenzor::trunc(inputs[0]);
     }, {a}, device, 0.0f, 0.0f, "Trunc");
 }
 

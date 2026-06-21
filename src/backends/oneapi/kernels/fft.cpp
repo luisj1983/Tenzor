@@ -170,9 +170,14 @@ void apply_scale_real_f64(sycl::queue& queue, double* data, int64_t numel, doubl
 // Since the input is real, we create a complex buffer (zero imaginary),
 // run the in-place C2C transform, then write to output.
 // ============================================================================
-auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto fft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
                 const std::string& norm, sycl::queue& queue) -> Tensor {
     namespace dft = ::oneapi::mkl::dft;
+
+    // The kernel gathers per-transform data via shape-derived contiguous strides
+    // (and the pad branch reads input.data_ptr() flat), so a non-contiguous input
+    // (transpose/slice/permute view) must be materialized contiguous first.
+    Tensor input = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
@@ -449,9 +454,13 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 //
 // oneMKL compute_backward performs unnormalized inverse DFT.
 // ============================================================================
-auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto ifft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
     namespace dft = ::oneapi::mkl::dft;
+
+    // Gather uses shape-derived contiguous strides; non-contiguous input must
+    // be materialized contiguous first.
+    Tensor input = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
@@ -630,9 +639,13 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // beyond labelling the dtype correctly — we just avoid introducing a
 // trailing length-2 dim that breaks backend parity with the CPU kernel.
 // ============================================================================
-auto rfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
+auto rfft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
     namespace dft = ::oneapi::mkl::dft;
+
+    // Pad/gather read input via flat shape-derived offsets; a non-contiguous
+    // real input must be materialized contiguous first.
+    Tensor input_raw = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
 
     auto shape_span = input_raw.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
@@ -898,9 +911,13 @@ auto rfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
 // per-element load/store in the scatter/gather loops is unchanged; only
 // the shape-accounting and dtype checks move.
 // ============================================================================
-auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto irfft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
                   const std::string& norm, sycl::queue& queue) -> Tensor {
     namespace dft = ::oneapi::mkl::dft;
+
+    // Gather reads input via flat shape-derived offsets; non-contiguous input
+    // must be materialized contiguous first.
+    Tensor input = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
@@ -1344,7 +1361,12 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
     // Step 1: Generate chirp sequence: chirp[k] = exp(-j * pi * k^2 / N)
     queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
         int64_t k = idx[0];
-        T angle = -PI * static_cast<T>(k) * static_cast<T>(k) / static_cast<T>(N);
+        // Compute the quadratic chirp phase in double precision (mirroring the
+        // radix-2 butterfly above) then narrow to T: k*k grows quadratically, so
+        // forming it in single precision loses accuracy for large N.
+        double angle_d = -static_cast<double>(PI) * static_cast<double>(k) *
+                         static_cast<double>(k) / static_cast<double>(N);
+        T angle = static_cast<T>(angle_d);
         chirp[2 * k]     = sycl::cos(angle);
         chirp[2 * k + 1] = sycl::sin(angle);
     }).wait();
@@ -1460,7 +1482,11 @@ void bluestein_fft_complex_sycl(const T* d_in, T* d_out,
     // Step 1: chirp[k] = exp(sign * j * pi * k^2 / N)
     queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
         int64_t k = idx[0];
-        T angle = sign * PI * static_cast<T>(k) * static_cast<T>(k) / static_cast<T>(N);
+        // Quadratic chirp phase in double precision then narrow (see fwd chirp).
+        double angle_d = static_cast<double>(sign) * static_cast<double>(PI) *
+                         static_cast<double>(k) * static_cast<double>(k) /
+                         static_cast<double>(N);
+        T angle = static_cast<T>(angle_d);
         chirp[2 * k]     = sycl::cos(angle);
         chirp[2 * k + 1] = sycl::sin(angle);
     }).wait();

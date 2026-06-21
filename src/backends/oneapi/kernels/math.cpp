@@ -1641,13 +1641,44 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         throw std::runtime_error("Inner dimensions must match for matmul");
     }
 
-    // Create output shape
-    std::vector<int64_t> out_shape;
+    // Broadcast the leading batch dimensions of a and b to a common shape.
+    // Previously the batch loop derived batch_count and the per-operand batch
+    // strides solely from a_shape and assumed b had identical batch dims; for a
+    // broadcast batch matmul (e.g. (B,m,k) @ (k,n), or batch dims of size 1 on
+    // one operand) b has fewer/size-1 batch elements, so indexing
+    // b_ptr + bi*(k*n) for bi in [0,batch_count) ran off the end of b → OOB
+    // device reads. Broadcast both operands' batch dims to a common shape and
+    // materialize them contiguous so the fixed m*k / k*n batch strides below are
+    // correct for every batch index. (Matches CPU/ROCm broadcast batch matmul.)
+    const std::vector<int64_t> a_batch_dims(a_shape.begin(), a_shape.end() - 2);
+    const std::vector<int64_t> b_batch_dims(b_shape.begin(), b_shape.end() - 2);
+    std::vector<int64_t> batch_shape = broadcast_shapes(a_batch_dims, b_batch_dims);
+
     int64_t batch_count = 1;
-    for (size_t i = 0; i < a_shape.size() - 2; ++i) {
-        out_shape.push_back(a_shape[i]);
-        batch_count *= a_shape[i];
+    for (int64_t d : batch_shape) batch_count *= d;
+
+    // Re-materialize a_cont/b_cont with their batch dims expanded to batch_shape
+    // (expand() yields a stride-0 broadcast view; contiguous_kernel realizes it
+    // so the raw-pointer batch strides used below are valid).
+    {
+        std::vector<int64_t> a_target = batch_shape;
+        a_target.push_back(m);
+        a_target.push_back(k);
+        if (static_cast<size_t>(a_cont.ndim()) != a_target.size() ||
+            !std::equal(a_target.begin(), a_target.end(), a_cont.shape().begin())) {
+            a_cont = contiguous_kernel(a_cont.expand(a_target), queue);
+        }
+        std::vector<int64_t> b_target = batch_shape;
+        b_target.push_back(k);
+        b_target.push_back(n);
+        if (static_cast<size_t>(b_cont.ndim()) != b_target.size() ||
+            !std::equal(b_target.begin(), b_target.end(), b_cont.shape().begin())) {
+            b_cont = contiguous_kernel(b_cont.expand(b_target), queue);
+        }
     }
+
+    // Create output shape from the broadcast batch dims + (m, n).
+    std::vector<int64_t> out_shape = batch_shape;
     out_shape.push_back(m);
     out_shape.push_back(n);
 
@@ -2894,7 +2925,10 @@ auto sin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<SinKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::sin(in_ptr[idx]);
+            // Evaluate in double then narrow: single-precision sycl::sin carries
+            // ~1-2 ULP error and diverges ~2.5e-7 from the CPU/CUDA reference,
+            // above the 1e-7 transcendental atol of MathOperationParity.Sin.
+            out_ptr[idx] = static_cast<float>(sycl::sin(static_cast<double>(in_ptr[idx])));
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {
@@ -2958,7 +2992,9 @@ auto cos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<CosKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::cos(in_ptr[idx]);
+            // Evaluate in double then narrow (see sin_kernel Float32): keeps the
+            // result within the 1e-7 transcendental atol vs the CPU/CUDA reference.
+            out_ptr[idx] = static_cast<float>(sycl::cos(static_cast<double>(in_ptr[idx])));
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {

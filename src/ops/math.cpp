@@ -121,6 +121,14 @@ auto mul(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto div(const Tensor& a, const Tensor& b) -> Tensor {
+    // True division of two Bool tensors must promote to a float dtype (PyTorch
+    // `/` semantics). promote_types(Bool, Bool) == Bool, and the Div kernel would
+    // otherwise perform integer division on bool (`x / false` is UB / SIGFPE).
+    if (a.dtype() == DType::Bool && b.dtype() == DType::Bool) {
+        Tensor af = a.to(DType::Float32);
+        Tensor bf = b.to(DType::Float32);
+        return detail::binary_op_promoted<OpId::Div>("div", af, bf);
+    }
     return detail::binary_op_promoted<OpId::Div>("div", a, b);
 }
 
@@ -144,6 +152,13 @@ auto dispatch_scalar_binop(OpId op, const Tensor& a, double scalar) -> Tensor {
     // integer fast-path when the scalar is integral.
     const bool promote_for_div = (op == OpId::Div) && is_integer_type(rdt);
     if (is_integer_type(rdt) && (!scalar_is_integral || promote_for_div)) {
+        rdt = DType::Float32;
+    }
+    // Bool tensors: true division must promote to float (PyTorch `/` semantics);
+    // also avoids bool/scalar integer-divide UB in DivOp::scalar<bool>. A
+    // non-integral scalar applied to a Bool tensor likewise promotes (e.g.
+    // bool + 0.5) rather than truncating.
+    if (rdt == DType::Bool && (op == OpId::Div || !scalar_is_integral)) {
         rdt = DType::Float32;
     }
     Tensor a_use = (a.dtype() != rdt) ? a.to(rdt) : a;
@@ -526,6 +541,14 @@ auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
 
 auto div_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
+    // True division produces a floating result; it cannot be stored back into a
+    // Bool tensor in place (matches PyTorch: "result type Float can't be cast to
+    // the desired output type Bool"). Also avoids bool/bool integer-divide UB.
+    if (self.dtype() == DType::Bool) {
+        throw std::runtime_error(
+            "div_: in-place true division is not supported for Bool tensors "
+            "(result type cannot be cast back to Bool)");
+    }
     validate_broadcast_shapes("div_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place div requires contiguous tensor");

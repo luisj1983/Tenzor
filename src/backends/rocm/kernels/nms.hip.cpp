@@ -192,19 +192,48 @@ __global__ void nms_bitonic_sort_kernel(const float* scores, int64_t* indices,
     float val_tid = (idx_tid < n) ? scores[idx_tid] : -1e30f;
     float val_partner = (idx_partner < n) ? scores[idx_partner] : -1e30f;
 
-    // For descending sort: in the ascending half of bitonic merge, we want
-    // larger values first (so swap if tid has smaller value than partner).
-    // In the descending half, we want smaller values first (swap if tid > partner).
+    // Stable descending order with an original-index tiebreak: on equal scores
+    // the LOWER original index must rank first, matching the CPU std::stable_sort
+    // / torchvision ordering. Bitonic sort is not stable, so without this the
+    // keep set can diverge from CPU on duplicate scores. "tid greater than
+    // partner" means (higher score) OR (equal score AND lower index).
+    auto greater = [](float va, int64_t ia, float vb, int64_t ib) -> bool {
+        if (va != vb) return va > vb;
+        return ia < ib;  // lower index ranks first on ties
+    };
+    bool tid_gt_partner = greater(val_tid, idx_tid, val_partner, idx_partner);
+
+    // For descending sort: in the ascending half of the bitonic merge we want
+    // the "greater" element first (swap if tid is NOT greater than partner);
+    // in the descending half we want it last (swap if tid IS greater).
     bool ascending_half = ((tid & sort_size) == 0);
-    // Invert for descending overall order
-    bool should_swap = ascending_half ? (val_tid < val_partner)
-                                       : (val_tid > val_partner);
+    bool should_swap = ascending_half ? !tid_gt_partner
+                                       :  tid_gt_partner;
 
     if (should_swap) {
         int64_t temp = indices[tid];
         indices[tid] = indices[partner];
         indices[partner] = temp;
     }
+}
+
+// Build composite sort keys for the radix-sort path: high 32 bits = an
+// order-preserving uint32 mapping of the score (larger score -> larger key),
+// low 32 bits = (0xFFFFFFFF - index). A DESCENDING sort on the 64-bit key then
+// orders by score descending, and by original index ASCENDING on ties — the
+// stable CPU/torchvision tiebreak.
+__global__ void nms_build_sort_keys_kernel(const float* scores, uint64_t* keys,
+                                           int64_t n) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    uint32_t u;
+    float s = scores[i];
+    memcpy(&u, &s, sizeof(u));
+    // IEEE-754 -> order-preserving unsigned: flip sign bit for positives, flip
+    // all bits for negatives, so numeric order matches unsigned order.
+    u ^= (uint32_t)(-(int32_t)(u >> 31)) | 0x80000000u;
+    uint32_t idx_tiebreak = 0xFFFFFFFFu - static_cast<uint32_t>(i);
+    keys[i] = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(idx_tiebreak);
 }
 
 // GPU sort for NMS: uses bitonic sort for small arrays, hipcub radix sort for larger.
@@ -245,19 +274,24 @@ static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices
         hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, stream,
                            d_indices, num_boxes, num_boxes);
         // hipcub radix sort (different code path from thrust/rocprim ICE trigger).
-        // Sort scores descending, carrying indices as values.
-        // hipcub::DeviceRadixSort::SortPairsDescending sorts keys descending.
-        // We need to sort scores (keys) and carry indices (values).
-        HipDevicePtr d_scores_copy_guard, d_scores_out_guard, d_indices_out_guard, d_temp_guard;
+        // Radix sort is NOT stable, so to match the CPU std::stable_sort ordering
+        // (equal scores keep the LOWER original index first) we sort a composite
+        // uint64 key = (orderable(score) << 32) | (0xFFFFFFFF - index) DESCENDING:
+        // descending on the high word gives score-descending; descending on the
+        // low word (0xFFFFFFFF-index) gives index-ascending on ties. Exactly the
+        // torchvision/CPU tiebreak.
+        HipDevicePtr d_keys_in_guard, d_keys_out_guard, d_indices_out_guard, d_temp_guard;
 
-        // Copy scores to a mutable buffer (SortPairsDescending needs mutable input)
-        NMS_HIP_CHECK(hipMalloc(&d_scores_copy_guard.ptr, num_boxes * sizeof(float)));
-        NMS_HIP_CHECK(hipMemcpyAsync(d_scores_copy_guard.ptr, d_scores,
-                                      num_boxes * sizeof(float), hipMemcpyDeviceToDevice, stream));
-        auto* d_scores_in = static_cast<float*>(d_scores_copy_guard.ptr);
+        NMS_HIP_CHECK(hipMalloc(&d_keys_in_guard.ptr, num_boxes * sizeof(uint64_t)));
+        auto* d_keys_in = static_cast<uint64_t*>(d_keys_in_guard.ptr);
+        {
+            int kb = (num_boxes + 255) / 256;
+            hipLaunchKernelGGL(nms_build_sort_keys_kernel, dim3(kb), dim3(256), 0, stream,
+                               d_scores, d_keys_in, num_boxes);
+        }
 
-        NMS_HIP_CHECK(hipMalloc(&d_scores_out_guard.ptr, num_boxes * sizeof(float)));
-        auto* d_scores_out = static_cast<float*>(d_scores_out_guard.ptr);
+        NMS_HIP_CHECK(hipMalloc(&d_keys_out_guard.ptr, num_boxes * sizeof(uint64_t)));
+        auto* d_keys_out = static_cast<uint64_t*>(d_keys_out_guard.ptr);
 
         NMS_HIP_CHECK(hipMalloc(&d_indices_out_guard.ptr, num_boxes * sizeof(int64_t)));
         auto* d_indices_out = static_cast<int64_t*>(d_indices_out_guard.ptr);
@@ -265,15 +299,15 @@ static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices
         // Query temp storage size
         size_t temp_bytes = 0;
         NMS_HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(
-            nullptr, temp_bytes, d_scores_in, d_scores_out,
-            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream));
+            nullptr, temp_bytes, d_keys_in, d_keys_out,
+            d_indices, d_indices_out, num_boxes, 0, sizeof(uint64_t) * 8, stream));
 
         NMS_HIP_CHECK(hipMalloc(&d_temp_guard.ptr, temp_bytes));
 
         // Execute sort
         NMS_HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(
-            d_temp_guard.ptr, temp_bytes, d_scores_in, d_scores_out,
-            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream));
+            d_temp_guard.ptr, temp_bytes, d_keys_in, d_keys_out,
+            d_indices, d_indices_out, num_boxes, 0, sizeof(uint64_t) * 8, stream));
 
         NMS_HIP_CHECK(hipStreamSynchronize(stream));
 

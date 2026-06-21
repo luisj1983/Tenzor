@@ -148,12 +148,24 @@ TEST_F(ZeROGlooTest, TwoRankGradientAllReduce) {
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), default_config);
 
-    // Step performs all-reduce
+    // Snapshot a locally-owned parameter before the step.
+    auto before = params[0]->tensor().clone();
+
+    // Step performs all-reduce of gradients (sum across ranks = 1 + 2 = 3) then
+    // an Adam update on the summed gradient.
     optimizer.step();
 
-    // After all-reduce, gradients should be sum: (1 + 2) = 3
-    // But optimizer consumes gradients, so we can't verify directly
-    // Instead, verify no crash and parameters updated
+    // The summed gradient is uniformly POSITIVE (3 everywhere), so Adam must
+    // move every element of the parameter DOWN. A broken/identity all-reduce
+    // that dropped a rank's contribution would still move it down, but a no-op
+    // all-reduce that left the gradient untouched-yet-consumed, or one that
+    // produced a zero/garbage gradient, fails this directional check.
+    auto after = params[0]->tensor();
+    auto delta = (after - before).to(DType::Float64).cpu();
+    double max_elem = tenzor::max(delta).item<double>();
+    EXPECT_LT(max_elem, 0.0)
+        << "all-reduced positive gradient must drive every param element down";
+
     auto stats = optimizer.get_memory_stats();
     EXPECT_EQ(stats.num_parameters, 100);
 }
@@ -194,12 +206,23 @@ TEST_F(ZeROGlooTest, GradientSynchronizationCorrectness) {
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), default_config);
 
-    // Perform step (includes all-reduce)
+    auto before = params[0]->tensor().clone();
+
+    // Perform step (includes all-reduce of gradients across both ranks).
     optimizer.step();
 
-    // Verify optimizer ran successfully
     EXPECT_EQ(optimizer.rank(), rank_);
     EXPECT_EQ(optimizer.world_size(), world_size_);
+
+    // Rank 0 grad for param 0 is 0, rank 1 grad is 10 → all-reduced sum is 10
+    // (uniformly positive), so Adam must move param 0 strictly downward on every
+    // rank. If synchronization silently used only the local gradient, rank 0
+    // (whose local grad is 0) would NOT move — this catches that.
+    auto after = params[0]->tensor();
+    double max_elem = tenzor::max((after - before).to(DType::Float64).cpu()).item<double>();
+    EXPECT_LT(max_elem, 0.0)
+        << "after gradient sync, the summed positive gradient must move param 0 down "
+           "on every rank (including rank 0 whose local grad was 0)";
 
     barrier();
 }
@@ -220,11 +243,22 @@ TEST_F(ZeROGlooTest, DistributedTrainingConvergence) {
         // Each rank generates different synthetic data
         auto inputs = randn({32, 784}, DType::Float32, Device::cpu());
 
-        // Create random integer targets manually
+        // LEARNABLE labels = bucket(row-mean), matching the single-process
+        // integration file. `std::rand() % 10` (pure noise) made convergence a
+        // coin flip — the model cannot fit random labels, so "any decrease"
+        // passes on noise. With an input-dependent rule the loss must genuinely
+        // drop, so the convergence assertion is meaningful.
         auto targets = empty({32}, DType::Int64, Device::cpu());
         auto* target_data = targets.data<int64_t>();
+        const float* in_data = inputs.data<float>();
         for (int i = 0; i < 32; ++i) {
-            target_data[i] = std::rand() % 10;
+            double sum = 0.0;
+            for (int j = 0; j < 784; ++j) sum += in_data[i * 784 + j];
+            double mean = sum / 784.0;
+            double squashed = 0.5 * (std::tanh(mean * 10.0) + 1.0);  // [0, 1]
+            int64_t cls = static_cast<int64_t>(squashed * 10);
+            if (cls >= 10) cls = 9;
+            target_data[i] = cls;
         }
 
         auto outputs = model.forward(Variable(inputs, false));
@@ -235,9 +269,11 @@ TEST_F(ZeROGlooTest, DistributedTrainingConvergence) {
         optimizer.step();
     }
 
-    // Loss should decrease on all ranks
-    EXPECT_LT(losses.back(), losses.front())
-        << "Rank " << rank_ << " failed to converge";
+    // On a learnable task the loss must drop by a meaningful margin, not just
+    // be < the first sample. Require at least a 5% reduction.
+    EXPECT_LT(losses.back(), losses.front() * 0.95f)
+        << "Rank " << rank_ << " failed to converge on a learnable task "
+        << "(initial: " << losses.front() << ", final: " << losses.back() << ")";
     EXPECT_FALSE(std::isnan(losses.back()))
         << "Rank " << rank_ << " got NaN loss";
 
@@ -506,12 +542,24 @@ TEST_F(ZeRONCCLTest, DistributedGPUTraining) {
         // Generate GPU data
         auto inputs = randn({32, 784}, DType::Float32, gpu_dev);
 
-        // Create random integer targets manually
-        auto targets = empty({32}, DType::Int64, gpu_dev);
-        auto* target_data = targets.data<int64_t>();
+        // LEARNABLE labels = bucket(row-mean), computed on a host copy of the
+        // inputs (GPU memory can't be indexed on the host), then moved to GPU.
+        // `std::rand() % 10` was pure noise — unlearnable, so any convergence
+        // assertion passed on chance.
+        auto inputs_cpu = inputs.to(Device::cpu());
+        const float* in_data = inputs_cpu.data<float>();
+        auto targets_cpu = empty({32}, DType::Int64, Device::cpu());
+        auto* target_data = targets_cpu.data<int64_t>();
         for (int i = 0; i < 32; ++i) {
-            target_data[i] = std::rand() % 10;
+            double sum = 0.0;
+            for (int j = 0; j < 784; ++j) sum += in_data[i * 784 + j];
+            double mean = sum / 784.0;
+            double squashed = 0.5 * (std::tanh(mean * 10.0) + 1.0);  // [0, 1]
+            int64_t cls = static_cast<int64_t>(squashed * 10);
+            if (cls >= 10) cls = 9;
+            target_data[i] = cls;
         }
+        auto targets = targets_cpu.to(gpu_dev);
 
         auto outputs = model.forward(Variable(inputs, false));
         auto loss = cross_entropy(outputs, targets);
@@ -522,9 +570,10 @@ TEST_F(ZeRONCCLTest, DistributedGPUTraining) {
         optimizer.step();
     }
 
-    // Training should converge on GPU
-    EXPECT_LT(losses.back(), losses.front())
-        << "GPU " << rank_ << " failed to converge";
+    // On a learnable task the loss must drop by a meaningful margin.
+    EXPECT_LT(losses.back(), losses.front() * 0.95f)
+        << "GPU " << rank_ << " failed to converge on a learnable task "
+        << "(initial: " << losses.front() << ", final: " << losses.back() << ")";
     EXPECT_FALSE(std::isnan(losses.back()));
 
     barrier();
@@ -657,10 +706,14 @@ TEST_F(ZeROGlooTest, BarrierSynchronization) {
         (void)dummy;
     }
 
-    // Synchronize again
+    // Synchronize again — if any rank failed to reach the barrier the collective
+    // would hang/throw; reaching here means all ranks synchronized. Assert the
+    // optimizer's view of the group is the expected one (a real post-barrier
+    // invariant rather than an unconditional SUCCEED).
     barrier();
 
-    SUCCEED();
+    EXPECT_EQ(optimizer.rank(), rank_);
+    EXPECT_EQ(optimizer.world_size(), world_size_);
 }
 
 TEST_F(ZeROGlooTest, ConcurrentOptimizationSteps) {
@@ -669,7 +722,9 @@ TEST_F(ZeROGlooTest, ConcurrentOptimizationSteps) {
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), default_config);
 
-    // All ranks perform steps concurrently
+    auto before = params[0]->tensor().clone();
+
+    // All ranks perform identical steps concurrently with all-ones gradients.
     for (int step = 0; step < 10; ++step) {
         for (auto& param : params) {
             auto shape_span = param->tensor().shape();
@@ -682,7 +737,14 @@ TEST_F(ZeROGlooTest, ConcurrentOptimizationSteps) {
     }
 
     barrier();
-    SUCCEED();
+
+    // The all-reduced gradient is uniformly positive every step, so 10 Adam
+    // updates must move param 0 strictly down — verifying the concurrent steps
+    // actually applied updates rather than silently no-op'ing.
+    auto after = params[0]->tensor();
+    double max_elem = tenzor::max((after - before).to(DType::Float64).cpu()).item<double>();
+    EXPECT_LT(max_elem, 0.0)
+        << "10 concurrent optimization steps must move param 0 downward";
 }
 
 // =====================================================================

@@ -1,14 +1,15 @@
 #version 450
-#extension GL_EXT_shader_atomic_float : enable
 
-// Max Pooling 3D Backward Pass for Float16 using pre-computed indices
+// Max Pooling 3D Backward Pass for Float16 using pre-computed indices.
+// grad_input is PACKED-F16 (2 bytes/elem); a float32 atomicAdd would write 4
+// bytes per element index (OOB + misrouted gradients). Accumulate via CAS.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };
 // Indices come from MaxPool3dForward as Int32, regardless of data dtype.
 // Reading them as packed Float16 silently corrupts every index.
 layout(binding = 1) buffer Indices { int indices_data[]; };
-layout(binding = 2) buffer GradInput { float grad_input[]; };
+layout(binding = 2) buffer GradInput { uint grad_input[]; };  // Packed F16, CAS-accumulated
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -39,6 +40,24 @@ float half_to_float(uint h) {
     return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
 }
 
+void atomicAddF16(uint flat_idx, float add_val) {
+    uint word_idx = flat_idx / 2u;
+    uint half_idx = flat_idx % 2u;
+    uint mask = 0xFFFFu << (half_idx * 16u);
+    uint old_val = grad_input[word_idx];
+    uint expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        uint bits = (expected >> (half_idx * 16u)) & 0xFFFFu;
+        float current = unpackHalf2x16(bits | (bits << 16u)).x;
+        float updated = current + add_val;
+        uint new_bits = packHalf2x16(vec2(updated, 0.0)).x & 0xFFFFu;
+        uint new_val = (expected & ~mask) | (new_bits << (half_idx * 16u));
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
@@ -52,6 +71,6 @@ void main() {
     int target_idx = indices_data[idx];
 
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
-        atomicAdd(grad_input[target_idx], grad);
+        atomicAddF16(uint(target_idx), grad);
     }
 }

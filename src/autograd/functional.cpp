@@ -301,13 +301,18 @@ auto jvp(std::function<Variable(const Variable&)> func,
     }
 
     // ---- Fallback: central finite differences ----------------------------
-    static std::once_flag warned_flag;
-    std::call_once(warned_flag, [] {
-        std::fprintf(stderr,
-            "[autograd::jvp] WARNING: falling back to finite-difference JVP. "
-            "The op chain in `func` has no registered forward-mode rule "
-            "(see jvp_dispatch.hpp). Results are numerically approximate.\n");
-    });
+    // Warn on EVERY fallback (not once-per-process): the previous std::once
+    // flag meant a single early warning could scroll out of the logs and every
+    // later silently-approximate JVP — including gradcheck-style verification
+    // via jacobian() — looked exact. A per-call warning makes the degradation
+    // visible at the call site that triggers it. The fallback is meant to be
+    // rare (some op in `func` lacks a registered forward-mode rule), so this
+    // does not flood logs in the analytic-rule-complete common case.
+    std::fprintf(stderr,
+        "[autograd::jvp] WARNING: falling back to finite-difference JVP for "
+        "this call. An op in `func` has no registered forward-mode rule "
+        "(see jvp_dispatch.hpp); the result is a numerical approximation, not "
+        "an analytic JVP.\n");
 
     const double eps = 1e-4;
 
@@ -410,139 +415,119 @@ auto jacobian(std::function<Variable(const Variable&)> func,
 
 auto hessian(std::function<Variable(const Variable&)> func,
              const Variable& input) -> Tensor {
+    // Hessian by columns: column i is the Hessian-vector product H·e_i, computed
+    // by `hvp` as an EXACT analytic forward-over-reverse double-backward (no
+    // finite differences). H is symmetric, so stacking the n column products
+    // yields the Hessian.
     auto input_data = input.tensor();
     int64_t n = input_data.numel();
+    const DType dtype = input_data.dtype();
+    const Device device = input_data.device();
 
-    // Forward-over-reverse: compute Jacobian of the gradient function.
-    // The gradient function: x -> grad(f(x), x)
-    auto grad_func = [&func, n](const Variable& x) -> Variable {
-        Variable x_grad(x.tensor(), true);
-        auto out = func(x_grad);
-        out.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
+    std::vector<Tensor> columns;
+    columns.reserve(static_cast<size_t>(n));
 
-        Tensor grad_val;
-        if (x_grad.grad().has_value()) {
-            grad_val = x_grad.grad().value();
-        } else {
-            grad_val = tenzor::zeros_like(x.tensor());
-        }
+    for (int64_t i = 0; i < n; ++i) {
+        // Basis vector e_i, shaped like the input. Build in Float32 on CPU so
+        // data<float>() is always valid, then cast to the input dtype/device.
+        auto e_i_cpu = tenzor::zeros({n}, DType::Float32, Device::cpu());
+        e_i_cpu.data<float>()[i] = 1.0f;
+        auto e_i = e_i_cpu.to(dtype).to(device);
+        e_i = tenzor::reshape(
+            e_i, std::vector<int64_t>(input_data.shape().begin(),
+                                      input_data.shape().end()));
 
-        return Variable(grad_val, false);
-    };
+        auto [_, col] = hvp(func, input, e_i);
+        columns.push_back(tenzor::reshape(col, {n}));
+    }
 
-    // Compute the Jacobian of the gradient function -> Hessian
-    Variable inp(input_data, false);
-    return jacobian(grad_func, inp);
+    // Stack columns -> (n, n). Symmetric, so this is the Hessian directly.
+    return tenzor::stack(std::span<const Tensor>(columns), 0);
 }
 
 auto hvp(std::function<Variable(const Variable&)> func,
          const Variable& input,
          const Tensor& v) -> std::pair<Variable, Tensor> {
-    // Forward-over-reverse: compute JVP of the gradient function with tangent v.
-    // This avoids materializing the full Hessian matrix.
-
-    // 1. Compute the primal output
+    // Exact Hessian-vector product H·v = d/dt[ grad(f, x + t·v) ]|_{t=0} via
+    // forward-over-reverse: differentiate (forward-mode / JVP) the reverse-mode
+    // gradient function.
+    //
+    //   grad_func(x) := grad_x( sum f(x) )   built with create_graph=true so the
+    //                    returned gradient Variable carries a grad_fn (the full
+    //                    second-order graph). The engine now keeps that graph
+    //                    connected across every Function hand-off (parallel
+    //                    Variable accumulator), so the gradient of x*x*x is the
+    //                    true 3x² graph in which all occurrences of x are linked.
+    //
+    //   H·v = jvp(grad_func, x, v).second
+    //
+    // The jvp walker accumulates the seed tangent across every occurrence of x
+    // in that second-order graph (forward-mode chain rule sums at each Add /
+    // each multi-use leaf), so this is the exact analytic H·v — e.g. for x³ the
+    // second derivative is the exact 6x, not the 4x the previously-severed graph
+    // produced. jvp() internally falls back to a (high-precision Float64) finite
+    // difference ONLY if some op in grad_func has no registered forward-mode
+    // rule; for the analytic-rule-complete common case no finite differencing
+    // happens at all.
     auto output = func(input);
 
-    // 2. Define the gradient function: x -> grad(f(x), x)
-    auto input_data = input.tensor();
+    const DType orig_dtype = input.tensor().dtype();
+    const Device orig_device = input.tensor().device();
 
-    // Float16 / BFloat16 finite-difference step (jvp uses eps=1e-4) is
-    // below the dtype's representable resolution, so perturbations get
-    // quantised to zero and the Hessian-vector product collapses to
-    // noise. Widen the probe to Float32 and narrow the result back.
-    const DType orig_dtype = input_data.dtype();
+    // Half precision: widen the whole forward-over-reverse computation to
+    // Float32 (Float16/BFloat16 cannot represent the perturbations / accumulate
+    // the second-order graph accurately), cast the result back at the end.
     const bool widen = (orig_dtype == DType::Float16 ||
                         orig_dtype == DType::BFloat16);
+    const DType work_dtype = widen ? DType::Float32 : orig_dtype;
 
-    // When widening, evaluate `func` at Float32 precision throughout —
-    // the finite-difference step probes how f varies and needs real
-    // sensitivity. If we cast back to Float16 inside func, the perturbed
-    // inputs quantise to the same value as the base point and the
-    // derivative collapses to zero. Callers who genuinely need the
-    // reduced-precision forward semantics can invoke hvp with a Float32
-    // probe directly.
-    auto grad_func = [&func](const Variable& x) -> Variable {
-        Variable x_grad(x.tensor(), true);
-        auto out = func(x_grad);
-        out.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
+    Tensor x_work = input.tensor();
+    if (x_work.dtype() != work_dtype) x_work = x_work.to(work_dtype);
+    Tensor v_work = (v.dtype() != work_dtype) ? v.to(work_dtype) : v;
 
-        Tensor grad_val;
-        if (x_grad.grad().has_value()) {
-            grad_val = x_grad.grad().value();
-        } else {
-            grad_val = tenzor::zeros_like(x.tensor());
+    Variable x_var(x_work, /*requires_grad=*/true);
+
+    // grad_func(p) := grad_p( sum func(p) ), graph-carrying (create_graph=true).
+    auto grad_func = [&func](const Variable& p) -> Variable {
+        // Retain input Variables in every forward op of `func` so the
+        // subsequent create_graph backward can build the second-order graph
+        // THROUGH saved intermediates (e.g. the x² inside d/dx(x³)). Without
+        // this the saved operands are detached and forward-over-reverse drops
+        // the dependence-through-saved-tensor contributions.
+        HigherOrderGraphRetentionGuard retain_guard;
+        // Fresh leaf for each evaluation so its grad_fn / accumulators are clean.
+        Variable pv(p.tensor(), /*requires_grad=*/true);
+        Variable out = func(pv);
+        Variable scalar = (out.tensor().numel() == 1) ? out : tenzor::sum(out);
+        // create_graph=true: the engine builds the connected second-order graph.
+        scalar.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        const auto& gv = pv.grad_variable();
+        if (gv) {
+            return *gv;
         }
-
-        return Variable(grad_val, false);
+        // Output does not depend on p — gradient is zero everywhere.
+        return Variable(tenzor::zeros_like(pv.tensor()), false);
     };
 
-    Tensor probe_input = widen ? input_data.to(DType::Float32) : input_data;
-    Tensor probe_v = widen ? v.to(DType::Float32) : v;
+    // Forward-mode differentiate the gradient at x with seed v -> exact H·v.
+    auto [_, hv] = jvp(grad_func, x_var, v_work);
 
-    // 3. Compute JVP of the gradient function with tangent v -> H @ v
-    Variable inp(probe_input, false);
-    auto [_, hvp_result] = jvp(grad_func, inp, probe_v);
-
-    if (widen) hvp_result = hvp_result.to(orig_dtype);
+    Tensor hvp_result = (hv.dtype() != orig_dtype) ? hv.to(orig_dtype) : hv;
+    if (hvp_result.device() != orig_device) hvp_result = hvp_result.to(orig_device);
     return {output, hvp_result};
 }
 
 auto vhp(std::function<Variable(const Variable&)> func,
          const Variable& input,
          const Tensor& v) -> std::pair<Variable, Tensor> {
-    // Reverse-over-reverse: compute how the gradient changes in direction v.
-    // v^T @ H = d/dt [grad(f, x + t*v)] at t=0
-    //
-    // We use central differences on the gradient function (consistent with
-    // the JVP implementation): grad(f, x+eps*v) - grad(f, x-eps*v) / (2*eps).
-    // For symmetric Hessians this equals H @ v, but the approach is formally
-    // the VHP (reverse-mode differentiation of the gradient).
-
-    auto input_data = input.tensor();
-
-    // Compute the primal output
-    auto output = func(input);
-
-    // Half-precision eps=1e-4 is below representable resolution — the
-    // perturbation quantises to zero and vhp_result ≈ 0/0. Widen to
-    // Float32 for the finite-difference step and cast back at the end.
-    const DType orig_dtype = input_data.dtype();
-    const bool widen = (orig_dtype == DType::Float16 ||
-                        orig_dtype == DType::BFloat16);
-
-    Tensor probe_input = widen ? input_data.to(DType::Float32) : input_data;
-    Tensor probe_v = widen ? v.to(DType::Float32) : v;
-
-    const double eps = 1e-4;
-
-    // Evaluate gradient at x + eps*v (at probe precision — see hvp above
-    // for why we don't cast back to the caller's dtype inside `func`).
-    auto perturbed_fwd = tenzor::add(probe_input, tenzor::mul(probe_v, eps));
-    Variable x_fwd(perturbed_fwd, true);
-    auto out_fwd = func(x_fwd);
-    out_fwd.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
-    Tensor grad_fwd = x_fwd.grad().has_value()
-        ? x_fwd.grad().value()
-        : tenzor::zeros_like(probe_input);
-
-    // Evaluate gradient at x - eps*v
-    auto perturbed_bwd = tenzor::sub(probe_input, tenzor::mul(probe_v, eps));
-    Variable x_bwd(perturbed_bwd, true);
-    auto out_bwd = func(x_bwd);
-    out_bwd.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
-    Tensor grad_bwd = x_bwd.grad().has_value()
-        ? x_bwd.grad().value()
-        : tenzor::zeros_like(probe_input);
-
-    // Central difference
-    auto vhp_result = tenzor::mul(
-        tenzor::sub(grad_fwd, grad_bwd),
-        1.0 / (2.0 * eps)
-    );
-
-    if (widen) vhp_result = vhp_result.to(orig_dtype);
-    return {output, vhp_result};
+    // v^T·H for a scalar f. The Hessian of a scalar function is symmetric, so
+    // v^T·H == H·v, and we compute it with the SAME exact forward-over-reverse
+    // double-backward as hvp (analytic — no finite differences). For the
+    // intended scalar-valued `func` this is exact; for a (non-standard)
+    // vector-valued `func` the Hessian-of-grad is generally non-symmetric and
+    // v^T·H != H·v — vhp on such inputs is not well-defined and is not
+    // supported (use jacobian/vjp of the gradient function explicitly).
+    return hvp(std::move(func), input, v);
 }
 
 auto vjp(std::function<Variable(const Variable&)> func,

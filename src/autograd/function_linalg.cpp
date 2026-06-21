@@ -505,27 +505,27 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         case DType::Float64:  rel_eps = 1e-12; break;
         default:              rel_eps = 1e-6; break;  // Float32
     }
-    auto abs_diffs = abs(diffs);
-    // Relative threshold scaled by the largest |s^2| of THIS matrix so the
-    // clamp is dimensionally meaningful regardless of the singular-value
-    // magnitudes. Reduce over only the trailing K dim (per matrix), keepdim,
-    // then unsqueeze to (..., 1, 1) so the tolerance broadcasts over the
-    // (..., K, K) comparison without coupling unrelated batch elements.
+    // Lorentzian-broadened reciprocal of the eigenvalue-gap, mirroring the
+    // strictly-better EigBackward regularization:
+    //     F_ij = diff_ij / (diff_ij^2 + eps^2),   diff_ij = s_j^2 - s_i^2.
+    // This equals the exact 1/(s_j^2 - s_i^2) for well-separated singular
+    // values but stays BOUNDED by 1/(2 eps) at (near-)degenerate roots and is
+    // never HARD-ZEROED. The previous fixed-threshold `lt(|diff|, tol)` mask
+    // clamped any pair whose squared gap fell under tol to exactly 0, dropping
+    // the eigenvector-rotation contribution entirely for closely-but-
+    // legitimately-separated spectra (common in ML covariance/attention
+    // matrices) — a finite-but-biased-low gradient. The diagonal (diff == 0)
+    // gives F == 0 automatically since the numerator is 0, so no explicit
+    // diagonal masking is needed. eps scales relative to the spectrum so the
+    // broadening is dimensionally meaningful regardless of magnitude.
     auto max_scale = tenzor::max(abs(S_sq), S_sq.ndim() - 1, /*keepdim=*/true);  // (..., 1)
     max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
-    auto tol = add(mul(max_scale, rel_eps), rel_eps);  // rel_eps*(max|s^2| + 1)
-    auto is_small = lt(abs_diffs, tol);
-
-    // Replace near-degenerate off-diagonal denominators (and the diagonal,
-    // which is always exactly zero) with 1 to avoid division by zero.
-    auto ones_kk = ones({K, K}, S.dtype(), S.device());
-    auto safe_diffs = where(is_small, ones_kk, diffs);
-
-    // F = 1/safe_diffs, then zero out the small/degenerate entries (this also
-    // zeros the diagonal, since diffs is exactly 0 there → is_small is true).
-    auto F = reciprocal(safe_diffs);
-    auto zero_kk = full({K, K}, 0.0f, S.dtype(), S.device());
-    F = where(is_small, zero_kk, F);
+    // eps = rel_eps * (max|s^2| + 1): scales with the spectrum, with a floor so
+    // an all-tiny-magnitude matrix is still regularized.
+    auto eps_tol = add(mul(max_scale, rel_eps), rel_eps);   // (..., 1, 1)
+    auto eps_sq = mul(eps_tol, eps_tol);
+    auto denom = add(mul(diffs, diffs), eps_sq);            // diff^2 + eps^2
+    auto F = div(diffs, denom);
 
     // Core SVD backward formula:
     // dL/dA = U @ (diag(dL/dS) + F * (Ut @ dL/dU) @ S_diag + S_diag @ F * (dL/dVh @ V)) @ Vh
@@ -725,18 +725,14 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto W_col = unsqueeze(W, W.ndim());      // (..., N, 1)  varies over i
     auto diffs = sub(W_row, W_col);           // diffs[..., i, j] = w_j - w_i
 
-    // Near-degenerate eigenvalues make 1/(w_j - w_i) blow up. The old code
-    // "clamped" |diff| to detail::dtype_epsilon (1e-30 for fp32/fp64) via
-    // where(lt(abs_diffs, eps), sign(diffs)*eps, diffs), which only fires at
-    // essentially exact zero where sign(0)=0 leaves safe_diffs=0, so
-    // reciprocal(0)=+inf and grad_A becomes inf/NaN at exact degeneracy. Mirror
-    // the forward-mode eigh JVP rule: build an is_small mask (relative
-    // threshold, capturing exact zeros too), set the denominator to 1 there,
-    // reciprocate, then ZERO those F entries — finite F at degenerate roots.
-    //
-    // NOTE (shared-header): detail::dtype_epsilon (1e-30 for fp32/fp64) is not
-    // a meaningful clamp magnitude; that helper is in safe_math.hpp (outside
-    // edit scope), so the relative tolerance is computed locally here.
+    // Lorentzian-broadened reciprocal of the eigenvalue gap (mirrors
+    // EigBackward): F_ij = diff_ij / (diff_ij^2 + eps^2), diff_ij = w_j - w_i.
+    // Exact 1/(w_j - w_i) for well-separated eigenvalues, BOUNDED by 1/(2 eps)
+    // at (near-)degenerate roots, and NEVER hard-zeroed — unlike the previous
+    // fixed-threshold mask that clamped any pair under `tol` to exactly 0 and
+    // thus dropped the eigenvector-rotation gradient for closely-but-
+    // legitimately-separated spectra. The diagonal (diff == 0) yields F == 0
+    // automatically (zero numerator), so no explicit diagonal masking.
     double rel_eps;
     switch (W.dtype()) {
         case DType::Float16:
@@ -744,23 +740,15 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
         case DType::Float64:  rel_eps = 1e-12; break;
         default:              rel_eps = 1e-6; break;  // Float32
     }
-    auto abs_diffs = abs(diffs);
-    // Per-matrix relative tolerance: reduce |w| over only the trailing N dim
-    // (the eigenvalues of THIS matrix), keepdim, then unsqueeze to (..., 1, 1)
-    // so it broadcasts over (..., N, N) without coupling unrelated batches.
+    // Per-matrix relative eps: reduce |w| over only the trailing N dim (the
+    // eigenvalues of THIS matrix), keepdim, then unsqueeze to (..., 1, 1) so it
+    // broadcasts over (..., N, N) without coupling unrelated batches.
     auto max_scale = tenzor::max(abs(W), W.ndim() - 1, /*keepdim=*/true);  // (..., 1)
     max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
-    auto tol = add(mul(max_scale, rel_eps), rel_eps);  // rel_eps*(max|w| + 1)
-    auto is_small = lt(abs_diffs, tol);
-
-    // Replace near-degenerate off-diagonal denominators (and the always-zero
-    // diagonal) with 1 to avoid division by zero.
-    auto ones_nn = ones({N, N}, W.dtype(), W.device());
-    auto safe_diffs = where(is_small, ones_nn, diffs);
-
-    auto F = reciprocal(safe_diffs);
-    auto zero_nn = full({N, N}, 0.0f, W.dtype(), W.device());
-    F = where(is_small, zero_nn, F);  // finite + diagonal/degenerate zeroed
+    auto eps_tol = add(mul(max_scale, rel_eps), rel_eps);  // rel_eps*(max|w| + 1)
+    auto eps_sq = mul(eps_tol, eps_tol);
+    auto denom = add(mul(diffs, diffs), eps_sq);           // diff^2 + eps^2
+    auto F = div(diffs, denom);
 
     auto Vt = transpose(V, V.ndim() - 2, V.ndim() - 1);
 
@@ -1145,19 +1133,14 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         case DType::Float64:  rel_eps = 1e-12; break;
         default:              rel_eps = 1e-6; break;  // Float32
     }
-    auto abs_diffs = abs(diffs);
-    // Per-matrix relative tolerance: reduce over only the trailing K dim,
-    // keepdim, then unsqueeze to (..., 1, 1) so unrelated batch matrices keep
-    // independent degeneracy thresholds.
+    // Lorentzian broadening (matches the Tensor path): F = diff/(diff^2+eps^2),
+    // bounded at degeneracy, never hard-zeroed; diagonal F==0 automatically.
     auto max_scale = tenzor::max(abs(S_sq), S_sq.ndim() - 1, /*keepdim=*/true);  // (..., 1)
     max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
-    auto tol = add(mul(max_scale, rel_eps), rel_eps);
-    auto is_small = lt(abs_diffs, tol);
-    auto ones_kk = ones({K, K}, S_tensor.dtype(), S_tensor.device());
-    auto safe_diffs = where(is_small, ones_kk, diffs);
-    auto F_tensor = reciprocal(safe_diffs);
-    auto zero_kk = full({K, K}, 0.0f, S_tensor.dtype(), S_tensor.device());
-    F_tensor = where(is_small, zero_kk, F_tensor);
+    auto eps_tol = add(mul(max_scale, rel_eps), rel_eps);
+    auto eps_sq = mul(eps_tol, eps_tol);
+    auto denom = add(mul(diffs, diffs), eps_sq);
+    auto F_tensor = div(diffs, denom);
 
     auto F = Variable(F_tensor, false);
 
@@ -1328,19 +1311,14 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
         case DType::Float64:  rel_eps = 1e-12; break;
         default:              rel_eps = 1e-6; break;  // Float32
     }
-    auto abs_diffs = abs(diffs);
-    // Per-matrix relative tolerance: reduce over only the trailing N dim,
-    // keepdim, then unsqueeze to (..., 1, 1) so unrelated batch matrices keep
-    // independent degeneracy thresholds.
+    // Lorentzian broadening (matches the Tensor path): F = diff/(diff^2+eps^2),
+    // bounded at degeneracy, never hard-zeroed; diagonal F==0 automatically.
     auto max_scale = tenzor::max(abs(W_tensor), W_tensor.ndim() - 1, /*keepdim=*/true);  // (..., 1)
     max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
-    auto tol = add(mul(max_scale, rel_eps), rel_eps);
-    auto is_small = lt(abs_diffs, tol);
-    auto ones_nn = ones({N, N}, W_tensor.dtype(), W_tensor.device());
-    auto safe_diffs = where(is_small, ones_nn, diffs);
-    auto F_tensor = reciprocal(safe_diffs);
-    auto zero_nn = full({N, N}, 0.0f, W_tensor.dtype(), W_tensor.device());
-    F_tensor = where(is_small, zero_nn, F_tensor);
+    auto eps_tol = add(mul(max_scale, rel_eps), rel_eps);
+    auto eps_sq = mul(eps_tol, eps_tol);
+    auto denom = add(mul(diffs, diffs), eps_sq);
+    auto F_tensor = div(diffs, denom);
 
     auto F = Variable(F_tensor, false);
 
@@ -2110,55 +2088,28 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // device.  Only the gradient hop is CPU-bound until the GPU backends
     // grow complex inv / matmul / div.
     //
-    // We currently support only non-batched eig (ndim == 2), matching the
-    // real-path constraint above.  A genuine batched complex backward
-    // would loop the unpacking and complex matmul per batch.
-
-    if (V.ndim() != 2) {
-        throw std::runtime_error(
-            "EigBackward: complex-eigenvalue backward currently supports "
-            "only non-batched matrices (ndim == 2); got ndim=" +
-            std::to_string(V.ndim()) + ".  File an issue to add batched "
-            "complex eig backward.");
-    }
+    // Batched complex eig is supported by looping the per-matrix complex
+    // backward over the flattened leading batch dims (the real path above is
+    // already batched). Each (n,n)/(n) slice runs the dense Mike-Giles complex
+    // gradient; results stack back into the batched grad_A.
 
     const Device orig_device = V.device();
     const DType  real_dtype  = V.dtype();
+    const int64_t n = V.shape().back();
+    const auto v_shape = std::vector<int64_t>(V.shape().begin(), V.shape().end());
 
-    // Shuttle every input tensor to CPU.
-    Tensor W_real_cpu   = W_real.to(Device::cpu());
-    Tensor W_imag_cpu   = W_imag.to(Device::cpu());
-    Tensor V_cpu        = V.to(Device::cpu());
-    Tensor grad_Wr_cpu  = grad_W_real.to(Device::cpu());
-    Tensor grad_Wi_cpu  = grad_W_imag.to(Device::cpu());
-    Tensor grad_V_cpu   = grad_V.to(Device::cpu());
+    // Shuttle every input to CPU at the saved real precision.
+    auto to_cpu_real = [&](const Tensor& t) {
+        return t.to(Device::cpu()).to(real_dtype).contiguous();
+    };
+    Tensor W_real_cpu   = to_cpu_real(W_real);
+    Tensor W_imag_cpu   = to_cpu_real(W_imag);
+    Tensor V_cpu        = to_cpu_real(V);
+    Tensor grad_Wr_cpu  = to_cpu_real(grad_W_real);
+    Tensor grad_Wi_cpu  = to_cpu_real(grad_W_imag);
+    Tensor grad_V_cpu   = to_cpu_real(grad_V);
 
-    // Promote everything to the LAPACK working precision (Float32 or
-    // Float64) — the saved tensors are already that dtype, but the grad
-    // outputs may have been padded with zeros_like (which preserves dtype
-    // anyway).  Stay consistent with the saved real_dtype.
-    W_real_cpu  = W_real_cpu.to(real_dtype);
-    W_imag_cpu  = W_imag_cpu.to(real_dtype);
-    V_cpu       = V_cpu.to(real_dtype);
-    grad_Wr_cpu = grad_Wr_cpu.to(real_dtype);
-    grad_Wi_cpu = grad_Wi_cpu.to(real_dtype);
-    grad_V_cpu  = grad_V_cpu.to(real_dtype);
-
-    Tensor V_complex_t, grad_V_complex_t, grad_W_complex_t;
-
-    if (real_dtype == DType::Float64) {
-        auto [Vc, gVc, gWc] = build_complex_inputs_typed<double, DType::Complex128>(
-            V_cpu, W_imag_cpu, grad_V_cpu, grad_Wr_cpu, grad_Wi_cpu);
-        V_complex_t      = Vc;
-        grad_V_complex_t = gVc;
-        grad_W_complex_t = gWc;
-    } else if (real_dtype == DType::Float32) {
-        auto [Vc, gVc, gWc] = build_complex_inputs_typed<float, DType::Complex64>(
-            V_cpu, W_imag_cpu, grad_V_cpu, grad_Wr_cpu, grad_Wi_cpu);
-        V_complex_t      = Vc;
-        grad_V_complex_t = gVc;
-        grad_W_complex_t = gWc;
-    } else {
+    if (real_dtype != DType::Float64 && real_dtype != DType::Float32) {
         // Lower-precision real dtypes are widened to Float32 by LAPACK; we
         // shouldn't reach here unless the forward changed.
         throw std::runtime_error(
@@ -2167,87 +2118,116 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
             std::to_string(static_cast<int>(real_dtype)) + ".");
     }
 
-    // Build complex W (vector of n complex eigenvalues) via tenzor::complex.
-    Tensor W_complex = tenzor::complex(W_real_cpu, W_imag_cpu);
+    // Per-matrix complex backward for a single (n,n)/(n) slice, all CPU
+    // real-dtype. Returns grad_A (n,n) real on CPU.
+    auto single_matrix_backward =
+        [&](const Tensor& Vm, const Tensor& Wr_m, const Tensor& Wi_m,
+            const Tensor& gV_m, const Tensor& gWr_m,
+            const Tensor& gWi_m) -> Tensor {
+        Tensor V_complex_t, grad_V_complex_t, grad_W_complex_t;
+        if (real_dtype == DType::Float64) {
+            auto [Vc, gVc, gWc] = build_complex_inputs_typed<double, DType::Complex128>(
+                Vm, Wi_m, gV_m, gWr_m, gWi_m);
+            V_complex_t = Vc; grad_V_complex_t = gVc; grad_W_complex_t = gWc;
+        } else {
+            auto [Vc, gVc, gWc] = build_complex_inputs_typed<float, DType::Complex64>(
+                Vm, Wi_m, gV_m, gWr_m, gWi_m);
+            V_complex_t = Vc; grad_V_complex_t = gVc; grad_W_complex_t = gWc;
+        }
 
-    const int64_t n = V_complex_t.shape().back();
+        // Build complex W (vector of n complex eigenvalues).
+        Tensor W_complex = tenzor::complex(Wr_m, Wi_m);
 
-    // F[i, j] = 1 / (W[j] - W[i]), 0 on diagonal — all complex.
-    auto W_col = unsqueeze(W_complex, 1);  // (n, 1)
-    auto W_row = unsqueeze(W_complex, 0);  // (1, n)
-    auto diff = sub(W_row, W_col);         // (n, n) complex
+        // F[i, j] = 1 / (W[j] - W[i]), 0 on diagonal — all complex.
+        auto W_col = unsqueeze(W_complex, 1);  // (n, 1)
+        auto W_row = unsqueeze(W_complex, 0);  // (1, n)
+        auto diff = sub(W_row, W_col);         // (n, n) complex
 
-    // Lorentzian-broadened complex reciprocal of eigenvalue gaps:
-    //   F_ij = conj(W_j - W_i) / (|W_j - W_i|^2 + eps^2)   (i != j),   F_ii = 0.
-    // This is the exact 1/(W_j - W_i) for well-separated eigenvalues but stays
-    // bounded by 1/(2 eps) at (near-)degenerate roots, preventing the Inf/NaN
-    // that the naive reciprocal would push into the downstream complex
-    // linalg::solve (which hard-aborts on non-finite input). Mirrors the
-    // real-eigenvalue path's regularization.
-    auto diff_re = tenzor::real(diff);
-    auto diff_im = tenzor::imag(diff);
-    auto mag2 = tenzor::add(tenzor::mul(diff_re, diff_re),
-                            tenzor::mul(diff_im, diff_im));   // (n, n) real |diff|^2
-    double w_scale_c = 0.0;
-    {
-        auto wr_max = tenzor::max(tenzor::abs(W_real_cpu));
-        auto wi_max = tenzor::max(tenzor::abs(W_imag_cpu));
-        auto scal = [](const Tensor& t) -> double {
-            return (t.dtype() == DType::Float64) ? t.item<double>()
-                                                 : static_cast<double>(t.item<float>());
-        };
-        w_scale_c = scal(wr_max) + scal(wi_max);
+        // Lorentzian-broadened complex reciprocal of eigenvalue gaps:
+        //   F_ij = conj(W_j - W_i) / (|W_j - W_i|^2 + eps^2)   (i != j), F_ii=0.
+        // Exact 1/(W_j - W_i) for well-separated eigenvalues, bounded by
+        // 1/(2 eps) at (near-)degenerate roots — prevents Inf/NaN reaching the
+        // downstream complex linalg::solve. Mirrors the real path.
+        auto diff_re = tenzor::real(diff);
+        auto diff_im = tenzor::imag(diff);
+        auto mag2 = tenzor::add(tenzor::mul(diff_re, diff_re),
+                                tenzor::mul(diff_im, diff_im));   // (n, n) real |diff|^2
+        double w_scale_c = 0.0;
+        {
+            auto wr_max = tenzor::max(tenzor::abs(Wr_m));
+            auto wi_max = tenzor::max(tenzor::abs(Wi_m));
+            auto scal = [](const Tensor& t) -> double {
+                return (t.dtype() == DType::Float64) ? t.item<double>()
+                                                     : static_cast<double>(t.item<float>());
+            };
+            w_scale_c = scal(wr_max) + scal(wi_max);
+        }
+        const double mach_c = (real_dtype == DType::Float64)
+            ? 2.220446049250313e-16 : 1.1920929e-7;
+        const double eps_c = std::sqrt(mach_c) * (1.0 + std::abs(w_scale_c));
+        auto denom_c = tenzor::add(mag2,
+            tenzor::full({1}, eps_c * eps_c, real_dtype, Device::cpu()));
+        auto inv_denom = tenzor::div(
+            tenzor::full({1}, 1.0, real_dtype, Device::cpu()), denom_c);   // (n, n) real
+        auto F_re = tenzor::mul(diff_re, inv_denom);
+        auto F_im = tenzor::mul(tenzor::neg(diff_im), inv_denom);
+        auto F = tenzor::complex(F_re, F_im);
+
+        // Zero the diagonal of F (eigenvalue self-gap is identically zero).
+        auto ones_n = tenzor::full({n}, 1.0, real_dtype, Device::cpu());
+        auto zeros_n = tenzor::full({n}, 0.0, real_dtype, Device::cpu());
+        auto eye_n_complex = tenzor::complex(tenzor::diag(ones_n), tenzor::diag(zeros_n));
+        auto ones_nn_real = tenzor::full({n, n}, 1.0, real_dtype, Device::cpu());
+        auto zeros_nn_real = tenzor::full({n, n}, 0.0, real_dtype, Device::cpu());
+        auto ones_nn_complex = tenzor::complex(ones_nn_real, zeros_nn_real);
+        auto off_diag_mask = tenzor::sub(ones_nn_complex, eye_n_complex);
+        F = tenzor::mul(F, off_diag_mask);
+
+        // Mike Giles formula for non-symmetric eig of a real A → (W, V):
+        //   grad_A = V^{-T} (diag(grad_W) + F ∘ (V^T grad_V)) V^T
+        // Plain (not Hermitian) transpose; the conjugate-Wirtinger convention
+        // of the incoming grads already accounts for the conjugation.
+        auto V_T = transpose(V_complex_t, 0, 1).contiguous();
+        auto VT_gradV = matmul(V_T, grad_V_complex_t);
+        auto eigvec_term = mul(VT_gradV, F);
+        auto diag_grad_W = diag(grad_W_complex_t);
+        auto inner = tenzor::add(diag_grad_W, eigvec_term);
+        auto rhs = matmul(inner, V_T);
+        auto grad_A_complex = tenzor::linalg::solve(V_T, rhs);
+        // A is real → take the real part.
+        return tenzor::real(grad_A_complex).to(real_dtype);
+    };
+
+    Tensor grad_A_cpu;
+    if (V.ndim() == 2) {
+        grad_A_cpu = single_matrix_backward(
+            V_cpu, W_real_cpu, W_imag_cpu, grad_V_cpu, grad_Wr_cpu, grad_Wi_cpu);
+    } else {
+        // Flatten the leading batch dims, loop, stack, reshape back.
+        int64_t batch = 1;
+        for (size_t d = 0; d + 2 < v_shape.size(); ++d) batch *= v_shape[d];
+        auto V_b   = tenzor::reshape(V_cpu,       {batch, n, n});
+        auto Wr_b  = tenzor::reshape(W_real_cpu,  {batch, n});
+        auto Wi_b  = tenzor::reshape(W_imag_cpu,  {batch, n});
+        auto gV_b  = tenzor::reshape(grad_V_cpu,  {batch, n, n});
+        auto gWr_b = tenzor::reshape(grad_Wr_cpu, {batch, n});
+        auto gWi_b = tenzor::reshape(grad_Wi_cpu, {batch, n});
+
+        std::vector<Tensor> grad_mats;
+        grad_mats.reserve(static_cast<size_t>(batch));
+        for (int64_t b = 0; b < batch; ++b) {
+            auto Vm   = tenzor::select(V_b,  0, b).contiguous();
+            auto Wr_m = tenzor::select(Wr_b, 0, b).contiguous();
+            auto Wi_m = tenzor::select(Wi_b, 0, b).contiguous();
+            auto gV_m = tenzor::select(gV_b, 0, b).contiguous();
+            auto gWr_m= tenzor::select(gWr_b,0, b).contiguous();
+            auto gWi_m= tenzor::select(gWi_b,0, b).contiguous();
+            grad_mats.push_back(single_matrix_backward(
+                Vm, Wr_m, Wi_m, gV_m, gWr_m, gWi_m));
+        }
+        auto stacked = tenzor::stack(std::span<const Tensor>(grad_mats), 0); // (batch, n, n)
+        grad_A_cpu = tenzor::reshape(stacked, v_shape);
     }
-    const double mach_c = (real_dtype == DType::Float64)
-        ? 2.220446049250313e-16 : 1.1920929e-7;
-    const double eps_c = std::sqrt(mach_c) * (1.0 + std::abs(w_scale_c));
-    auto denom_c = tenzor::add(mag2,
-        tenzor::full({1}, eps_c * eps_c, real_dtype, Device::cpu()));
-    // F = conj(diff) / denom_c  (complex / real).  Build as complex(re/denom, im_conj/denom).
-    auto inv_denom = tenzor::div(
-        tenzor::full({1}, 1.0, real_dtype, Device::cpu()), denom_c);   // (n, n) real
-    auto F_re = tenzor::mul(diff_re, inv_denom);
-    auto F_im = tenzor::mul(tenzor::neg(diff_im), inv_denom);
-    auto F = tenzor::complex(F_re, F_im);
-
-    // Zero the diagonal of F (eigenvalue self-gap is identically zero).
-    auto ones_n = tenzor::full({n}, 1.0, real_dtype, Device::cpu());
-    auto zeros_n = tenzor::full({n}, 0.0, real_dtype, Device::cpu());
-    auto eye_n_complex = tenzor::complex(tenzor::diag(ones_n), tenzor::diag(zeros_n));
-    auto ones_nn_real = tenzor::full({n, n}, 1.0, real_dtype, Device::cpu());
-    auto zeros_nn_real = tenzor::full({n, n}, 0.0, real_dtype, Device::cpu());
-    auto ones_nn_complex = tenzor::complex(ones_nn_real, zeros_nn_real);
-    auto off_diag_mask = tenzor::sub(ones_nn_complex, eye_n_complex);
-    F = tenzor::mul(F, off_diag_mask);
-
-    // The Mike Giles formula for the *non-symmetric* eig of a real
-    // matrix A producing complex (W, V) uses the plain transpose, not
-    // the Hermitian (conjugate) transpose:
-    //
-    //   grad_A = V^{-T} (diag(grad_W) + F ∘ (V^T grad_V)) V^T
-    //
-    // (See Giles 2008 §3 and the DLR matrix-calculus notes; the
-    // conjugation that one might expect from "complex math" is already
-    // baked into the conjugate-Wirtinger convention by which the
-    // upstream gradients arrive — we must NOT conjugate again here.)
-    auto V_T = transpose(V_complex_t, 0, 1).contiguous();
-
-    // (V^T grad_V) ∘ F
-    auto VT_gradV = matmul(V_T, grad_V_complex_t);
-    auto eigvec_term = mul(VT_gradV, F);
-
-    // diag(grad_W) is complex; tenzor::diag is dtype-agnostic byte copy
-    // on CPU, so it works for Complex64/128.
-    auto diag_grad_W = diag(grad_W_complex_t);
-    auto inner = tenzor::add(diag_grad_W, eigvec_term);
-
-    // grad_A_complex = V^{-T} @ inner @ V^T
-    //                = solve(V^T, inner @ V^T)
-    auto rhs = matmul(inner, V_T);
-    auto grad_A_complex = tenzor::linalg::solve(V_T, rhs);
-
-    // A is real → take the real part.
-    auto grad_A_cpu = tenzor::real(grad_A_complex).to(real_dtype);
 
     // Move back to the original device.
     if (orig_device.type != Device::Type::CPU) {

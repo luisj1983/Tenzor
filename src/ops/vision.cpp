@@ -84,6 +84,12 @@ auto fold(const Tensor& input,
             "output_size must have 2 elements (H, W), got " +
             std::to_string(output_size.size()));
     }
+    if (output_size[0] <= 0 || output_size[1] <= 0) {
+        throw std::invalid_argument(
+            "fold: output_size elements must be positive, got (" +
+            std::to_string(output_size[0]) + ", " +
+            std::to_string(output_size[1]) + ")");
+    }
 
     // Validate positivity of structural parameters before any division/modulo.
     // kernel_size guards the modulo on col_channels and the output-size formula;
@@ -187,6 +193,17 @@ auto interpolate(const Tensor& input,
             ". Supported modes: 'nearest', 'bilinear', 'bicubic', 'trilinear'");
     }
 
+    // Reject non-positive output extents before serializing to the backend;
+    // a zero/negative size produces negative loop bounds or a huge unsigned
+    // extent after cast inside the kernel (memory-safety risk).
+    for (size_t i = 0; i < size.size(); ++i) {
+        if (size[i] <= 0) {
+            throw std::invalid_argument(
+                "interpolate: output size elements must be positive, got " +
+                std::to_string(size[i]) + " at index " + std::to_string(i));
+        }
+    }
+
     // Check for no-op (output size matches input spatial dims)
     bool same_size = true;
     for (size_t i = 0; i < size.size(); ++i) {
@@ -269,6 +286,16 @@ auto affine_grid(const Tensor& theta,
     if (theta_shape[0] != size[0]) {
         throw std::invalid_argument(
             "affine_grid: batch size of theta must match size[0]");
+    }
+    // Reject non-positive output extents before serializing to the backend;
+    // a zero/negative grid dimension yields negative loop bounds / huge
+    // unsigned extents inside the kernel (memory-safety risk).
+    for (size_t i = 0; i < size.size(); ++i) {
+        if (size[i] <= 0) {
+            throw std::invalid_argument(
+                "affine_grid: size elements must be positive, got " +
+                std::to_string(size[i]) + " at index " + std::to_string(i));
+        }
     }
 
     // Serialize size as comma-separated string

@@ -207,6 +207,22 @@ auto NCCLBackend::all_reduce_async(Tensor& tensor, ReduceOp op,
                                     void* stream) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     validate_gpu_tensor(tensor);
+
+    // ReduceOp::AVG is implemented as ncclSum followed by an in-place divide by
+    // world_size. The async path cannot safely perform that divide on the
+    // caller's stream without extra synchronization, so it would otherwise
+    // return an un-averaged SUM under the AVG label — silently wrong, unlike the
+    // synchronous all_reduce() which divides internally. Reject AVG explicitly
+    // rather than producing a wrong result; callers needing an async average
+    // must use ncclSum here and divide by world_size after their own sync.
+    if (op == ReduceOp::AVG) {
+        throw std::invalid_argument(
+            "NCCLBackend::all_reduce_async: ReduceOp::AVG is not supported on the "
+            "asynchronous path (the averaging divide cannot be applied on the "
+            "caller's stream). Use ReduceOp::SUM and divide by world_size after "
+            "synchronizing, or use the synchronous all_reduce().");
+    }
+
     int device_id = get_device_id(tensor);
     ncclComm_t comm = get_communicator(device_id);
 
@@ -770,9 +786,21 @@ auto NCCLBackend::all_to_all_single(Tensor& output, const Tensor& input) -> void
 
 auto NCCLBackend::barrier() -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-    // NCCL doesn't have native barrier, use all-reduce on dummy tensor
+    // NCCL doesn't have native barrier, use all-reduce on dummy tensor.
+    // Use the communicator's OWN device, not whatever device happens to be
+    // current. A single backend instance binds exactly one device (enforced in
+    // init_communicator); using the ambient cudaGetDevice() could pick a
+    // different device, which would make get_communicator() throw the
+    // "single backend instance supports only one device" error or try to build
+    // a comm from the already-consumed unique_id. Fall back to the ambient
+    // device only if no communicator has been created yet (initialize() always
+    // builds one, so this is just a safety net).
     int device_id = 0;
-    GPU_CHECK(cudaGetDevice(&device_id));
+    if (!communicators_.empty()) {
+        device_id = communicators_.begin()->first;
+    } else {
+        GPU_CHECK(cudaGetDevice(&device_id));
+    }
 
     Tensor dummy = zeros({1}, DType::Float32, Device::cuda(device_id));
     all_reduce(dummy, ReduceOp::SUM);

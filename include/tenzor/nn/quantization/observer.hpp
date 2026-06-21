@@ -126,9 +126,14 @@ private:
  * Similar to MinMaxObserver but uses exponential moving average to
  * reduce sensitivity to outliers and adapt to changing distributions.
  *
- * Update rule:
+ * Update rule (momentum weights the accumulated HISTORY, like an EMA decay /
+ * BatchNorm-style momentum — NOT PyTorch's averaging_constant, which weights
+ * the new sample). Larger momentum = more smoothing / slower adaptation:
  * min_avg = momentum * min_avg + (1 - momentum) * current_min
  * max_avg = momentum * max_avg + (1 - momentum) * current_max
+ *
+ * To match PyTorch's MovingAverageMinMaxObserver(averaging_constant=c), pass
+ * momentum = 1 - c (e.g. PyTorch default c=0.01 -> momentum=0.99).
  *
  * @code
  * MovingAverageMinMaxObserver observer(0.99);  // Heavy smoothing

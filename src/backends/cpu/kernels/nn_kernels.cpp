@@ -761,7 +761,13 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
     int64_t n = input.numel();
     float* mask_data = mask.data<float>();
 
-    float scale = 1.0f / (1.0f - p);
+    // Compute the inverted-dropout scale in double so the Float64 path is
+    // exact to double precision; narrow to float only for the (Float32) mask
+    // and the Float32/Float16/BFloat16 outputs. The Float64 forward and
+    // backward both use scale_d, keeping the gradient an exact derivative of
+    // the forward (see dropout_backward_kernel).
+    const double scale_d = 1.0 / (1.0 - static_cast<double>(p));
+    const float scale = static_cast<float>(scale_d);
 
     // Draw ONE base seed on the calling (master) thread, BEFORE any parallel
     // region, so manual_seed() set on this thread is honored and the per-element
@@ -771,6 +777,9 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
 
     auto apply_dropout_float = [&](auto* in_data, auto* out_data) {
         using T = std::remove_pointer_t<decltype(in_data)>;
+        // Float32 keeps the float scale; Float64 uses the exact double scale.
+        const T scale_t = static_cast<T>(
+            std::is_same_v<T, double> ? scale_d : static_cast<double>(scale));
         #pragma omp parallel for
         for (int64_t i = 0; i < n; ++i) {
             float r = counter_uniform(base_seed, static_cast<uint64_t>(i));
@@ -779,7 +788,7 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
                 out_data[i] = T(0);
             } else {
                 mask_data[i] = scale;
-                out_data[i] = in_data[i] * static_cast<T>(scale);
+                out_data[i] = in_data[i] * scale_t;
             }
         }
     };
@@ -834,11 +843,16 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
             grad_in_data[i] = grad_data[i] * mask_data[i];
         }
     } else if (grad_output.dtype() == DType::Float64) {
+        // Use the exact double scale (matching the Float64 forward in
+        // dropout_kernel) instead of the float-rounded mask value, so the
+        // backward is a bit-exact derivative of the double-precision forward.
+        // The mask carries the keep/drop indicator (0 == dropped).
+        const double scale_d = 1.0 / (1.0 - static_cast<double>(p));
         const double* grad_data = grad_output.data<double>();
         double* grad_in_data = grad_input.data<double>();
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
-            grad_in_data[i] = grad_data[i] * static_cast<double>(mask_data[i]);
+            grad_in_data[i] = (mask_data[i] != 0.0f) ? grad_data[i] * scale_d : 0.0;
         }
     } else if (grad_output.dtype() == DType::Float16) {
         const Float16* grad_data = grad_output.data<Float16>();
@@ -1709,6 +1723,10 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
     for (auto s : normalized_shape) {
         norm_size *= s;
     }
+    if (norm_size <= 0) {
+        throw std::invalid_argument(
+            "layer_norm: normalized_shape must have a positive element count");
+    }
     int64_t batch_size = input_cont.numel() / norm_size;
 
     auto output = Tensor::empty_uninitialized(
@@ -1813,6 +1831,10 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
     for (auto s : normalized_shape) {
         norm_size *= s;
     }
+    if (norm_size <= 0) {
+        throw std::invalid_argument(
+            "layer_norm: normalized_shape must have a positive element count");
+    }
     int64_t batch_size = input_cont.numel() / norm_size;
 
     // Create output tensor
@@ -1910,6 +1932,10 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
+    if (num_groups <= 0 || C % num_groups != 0) {
+        throw std::invalid_argument(
+            "group_norm: num_groups must be positive and divide the channel count");
+    }
     int64_t spatial_size = 1;
     for (size_t i = 2; i < shape.size(); ++i) {
         spatial_size *= shape[i];
@@ -1990,6 +2016,10 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
     int64_t spatial_size = 1;
     for (size_t i = 2; i < shape.size(); ++i) {
         spatial_size *= shape[i];
+    }
+    if (spatial_size <= 0) {
+        throw std::invalid_argument(
+            "instance_norm: input must have a positive spatial size");
     }
 
     auto output = Tensor::empty_uninitialized(
@@ -2090,6 +2120,10 @@ auto group_norm_kernel_with_stats(const Tensor& input, int64_t num_groups,
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
+    if (num_groups <= 0 || C % num_groups != 0) {
+        throw std::invalid_argument(
+            "group_norm: num_groups must be positive and divide the channel count");
+    }
     int64_t spatial_size = 1;
     for (size_t i = 2; i < shape.size(); ++i) {
         spatial_size *= shape[i];
@@ -2189,6 +2223,10 @@ auto instance_norm_kernel_with_stats(const Tensor& input, const Tensor& weight,
     for (size_t i = 2; i < shape.size(); ++i) {
         spatial_size *= shape[i];
     }
+    if (spatial_size <= 0) {
+        throw std::invalid_argument(
+            "instance_norm: input must have a positive spatial size");
+    }
 
     auto output = Tensor::empty_uninitialized(
         std::vector<int64_t>(shape.begin(), shape.end()),
@@ -2246,6 +2284,10 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     int64_t norm_size = 1;
     for (auto s : normalized_shape) {
         norm_size *= s;
+    }
+    if (norm_size <= 0) {
+        throw std::invalid_argument(
+            "layer_norm_backward: normalized_shape must have a positive element count");
     }
     int64_t batch_size = input_cont.numel() / norm_size;
 
@@ -2484,12 +2526,22 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
 // GroupNorm Backward
 // ============================================================================
 
-auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+auto group_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in,
                                  int64_t num_groups, const Tensor& mean,
-                                 const Tensor& rstd, const Tensor& weight) -> std::vector<Tensor> {
+                                 const Tensor& rstd, const Tensor& weight_in) -> std::vector<Tensor> {
+    // Contiguify flat-indexed inputs (mirrors layer_norm_backward_kernel): the
+    // dtype paths below read input/grad_output/weight via data<T>()[idx] over
+    // packed [0,numel) offsets, which is only valid for contiguous storage.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor grad_output = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    Tensor weight = weight_in.is_contiguous() ? weight_in : weight_in.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
+    if (num_groups <= 0 || C % num_groups != 0) {
+        throw std::invalid_argument(
+            "group_norm_backward: num_groups must be positive and divide the channel count");
+    }
     int64_t spatial_size = 1;
     for (size_t i = 2; i < shape.size(); ++i) {
         spatial_size *= shape[i];
@@ -2759,9 +2811,15 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
 // InstanceNorm Backward
 // ============================================================================
 
-auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+auto instance_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in,
                                     const Tensor& mean, const Tensor& rstd,
-                                    const Tensor& weight) -> std::vector<Tensor> {
+                                    const Tensor& weight_in) -> std::vector<Tensor> {
+    // Contiguify flat-indexed inputs (mirrors layer_norm_backward_kernel): the
+    // dtype paths below read input/grad_output/weight via data<T>()[idx] over
+    // packed [0,numel) offsets, which is only valid for contiguous storage.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor grad_output = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    Tensor weight = (weight_in.impl() && !weight_in.is_contiguous()) ? weight_in.contiguous() : weight_in;
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];

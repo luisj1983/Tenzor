@@ -588,9 +588,15 @@ class WeightedRandomSampler(Sampler[int]):
         self.num_samples = num_samples
         self.replacement = replacement
         self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch so successive epochs draw different (but still
+        reproducible) samples. Mirrors ``DistributedSampler.set_epoch``."""
+        self.epoch = epoch
 
     def __iter__(self) -> Iterator[int]:
-        g = random.Random(self.seed)
+        g = random.Random(self.seed + self.epoch)
         if self.replacement:
             indices = g.choices(
                 range(len(self.weights)), weights=self.weights, k=self.num_samples
@@ -646,9 +652,15 @@ class SubsetRandomSampler(Sampler[int]):
     def __init__(self, indices: Sequence[int], seed: int = 0):
         self.indices = list(indices)
         self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch so successive epochs draw different (but still
+        reproducible) orderings. Mirrors ``DistributedSampler.set_epoch``."""
+        self.epoch = epoch
 
     def __iter__(self) -> Iterator[int]:
-        g = random.Random(self.seed)
+        g = random.Random(self.seed + self.epoch)
         shuffled = list(self.indices)
         g.shuffle(shuffled)
         return iter(shuffled)
@@ -795,10 +807,15 @@ class _PrefetchWorker:
         queue_size: int = 2,
         worker_init_fn: Optional[Callable] = None,
         dataset: Any = None,
+        seed: int = 0,
     ):
         self._iterable = iterable
         self._queue: Queue = Queue(maxsize=queue_size)
         self._sentinel = object()
+        # Base seed for this (single) worker. Matches the multi-process
+        # contract where worker RNG is seeded with ``seed + worker_id``;
+        # here worker_id is always 0.
+        self._seed = seed
         # Audit item Z.15: with num_workers=1 the fast path used a plain
         # thread but never invoked worker_init_fn nor populated
         # get_worker_info().  Multi-worker semantics now match for
@@ -819,9 +836,12 @@ class _PrefetchWorker:
         _worker_info_tls.info = WorkerInfo(
             id=0,
             num_workers=1,
-            seed=0,
+            seed=self._seed,
             dataset=self._dataset,
         )
+        # Seed this worker's RNG to match the multi-process formula
+        # (seed + worker_id) with worker_id == 0.
+        random.seed(self._seed)
         try:
             if self._worker_init_fn is not None:
                 self._worker_init_fn(0)
@@ -829,7 +849,19 @@ class _PrefetchWorker:
                 # BB.22: bail out early if the consumer has detached.
                 if not self._alive:
                     break
-                self._queue.put(item)
+                # BB.22 / deadlock fix: a blocking put() on a full queue
+                # would hang forever if the consumer detached after the
+                # _alive check above. Retry with a short timeout and
+                # re-check _alive each round so close() can unblock us.
+                while self._alive:
+                    try:
+                        self._queue.put(item, timeout=0.1)
+                        break
+                    except Full:
+                        continue
+                else:
+                    # Consumer detached while we were blocked; stop producing.
+                    break
         except Exception as e:
             # Only try to surface the error if we haven't been closed; a
             # closed queue may already have been drained and pushing
@@ -1524,6 +1556,7 @@ class DataLoader(Generic[T_co]):
                         queue_size=self.prefetch_factor,
                         worker_init_fn=self.worker_init_fn,
                         dataset=self.dataset,
+                        seed=random.randint(0, 2**31),
                     )
                 else:
                     self._persistent_worker.reset_for_new_epoch(
@@ -1537,6 +1570,10 @@ class DataLoader(Generic[T_co]):
                 queue_size=self.prefetch_factor,
                 worker_init_fn=self.worker_init_fn,
                 dataset=self.dataset,
+                # Draw from the global RNG, which tz.manual_seed seeds, so the
+                # single-worker seed is reproducible and follows the same
+                # source as the multi-process loader's seed.
+                seed=random.randint(0, 2**31),
             )
             return _wrap_pin_memory(it, self.pin_memory)
 

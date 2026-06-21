@@ -212,7 +212,7 @@ __global__ void istft_normalize_kernel_hip(
 auto istft_kernel(const Tensor& input, int64_t n_fft,
                   int64_t hop_length, int64_t win_length,
                   const Tensor& window, bool center,
-                  bool /*normalized*/, bool onesided,
+                  bool normalized, bool onesided,
                   int64_t length, hipStream_t stream) -> Tensor {
     if (n_fft <= 0) throw std::runtime_error("istft: n_fft must be > 0");
     if (hop_length <= 0) hop_length = n_fft / 4;
@@ -235,11 +235,16 @@ auto istft_kernel(const Tensor& input, int64_t n_fft,
     Tensor transposed = tenzor::transpose(reshaped, -1, -2);
     Tensor transposed_contig = transposed.contiguous();
 
+    // Match the forward stft's normalization: stft(normalized=True) scales the
+    // forward rFFT by 1/sqrt(n_fft) ("ortho"), so the inverse must also use the
+    // ortho transform to round-trip to identity. Using "backward" (1/n_fft) on
+    // ortho-scaled input scales the reconstruction by 1/sqrt(n_fft) (wrong).
+    const char* inv_norm = normalized ? "ortho" : "backward";
     Tensor time_frames;
     if (onesided) {
-        time_frames = rocm_irfft_kernel(transposed_contig, /*dim=*/2, n_fft, "backward", stream);
+        time_frames = rocm_irfft_kernel(transposed_contig, /*dim=*/2, n_fft, inv_norm, stream);
     } else {
-        time_frames = rocm_ifft_kernel(transposed_contig, /*dim=*/2, n_fft, "backward", stream);
+        time_frames = rocm_ifft_kernel(transposed_contig, /*dim=*/2, n_fft, inv_norm, stream);
         time_frames = tenzor::real(time_frames);
     }
 

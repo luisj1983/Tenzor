@@ -91,6 +91,7 @@ public:
         if (!pool.streams.empty()) return;  // Already initialized
 
         cudaSetDevice(device_id);
+        pool.base_size = pool_size;  // permanent streams [0, base_size) are never reclaimed
         pool.streams.resize(pool_size);
         pool.available.resize(pool_size, true);
         for (size_t i = 0; i < pool_size; ++i) {
@@ -158,7 +159,7 @@ public:
 
         for (size_t i = 0; i < pool.streams.size(); ++i) {
             if (pool.streams[i] == stream) {
-                pool.available[i] = true;
+                reclaim_or_free(pool, i, stream);
                 return;
             }
         }
@@ -181,7 +182,7 @@ public:
                 auto& pool = device_pools_[device_id];
                 for (size_t i = 0; i < pool.streams.size(); ++i) {
                     if (pool.streams[i] == stream) {
-                        pool.available[i] = true;
+                        reclaim_or_free(pool, i, stream);
                         return;
                     }
                 }
@@ -192,7 +193,7 @@ public:
         for (auto& pool : device_pools_) {
             for (size_t i = 0; i < pool.streams.size(); ++i) {
                 if (pool.streams[i] == stream) {
-                    pool.available[i] = true;
+                    reclaim_or_free(pool, i, stream);
                     return;
                 }
             }
@@ -241,7 +242,24 @@ private:
     struct DevicePool {
         std::vector<cudaStream_t> streams;
         std::vector<uint8_t> available;  // NOT vector<bool> — bit-packing is not thread-safe
+        size_t base_size = 0;            // count of permanent streams created in init()
     };
+
+    // Reclaim an overflow stream (index >= base_size) on release: destroy it,
+    // remove its pool slot, and drop its stream_device_ entry so the pool and
+    // the map cannot grow without bound under bursts of concurrent acquires.
+    // Permanent streams [0, base_size) are only flagged available. `idx` must be
+    // a valid index into `pool.streams`. Caller holds mutex_.
+    void reclaim_or_free(DevicePool& pool, size_t idx, cudaStream_t stream) {
+        if (idx >= pool.base_size) {
+            cudaStreamDestroy(stream);
+            stream_device_.erase(stream);
+            pool.streams.erase(pool.streams.begin() + idx);
+            pool.available.erase(pool.available.begin() + idx);
+        } else {
+            pool.available[idx] = true;
+        }
+    }
 
     std::vector<DevicePool> device_pools_;
     // Maps each handed-out stream to the device it was acquired/created on, so

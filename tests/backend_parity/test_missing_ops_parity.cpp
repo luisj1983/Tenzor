@@ -42,6 +42,21 @@ protected:
         }
         return true;
     }
+
+    // Exact element-wise integer comparison (bucket/bin indices and counts must
+    // match exactly across backends — a 1-off bucket index is a real bug, not
+    // numerical drift). Casts both to Int64 on CPU first.
+    static bool equal_int(const Tensor& a, const Tensor& b) {
+        auto ac = a.to(Device::cpu()).to(DType::Int64);
+        auto bc = b.to(Device::cpu()).to(DType::Int64);
+        if (ac.numel() != bc.numel()) return false;
+        const int64_t* ad = ac.data<int64_t>();
+        const int64_t* bd = bc.data<int64_t>();
+        for (size_t i = 0; i < ac.numel(); ++i) {
+            if (ad[i] != bd[i]) return false;
+        }
+        return true;
+    }
 };
 
 TEST_P(MissingOpsParity, Bernoulli) {
@@ -76,6 +91,11 @@ TEST_P(MissingOpsParity, Bucketize) {
     auto cr = cpu_ref.to(Device::cpu());
     auto gr = gpu_result.to(Device::cpu());
     EXPECT_EQ(cr.numel(), gr.numel());
+    // Bucket indices are integers — they must match the CPU reference exactly.
+    // A backend ignoring boundaries (returning zeros) or off-by-one bucketing
+    // is caught here; a numel-only check would have passed it.
+    EXPECT_TRUE(equal_int(cpu_ref, gpu_result))
+        << "GPU bucketize indices diverge from CPU reference";
 }
 
 TEST_P(MissingOpsParity, CDist) {
@@ -97,6 +117,15 @@ TEST_P(MissingOpsParity, STFT) {
 
     auto gpu_result = tenzor::fft::stft(signal.to(device), n_fft);
     EXPECT_EQ(cpu_ref.shape().size(), gpu_result.shape().size());
+    ASSERT_EQ(cpu_ref.numel(), gpu_result.numel());
+    // Compare the actual spectrogram values, not just rank/numel. The STFT
+    // output is complex; abs() yields the real magnitude spectrogram, which we
+    // compare element-wise. A backend returning a correctly-shaped zero/NaN
+    // tensor (or wrong spectrum) fails here.
+    auto cpu_mag = tenzor::abs(cpu_ref);
+    auto gpu_mag = tenzor::abs(gpu_result).to(Device::cpu());
+    EXPECT_TRUE(close(cpu_mag, gpu_mag, 1e-3))
+        << "GPU STFT magnitude spectrogram diverges from CPU reference";
 }
 
 TEST_P(MissingOpsParity, STFT_ISTFT_RoundTrip) {
@@ -118,10 +147,14 @@ TEST_P(MissingOpsParity, Histogram) {
     auto [cpu_counts, cpu_edges] = histogram(input, 10);
     auto [gpu_counts, gpu_edges] = histogram(input.to(device), 10);
 
-    // Counts may be int64, edges are float — just check shapes match
     EXPECT_EQ(cpu_counts.numel(), gpu_counts.numel());
     EXPECT_EQ(cpu_edges.numel(), gpu_edges.numel());
     EXPECT_TRUE(close(cpu_edges, gpu_edges.to(Device::cpu()), 1e-5));
+    // Bin counts are the substance of a histogram — compare them exactly. A
+    // backend mis-binning (or returning zero counts) with correct edges would
+    // have passed the edges-only check; it fails here.
+    EXPECT_TRUE(equal_int(cpu_counts, gpu_counts))
+        << "GPU histogram bin counts diverge from CPU reference";
 }
 
 // ============================================================================

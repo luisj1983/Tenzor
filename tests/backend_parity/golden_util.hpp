@@ -74,6 +74,20 @@ inline int& comparison_counter() {
     return count;
 }
 
+// Counts golden LOAD ATTEMPTS (every maybe_load call), as opposed to
+// comparison_counter() which counts successful loads that were actually
+// compared. The gap between the two is the silent-disable failure mode the
+// audit flagged: if the input generator / RNG-seed scheme changes, every
+// fingerprint shifts, maybe_load returns nullopt for all of them, and the
+// suite degrades to zero comparisons while still reporting PASS. By tracking
+// attempts we can assert at process exit that a binary which TRIED to use
+// goldens actually compared at least one — without false-failing a binary
+// that legitimately has no goldens for its ops (attempts == 0).
+inline int& load_attempt_counter() {
+    static int count = 0;
+    return count;
+}
+
 // Flush the comparison count to $TENZOR_GOLDEN_COVERAGE_REPORT (if set).
 // Multiple parity test binaries run in one CI step and would clobber a shared
 // path, so each process writes to "<report>.<pid>" — the CI step globs and
@@ -99,6 +113,54 @@ inline void note_comparison() {
     }();
     (void)registered;
     ++comparison_counter();
+}
+
+// Process-exit gate: if this binary attempted to load goldens at all but never
+// successfully compared even one, every golden it expected went missing — the
+// fingerprints no longer match any committed .gold file (input generator or
+// seed scheme changed, or the golden dir was lost). That silently turns the
+// parity comparisons into no-ops while the suite still reports PASS, which is
+// exactly the rot this check exists to surface. Force a non-zero process exit
+// so ctest goes red instead of green-on-nothing. Opt out with
+// TENZOR_GOLDEN_ALLOW_ZERO=1 (e.g. when intentionally re-recording goldens).
+inline void enforce_golden_coverage_at_exit() {
+    if (const char* a = std::getenv("TENZOR_GOLDEN_ALLOW_ZERO"); a && *a && *a != '0')
+        return;
+    // When recording, no comparisons happen by design — don't fail.
+    if (recording_enabled()) return;
+    // This gate is OPT-IN. Enforcing it unconditionally would turn every
+    // legitimate "no committed golden for this fingerprint yet" case into a hard
+    // process failure: a CPU-only dev host (or any binary whose ops simply have
+    // no recorded goldens) attempts loads, matches none, and would be killed
+    // despite all its gtest assertions passing/skipping. CI that wants the
+    // coverage floor sets TENZOR_REQUIRE_GOLDEN_COVERAGE=1 (or names a
+    // TENZOR_GOLDEN_COVERAGE_REPORT to collect the per-binary tallies); only
+    // then do we fail a binary that attempted goldens but compared none.
+    const char* require = std::getenv("TENZOR_REQUIRE_GOLDEN_COVERAGE");
+    const char* report  = std::getenv("TENZOR_GOLDEN_COVERAGE_REPORT");
+    const bool enforce =
+        (require && *require && *require != '0') || (report && *report);
+    if (!enforce) return;
+    if (load_attempt_counter() > 0 && comparison_counter() == 0) {
+        std::cerr << "[GOLDEN COVERAGE FAILURE] " << load_attempt_counter()
+                  << " golden load(s) were attempted but NONE matched a committed "
+                     ".gold file — every golden comparison silently became a no-op. "
+                     "The input generator or seed scheme likely changed, abandoning "
+                     "all goldens. Re-record with TENZOR_RECORD_GOLDENS=1 on a "
+                     "multi-backend host (or set TENZOR_GOLDEN_ALLOW_ZERO=1 to bypass)."
+                  << std::endl;
+        std::_Exit(1);
+    }
+}
+
+// Called on every maybe_load(); arms the exit gate on first attempt.
+inline void note_load_attempt() {
+    static bool registered = [] {
+        std::atexit(&enforce_golden_coverage_at_exit);
+        return true;
+    }();
+    (void)registered;
+    ++load_attempt_counter();
 }
 
 /**
@@ -291,6 +353,7 @@ inline std::string maybe_record(std::string_view test_name,
  */
 inline std::optional<Tensor> maybe_load(std::string_view test_name,
                                         const std::vector<Tensor>& inputs) {
+    note_load_attempt();
     uint64_t fp = fingerprint_inputs(test_name, inputs);
     std::string path = golden_path(test_name, fp);
 

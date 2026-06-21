@@ -9,6 +9,7 @@
 #include "tenzor/core/shape.hpp"
 #include <cstdint>
 #include <complex>
+#include <limits>
 #include <optional>
 #include <variant>
 
@@ -204,12 +205,41 @@ auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor 
     return dispatch(OpId::Where, inputs)[0];
 }
 
+namespace {
+// Validate that a take/put index tensor is integral and (on CPU, where we can
+// cheaply inspect it) that every flat index is within [0, numel). An
+// out-of-range or float-typed index would otherwise become an OOB read
+// (take) / write (put) in the kernel.
+void validate_flat_index(const Tensor& index, int64_t numel, const char* op) {
+    if (index.dtype() != DType::Int32 && index.dtype() != DType::Int64) {
+        throw std::invalid_argument(
+            std::string(op) + ": index must be Int32 or Int64, got " +
+            std::string(dtype_name(index.dtype())));
+    }
+    if (index.numel() == 0) return;
+    if (index.device().type != Device::Type::CPU) return;  // skip device round-trip
+    auto idx_cpu = index.to(DType::Int64).contiguous();
+    const auto* p = idx_cpu.data<int64_t>();
+    int64_t n = idx_cpu.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        if (p[i] < 0 || p[i] >= numel) {
+            throw std::out_of_range(
+                std::string(op) + ": index " + std::to_string(p[i]) +
+                " out of bounds for tensor with " + std::to_string(numel) +
+                " elements");
+        }
+    }
+}
+}  // namespace
+
 auto take(const Tensor& input, const Tensor& index) -> Tensor {
+    validate_flat_index(index, input.numel(), "take");
     std::vector<Tensor> inputs = {input, index};
     return dispatch(OpId::Take, inputs)[0];
 }
 
 auto put(const Tensor& input, const Tensor& index, const Tensor& source) -> Tensor {
+    validate_flat_index(index, input.numel(), "put");
     std::vector<Tensor> inputs = {input, index, source};
     return dispatch(OpId::Put, inputs)[0];
 }
@@ -271,30 +301,32 @@ auto nonzero(const Tensor& input) -> Tensor {
         }
     };
 
-    std::vector<std::vector<int64_t>> indices;
-
+    // Count nonzeros first so we can fill a single flat buffer (avoids a
+    // per-nonzero heap std::vector — a perf cliff for mostly-nonzero tensors).
+    int64_t num_nonzero = 0;
     for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-        if (is_nonzero(flat_idx)) {
-            std::vector<int64_t> multi_idx(ndim);
-            int64_t remaining = flat_idx;
-            for (int64_t d = ndim - 1; d >= 0; --d) {
-                multi_idx[d] = remaining % shape[d];
-                remaining /= shape[d];
-            }
-            indices.push_back(multi_idx);
-        }
+        if (is_nonzero(flat_idx)) ++num_nonzero;
     }
 
-    int64_t num_nonzero = indices.size();
     if (num_nonzero == 0) {
         return tenzor::empty({0, ndim}, DType::Int64, input.device());
     }
 
-    std::vector<int64_t> result_data(num_nonzero * ndim);
-    for (int64_t i = 0; i < num_nonzero; ++i) {
-        for (int64_t d = 0; d < ndim; ++d) {
-            result_data[i * ndim + d] = indices[i][d];
+    // Overflow guard on the result element count (num_nonzero * ndim).
+    if (ndim > 0 && num_nonzero > std::numeric_limits<int64_t>::max() / ndim) {
+        throw std::overflow_error("nonzero: result size overflows int64_t");
+    }
+
+    std::vector<int64_t> result_data(static_cast<size_t>(num_nonzero) * ndim);
+    int64_t out_row = 0;
+    for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
+        if (!is_nonzero(flat_idx)) continue;
+        int64_t remaining = flat_idx;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            result_data[out_row * ndim + d] = remaining % shape[d];
+            remaining /= shape[d];
         }
+        ++out_row;
     }
 
     auto result = tenzor::from_data(result_data.data(), {num_nonzero, ndim}, Device::cpu());

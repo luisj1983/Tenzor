@@ -162,6 +162,11 @@ auto launch_advanced_index_gather(
                     if (meta.is_indexed[i]) {
                         int64_t idx_val = d_idx_ptrs[i][bc];
                         if (idx_val < 0) idx_val += meta.src_shape[i];
+                        // Bounds guard: an OOB user index (still <0 after one wrap,
+                        // or >= dim size) would dereference out-of-bounds device
+                        // memory. Clamp into range to keep the read in-bounds.
+                        if (idx_val < 0) idx_val = 0;
+                        else if (idx_val >= meta.src_shape[i]) idx_val = meta.src_shape[i] - 1;
                         src_offset += idx_val * meta.src_strides[i];
                     }
                 }
@@ -228,6 +233,10 @@ auto launch_advanced_index_put(
                     if (meta.is_indexed[i]) {
                         int64_t idx_val = d_idx_ptrs[i][bc];
                         if (idx_val < 0) idx_val += meta.src_shape[i];
+                        // Bounds guard: an OOB user index would write out-of-bounds
+                        // device memory. Clamp into range to keep the write in-bounds.
+                        if (idx_val < 0) idx_val = 0;
+                        else if (idx_val >= meta.src_shape[i]) idx_val = meta.src_shape[i] - 1;
                         dst_offset += idx_val * meta.src_strides[i];
                     }
                 }

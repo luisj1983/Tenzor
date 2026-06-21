@@ -51,6 +51,22 @@ public:
      */
     auto has_function(const std::string& name) const -> bool;
 
+    /**
+     * @brief Remove a registered function by name.
+     * @return true if a function was removed, false if the name was unknown.
+     */
+    auto unregister_function(const std::string& name) -> bool;
+
+    /**
+     * @brief Remove all registered functions.
+     *
+     * Called from shutdown_rpc so process-global Python callables captured in
+     * RpcFunction closures are released while the interpreter is still alive
+     * (under the GIL), rather than at interpreter finalization — avoiding the
+     * documented pybind11 shutdown DECREF hazard.
+     */
+    auto clear() -> void;
+
 private:
     FunctionRegistry() = default;
     mutable std::mutex mutex_;

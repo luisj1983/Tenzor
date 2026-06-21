@@ -23,6 +23,7 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "gptq_dequant_helper.hpp"
 
 #include <cmath>
 
@@ -104,6 +105,7 @@ TEST_P(GPTQQuantizerMultiDTypeTest, QuantizeLayerRoundTrip) {
     ASSERT_EQ(result.packed_weight.dim(), 2);
     EXPECT_EQ(result.packed_weight.size(0), 32);
     EXPECT_GT(result.scales.numel(), 0);
+    ASSERT_EQ(result.in_features, 64);
 
     // Scales must be finite — non-finite values indicate the
     // internal Float32 pipeline saw a NaN/Inf from the dtype
@@ -114,6 +116,20 @@ TEST_P(GPTQQuantizerMultiDTypeTest, QuantizeLayerRoundTrip) {
         EXPECT_TRUE(std::isfinite(sdata[i]))
             << "Non-finite GPTQ scale at index " << i;
     }
+
+    // Actually measure the round-trip the test is named for: dequantize the
+    // packed INT4 weight and bound the relative reconstruction error against
+    // the original Float32 reference. GPTQ error-compensates, so we bound the
+    // aggregate relative Frobenius error (zeros/garbage => ~1.0). The dtype
+    // conversion adds only a small term on top of the INT4 quantization error.
+    auto recon = ::tenzor::testing::gptq_detail::reconstruct_gptq(
+        result, config.group_size, config.sym);
+    double rel_err = ::tenzor::testing::gptq_detail::relative_frobenius_error(
+        recon, weight_cpu);
+    EXPECT_LT(rel_err, 0.40)
+        << "GPTQ INT4 dequant relative error " << rel_err
+        << " for dtype " << dtype_name(dtype_)
+        << " — quantizer likely broken (zeros/garbage gives ~1.0)";
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(GPTQQuantizerMultiDTypeTest);

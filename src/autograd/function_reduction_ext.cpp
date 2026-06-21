@@ -27,6 +27,51 @@
 
 namespace tenzor {
 
+namespace {
+// Value-match smear mask for a GLOBAL min: gradient flows to element(s) equal
+// to the saved scalar min `output`. Uses the SAME `1 - clamp(|x-output|/eps)`
+// smear convention as MinBackward's dim path (so global and dim agree),
+// normalised by the global tie count with a safe `maximum(tie_count,1)` guard.
+// The relative-to-eps smear + guard removes the all-zero-mask 0/0 NaN the old
+// absolute-epsilon hard one-hot could produce for large-magnitude inputs.
+// (Mirrors compute_value_match_global_mask in function_reduction.cpp; kept
+// local to this TU since that helper lives in an anonymous namespace.)
+Tensor compute_min_value_match_global_mask(const Tensor& input,
+                                           const Tensor& output) {
+    auto input_shape_vec =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto output_reshaped = output;
+    if (output.ndim() == 0) {
+        std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+        output_reshaped = reshape(output, ones_shape);
+    }
+    auto output_expanded = expand(output_reshaped, input_shape_vec);
+
+    double eps_val;
+    switch (input.dtype()) {
+        case DType::Float64:  eps_val = 1e-12; break;
+        case DType::Float16:
+        case DType::BFloat16: eps_val = 1e-3;  break;
+        default:              eps_val = 1e-7;  break;
+    }
+    const bool is_half =
+        (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    auto abs_diff = abs(sub(input, output_expanded));
+    auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
+    auto epsilon = full(input_shape_vec, eps_val, DType::Float32, input.device());
+    auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+    auto clamped = clamp(div(abs_diff_f32, epsilon), 0.0f, 1.0f);
+    auto mask = sub(ones_tensor, clamped);
+
+    auto tie_count = sum(mask);
+    auto tie_count_exp = expand(reshape(tie_count,
+        std::vector<int64_t>(input_shape_vec.size(), 1)), input_shape_vec);
+    auto safe_tie = maximum(tie_count_exp, ones_tensor);
+    auto normalized = div(mask, safe_tie);
+    return is_half ? normalized.to(input.dtype()) : normalized;
+}
+}  // namespace
+
 // =========================================================================
 // Reduction Backward Functions
 // =========================================================================
@@ -51,50 +96,16 @@ auto MinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     bool has_dim = saved_tensors_.size() > 2;
 
     if (!has_dim) {
-        // Global min: gradient flows only to the minimum element
-        auto output_reshaped = output;
-        if (output.ndim() == 0) {
-            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
-            output_reshaped = reshape(output, ones_shape);
-        }
-        auto output_expanded = expand(output_reshaped, input_shape_vec);
-
-        // Create mask where input == output (within epsilon)
-        auto diff = sub(input, output_expanded);
-        auto abs_diff = abs(diff);
-        double eps_val;
-        switch (input.dtype()) {
-            case DType::Float64:  eps_val = 1e-12; break;
-            case DType::Float16:
-            case DType::BFloat16: eps_val = 1e-3; break;
-            default:              eps_val = 1e-7; break;
-        }
-        auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
-        auto mask_bool = lt(abs_diff, epsilon);
-        // Build mask + tie_count in Float32: in Float16/BFloat16 the running
-        // sum saturates past 2048 ties (and 1/tie_count underflows), silently
-        // mis-normalising the gradient. Narrow the final grad back.
-        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
-        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
-        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
-        auto mask = where(mask_bool, ones_tensor, zeros_tensor);
-
-        // Normalize mask by tie count
-        auto tie_count = sum(mask);
-        mask = div(mask, tie_count);
-
-        // Broadcast grad_output to input shape
+        // Global min: route through the SAME 1-clamp smear convention as the
+        // dim path (compute_min_value_match_global_mask), safe tie-count guard.
+        auto mask = compute_min_value_match_global_mask(input, output);
         auto grad_reshaped = grad_output;
         if (grad_output.ndim() == 0) {
             std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
             grad_reshaped = reshape(grad_output, ones_shape);
         }
         auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
-        auto grad_f32 = is_half ? grad_broadcasted.to(DType::Float32) : grad_broadcasted;
-        auto grad_input = mul(grad_f32, mask);
-        if (is_half) grad_input = grad_input.to(input.dtype());
-
-        return {grad_input};
+        return {mul(grad_broadcasted, mask)};
     } else {
         // Dimension-specific min
         int64_t dim = saved_tensors_[2].data<int64_t>()[0];
@@ -163,35 +174,9 @@ auto MinBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     bool has_dim = saved_tensors_.size() > 2;
 
     if (!has_dim) {
-        auto output_reshaped = output;
-        if (output.ndim() == 0) {
-            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
-            output_reshaped = reshape(output, ones_shape);
-        }
-        auto output_expanded = expand(output_reshaped, input_shape_vec);
-
-        auto diff = sub(input, output_expanded);
-        auto abs_diff = abs(diff);
-        double eps_val;
-        switch (input.dtype()) {
-            case DType::Float64:  eps_val = 1e-12; break;
-            case DType::Float16:
-            case DType::BFloat16: eps_val = 1e-3; break;
-            default:              eps_val = 1e-7; break;
-        }
-        auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
-        auto mask_bool = lt(abs_diff, epsilon);
-        // Build mask + tie_count in Float32 so the sum doesn't saturate in
-        // half precision; narrow the normalized mask back to input dtype.
-        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
-        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
-        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
-        auto mask = where(mask_bool, ones_tensor, zeros_tensor);
-
-        auto tie_count = sum(mask);
-        mask = div(mask, tie_count);
-        if (is_half) mask = mask.to(input.dtype());
-
+        // Same 1-clamp smear global mask as the first-order path (constant wrt
+        // differentiation): consistent with the dim path, safe tie-count guard.
+        auto mask = compute_min_value_match_global_mask(input, output);
         auto grad_v = grad_var;
         if (grad_var.tensor().ndim() == 0) {
             std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);

@@ -168,6 +168,8 @@ auto gru_cell_forward_kernel(
         throw std::runtime_error("gru_cell_forward: only Float32, Float64, and BFloat16 supported");
     }
 
+    // Drain before the host reads the USM-shared h_out.
+    queue.wait_and_throw();
     return h_out;
 }
 
@@ -416,6 +418,8 @@ auto gru_cell_backward_kernel(
         throw std::runtime_error("gru_cell_backward: only Float32, Float64, and BFloat16 supported");
     }
 
+    // Drain before the host reads the USM-shared gradient outputs.
+    queue.wait_and_throw();
     return outputs;
 }
 

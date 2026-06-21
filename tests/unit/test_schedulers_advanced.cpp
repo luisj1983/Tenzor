@@ -358,19 +358,23 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_BasicRestart) {
     EXPECT_EQ(scheduler.get_T_cur(), 0);
     EXPECT_EQ(scheduler.get_T_i(), 10);
 
-    // First cycle: step T_0 - 1 == 9 times so T_cur visits 1..9 and the
-    // LR descends to eta_min on the 9th call (period == T_0 - 1 in
-    // update_lr, so T_cur == 9 yields cos(pi) == -1 == eta_min).
-    // The 10th call triggers the restart roll-over.
+    // First cycle: step 9 times so T_cur visits 1..9. PyTorch SGDR uses the
+    // full period T_i in the denominator: lr = eta_min + (base-eta_min) *
+    // (1 + cos(pi * T_cur / T_i)) / 2. So at T_cur == 9 (T_i == 10) the LR is
+    // the cycle minimum but NOT exactly eta_min (the exact minimum would occur
+    // at T_cur == T_i == 10, which is the restart point). The 10th call
+    // triggers the restart roll-over.
     std::vector<double> lrs_cycle1;
     for (int i = 0; i < 9; i++) {
         scheduler.step();
         lrs_cycle1.push_back(scheduler.get_last_lr());
     }
 
-    // LR should decrease during cycle and reach eta_min at T_cur == T_i - 1.
+    // LR should decrease monotonically through the cycle toward eta_min.
     EXPECT_GT(lrs_cycle1[0], lrs_cycle1[8]);
-    EXPECT_NEAR(lrs_cycle1[8], 0.0, 1e-6);  // Near eta_min
+    // Exact PyTorch value at T_cur=9, T_i=10: (1 + cos(0.9*pi)) / 2.
+    const double expected_min = (1.0 + std::cos(std::numbers::pi * 9.0 / 10.0)) / 2.0;
+    EXPECT_NEAR(lrs_cycle1[8], expected_min, 1e-6);
 
     // 10th call triggers the restart: T_cur rolls 10 -> 0, LR recomputes
     // at T_cur == 0 (which is base_lr == 1.0).
@@ -414,16 +418,18 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_EtaMin) {
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 10, 1, 0.1);  // eta_min=0.1
 
-    // T_0 - 1 == 9 steps to land at T_cur == 9 (bottom of cycle, == eta_min).
-    // The 10th step would trigger the restart and bounce back to base_lr.
+    // 9 steps to land at T_cur == 9 (cycle minimum). With the full-period
+    // PyTorch denominator, the LR here is the lowest in-cycle value but not
+    // exactly eta_min (that is approached only as T_cur -> T_i).
     for (int i = 0; i < 9; i++) {
         scheduler.step();
     }
 
-    // LR should not go below eta_min and should reach eta_min exactly at
-    // T_cur == T_i - 1.
+    // LR must stay at or above eta_min, and equal the exact PyTorch SGDR value
+    // at T_cur=9, T_i=10, eta_min=0.1, base_lr=1.0.
+    const double expected = 0.1 + (1.0 - 0.1) * (1.0 + std::cos(std::numbers::pi * 9.0 / 10.0)) / 2.0;
     EXPECT_GE(scheduler.get_last_lr(), 0.1);
-    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-6);
+    EXPECT_NEAR(scheduler.get_last_lr(), expected, 1e-6);
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_MultipleRestarts) {

@@ -139,6 +139,18 @@ __global__ void flash_attention_v2_kernel_f64_hip(
         const int kv_start = kv_block * Bc;
         const int kv_end_actual = (kv_start + Bc < seq_len_k) ? Bc : (seq_len_k - kv_start);
 
+        // Fully-masked causal tile guard (mirrors the FP32 kernel in
+        // fused_ops.hip.cpp). When the entire KV tile lies strictly after q_row
+        // every score is NEG_INF, so tile_max = NEG_INF and
+        // exp(NEG_INF - NEG_INF) = exp(NaN) = NaN, giving tile_sum = NaN. The
+        // online-softmax merge then does l_prev + NaN*0 = NaN (IEEE-754) and
+        // o_acc += NaN*0 = NaN, poisoning the whole row and logsumexp. A fully
+        // masked tile contributes nothing, so skip it. The condition is uniform
+        // across the block, so it does not desync the __syncthreads() below.
+        if (causal && kv_start > q_row) {
+            continue;
+        }
+
         // Load K tile.
         for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE) {
             int row = idx / HEAD_DIM;

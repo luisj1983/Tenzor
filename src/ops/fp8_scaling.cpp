@@ -73,6 +73,13 @@ auto fp8_grid_params(DType fp8_dtype) -> FP8Params {
 } // namespace
 
 auto compute_amax(const Tensor& t) -> float {
+    // An empty tensor has no elements, so the global max reduction has no
+    // identity and would throw/return garbage. amax of an empty tensor is 0
+    // (no magnitude to represent), which compute_fp8_scale maps to the
+    // minimum positive scale.
+    if (t.numel() == 0) {
+        return 0.0f;
+    }
     // abs -> max reduction, then pull scalar to CPU
     Tensor abs_t = tenzor::abs(t.to(DType::Float32));
     Tensor max_val = tenzor::max(abs_t);
