@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <iostream>  // D.2: dtor error logging
+#include <cstring>  // D.2: std::memcpy
 #include "tenzor/utils/log.hpp"  // D.1: TENZOR_LOG_ERROR
 
 namespace tenzor {
