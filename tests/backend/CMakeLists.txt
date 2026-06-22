@@ -46,7 +46,7 @@ if(TENZOR_BUILD_ONEAPI AND TARGET tenzor_backend_oneapi)
         tenzor_core tenzor_backend_oneapi GTest::gtest_main)
 
     # Add the bin directory to link path so -ltenzor_backend_oneapi finds the library
-    target_link_directories(test_oneapi_caching_allocator PRIVATE ${CMAKE_SOURCE_DIR}/bin)
+    target_link_directories(test_oneapi_caching_allocator PRIVATE ${PROJECT_BINARY_DIR}/bin)
 
     # Ensure the oneapi backend is built before the test
     add_dependencies(test_oneapi_caching_allocator tenzor_backend_oneapi)

@@ -1,7 +1,7 @@
 add_executable(op_coverage_report op_coverage_report.cpp)
 target_link_libraries(op_coverage_report PRIVATE tenzor_core)
 set_target_properties(op_coverage_report PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 
 # audit-8 II.19: previously orphaned (lived in tools/ but were never built).
@@ -9,7 +9,7 @@ set_target_properties(op_coverage_report PROPERTIES
 add_executable(tenzor_serve tenzor_serve.cpp)
 target_link_libraries(tenzor_serve PRIVATE tenzor_core)
 set_target_properties(tenzor_serve PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 
 # Requires ModelHub (tenzor::models::ModelHub lives behind
@@ -18,7 +18,7 @@ if(TENZOR_BUILD_MODEL_HUB)
     add_executable(tenzor_model_converter tenzor_model_converter.cpp)
     target_link_libraries(tenzor_model_converter PRIVATE tenzor_core)
     set_target_properties(tenzor_model_converter PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
     )
 endif()
 

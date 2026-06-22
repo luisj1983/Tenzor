@@ -8,7 +8,7 @@ find_package(GTest REQUIRED)
 
 # Include directories
 include_directories(
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${GTEST_INCLUDE_DIRS}
 )

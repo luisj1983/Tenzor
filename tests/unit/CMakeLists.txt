@@ -312,7 +312,7 @@ target_link_libraries(test_onnx_audit_fixes PRIVATE tenzor_core GTest::gtest_mai
 find_package(Protobuf QUIET)
 if(Protobuf_FOUND)
     target_include_directories(test_onnx_audit_fixes PRIVATE
-        ${CMAKE_BINARY_DIR}/generated/onnx_proto)
+        ${PROJECT_BINARY_DIR}/generated/onnx_proto)
     target_link_libraries(test_onnx_audit_fixes PRIVATE protobuf::libprotobuf)
     # Newer protobuf splits CHECK-op helpers into Abseil; the generated headers
     # we compile here can pull them in. Link absl if present so the test
@@ -903,19 +903,19 @@ tenzor_discover_tests(test_cat_slice_negative_dim LABELS "audit;unit" DISCOVERY_
 
 # Audit P0 #8: caching allocator cross-thread dealloc bookkeeping drift
 add_executable(test_caching_allocator_cross_thread test_caching_allocator_cross_thread.cpp)
-target_include_directories(test_caching_allocator_cross_thread PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(test_caching_allocator_cross_thread PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_caching_allocator_cross_thread PRIVATE tenzor_backend_cpu GTest::gtest_main)
 tenzor_discover_tests(test_caching_allocator_cross_thread DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
 
 # Task 7.1+7.2: split-sibling coalescing + memory_summary() introspection
 add_executable(test_caching_allocator_coalesce test_caching_allocator_coalesce.cpp)
-target_include_directories(test_caching_allocator_coalesce PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(test_caching_allocator_coalesce PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_caching_allocator_coalesce PRIVATE tenzor_backend_cpu tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_caching_allocator_coalesce DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;allocator")
 
 # S16: pressure / partial-eviction / env-var hardening
 add_executable(test_caching_allocator_pressure test_caching_allocator_pressure.cpp)
-target_include_directories(test_caching_allocator_pressure PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(test_caching_allocator_pressure PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(test_caching_allocator_pressure PRIVATE tenzor_backend_cpu tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_caching_allocator_pressure DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;allocator")
 

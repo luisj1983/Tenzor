@@ -123,7 +123,7 @@ add_executable(test_quantized_linear_signed test_quantized_linear_signed.cpp)
 target_link_libraries(test_quantized_linear_signed PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
 set_target_properties(test_quantized_linear_signed PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_quantized_linear_signed
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -134,15 +134,15 @@ tenzor_discover_tests(test_quantized_linear_signed
 # the test to exercise the real kernel (scalar + AVX2 unpack paths).
 add_executable(test_quantized_linear_int4
     test_quantized_linear_int4.cpp
-    ${CMAKE_SOURCE_DIR}/src/backends/cpu/kernels/quantization/quantized_linear_int4.cpp)
+    ${PROJECT_SOURCE_DIR}/src/backends/cpu/kernels/quantization/quantized_linear_int4.cpp)
 target_link_libraries(test_quantized_linear_int4 PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
 # fused_qlinear_dequant lives in a header-only kernel; expose its directory so
 # the INT4 regression test can include and exercise it directly.
 target_include_directories(test_quantized_linear_int4 PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/backends/cpu/kernels)
+    ${PROJECT_SOURCE_DIR}/src/backends/cpu/kernels)
 set_target_properties(test_quantized_linear_int4 PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_quantized_linear_int4
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -154,7 +154,7 @@ add_executable(test_quantized_conv2d_signed_zp test_quantized_conv2d_signed_zp.c
 target_link_libraries(test_quantized_conv2d_signed_zp PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
 set_target_properties(test_quantized_conv2d_signed_zp PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_quantized_conv2d_signed_zp
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -164,7 +164,7 @@ add_executable(test_release_audit_cpu test_release_audit_cpu.cpp)
 target_link_libraries(test_release_audit_cpu PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
 set_target_properties(test_release_audit_cpu PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_release_audit_cpu
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -174,7 +174,7 @@ add_executable(test_dtype_preservation test_dtype_preservation.cpp)
 target_link_libraries(test_dtype_preservation PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
 set_target_properties(test_dtype_preservation PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_dtype_preservation
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS multi)
 
@@ -184,7 +184,7 @@ add_executable(test_thread_simd_unification test_thread_simd_unification.cpp)
 target_link_libraries(test_thread_simd_unification PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
 set_target_properties(test_thread_simd_unification PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_thread_simd_unification
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -195,7 +195,7 @@ add_executable(test_init_ocl_workaround test_init_ocl_workaround.cpp)
 target_link_libraries(test_init_ocl_workaround PRIVATE
     tenzor_core GTest::gtest_main)
 set_target_properties(test_init_ocl_workaround PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_init_ocl_workaround
     LABELS "backends" DISCOVERY_TIMEOUT 60)
 
@@ -207,6 +207,6 @@ add_executable(test_indexing_reduction_dtypes test_indexing_reduction_dtypes.cpp
 target_link_libraries(test_indexing_reduction_dtypes PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
 set_target_properties(test_indexing_reduction_dtypes PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 tenzor_discover_tests(test_indexing_reduction_dtypes
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS multi)

@@ -19,7 +19,7 @@ target_link_libraries(test_hrm_example PRIVATE
     GTest::gtest_main
     example_22_hrm_autograd_runner)
 target_include_directories(test_hrm_example PRIVATE
-    ${CMAKE_SOURCE_DIR}/examples/cpp/showcase)
+    ${PROJECT_SOURCE_DIR}/examples/cpp/showcase)
 set_target_properties(test_hrm_example PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON)
@@ -89,8 +89,8 @@ target_link_libraries(test_all_autograd_examples PRIVATE
     ${SHOWCASE_AUTOGRAD_RUNNER_TARGETS}
     ${NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS})
 target_include_directories(test_all_autograd_examples PRIVATE
-    ${CMAKE_SOURCE_DIR}/examples/cpp/showcase
-    ${CMAKE_SOURCE_DIR}/examples/cpp/training)
+    ${PROJECT_SOURCE_DIR}/examples/cpp/showcase
+    ${PROJECT_SOURCE_DIR}/examples/cpp/training)
 set_target_properties(test_all_autograd_examples PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON)

@@ -281,7 +281,7 @@ target_compile_options(tenzor_core PRIVATE ${TENZOR_WARNING_FLAGS})
 set_target_properties(tenzor_core PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
-    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/tenzor/tenzor.hpp"
+    PUBLIC_HEADER "${PROJECT_SOURCE_DIR}/include/tenzor/tenzor.hpp"
 )
 
 # Internal methods visible only to core + backends
@@ -323,7 +323,7 @@ endif()
 
 # Include directories
 target_include_directories(tenzor_core PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -363,8 +363,8 @@ find_package(Protobuf QUIET)
 if(Protobuf_FOUND)
     find_program(TENZOR_PROTOC protoc REQUIRED)
 
-    set(ONNX_PROTO_SRC_DIR ${CMAKE_SOURCE_DIR}/proto)
-    set(ONNX_PROTO_GEN_DIR ${CMAKE_BINARY_DIR}/generated/onnx_proto)
+    set(ONNX_PROTO_SRC_DIR ${PROJECT_SOURCE_DIR}/proto)
+    set(ONNX_PROTO_GEN_DIR ${PROJECT_BINARY_DIR}/generated/onnx_proto)
     file(MAKE_DIRECTORY ${ONNX_PROTO_GEN_DIR})
 
     set(ONNX_PROTO_FILE ${ONNX_PROTO_SRC_DIR}/onnx.proto)
@@ -431,8 +431,8 @@ if(TENZOR_BUILD_SERVING)
         find_program(PROTOC protoc REQUIRED)
         find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
 
-        set(PROTO_SRC_DIR ${CMAKE_SOURCE_DIR}/proto)
-        set(PROTO_GEN_DIR ${CMAKE_BINARY_DIR}/generated/proto)
+        set(PROTO_SRC_DIR ${PROJECT_SOURCE_DIR}/proto)
+        set(PROTO_GEN_DIR ${PROJECT_BINARY_DIR}/generated/proto)
         file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
 
         set(PROTO_FILE ${PROTO_SRC_DIR}/tenzor_serving.proto)
@@ -478,8 +478,8 @@ target_compile_definitions(tenzor_core PRIVATE
 )
 
 # Add MKL for linear algebra (linalg.cpp uses LAPACKE)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
-include(${CMAKE_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE _MKL_MODULE_FOUND)
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+include(${PROJECT_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE _MKL_MODULE_FOUND)
 if(_MKL_MODULE_FOUND AND MKL_FOUND)
     target_link_libraries(tenzor_core PRIVATE ${MKL_LIBRARIES})
     target_include_directories(tenzor_core PRIVATE ${MKL_INCLUDE_DIRS})

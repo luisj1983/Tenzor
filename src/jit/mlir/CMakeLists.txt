@@ -18,7 +18,7 @@ target_link_libraries(tenzor_jit_mlir PUBLIC
     OpenSSL::Crypto                # SHA-256 for cache key
 )
 target_include_directories(tenzor_jit_mlir PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 # Path A (2026-05-19 amendment): authentic IREE 3.11.0 base/hal/vm/runtime
 # headers are staged in third_party/iree_compat. They are listed BEFORE the
@@ -27,7 +27,7 @@ target_include_directories(tenzor_jit_mlir PUBLIC
 # .a libraries shipped in the dist remain ABI-compatible with these headers
 # since both originate from the upstream 3.11.0 release.
 target_include_directories(tenzor_jit_mlir BEFORE PUBLIC
-    ${CMAKE_SOURCE_DIR}/third_party/iree_compat
+    ${PROJECT_SOURCE_DIR}/third_party/iree_compat
 )
 target_compile_features(tenzor_jit_mlir PUBLIC cxx_std_23)
 
@@ -41,7 +41,7 @@ endif()
 # project-local .venv-iree/ at runtime (the venv pip-installs the
 # full-GPU iree-compile with cuda + rocm + vulkan-spirv targets).
 target_compile_definitions(tenzor_jit_mlir PRIVATE
-    TENZOR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    TENZOR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 if(IREE_RUN_MODULE_EXECUTABLE)
     target_compile_definitions(tenzor_jit_mlir PRIVATE
         TENZOR_IREE_RUN_MODULE_PATH="${IREE_RUN_MODULE_EXECUTABLE}")

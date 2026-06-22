@@ -147,7 +147,7 @@ set_target_properties(tenzor_rocm_kernels PROPERTIES
 
 # Include directories for HIP kernels
 target_include_directories(tenzor_rocm_kernels PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
     ${HIP_INCLUDE_DIRS}
     ${ROCM_PATH}/include
     /opt/rocm/include
@@ -247,7 +247,7 @@ add_custom_command(
         ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
         -Wall -Wextra -pedantic
                 -fopenmp
-        -I${CMAKE_SOURCE_DIR}/include
+        -I${PROJECT_SOURCE_DIR}/include
         -isystem ${ROCM_PATH}/include
         -DTENZOR_HAS_MIOPEN
         -DTENZOR_HAS_ROCBLAS
@@ -287,7 +287,7 @@ add_custom_command(
         ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
         -Wall -Wextra -pedantic
                 -fopenmp
-        -I${CMAKE_SOURCE_DIR}/include
+        -I${PROJECT_SOURCE_DIR}/include
         -isystem ${ROCM_PATH}/include
         -DTENZOR_HAS_MIOPEN
         -DTENZOR_HAS_ROCBLAS
@@ -322,7 +322,7 @@ set_target_properties(tenzor_backend_rocm PROPERTIES
 
 # Include directories
 target_include_directories(tenzor_backend_rocm PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
     ${HIP_INCLUDE_DIRS}
     ${ROCM_PATH}/include
     /opt/rocm/include

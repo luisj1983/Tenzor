@@ -161,7 +161,7 @@ if(TENZOR_USE_MLIR_JIT)
     #   3. System-installed IREE via find_package's default search
     #   4. FetchContent source build (heavy: ~30-60 min cold, ~10 GB build dir
     #      because IREE bundles LLVM/StableHLO). Triggered only when 1-3 fail.
-    set(_iree_local_dist "${CMAKE_SOURCE_DIR}/third_party/iree_dist")
+    set(_iree_local_dist "${PROJECT_SOURCE_DIR}/third_party/iree_dist")
     if(DEFINED ENV{IREE_DIR})
         list(APPEND CMAKE_PREFIX_PATH "$ENV{IREE_DIR}")
     elseif(DEFINED ENV{TENZOR_IREE_DIR})
@@ -215,7 +215,7 @@ if(TENZOR_USE_MLIR_JIT)
     find_program(IREE_COMPILE_EXECUTABLE iree-compile
         HINTS
             $ENV{TENZOR_IREE_COMPILE}
-            ${CMAKE_SOURCE_DIR}/.venv-iree/bin
+            ${PROJECT_SOURCE_DIR}/.venv-iree/bin
             ${IREECompiler_DIR}/../../../bin
         REQUIRED)
     message(STATUS "  iree-compile: ${IREE_COMPILE_EXECUTABLE}")
@@ -247,7 +247,7 @@ if(TENZOR_USE_MLIR_JIT)
     find_program(IREE_RUN_MODULE_EXECUTABLE iree-run-module
         HINTS
             $ENV{TENZOR_IREE_RUN_MODULE}
-            ${CMAKE_SOURCE_DIR}/.venv-iree/bin
+            ${PROJECT_SOURCE_DIR}/.venv-iree/bin
             ${IREECompiler_DIR}/../../../bin
         REQUIRED)
     message(STATUS "  iree-run-module: ${IREE_RUN_MODULE_EXECUTABLE}")
@@ -415,32 +415,40 @@ if(TENZOR_ENABLE_CLANG_TIDY)
     endif()
 endif()
 
-# Set output directories - all binaries and libraries in <project>/bin
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+# Output directories and RPATH defaults.
+#
+# These are imposed ONLY for a standalone (top-level) Tenzor build. When Tenzor
+# is consumed via add_subdirectory / FetchContent, the parent project owns
+# artifact placement and RPATH policy — forcing them here would fight the
+# consumer and, worse, pre-fix the source-tree output dir wrote compiled
+# artifacts back into ${PROJECT_SOURCE_DIR} (read-only under FetchContent's
+# _deps). A consumer that wants Tenzor's binaries collected in one place sets
+# CMAKE_{RUNTIME,LIBRARY,ARCHIVE}_OUTPUT_DIRECTORY itself.
+if(PROJECT_IS_TOP_LEVEL)
+    # All binaries, backend .so and archives land in <build>/bin
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 
-# For multi-configuration generators (Visual Studio, Xcode)
-foreach(CONFIG ${CMAKE_CONFIGURATION_TYPES})
-    string(TOUPPER ${CONFIG} CONFIG_UPPER)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_SOURCE_DIR}/bin)
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_SOURCE_DIR}/bin)
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_SOURCE_DIR}/bin)
-endforeach()
+    # For multi-configuration generators (Visual Studio, Xcode)
+    foreach(CONFIG ${CMAKE_CONFIGURATION_TYPES})
+        string(TOUPPER ${CONFIG} CONFIG_UPPER)
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${PROJECT_BINARY_DIR}/bin)
+        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${PROJECT_BINARY_DIR}/bin)
+        set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${PROJECT_BINARY_DIR}/bin)
+    endforeach()
 
-# Set RPATH so executables can find shared libraries in same directory
-set(CMAKE_SKIP_BUILD_RPATH FALSE)
-set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
-set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-
-# Use $ORIGIN to find libraries in the same directory as the executable. All
-# build outputs (binaries, backend .so, archives) land in ${CMAKE_SOURCE_DIR}/bin
-# (CMAKE_*_OUTPUT_DIRECTORY above), so $ORIGIN already resolves to that dir for
-# any in-tree binary — the previous absolute ${CMAKE_SOURCE_DIR}/bin entry was
-# redundant and only leaked the build-machine source path into every binary's
-# RPATH (and could let another user's bin/ be searched on a shared host).
-set(CMAKE_BUILD_RPATH "$ORIGIN")
+    # RPATH so executables find sibling shared libraries. $ORIGIN resolves to
+    # <build>/bin for any in-tree binary (all outputs land there above), so a
+    # single relative entry suffices and avoids leaking an absolute build path
+    # into every binary's RPATH. Per-target INSTALL_RPATH is set in the install()
+    # section below; these only govern the standalone build/install of Tenzor.
+    set(CMAKE_SKIP_BUILD_RPATH FALSE)
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
+    set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+    set(CMAKE_BUILD_RPATH "$ORIGIN")
+endif()
 
 # Find required packages
 find_package(Threads REQUIRED)
@@ -473,7 +481,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # consumer such as model hub / config IO) can `#include <nlohmann/json.hpp>`.
 add_library(tenzor_nlohmann_json INTERFACE)
 target_include_directories(tenzor_nlohmann_json INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party>
 )
 
 # Add subdirectories
@@ -544,7 +552,7 @@ if(TENZOR_BUILD_PYTHON)
 
         set_target_properties(tenzor_python PROPERTIES
             OUTPUT_NAME "tenzor_core"
-            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/tenzor"
+            LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/python/tenzor"
         )
 
         # Copy Python package files incrementally: only re-copy when source
@@ -580,35 +588,35 @@ if(TENZOR_BUILD_PYTHON)
         set(_PY_OUTPUTS "")
         foreach(_src ${_PY_ALL_INPUTS})
             get_filename_component(_fname ${_src} NAME)
-            list(APPEND _PY_OUTPUTS ${CMAKE_BINARY_DIR}/python/tenzor/${_fname})
+            list(APPEND _PY_OUTPUTS ${PROJECT_BINARY_DIR}/python/tenzor/${_fname})
         endforeach()
         foreach(_src ${_PY_SPECIAL_SOURCES})
             get_filename_component(_fname ${_src} NAME)
             list(APPEND _PY_OUTPUTS
-                ${CMAKE_BINARY_DIR}/python/tenzor/special/${_fname})
+                ${PROJECT_BINARY_DIR}/python/tenzor/special/${_fname})
         endforeach()
         foreach(_src ${_PY_DISTRIBUTIONS_SOURCES})
             get_filename_component(_fname ${_src} NAME)
             list(APPEND _PY_OUTPUTS
-                ${CMAKE_BINARY_DIR}/python/tenzor/distributions/${_fname})
+                ${PROJECT_BINARY_DIR}/python/tenzor/distributions/${_fname})
         endforeach()
 
         add_custom_command(
             OUTPUT ${_PY_OUTPUTS}
             COMMAND ${CMAKE_COMMAND} -E make_directory
-                ${CMAKE_BINARY_DIR}/python/tenzor/special
+                ${PROJECT_BINARY_DIR}/python/tenzor/special
             COMMAND ${CMAKE_COMMAND} -E make_directory
-                ${CMAKE_BINARY_DIR}/python/tenzor/distributions
+                ${PROJECT_BINARY_DIR}/python/tenzor/distributions
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_SOURCES}
-                ${CMAKE_BINARY_DIR}/python/tenzor/
+                ${PROJECT_BINARY_DIR}/python/tenzor/
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_STUBS}
-                ${CMAKE_BINARY_DIR}/python/tenzor/
+                ${PROJECT_BINARY_DIR}/python/tenzor/
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${_PY_SPECIAL_SOURCES}
-                ${CMAKE_BINARY_DIR}/python/tenzor/special/
+                ${PROJECT_BINARY_DIR}/python/tenzor/special/
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${_PY_DISTRIBUTIONS_SOURCES}
-                ${CMAKE_BINARY_DIR}/python/tenzor/distributions/
+                ${PROJECT_BINARY_DIR}/python/tenzor/distributions/
             DEPENDS ${_PY_ALL_INPUTS}
                 ${_PY_SPECIAL_SOURCES} ${_PY_DISTRIBUTIONS_SOURCES}
             COMMENT "Copying Python files and type stubs to build directory"
@@ -634,9 +642,9 @@ if(TENZOR_BUILD_TESTS)
         add_test(
             NAME lint_test_contract
             COMMAND ${Python_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tools/lint_test_contract.py
-                --tests-dir ${CMAKE_SOURCE_DIR}/tests
-                --baseline ${CMAKE_SOURCE_DIR}/tools/lint_test_contract_baseline.txt
+                ${PROJECT_SOURCE_DIR}/tools/lint_test_contract.py
+                --tests-dir ${PROJECT_SOURCE_DIR}/tests
+                --baseline ${PROJECT_SOURCE_DIR}/tools/lint_test_contract_baseline.txt
         )
         set_tests_properties(lint_test_contract PROPERTIES LABELS "lint")
 
@@ -646,32 +654,32 @@ if(TENZOR_BUILD_TESTS)
         add_test(
             NAME AuditMarkersScan
             COMMAND ${Python_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tools/scan_audit_markers.py
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                ${PROJECT_SOURCE_DIR}/tools/scan_audit_markers.py
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         )
         set_tests_properties(AuditMarkersScan PROPERTIES LABELS "lint")
 
         add_test(
             NAME PyiDrift
             COMMAND ${Python_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tools/check_pyi_drift.py
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                ${PROJECT_SOURCE_DIR}/tools/check_pyi_drift.py
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         )
         set_tests_properties(PyiDrift PROPERTIES LABELS "lint")
 
         add_test(
             NAME ParamGroupSerialization
             COMMAND ${Python_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tools/check_param_group_serialization.py
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                ${PROJECT_SOURCE_DIR}/tools/check_param_group_serialization.py
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         )
         set_tests_properties(ParamGroupSerialization PROPERTIES LABELS "lint")
 
         add_test(
             NAME TensorboardWireFormat
             COMMAND ${Python_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tools/check_tensorboard_wire_format.py
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                ${PROJECT_SOURCE_DIR}/tools/check_tensorboard_wire_format.py
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         )
         set_tests_properties(TensorboardWireFormat PROPERTIES LABELS "lint")
 
@@ -682,10 +690,22 @@ if(TENZOR_BUILD_TESTS)
         add_test(
             NAME MultidtypeCoverage
             COMMAND ${Python_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tools/check_multidtype_coverage.py
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                ${PROJECT_SOURCE_DIR}/tools/check_multidtype_coverage.py
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         )
         set_tests_properties(MultidtypeCoverage PROPERTIES LABELS "lint")
+
+        # Guard against re-introducing CMAKE_SOURCE_DIR/CMAKE_BINARY_DIR in
+        # Tenzor's own cmake files — those break add_subdirectory/FetchContent
+        # consumption (they resolve to the consumer's tree). Must use PROJECT_*.
+        add_test(
+            NAME CMakeProjectDirLint
+            COMMAND ${Python_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tools/check_cmake_project_dir.py
+                --root ${PROJECT_SOURCE_DIR}
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        )
+        set_tests_properties(CMakeProjectDirLint PROPERTIES LABELS "lint")
     endif()
 endif()
 
@@ -714,8 +734,8 @@ endif()
 find_package(Doxygen)
 if(DOXYGEN_FOUND)
     add_custom_target(docs
-        COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Doxyfile
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMAND ${DOXYGEN_EXECUTABLE} ${PROJECT_SOURCE_DIR}/Doxyfile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         COMMENT "Generating API documentation with Doxygen"
         VERBATIM)
     message(STATUS "  Doxygen:              Found (run 'make docs' to generate)")

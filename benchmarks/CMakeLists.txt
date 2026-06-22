@@ -24,62 +24,62 @@ set(BENCHMARK_TARGETS
 # benchmark_ops - Matrix and tensor operations
 add_executable(benchmark_ops benchmark_ops.cpp)
 target_link_libraries(benchmark_ops PRIVATE tenzor_core)
-target_include_directories(benchmark_ops PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_ops PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_convolutions - Convolution operations
 add_executable(benchmark_convolutions benchmark_convolutions.cpp)
 target_link_libraries(benchmark_convolutions PRIVATE tenzor_core)
-target_include_directories(benchmark_convolutions PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_convolutions PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_memory - Memory operations
 add_executable(benchmark_memory benchmark_memory.cpp)
 target_link_libraries(benchmark_memory PRIVATE tenzor_core)
-target_include_directories(benchmark_memory PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_memory PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_training - Full training loops
 add_executable(benchmark_training benchmark_training.cpp)
 target_link_libraries(benchmark_training PRIVATE tenzor_core)
-target_include_directories(benchmark_training PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_training PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # bench_fused_ops - Fused operations (existing)
 add_executable(bench_fused_ops bench_fused_ops.cpp)
 target_link_libraries(bench_fused_ops PRIVATE tenzor_core)
-target_include_directories(bench_fused_ops PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(bench_fused_ops PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_attention - Transformer and attention mechanisms
 add_executable(benchmark_attention benchmark_attention.cpp)
 target_link_libraries(benchmark_attention PRIVATE tenzor_core)
-target_include_directories(benchmark_attention PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_attention PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_normalization - BatchNorm, LayerNorm, RMSNorm
 add_executable(benchmark_normalization benchmark_normalization.cpp)
 target_link_libraries(benchmark_normalization PRIVATE tenzor_core)
-target_include_directories(benchmark_normalization PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_normalization PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_mixed_precision - FP16/BF16/INT8 performance
 add_executable(benchmark_mixed_precision benchmark_mixed_precision.cpp)
 target_link_libraries(benchmark_mixed_precision PRIVATE tenzor_core)
-target_include_directories(benchmark_mixed_precision PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_mixed_precision PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_models - End-to-end model benchmarks
 add_executable(benchmark_models benchmark_models.cpp)
 target_link_libraries(benchmark_models PRIVATE tenzor_core)
-target_include_directories(benchmark_models PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_models PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_embeddings - Embedding layer performance
 add_executable(benchmark_embeddings benchmark_embeddings.cpp)
 target_link_libraries(benchmark_embeddings PRIVATE tenzor_core)
-target_include_directories(benchmark_embeddings PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_embeddings PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_rnn - LSTM/GRU performance
 add_executable(benchmark_rnn benchmark_rnn.cpp)
 target_link_libraries(benchmark_rnn PRIVATE tenzor_core)
-target_include_directories(benchmark_rnn PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_rnn PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # benchmark_dispatch - Dispatch overhead measurement
 add_executable(benchmark_dispatch benchmark_dispatch.cpp)
 target_link_libraries(benchmark_dispatch PRIVATE tenzor_core)
-target_include_directories(benchmark_dispatch PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(benchmark_dispatch PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # RR.19 (audit-11): benchmark_compression — pruning / quantization
 # pipelines, driven via Google Benchmark. Needs --device flag wired into
@@ -92,7 +92,7 @@ if (benchmark_FOUND)
     target_link_libraries(benchmark_compression
         PRIVATE tenzor_core benchmark::benchmark)
     target_include_directories(benchmark_compression PRIVATE
-        ${CMAKE_SOURCE_DIR}/include)
+        ${PROJECT_SOURCE_DIR}/include)
 else()
     message(STATUS "Google Benchmark not found — skipping benchmark_compression")
     # Remove from the build list so foreach below doesn't reference an

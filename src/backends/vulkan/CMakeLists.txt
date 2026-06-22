@@ -36,7 +36,7 @@ message(STATUS "Found glslc: ${GLSLC}")
 
 # Compile GLSL shaders to SPIR-V
 set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/kernels)
-set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders/vulkan)
+set(SHADER_OUTPUT_DIR ${PROJECT_BINARY_DIR}/shaders/vulkan)
 
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 
@@ -116,9 +116,9 @@ if(GLSLC)
 
     add_custom_command(
         OUTPUT ${EMBEDDED_SHADERS_HEADER} ${EMBEDDED_SHADERS_IMPL}
-        COMMAND ${CMAKE_COMMAND} -E env ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed_shaders.py
+        COMMAND ${CMAKE_COMMAND} -E env ${Python_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/embed_shaders.py
                 ${SHADER_OUTPUT_DIR} ${EMBEDDED_SHADERS_HEADER}
-        DEPENDS ${SHADER_OUTPUTS} ${CMAKE_SOURCE_DIR}/scripts/embed_shaders.py
+        DEPENDS ${SHADER_OUTPUTS} ${PROJECT_SOURCE_DIR}/scripts/embed_shaders.py
         COMMENT "Embedding Vulkan shaders into C++ source"
     )
 
@@ -163,7 +163,7 @@ if(GLSLC)
         vulkan_backend.hpp
         vulkan_helpers.hpp
         vulkan_utils.hpp
-        ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
+        ${PROJECT_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
         ${EMBEDDED_SHADERS_IMPL}
     )
 else()
@@ -200,7 +200,7 @@ else()
         vulkan_backend.hpp
         vulkan_helpers.hpp
         vulkan_utils.hpp
-        ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
+        ${PROJECT_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
     )
 endif()
 
@@ -213,7 +213,7 @@ set_target_properties(tenzor_backend_vulkan PROPERTIES
 )
 
 target_include_directories(tenzor_backend_vulkan PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
     ${Vulkan_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}  # For embedded_shaders.hpp

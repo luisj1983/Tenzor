@@ -1033,8 +1033,8 @@ if(Python3_FOUND)
     add_test(
         NAME LayerTestGradFlowGuard
         COMMAND ${Python3_EXECUTABLE}
-            "${CMAKE_SOURCE_DIR}/tools/check_layer_tests.py"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            "${PROJECT_SOURCE_DIR}/tools/check_layer_tests.py"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     )
     set_tests_properties(LayerTestGradFlowGuard PROPERTIES
         LABELS "lint;layer_tests"
@@ -1049,7 +1049,7 @@ if(TENZOR_BUILD_PYTHON)
     find_package(Python COMPONENTS Interpreter)
     if(Python_FOUND)
         set(PYTHON_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/python")
-        set(PYTHON_TEST_ENV "PYTHONPATH=${CMAKE_BINARY_DIR}/python")
+        set(PYTHON_TEST_ENV "PYTHONPATH=${PROJECT_BINARY_DIR}/python")
 
         # The project's Python dependencies (numpy, ml_dtypes, …) live in the
         # in-tree .venv-iree virtualenv. The CMake-discovered interpreter may be
@@ -1058,7 +1058,7 @@ if(TENZOR_BUILD_PYTHON)
         # interpreter. ABI-compatible because the venv is the same CPython
         # minor version the extension module is built against.
         file(GLOB _venv_site_dirs
-             "${CMAKE_SOURCE_DIR}/.venv-iree/lib/python*/site-packages")
+             "${PROJECT_SOURCE_DIR}/.venv-iree/lib/python*/site-packages")
         foreach(_venv_site ${_venv_site_dirs})
             if(IS_DIRECTORY "${_venv_site}")
                 set(PYTHON_TEST_ENV "${PYTHON_TEST_ENV}:${_venv_site}")
@@ -1086,7 +1086,7 @@ if(TENZOR_BUILD_PYTHON)
             add_test(
                 NAME "cpu_python_${test_name}"
                 COMMAND ${Python_EXECUTABLE} ${test_file}
-                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
             )
             list(FIND PYTHON_SMOKE_TESTS ${test_name} _smoke_idx)
             if(_smoke_idx GREATER -1)

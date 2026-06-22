@@ -18,7 +18,7 @@ tenzor_discover_tests(test_chunk_split LABELS "autograd" DISCOVERY_TIMEOUT 60)
 add_executable(test_save_backward_multi_device test_save_backward_multi_device.cpp)
 target_link_libraries(test_save_backward_multi_device PRIVATE tenzor_core GTest::gtest_main)
 target_include_directories(test_save_backward_multi_device PRIVATE
-    ${CMAKE_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/tests
 )
 tenzor_discover_tests(test_save_backward_multi_device LABELS "autograd" DISCOVERY_TIMEOUT 60 BACKENDS multi)
 

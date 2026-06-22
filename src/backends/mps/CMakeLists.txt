@@ -46,7 +46,7 @@ endif()
 add_library(tenzor_backend_mps SHARED ${MPS_SOURCES})
 
 target_include_directories(tenzor_backend_mps PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 
 target_link_libraries(tenzor_backend_mps PRIVATE
@@ -74,7 +74,7 @@ set_target_properties(tenzor_backend_mps PROPERTIES
     OUTPUT_NAME tenzor_backend_mps
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin
+    LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin
 )
 
 if(TARGET mps_shaders)

@@ -63,7 +63,7 @@ add_library(example_gru_time_series_runner OBJECT
 target_link_libraries(example_gru_time_series_runner PUBLIC tenzor_core)
 target_include_directories(example_gru_time_series_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_gru_time_series_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -84,7 +84,7 @@ add_library(example_vit_image_classification_runner OBJECT
 target_link_libraries(example_vit_image_classification_runner PUBLIC tenzor_core)
 target_include_directories(example_vit_image_classification_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_vit_image_classification_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -104,7 +104,7 @@ add_library(example_transformer_seq2seq_runner OBJECT
 target_link_libraries(example_transformer_seq2seq_runner PUBLIC tenzor_core)
 target_include_directories(example_transformer_seq2seq_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_transformer_seq2seq_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -123,7 +123,7 @@ add_library(example_vae_autoencoder_runner OBJECT
 target_link_libraries(example_vae_autoencoder_runner PUBLIC tenzor_core)
 target_include_directories(example_vae_autoencoder_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_vae_autoencoder_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -142,7 +142,7 @@ add_library(example_yolo_object_detection_runner OBJECT
 target_link_libraries(example_yolo_object_detection_runner PUBLIC tenzor_core)
 target_include_directories(example_yolo_object_detection_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_yolo_object_detection_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -162,7 +162,7 @@ add_library(example_unet_semantic_segmentation_runner OBJECT
 target_link_libraries(example_unet_semantic_segmentation_runner PUBLIC tenzor_core)
 target_include_directories(example_unet_semantic_segmentation_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_unet_semantic_segmentation_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -185,7 +185,7 @@ add_library(example_gpt_text_generation_runner OBJECT
 target_link_libraries(example_gpt_text_generation_runner PUBLIC tenzor_core)
 target_include_directories(example_gpt_text_generation_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_gpt_text_generation_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -205,7 +205,7 @@ add_library(example_gradient_checkpointing_runner OBJECT
 target_link_libraries(example_gradient_checkpointing_runner PUBLIC tenzor_core)
 target_include_directories(example_gradient_checkpointing_runner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
-    ${CMAKE_SOURCE_DIR}/include)
+    ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(example_gradient_checkpointing_runner PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
@@ -297,7 +297,7 @@ if(TENZOR_BUILD_PYTHON AND TARGET tenzor_python)
                 COMMAND ${Python_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/python/${_ex}.py)
             set_tests_properties(example_python_${_ex} PROPERTIES
-                ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python"
+                ENVIRONMENT "PYTHONPATH=${PROJECT_BINARY_DIR}/python"
                 TIMEOUT 600
                 LABELS "examples;python")
         endforeach()
@@ -308,7 +308,7 @@ if(TENZOR_BUILD_PYTHON AND TARGET tenzor_python)
                 COMMAND ${Python_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/python/${_ex}.py)
             set_tests_properties(example_python_${_ex} PROPERTIES
-                ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python"
+                ENVIRONMENT "PYTHONPATH=${PROJECT_BINARY_DIR}/python"
                 TIMEOUT 1800
                 LABELS "examples;python;examples_slow")
         endforeach()

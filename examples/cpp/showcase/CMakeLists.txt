@@ -47,7 +47,7 @@ foreach(EXAMPLE ${SHOWCASE_EXAMPLES})
             target_link_libraries(${TARGET_NAME} PRIVATE tenzor_core)
             target_include_directories(${TARGET_NAME} PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}
-                ${CMAKE_SOURCE_DIR}/include
+                ${PROJECT_SOURCE_DIR}/include
             )
 
             # Set C++23 standard (required for Tenzor's concepts, std::span, std::expected)
@@ -112,7 +112,7 @@ foreach(MAPPING ${AUTOGRAD_RUNNERS})
         target_link_libraries(${RUNNER_TARGET} PUBLIC tenzor_core)
         target_include_directories(${RUNNER_TARGET} PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}
-            ${CMAKE_SOURCE_DIR}/include)
+            ${PROJECT_SOURCE_DIR}/include)
         set_target_properties(${RUNNER_TARGET} PROPERTIES
             CXX_STANDARD 23
             CXX_STANDARD_REQUIRED ON

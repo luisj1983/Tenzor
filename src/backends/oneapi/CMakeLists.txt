@@ -113,7 +113,7 @@ set(SYCL_COMMON_FLAGS
     -std=c++23 -fPIC
     -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
     -O3 -DNDEBUG
-    -I${CMAKE_SOURCE_DIR}/include
+    -I${PROJECT_SOURCE_DIR}/include
 )
 
 if(ONEDPL_FOUND)
@@ -263,7 +263,7 @@ endforeach()
 set(BACKEND_GLUE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/oneapi_backend.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/oneapi_kernel_registry.cpp
-    ${CMAKE_SOURCE_DIR}/src/backend/oneapi_caching_allocator.cpp
+    ${PROJECT_SOURCE_DIR}/src/backend/oneapi_caching_allocator.cpp
 )
 
 foreach(SRC ${BACKEND_GLUE_SOURCES})
@@ -292,7 +292,7 @@ endif()
 
 set(SYCL_LINK_FLAGS -L${SYCL_LIBRARY_DIR} -lsycl -Wl,-rpath,${SYCL_LIBRARY_DIR})
 
-set(ONEAPI_SO_OUTPUT "${CMAKE_SOURCE_DIR}/bin/tenzor_backend_oneapi.so")
+set(ONEAPI_SO_OUTPUT "${PROJECT_BINARY_DIR}/bin/tenzor_backend_oneapi.so")
 add_custom_command(
     OUTPUT ${ONEAPI_SO_OUTPUT}
     COMMAND ${SYCL_COMPILER}
@@ -301,12 +301,12 @@ add_custom_command(
         ${ALL_OBJECTS}
         -o ${ONEAPI_SO_OUTPUT}
         -Wl,-soname,tenzor_backend_oneapi.so
-        -L${CMAKE_SOURCE_DIR}/bin -ltenzor_core
+        -L${PROJECT_BINARY_DIR}/bin -ltenzor_core
         # Build-tree rpath (find libtenzor_core during local runs) plus
         # relocatable $ORIGIN rpaths so the INSTALLED .so finds libtenzor_core
         # relative to itself: $ORIGIN for the wheel (co-located) layout and
         # $ORIGIN/../.. for the FHS layout (lib/tenzor/backends -> lib).
-        -Wl,-rpath,${CMAKE_SOURCE_DIR}/bin
+        -Wl,-rpath,${PROJECT_BINARY_DIR}/bin
         -Wl,-rpath,$ORIGIN
         -Wl,-rpath,$ORIGIN/../..
         ${SYCL_LINK_FLAGS}
@@ -329,7 +329,7 @@ add_dependencies(tenzor_backend_oneapi_build tenzor_core)
 add_library(tenzor_backend_oneapi SHARED IMPORTED GLOBAL)
 set_target_properties(tenzor_backend_oneapi PROPERTIES
     IMPORTED_LOCATION ${ONEAPI_SO_OUTPUT}
-    INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/include"
+    INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/include"
 )
 add_dependencies(tenzor_backend_oneapi tenzor_backend_oneapi_build)
 

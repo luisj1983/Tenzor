@@ -8,7 +8,7 @@ target_link_libraries(test_utils_logging PRIVATE
     GTest::gtest_main
 )
 set_target_properties(test_utils_logging PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_utils_logging DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -20,7 +20,7 @@ target_link_libraries(test_utils_config PRIVATE
     GTest::gtest_main
 )
 set_target_properties(test_utils_config PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_utils_config DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -32,7 +32,7 @@ target_link_libraries(test_utils_benchmark PRIVATE
     GTest::gtest_main
 )
 set_target_properties(test_utils_benchmark PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_utils_benchmark DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -44,7 +44,7 @@ target_link_libraries(test_utils_tensorboard PRIVATE
     GTest::gtest_main
 )
 set_target_properties(test_utils_tensorboard PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_utils_tensorboard DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -52,7 +52,7 @@ tenzor_discover_tests(test_utils_tensorboard DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 add_executable(test_autograd_profiler test_autograd_profiler.cpp)
 target_link_libraries(test_autograd_profiler PRIVATE tenzor_core GTest::gtest_main)
 set_target_properties(test_autograd_profiler PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_autograd_profiler DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -64,7 +64,7 @@ target_link_libraries(test_utils_widen_narrow PRIVATE
     GTest::gtest_main
 )
 set_target_properties(test_utils_widen_narrow PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_utils_widen_narrow DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -76,7 +76,7 @@ target_link_libraries(test_utils_autograd_wrap PRIVATE
     GTest::gtest_main
 )
 set_target_properties(test_utils_autograd_wrap PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_utils_autograd_wrap DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
@@ -88,6 +88,6 @@ target_link_libraries(test_utils_dead_code_cleanup PRIVATE
     GTest::gtest_main
 )
 set_target_properties(test_utils_dead_code_cleanup PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
 )
 tenzor_discover_tests(test_utils_dead_code_cleanup DISCOVERY_TIMEOUT 60 BACKENDS cpu)

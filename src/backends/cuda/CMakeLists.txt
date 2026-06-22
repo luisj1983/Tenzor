@@ -88,7 +88,7 @@ set_target_properties(tenzor_backend_cuda PROPERTIES
 
 # Include directories
 target_include_directories(tenzor_backend_cuda PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
     ${CUDAToolkit_INCLUDE_DIRS}
 )
 

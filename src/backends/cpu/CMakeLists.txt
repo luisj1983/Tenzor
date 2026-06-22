@@ -70,7 +70,7 @@ set_target_properties(tenzor_backend_cpu PROPERTIES
 
 # Include directories
 target_include_directories(tenzor_backend_cpu PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 
 # Link against core library
@@ -422,8 +422,8 @@ endif()
 # IMPORTANT: MKL is found FIRST to ensure we use GNU threading (not Intel OpenMP)
 # to avoid conflicts with GCC's libgomp. If we let find_package(BLAS) find MKL first,
 # it uses intel_thread which links libiomp5, causing dual OpenMP runtime issues.
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
-include(${CMAKE_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE MKL_MODULE_FOUND)
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+include(${PROJECT_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE MKL_MODULE_FOUND)
 if(MKL_MODULE_FOUND AND MKL_FOUND)
     target_link_libraries(tenzor_backend_cpu PRIVATE ${MKL_LIBRARIES})
     target_include_directories(tenzor_backend_cpu PRIVATE ${MKL_INCLUDE_DIRS})
@@ -446,7 +446,7 @@ else()
 endif()
 
 # Optional: Intel oneDNN for optimized DNN primitives (Conv, BatchNorm, etc.)
-include(${CMAKE_SOURCE_DIR}/cmake/FindOneDNN.cmake OPTIONAL RESULT_VARIABLE ONEDNN_MODULE_FOUND)
+include(${PROJECT_SOURCE_DIR}/cmake/FindOneDNN.cmake OPTIONAL RESULT_VARIABLE ONEDNN_MODULE_FOUND)
 if(ONEDNN_MODULE_FOUND AND ONEDNN_FOUND)
     # oneDNN's pre-built libdnnl.so links libtbb.so.12 (release). During library
     # init, libtbb.so does dlsym("scalable_free") to find tbbmalloc. If tbbmalloc
