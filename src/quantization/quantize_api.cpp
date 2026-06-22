@@ -434,8 +434,7 @@ auto calibrate(
             if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(child)) {
                 if (fq->observer() && fq->observer()->has_data()) {
                     auto qparams = fq->observer()->calculate_qparams(
-                        nn::quantization::QuantDType::INT8,
-                        nn::quantization::QuantizationScheme::PerTensorSymmetric
+                        fq->quant_dtype(), fq->quant_scheme()
                     );
                     params_map.insert_or_assign(std::to_string(idx), std::move(qparams));
                 }
@@ -448,8 +447,7 @@ auto calibrate(
             if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(submodule)) {
                 if (fq->observer() && fq->observer()->has_data()) {
                     auto qparams = fq->observer()->calculate_qparams(
-                        nn::quantization::QuantDType::INT8,
-                        nn::quantization::QuantizationScheme::PerTensorSymmetric
+                        fq->quant_dtype(), fq->quant_scheme()
                     );
                     params_map.insert_or_assign(name, std::move(qparams));
                 }

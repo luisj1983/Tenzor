@@ -51,7 +51,9 @@ auto parse_positive_int_env(const char* name) -> int {
     errno = 0;
     char* end = nullptr;
     long value = std::strtol(env, &end, 10);
-    if (end == env || errno == ERANGE || value <= 0) {
+    // Reject trailing garbage (e.g. "8x", "4,8") as documented: end must reach
+    // the terminating NUL, not just a leading numeric prefix.
+    if (end == env || *end != '\0' || errno == ERANGE || value <= 0) {
         return 0;
     }
     if (value > static_cast<long>(std::numeric_limits<int>::max())) {

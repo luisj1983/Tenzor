@@ -3118,8 +3118,18 @@ Returns:
                         else if (start < 0) start += dim_size;
                         if (stop == std::numeric_limits<int64_t>::max()) stop = (step > 0) ? dim_size : -1;
                         else if (stop < 0) stop += dim_size;
-                        start = std::clamp(start, int64_t(0), dim_size);
-                        stop = std::clamp(stop, int64_t(0), dim_size);
+                        // Clamp step-aware. For a negative step the valid stop
+                        // range is [-1, dim_size-1], where stop = -1 means "down
+                        // to and including index 0"; clamping that sentinel to 0
+                        // (as the positive-step bound did) silently dropped the
+                        // first element of every reversed slice.
+                        if (step > 0) {
+                            start = std::clamp(start, int64_t(0), dim_size);
+                            stop = std::clamp(stop, int64_t(0), dim_size);
+                        } else {
+                            start = std::clamp(start, int64_t(0), dim_size - 1);
+                            stop = std::clamp(stop, int64_t(-1), dim_size - 1);
+                        }
                         result = result.slice(dim_cursor, start, stop, step);
                         dim_cursor++;
                         remaining_consuming--;  // NN.22

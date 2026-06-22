@@ -1796,11 +1796,17 @@ PYBIND11_MODULE(tenzor_core, m) {
                std::shared_ptr<tenzor::data::transforms::Lambda>>(transforms, "Lambda",
         "Custom transform from a callable")
         .def(py::init([](py::function func) {
+            // DataLoader workers apply this Transform on C++ worker threads; hold
+            // the py::function through a GIL-aware deleter so its dec_ref (e.g. at
+            // worker/transform teardown) happens with the GIL held.
+            auto fn = std::shared_ptr<py::function>(
+                new py::function(std::move(func)),
+                [](py::function* p) { py::gil_scoped_acquire g; delete p; });
             return std::make_unique<tenzor::data::transforms::Lambda>(
-                [func](const tenzor::Tensor& input, const tenzor::Tensor& target)
+                [fn](const tenzor::Tensor& input, const tenzor::Tensor& target)
                     -> std::pair<tenzor::Tensor, tenzor::Tensor> {
                     py::gil_scoped_acquire acquire;
-                    auto result = func(input, target);
+                    auto result = (*fn)(input, target);
                     return result.cast<std::pair<tenzor::Tensor, tenzor::Tensor>>();
                 });
         }), py::arg("func"));
@@ -3056,13 +3062,19 @@ void bind_compression(py::module& m) {
                                     const std::string& device_str,
                                     py::function py_kernel) -> uint32_t {
         auto device_type = tenzor::Device::from_string(device_str).type;
-        // Wrap Python callable in a CustomKernelFn
-        auto kernel = [py_kernel](std::span<const tenzor::Tensor> inputs,
+        // Wrap Python callable in a CustomKernelFn. The kernel is moved into the
+        // process-global CustomOpRegistry and destroyed at static teardown; hold
+        // the py::function through a GIL-aware deleter so its dec_ref happens with
+        // the GIL held (a bare py::function dtor there aborts).
+        auto kernel_fn = std::shared_ptr<py::function>(
+            new py::function(std::move(py_kernel)),
+            [](py::function* p) { py::gil_scoped_acquire g; delete p; });
+        auto kernel = [kernel_fn](std::span<const tenzor::Tensor> inputs,
                                    const tenzor::OpAttributes& /*attrs*/) -> tenzor::Tensor {
             py::gil_scoped_acquire gil;
             py::list py_inputs;
             for (const auto& t : inputs) py_inputs.append(t);
-            py::object result = py_kernel(py_inputs);
+            py::object result = (*kernel_fn)(py_inputs);
             return result.cast<tenzor::Tensor>();
         };
         auto id = tenzor::register_custom_op(name, device_type, std::move(kernel));

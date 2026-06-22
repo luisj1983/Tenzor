@@ -21,7 +21,8 @@ namespace cpu {
  * @brief Fused quantized linear: output = dequant(act @ w_int4) + bias
  *
  * @param act          INT8 activations, row-major [M x K]
- * @param weights      Packed INT4 weights, row-major [K x N], 2 values per byte
+ * @param weights      Packed INT4 weights, out-feature-major [N x K], 2 values
+ *                     per byte (channel n's K nibbles contiguous; QInt4x2 layout)
  * @param bias         Float32 bias [N], may be nullptr
  * @param output       Float32 output [M x N]
  * @param M            Number of rows (batch size)
@@ -97,11 +98,13 @@ inline void fused_qlinear_dequant(
     std::vector<int32_t> col_sum_w;
     if (act_zp != 0) {
         col_sum_w.assign(static_cast<size_t>(N), 0);
-        for (int64_t k = 0; k < K; ++k) {
-            const int8_t* w_row = w_data + k * N;
-            for (int64_t n = 0; n < N; ++n) {
-                col_sum_w[static_cast<size_t>(n)] += static_cast<int32_t>(w_row[n]);
+        for (int64_t n = 0; n < N; ++n) {
+            const int8_t* w_row = w_data + n * K;
+            int32_t s = 0;
+            for (int64_t k = 0; k < K; ++k) {
+                s += static_cast<int32_t>(w_row[k]);
             }
+            col_sum_w[static_cast<size_t>(n)] = s;
         }
     }
     const int32_t* col_sum_w_ptr = col_sum_w.empty() ? nullptr : col_sum_w.data();
@@ -111,9 +114,13 @@ inline void fused_qlinear_dequant(
         const int8_t* act_row = act + m * K;
         for (int64_t n = 0; n < N; ++n) {
             int32_t acc = 0;
+            // QInt4x2 weights are out-feature-major: channel n's K nibbles are
+            // contiguous at w_data + n*K (w_data[n*K + k] == weight[n, k]),
+            // matching quantized_linear_int4_kernel's weight_row = packed + o*(K/2).
+            const int8_t* w_row = w_data + n * K;
             for (int64_t k = 0; k < K; ++k) {
                 acc += static_cast<int32_t>(act_row[k]) *
-                       static_cast<int32_t>(w_data[k * N + n]);
+                       static_cast<int32_t>(w_row[k]);
             }
 
             if (col_sum_w_ptr) {

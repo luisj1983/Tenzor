@@ -836,8 +836,12 @@ auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Clone kernel - create a copy of the tensor
-auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    // Works for all dtypes
+auto clone_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // Works for all dtypes. memcpy copies numel*dtype_size CONTIGUOUS bytes, so a
+    // non-contiguous input (whose data_ptr()+offset is strided) must be
+    // materialized first or the copy reads the wrong bytes (corrupting the
+    // det/eig inputs that route through clone).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -1398,6 +1402,33 @@ auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue)
 
     // Indices can be Int32 or Int64
     bool is_int64 = (idx_cont.dtype() == DType::Int64);
+
+    // torch.take indexes into the flattened input and bounds-checks every index
+    // (supporting Python-style negatives). The kernels below do a raw
+    // in_ptr[idx] with no check, so normalize negatives and validate the range
+    // here (a small host-side check of the index VALUES — the gather itself
+    // stays on device) to reject out-of-bounds indices instead of performing an
+    // out-of-bounds device read.
+    {
+        const int64_t in_numel = in_cont.numel();
+        Tensor idx_host = idx_cont.to(Device::cpu());
+        auto check = [&](auto* p) {
+            for (int64_t k = 0; k < num_indices; ++k) {
+                int64_t v = static_cast<int64_t>(p[k]);
+                if (v < 0) v += in_numel;
+                if (v < 0 || v >= in_numel) {
+                    throw std::out_of_range(
+                        "take: index " + std::to_string(static_cast<int64_t>(p[k])) +
+                        " is out of bounds for input with " + std::to_string(in_numel) +
+                        " elements");
+                }
+                p[k] = static_cast<std::remove_reference_t<decltype(*p)>>(v);
+            }
+        };
+        if (is_int64) check(idx_host.data<int64_t>());
+        else          check(idx_host.data<int32_t>());
+        idx_cont = idx_host.to(in_cont.device());
+    }
 
     if (in_cont.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(in_cont);
@@ -3081,6 +3112,19 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
             int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
             out_ptr[i] = in_ptr[src_idx];
         });
+    } else if (in_cont.dtype() == DType::BFloat16) {
+        // Pure gather copy — BFloat16 is a 2-byte move needing no arithmetic.
+        const uint16_t* in_ptr = reinterpret_cast<const uint16_t*>(in_cont.data_ptr());
+        uint16_t* out_ptr = reinterpret_cast<uint16_t*>(const_cast<void*>(output.data_ptr()));
+        queue.parallel_for<RepeatInterleaveScalarBF16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+            int64_t outer_idx = i / (inner_size * out_dim_size);
+            int64_t src_dim_idx = out_dim_idx / repeats;
+            int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+            out_ptr[i] = in_ptr[src_idx];
+        });
     } else {
         throw std::runtime_error("repeat_interleave: unsupported dtype");
     }
@@ -3108,6 +3152,7 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     auto shape = in_cont.shape();
     int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     int64_t in_dim_size = shape[dim];
 
     // Convert repeats to int64 on device (no CPU roundtrip)

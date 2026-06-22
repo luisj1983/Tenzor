@@ -609,7 +609,7 @@ namespace oneapi {
                              const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
     auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_size,
                            const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
-                           sycl::queue& queue) -> Tensor;
+                           bool count_include_pad, sycl::queue& queue) -> Tensor;
     auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& kernel_size,
                              const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
                              const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
@@ -2480,7 +2480,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             std::vector<int64_t> ks{k[0], k[1], k[2]};
             std::vector<int64_t> st{s[0], s[1], s[2]};
             std::vector<int64_t> pd{p[0], p[1], p[2]};
-            return {oneapi::avgpool3d_forward(inputs[0], ks, st, pd, get_q(inputs))};
+            // PyTorch AvgPool3d default count_include_pad=true.
+            const bool cip = attrs.get_bool(AttrKey::CountIncludePad, true);
+            return {oneapi::avgpool3d_forward(inputs[0], ks, st, pd, cip, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AvgPool3dBackward,

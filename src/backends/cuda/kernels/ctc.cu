@@ -106,8 +106,9 @@ __global__ void ctc_forward_backward_kernel(
         return (s % 2 == 0) ? static_cast<int32_t>(blank) : tgt_n[s / 2];
     };
 
-    if (T_n <= 0 || S_n <= 0 || L_n > L_max) {
-        // Degenerate case: zero loss, zero grad.
+    if (T_n <= 0 || S_n <= 0 || L_n > L_max || T_n > T_max) {
+        // Degenerate case: zero loss, zero grad. T_n > T_max would index
+        // alpha/beta past their [T_max, ...] allocation (OOB write) below.
         if (tid == 0) loss_out[n] = T(0);
         for (int64_t idx = tid; idx < T_max * C; idx += nthreads) {
             int64_t t = idx / C;

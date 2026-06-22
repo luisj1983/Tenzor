@@ -375,6 +375,7 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();
@@ -537,6 +538,7 @@ auto cumsum_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Ten
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();
@@ -662,6 +664,7 @@ auto cumprod_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();
@@ -3175,6 +3178,7 @@ auto cummax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
@@ -3268,6 +3272,7 @@ auto cummin_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();

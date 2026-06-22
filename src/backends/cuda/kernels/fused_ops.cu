@@ -2089,8 +2089,10 @@ __global__ void flash_attention_v2_kernel(
     // Configuration
     constexpr int Bc = 32;  // Keys per tile - small for register pressure
 
-    const int batch_head = blockIdx.x;
-    const int query_idx = blockIdx.y;
+    // query_idx uses grid.x (limit 2^31-1) and batch_head grid.y (limit 65535)
+    // so sequences longer than 65535 launch and compute correctly.
+    const int query_idx = blockIdx.x;
+    const int batch_head = blockIdx.y;
 
     if (query_idx >= seq_len_q) return;
 
@@ -2330,9 +2332,11 @@ auto fused_attention_cuda(
     constexpr int BLOCK_SIZE = 256;
     constexpr int Bc = 32;  // Keys per tile
 
-    // Grid: one block per (batch_head, query_row) pair
+    // Grid: one block per (query_row, batch_head) pair. query_row is the x-dim
+    // (grid limit 2^31-1) so seq_len_q > 65535 is supported; batch_head is the
+    // y-dim (limit 65535, always ample for batch*heads).
     dim3 threads(BLOCK_SIZE);
-    dim3 blocks(batch_heads, seq_len_q);
+    dim3 blocks(seq_len_q, batch_heads);
 
     // Compute shared memory size based on head_dim
     // Layout: K_tile[Bc][HEAD_DIM+4] + V_tile[Bc][HEAD_DIM+4] + Q_shared[HEAD_DIM] + scores[Bc] + reduce[8]

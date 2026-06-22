@@ -2891,8 +2891,11 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
         : tenzor::zeros({0}, DType::Int64, embeddings.device());
     int64_t* argmax_ptr = is_max ? max_indices.data<int64_t>() : nullptr;
 
-    int threads = std::min(static_cast<int>(embedding_dim), 256);
-    int blocks = static_cast<int>(num_bags);
+    // Clamp to >= 1: a dim3 with a zero extent (embedding_dim == 0 or
+    // num_bags == 0) is an invalid kernel launch. With >= 1 the kernel's bounds
+    // checks make it a no-op and the pre-initialized outputs are returned.
+    int threads = std::max(1, std::min(static_cast<int>(embedding_dim), 256));
+    int blocks = std::max(1, static_cast<int>(num_bags));
 
     switch (embeddings.dtype()) {
         case DType::Float32:
@@ -3051,8 +3054,11 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
     HIP_CHECK(hipMemsetAsync(grad_weight.data_ptr(), 0,
                              num_embeddings * embedding_dim * dtype_size(grad_output.dtype()), stream));
 
-    int threads = std::min(static_cast<int>(embedding_dim), 256);
-    int blocks = static_cast<int>(num_bags);
+    // Clamp to >= 1: a dim3 with a zero extent (embedding_dim == 0 or
+    // num_bags == 0) is an invalid kernel launch. With >= 1 the kernel's bounds
+    // checks make it a no-op and the pre-initialized outputs are returned.
+    int threads = std::max(1, std::min(static_cast<int>(embedding_dim), 256));
+    int blocks = std::max(1, static_cast<int>(num_bags));
     bool is_mean = (mode == "mean");
 
     switch (grad_output.dtype()) {

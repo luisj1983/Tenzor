@@ -436,23 +436,24 @@ auto PatternMatcher::match_gemm_epilogue(const Graph& graph, size_t start_idx,
     std::vector<std::shared_ptr<Node>> matched = {n0};
     size_t next = start_idx + 1;
 
-    // Optional: Add(bias)
+    // Optional: Add(bias). Require a real data-dependency edge (the Add must
+    // consume the MatMul/Linear output) — matching purely on op-type and
+    // topological position fuses an unrelated Add, dangling its true producer's
+    // output. Every sibling matcher uses consumes_output() for this reason.
     if (next < nodes.size() && nodes[next]->op_type() == OpType::Add &&
-        !used.count(nodes[next].get())) {
+        !used.count(nodes[next].get()) &&
+        consumes_output(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
         ++next;
-        if (matched.size() > 1 && !has_single_use(matched.back())) {
-            // Add has multiple uses — can still fuse MatMul+Add but not activation
-        }
     }
 
-    // Optional: activation
+    // Optional: activation — must consume the previous matched node's output and
+    // that node must have a single use.
     if (next < nodes.size() && is_activation(nodes[next]->op_type()) &&
-        !used.count(nodes[next].get())) {
-        // Only fuse if the previous node has single use
-        if (matched.size() >= 1 && has_single_use(matched.back())) {
-            matched.push_back(nodes[next]);
-        }
+        !used.count(nodes[next].get()) &&
+        has_single_use(matched.back()) &&
+        consumes_output(matched.back(), nodes[next])) {
+        matched.push_back(nodes[next]);
     }
 
     // Need at least MatMul + one more op to justify fusion

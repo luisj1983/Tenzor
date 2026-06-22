@@ -398,10 +398,14 @@ void interpolate_nearest_5d_impl(
 // Interpolate Kernel (Public Interface)
 // ============================================================================
 
-auto interpolate_kernel(const Tensor& input,
+auto interpolate_kernel(const Tensor& input_in,
                         const std::vector<int64_t>& size,
                         const std::string& mode,
                         bool align_corners) -> Tensor {
+    // data<T>() returns storage+offset WITHOUT applying strides; the index math
+    // below assumes a contiguous row-major layout. Materialize one so permuted /
+    // sliced (e.g. channels-last) views are read correctly.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape = input.shape();
 
     // Handle 5D input (trilinear / nearest-5d)
@@ -1226,12 +1230,15 @@ void roi_align_backward_impl(
 
 } // anonymous namespace
 
-auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
+auto roi_align_forward_kernel(const Tensor& features_in, const Tensor& rois_in,
                                int64_t output_h, int64_t output_w,
                                float spatial_scale, int64_t sampling_ratio,
                                bool aligned) -> Tensor {
     // features: (N, C, H, W)
     // rois: (num_rois, 5) where each row is [batch_idx, x1, y1, x2, y2]
+    // data<T>() ignores strides; index math below assumes contiguous layout.
+    Tensor features = features_in.is_contiguous() ? features_in : features_in.contiguous();
+    Tensor rois = rois_in.is_contiguous() ? rois_in : rois_in.contiguous();
     const auto& feat_shape = features.shape();
     int64_t batch_size = feat_shape[0];
     int64_t channels = feat_shape[1];
@@ -1321,9 +1328,12 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
 // Box IoU
 // =========================================================================
 
-auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor {
+auto box_iou_kernel(const Tensor& boxes1_in, const Tensor& boxes2_in, int iou_type) -> Tensor {
     // boxes1: (N, 4), boxes2: (M, 4) in x1,y1,x2,y2 format
     // Returns (N, M) IoU matrix
+    // data<T>() ignores strides; the i*4+k indexing assumes contiguous rows.
+    Tensor boxes1 = boxes1_in.is_contiguous() ? boxes1_in : boxes1_in.contiguous();
+    Tensor boxes2 = boxes2_in.is_contiguous() ? boxes2_in : boxes2_in.contiguous();
     const int64_t N = boxes1.shape()[0];
     const int64_t M = boxes2.shape()[0];
 
@@ -1457,10 +1467,12 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
 
 // Per-axis unfold (im2col). Supports asymmetric kernel/stride/padding/dilation
 // (kh!=kw etc.), matching the dispatcher's per-axis attrs and nn.Unfold.
-auto unfold_kernel(const Tensor& input,
+auto unfold_kernel(const Tensor& input_in,
                    int64_t kh, int64_t kw, int64_t sh, int64_t sw,
                    int64_t ph, int64_t pw, int64_t dh, int64_t dw) -> Tensor {
     // input: (N, C, H, W); output: (N, C * kh * kw, L), L = H_out * W_out.
+    // data<T>() ignores strides; the (n*C+c)*H*W indexing assumes contiguous.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     const auto& shape = input.shape();
     int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
 

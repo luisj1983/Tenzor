@@ -2555,7 +2555,10 @@ auto ONNXImporter::convert_pad(const ONNXImportNode& node) -> void {
     // from the legacy `value` attribute in Pad-2..10. Read both for compat.
     double value = 0.0;
     if (node.inputs.size() > 2) {
-        auto value_t = get_input(node.inputs[2]);
+        // get_host_input: this scalar control tensor is dereferenced on the
+        // host below, so it must be CPU-resident (a GPU import otherwise reads a
+        // device pointer). Matches convert_reshape/expand/constant_of_shape.
+        auto value_t = get_host_input(node.inputs[2]);
         if (value_t.numel() > 0) {
             // Read through Float64 (not Float32): the pad API takes a double,
             // so widening via Float64 is lossless for Float64 models and for
@@ -2633,13 +2636,14 @@ auto ONNXImporter::convert_clip(const ONNXImportNode& node) -> void {
     double max_val = std::numeric_limits<double>::infinity();
 
     if (node.inputs.size() > 1 && !node.inputs[1].empty()) {
-        auto min_t = get_input(node.inputs[1]);
+        // Host-resident: dereferenced on the host below (see convert_pad).
+        auto min_t = get_host_input(node.inputs[1]);
         if (min_t.numel() > 0) {
             min_val = *static_cast<const double*>(min_t.to(DType::Float64).data_ptr());
         }
     }
     if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
-        auto max_t = get_input(node.inputs[2]);
+        auto max_t = get_host_input(node.inputs[2]);
         if (max_t.numel() > 0) {
             max_val = *static_cast<const double*>(max_t.to(DType::Float64).data_ptr());
         }
@@ -2659,14 +2663,24 @@ auto ONNXImporter::convert_cast(const ONNXImportNode& node) -> void {
         case 1:  dtype = DType::Float32; break;
         case 2:  dtype = DType::UInt8; break;
         case 3:  dtype = DType::Int8; break;
+        case 4:  dtype = DType::UInt16; break;
         case 5:  dtype = DType::Int16; break;
         case 6:  dtype = DType::Int32; break;
         case 7:  dtype = DType::Int64; break;
         case 9:  dtype = DType::Bool; break;
         case 10: dtype = DType::Float16; break;
         case 11: dtype = DType::Float64; break;
+        case 12: dtype = DType::UInt32; break;
+        case 13: dtype = DType::UInt64; break;
+        case 14: dtype = DType::Complex64; break;
+        case 15: dtype = DType::Complex128; break;
         case 16: dtype = DType::BFloat16; break;
+        case 17: dtype = DType::FP8_E4M3; break;       // ONNX FLOAT8E4M3FN
+        case 18: dtype = DType::FP8_E4M3FNUZ; break;   // ONNX FLOAT8E4M3FNUZ
+        case 19: dtype = DType::FP8_E5M2; break;       // ONNX FLOAT8E5M2
+        case 20: dtype = DType::FP8_E5M2FNUZ; break;   // ONNX FLOAT8E5M2FNUZ
         default:
+            // 8 = STRING (no Tenzor dtype) and any future/unknown id.
             throw std::runtime_error("Unsupported ONNX Cast target type: " + std::to_string(to_type));
     }
 
@@ -2769,7 +2783,14 @@ static auto apply_multi_axis_reduce(const Tensor& input,
         for (int64_t d = 0; d < ndim; ++d) axes.push_back(d);
     }
     // Normalize negative axes.
-    for (auto& a : axes) if (a < 0) a += ndim;
+    for (auto& a : axes) {
+        if (a < 0) a += ndim;
+        if (a < 0 || a >= ndim) {
+            throw std::runtime_error(
+                "ONNX reduce: axis " + std::to_string(a) +
+                " is out of range for a rank-" + std::to_string(ndim) + " input");
+        }
+    }
     std::sort(axes.begin(), axes.end(), std::greater<int64_t>());
 
     Tensor result = input;
@@ -3034,7 +3055,9 @@ auto ONNXImporter::convert_topk(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     int64_t k = 1;
     if (node.inputs.size() > 1) {
-        auto k_t = get_input(node.inputs[1]);
+        // Host-resident + Int64: K is dereferenced on the host, and may be
+        // provided as Int32 (data<int64_t>() would otherwise throw).
+        auto k_t = get_host_input(node.inputs[1]).to(DType::Int64);
         if (k_t.numel() > 0) k = k_t.data<int64_t>()[0];
     } else {
         // Older opsets (pre-10) used `k` as an int attribute.
@@ -3062,9 +3085,12 @@ auto ONNXImporter::convert_tile(const ONNXImportNode& node) -> void {
 
 auto ONNXImporter::convert_range(const ONNXImportNode& node) -> void {
     // ONNX Range: inputs (start, limit, delta) — all scalars (0-D tensors).
-    auto start_t = get_input(node.inputs[0]).to(DType::Float64);
-    auto limit_t = get_input(node.inputs[1]).to(DType::Float64);
-    auto delta_t = get_input(node.inputs[2]).to(DType::Float64);
+    // Host-resident: these scalars are dereferenced on the host below; a GPU
+    // import otherwise reads device pointers. (dtype/device reads farther down
+    // do not dereference data, so get_input is fine there.)
+    auto start_t = get_host_input(node.inputs[0]).to(DType::Float64);
+    auto limit_t = get_host_input(node.inputs[1]).to(DType::Float64);
+    auto delta_t = get_host_input(node.inputs[2]).to(DType::Float64);
     double start = start_t.data<double>()[0];
     double limit = limit_t.data<double>()[0];
     double delta = delta_t.data<double>()[0];

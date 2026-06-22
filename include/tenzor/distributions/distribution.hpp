@@ -1841,7 +1841,10 @@ public:
     auto entropy() -> Tensor override {
         // H = loc + 0.5 + log(scale * sqrt(2*pi*e))
         // = loc + 0.5 + log(scale) + 0.5*log(2*pi*e)
-        return loc_ + 0.5f + tenzor::log(scale_) + 0.9189385332f;
+        // Use double literals so Float64 LogNormal keeps full precision
+        // (0.5*log(2*pi) = 0.91893853320467274178...); a float literal capped it
+        // at ~1e-7.
+        return loc_ + 0.5 + tenzor::log(scale_) + 0.91893853320467274178;
     }
 
     auto mean() -> Tensor override {
@@ -3101,8 +3104,11 @@ public:
 
     static auto from_logits(Tensor temperature, Tensor logits)
         -> RelaxedOneHotCategorical {
-        // Compute probs via softmax (inline, no dependency on nn::)
-        auto max_val = tenzor::max(logits);
+        // Compute probs via softmax (inline, no dependency on nn::). Subtract the
+        // PER-ROW max over the category axis, not a global scalar max: with a
+        // global max a row whose logits are all far below it underflows
+        // exp(.)→0, making sum_exp 0 and probs 0/0 = NaN.
+        auto max_val = tenzor::max(logits, std::optional<int64_t>{-1}, /*keepdim=*/true);
         auto shifted = logits - max_val;
         auto exp_vals = tenzor::exp(shifted);
         auto sum_exp = tenzor::sum(exp_vals, -1, /*keepdim=*/true);
@@ -3127,8 +3133,10 @@ public:
         auto gumbels = tenzor::neg(tenzor::log(tenzor::neg(tenzor::log(u_clamped))));
         // Scores: (logits + gumbels) / temperature
         auto scores = (logits_ + gumbels) / temperature_;
-        // Softmax (inline implementation over last dim)
-        auto max_s = tenzor::max(scores);
+        // Softmax (inline implementation over last dim). Per-row max over the
+        // category axis (a global scalar max underflows rows that sit far below
+        // it to all-zero, giving sum_exp 0 and a 0/0 = NaN sample).
+        auto max_s = tenzor::max(scores, std::optional<int64_t>{-1}, /*keepdim=*/true);
         auto shifted = scores - max_s;
         auto exp_s = tenzor::exp(shifted);
         auto sum_exp = tenzor::sum(exp_s, -1, /*keepdim=*/true);

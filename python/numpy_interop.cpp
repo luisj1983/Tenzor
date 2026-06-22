@@ -189,26 +189,23 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
     if (kind == 'V' && itemsize == 1) {
         auto ml_dtypes = get_ml_dtypes_module();
         if (!ml_dtypes.is_none()) {
-          try {
-            auto e4m3fnuz = ml_dtypes.attr("float8_e4m3fnuz");
-            if (dtype.equal(py::dtype::from_args(e4m3fnuz))) {
-                return DType::FP8_E4M3FNUZ;
-            }
-            auto e5m2fnuz = ml_dtypes.attr("float8_e5m2fnuz");
-            if (dtype.equal(py::dtype::from_args(e5m2fnuz))) {
-                return DType::FP8_E5M2FNUZ;
-            }
-            auto e4m3 = ml_dtypes.attr("float8_e4m3fn");
-            if (dtype.equal(py::dtype::from_args(e4m3))) {
-                return DType::FP8_E4M3;
-            }
-            auto e5m2 = ml_dtypes.attr("float8_e5m2");
-            if (dtype.equal(py::dtype::from_args(e5m2))) {
-                return DType::FP8_E5M2;
-            }
-          } catch (const py::error_already_set&) {
-            PyErr_Clear();
-          }
+          // Probe each FP8 variant independently: older ml_dtypes releases lack
+          // the FNUZ attributes, and a single shared try-block would let the
+          // first missing attr's AttributeError skip the remaining (present)
+          // variants — misclassifying e.g. float8_e4m3fn as unsupported.
+          auto matches = [&](const char* name) -> bool {
+              try {
+                  auto a = ml_dtypes.attr(name);
+                  return dtype.equal(py::dtype::from_args(a));
+              } catch (const py::error_already_set&) {
+                  PyErr_Clear();
+                  return false;
+              }
+          };
+          if (matches("float8_e4m3fnuz")) return DType::FP8_E4M3FNUZ;
+          if (matches("float8_e5m2fnuz")) return DType::FP8_E5M2FNUZ;
+          if (matches("float8_e4m3fn"))   return DType::FP8_E4M3;
+          if (matches("float8_e5m2"))     return DType::FP8_E5M2;
         } else {
             // ml_dtypes not available — fall back to dtype-name string match.
             // Match the FNUZ variants first: their names contain the

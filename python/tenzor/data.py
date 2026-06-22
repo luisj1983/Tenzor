@@ -529,9 +529,14 @@ class DistributedSampler(Sampler[int]):
 
         # Pad or truncate to total_size
         if self.total_size > total:
-            # Repeat indices to fill
+            # Repeat indices to fill. The padding can exceed len(indices) when the
+            # dataset is smaller than num_replicas, so repeat the whole index list
+            # enough times before slicing — `indices[:padding]` alone would only
+            # add min(padding, len(indices)) items and leave indices too short.
             padding = self.total_size - total
-            indices += indices[:padding]
+            if total > 0:
+                reps = (padding + total - 1) // total  # ceil(padding / total)
+                indices += (indices * reps)[:padding]
         else:
             indices = indices[: self.total_size]
 
@@ -615,12 +620,15 @@ class WeightedRandomSampler(Sampler[int]):
             keys = []
             for i in range(n):
                 w_i = self.weights[i]
+                # Zero/negative-weight items are NEVER selected without
+                # replacement: exclude them from the candidate pool entirely.
+                # (Previously they got key 0.0 and still filled num_samples when
+                # there were fewer positive-weight items than requested.)
                 if w_i <= 0.0:
-                    keys.append((0.0, i))
-                else:
-                    u = g.random()
-                    # u is in (0, 1); take key as u**(1.0/w_i)
-                    keys.append((u ** (1.0 / w_i), i))
+                    continue
+                u = g.random()
+                # u is in (0, 1); take key as u**(1.0/w_i)
+                keys.append((u ** (1.0 / w_i), i))
             keys.sort(key=lambda t: t[0], reverse=True)
             indices = [i for _, i in keys[: self.num_samples]]
         return iter(indices)

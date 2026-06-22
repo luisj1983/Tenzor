@@ -1930,7 +1930,7 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -1946,7 +1946,7 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -1962,7 +1962,7 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -1978,7 +1978,7 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -1994,7 +1994,7 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -2010,7 +2010,7 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -2061,7 +2061,7 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -2077,7 +2077,7 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -2093,7 +2093,7 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -2109,7 +2109,7 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -2125,7 +2125,7 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;
@@ -2141,7 +2141,7 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    dim, stream  // pass the resolved stream; default was stream 0
                 );
             }
             break;

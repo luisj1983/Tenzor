@@ -277,7 +277,7 @@ namespace cpu {
     auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor;
     auto contiguous_kernel(const Tensor& input) -> Tensor;
     auto clone_kernel(const Tensor& input) -> Tensor;
-    auto fill_kernel(const Tensor& input, float value) -> Tensor;
+    auto fill_kernel(const Tensor& input, double value) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
     auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor;
     auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor;
@@ -1592,7 +1592,7 @@ static void register_cpu_kernels_shape(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_KERNEL(table, Clone, cpu::clone_kernel);
 
     table.register_single_output_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         return cpu::fill_kernel(inputs[0], value);
     });
 

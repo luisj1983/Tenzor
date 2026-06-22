@@ -128,7 +128,7 @@ auto AdamAtan2::step_impl() -> void {
         // Track gradient magnitude only when statistics tracking is enabled
         // (.item() forces GPU synchronization per parameter, which is expensive)
         if (track_statistics_) {
-            auto grad_sq_sum = tenzor::sum(grad * grad).item<float>();
+            auto grad_sq_sum = tenzor::sum(grad * grad).item<double>();
             total_grad_mag += std::sqrt(grad_sq_sum);
         }
         total_params++;
@@ -178,7 +178,7 @@ auto AdamAtan2::step_impl() -> void {
         if (track_statistics_) {
             auto update_flat = update.view({-1});
             auto update_sq = update_flat * update_flat;
-            auto update_sq_sum = tenzor::sum(update_sq).template item<float>();
+            auto update_sq_sum = tenzor::sum(update_sq).template item<double>();
             double update_mag = std::sqrt(update_sq_sum);
             total_update_mag += update_mag;
             max_update_mag = std::max(max_update_mag, update_mag);

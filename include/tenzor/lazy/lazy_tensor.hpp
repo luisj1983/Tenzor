@@ -261,6 +261,18 @@ private:
         return g;
     }
 
+    /// Mutable canonical resolver. New nodes must be appended to the canonical
+    /// graph (the one flush()/nodes() follow); appending to a stale, absorbed
+    /// operand's nodes_ would strand the node so it is never materialised.
+    auto canonical_mut() -> LazyGraph* {
+        LazyGraph* g = this;
+        while (auto next = g->canonical_.lock()) {
+            if (next.get() == g) break;
+            g = next.get();
+        }
+        return g;
+    }
+
     /// Execute a single node given materialized inputs.
     auto execute_node(const std::shared_ptr<LazyNode>& node) -> Tensor;
 };

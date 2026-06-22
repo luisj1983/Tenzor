@@ -688,9 +688,11 @@ auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
     }
     HIP_CHECK(hipGetLastError());
-    // Synchronize before the RAII buffers are destroyed at scope exit, since the
-    // kernel reads from them.
-    HIP_CHECK(hipDeviceSynchronize());
+    // Synchronize before the RAII metadata buffers are destroyed at scope exit,
+    // since the kernel reads from them. Sync only the launch stream (0) rather
+    // than hipDeviceSynchronize(), which would block the host on ALL device work
+    // across every stream and serialize otherwise-independent GPU activity.
+    HIP_CHECK(hipStreamSynchronize(0));
 
     return result;
 }

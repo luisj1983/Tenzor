@@ -4953,6 +4953,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         }
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        // Float16/BFloat16 lack composed-op coverage in some primitives (same
+        // reason rocm_compose_nanvar widens): compute in Float32 and narrow back.
+        if (x.dtype() == DType::Float16 || x.dtype() == DType::BFloat16) {
+            const DType orig = x.dtype();
+            Tensor xf = x.to(DType::Float32);
+            Tensor c = tenzor::where(isnan(xf), zeros_like(xf), xf);
+            return tenzor::sum(c, dim, keepdim).to(orig);
+        }
         Tensor cleaned = tenzor::where(isnan(x), zeros_like(x), x);
         return tenzor::sum(cleaned, dim, keepdim);
     });
@@ -4963,11 +4971,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         }
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        Tensor mask = isnan(x);
-        Tensor cleaned = where(mask, zeros_like(x), x);
+        // Float16/BFloat16 lack composed-op coverage in some primitives: widen.
+        const bool half = (x.dtype() == DType::Float16 || x.dtype() == DType::BFloat16);
+        const DType orig = x.dtype();
+        Tensor xf = half ? x.to(DType::Float32) : x;
+        Tensor mask = isnan(xf);
+        Tensor cleaned = where(mask, zeros_like(xf), xf);
         Tensor numer = tenzor::sum(cleaned, dim, keepdim);
-        Tensor count = tenzor::sum(logical_not(mask).to(x.dtype()), dim, keepdim);
-        return tenzor::div(numer, count);
+        Tensor count = tenzor::sum(logical_not(mask).to(xf.dtype()), dim, keepdim);
+        Tensor res = tenzor::div(numer, count);
+        return half ? res.to(orig) : res;
     });
     // Aminmax: native HIP dual min/max reduction (returns 2 tensors)
     table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {

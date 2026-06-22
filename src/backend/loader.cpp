@@ -143,7 +143,18 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
         std::error_code mkec;
         std::filesystem::create_directories(cache_dir, mkec);
         ::chmod(cache_dir.c_str(), 0700);  // best-effort owner-only
+        // Verify the result is a REAL directory we own and that is not group/
+        // world writable — lstat (not stat) so a symlink another user pre-created
+        // to redirect the probe cache is rejected rather than followed. On any
+        // mismatch, disable the on-disk cache (probe runs fresh) instead of
+        // reading/writing through a hijacked path.
+        struct stat dst{};
+        if (::lstat(cache_dir.c_str(), &dst) != 0 || !S_ISDIR(dst.st_mode) ||
+            dst.st_uid != getuid() || (dst.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+            cache_dir.clear();  // untrusted: cache read/write below are gated on this
+        }
     }
+    const bool cache_usable = !cache_dir.empty();
     std::string cache_file = cache_dir + "/probe_" + lib_filename + "_" +
                              std::to_string(mtime_val);
 
@@ -151,7 +162,7 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
     int cached_result = -1;  // -1 = no cache, 0 = ok, 1 = failed, 2 = hung
     {
         // O_NOFOLLOW: refuse to follow a symlink another user may have planted.
-        int cache_fd = open(cache_file.c_str(), O_RDONLY | O_NOFOLLOW);
+        int cache_fd = cache_usable ? open(cache_file.c_str(), O_RDONLY | O_NOFOLLOW) : -1;
         if (cache_fd >= 0) {
             struct stat st{};
             // Only trust a regular file owned by us that is not group/world
@@ -221,6 +232,7 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
 
             // Write cache result
             auto write_cache = [&](char result) {
+                if (!cache_usable) return;  // untrusted cache dir: skip persisting
                 int fd = open(cache_file.c_str(),
                               O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
                 if (fd >= 0) {

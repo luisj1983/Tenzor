@@ -138,6 +138,16 @@ void validate_image_dims(int width, int height, int channels) {
             "got " + std::to_string(channels));
     }
     const int64_t w = width, h = height, n = channels;
+    // Bound the dimensions BEFORE the byte-size products below: with w/h near
+    // INT_MAX the int64 products (w*h*n, etc.) overflow and wrap, so a later
+    // size guard would compare against a bogus (possibly negative) value and let
+    // stb's 32-bit size fields overflow. 2^24 per side is far beyond any real image.
+    constexpr int64_t kMaxImageDim = 1 << 24;
+    if (w <= 0 || h <= 0 || w > kMaxImageDim || h > kMaxImageDim) {
+        throw std::invalid_argument(
+            "image dimensions out of range: " + std::to_string(w) + "x" +
+            std::to_string(h));
+    }
     // PNG filtered-scanline buffer: (x*n + 1) * y.
     const int64_t png_bytes = (w * n + 1) * h;
     // Raw HWC pixel buffer: x * y * n.

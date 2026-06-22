@@ -57,7 +57,12 @@ auto widen_narrow_compute(const Tensor& x, Fn&& fn) -> Tensor {
         }
         return result;
     }
-    Tensor result = std::forward<Fn>(fn)(x);
+    // fn reads x.data<T>() linearly (storage+offset, strides NOT applied), so a
+    // non-contiguous Float32/Float64 view must be materialized first or it would
+    // be read as if contiguous (wrong data). The half path above already yields
+    // a contiguous tensor via .to(Float32).
+    Tensor xc = x.is_contiguous() ? x : x.contiguous();
+    Tensor result = std::forward<Fn>(fn)(xc);
     if (result.dtype() != orig) {
         return result.to(orig);
     }

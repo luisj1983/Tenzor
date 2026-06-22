@@ -2289,7 +2289,10 @@ auto log_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
 }
 
 // Power kernel launcher
-auto pow_kernel(const Tensor& input, double exponent, cudaStream_t stream) -> Tensor {
+auto pow_kernel(const Tensor& input_in, double exponent, cudaStream_t stream) -> Tensor {
+    // Kernels index data<T>() linearly; materialize a contiguous copy so a
+    // non-contiguous (sliced/transposed) input is read in storage order.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2332,7 +2335,8 @@ auto pow_kernel(const Tensor& input, double exponent, cudaStream_t stream) -> Te
 }
 
 // Clamp kernel launcher
-auto clamp_kernel(const Tensor& input, double min_val, double max_val, cudaStream_t stream) -> Tensor {
+auto clamp_kernel(const Tensor& input_in, double min_val, double max_val, cudaStream_t stream) -> Tensor {
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2674,7 +2678,8 @@ __global__ void clamp_max_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16*
     }
 }
 
-auto clamp_min_kernel(const Tensor& input, double min_val, cudaStream_t stream) -> Tensor {
+auto clamp_min_kernel(const Tensor& input_in, double min_val, cudaStream_t stream) -> Tensor {
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2710,7 +2715,8 @@ auto clamp_min_kernel(const Tensor& input, double min_val, cudaStream_t stream) 
     return result;
 }
 
-auto clamp_max_kernel(const Tensor& input, double max_val, cudaStream_t stream) -> Tensor {
+auto clamp_max_kernel(const Tensor& input_in, double max_val, cudaStream_t stream) -> Tensor {
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3677,6 +3683,10 @@ auto strided_fill_kernel(Tensor& self, double value, cudaStream_t stream) -> voi
     }
     int64_t* d_meta = nullptr;
     CUDA_CHECK(cudaMallocAsync(&d_meta, meta.size() * sizeof(int64_t), stream));
+    // RAII: free d_meta on EVERY exit path, including when a CUDA_CHECK in the
+    // launch/dispatch below throws (which previously leaked the device buffer).
+    struct DMetaGuard { int64_t* p; cudaStream_t s; ~DMetaGuard() { if (p) cudaFreeAsync(p, s); } }
+        d_meta_guard{d_meta, stream};
     CUDA_CHECK(cudaMemcpyAsync(d_meta, meta.data(), meta.size() * sizeof(int64_t),
                                cudaMemcpyHostToDevice, stream));
 
@@ -3739,7 +3749,6 @@ auto strided_fill_kernel(Tensor& self, double value, cudaStream_t stream) -> voi
                FP8_E5M2FNUZ(static_cast<float>(value)).bits);
     } else if (self.dtype() == DType::QInt8) {
         if (self.q_scale() == 0.0) {
-            CUDA_CHECK(cudaFreeAsync(d_meta, stream));
             throw std::runtime_error(
                 "fill_ on quantized tensor requires quantization params: "
                 "call set_quantization_params(scale, zero_point) first");
@@ -3748,7 +3757,6 @@ auto strided_fill_kernel(Tensor& self, double value, cudaStream_t stream) -> voi
         launch(self.data<int8_t>(), static_cast<int8_t>(std::clamp<int64_t>(qval, -128, 127)));
     } else if (self.dtype() == DType::QUInt8) {
         if (self.q_scale() == 0.0) {
-            CUDA_CHECK(cudaFreeAsync(d_meta, stream));
             throw std::runtime_error(
                 "fill_ on quantized tensor requires quantization params: "
                 "call set_quantization_params(scale, zero_point) first");
@@ -3758,7 +3766,6 @@ auto strided_fill_kernel(Tensor& self, double value, cudaStream_t stream) -> voi
                static_cast<uint8_t>(std::clamp<int64_t>(qval, 0, 255)));
     } else if (self.dtype() == DType::QInt4x2) {
         if (self.q_scale() == 0.0) {
-            CUDA_CHECK(cudaFreeAsync(d_meta, stream));
             throw std::runtime_error(
                 "fill_ on quantized tensor requires quantization params: "
                 "call set_quantization_params(scale, zero_point) first");
@@ -3768,11 +3775,9 @@ auto strided_fill_kernel(Tensor& self, double value, cudaStream_t stream) -> voi
         const uint8_t packed = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
         launch(reinterpret_cast<uint8_t*>(self.data_ptr()), packed);
     } else {
-        CUDA_CHECK(cudaFreeAsync(d_meta, stream));
         throw std::runtime_error("strided_fill: unsupported dtype");
     }
 
-    CUDA_CHECK(cudaFreeAsync(d_meta, stream));
 }
 
 // Zeros kernel launcher - creates tensor filled with zeros
@@ -8376,41 +8381,49 @@ __global__ void logical_xor_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloa
 #define DEFINE_BINARY_LOGICAL_KERNEL(name) \
 auto name##_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor { \
     if (a.dtype() != b.dtype()) throw std::runtime_error(#name ": tensors must have the same dtype"); \
-    int64_t n = a.numel(); \
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end()); \
+    /* Broadcast both operands to a common shape and materialize contiguous */ \
+    /* copies. The kernels index lhs[idx]/rhs[idx] with one linear index, so a */ \
+    /* smaller operand would otherwise be read out of bounds (and the result */ \
+    /* would have the wrong shape). */ \
+    std::vector<int64_t> shape = detail::compute_broadcast_shape( \
+        std::vector<int64_t>(a.shape().begin(), a.shape().end()), \
+        std::vector<int64_t>(b.shape().begin(), b.shape().end())); \
+    Tensor lhs = a.expand(shape).contiguous(); \
+    Tensor rhs = b.expand(shape).contiguous(); \
+    int64_t n = lhs.numel(); \
     Tensor result(shape, DType::Bool, a.device()); \
     dim3 grid, block; \
     compute_launch_config_1d(n, grid, block); \
     if (a.dtype() == DType::Float32) { \
-        name##_kernel_device<<<grid, block, 0, stream>>>(a.data<float>(), b.data<float>(), result.data<uint8_t>(), n); \
+        name##_kernel_device<<<grid, block, 0, stream>>>(lhs.data<float>(), rhs.data<float>(), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::Float64) { \
-        name##_kernel_device<<<grid, block, 0, stream>>>(a.data<double>(), b.data<double>(), result.data<uint8_t>(), n); \
+        name##_kernel_device<<<grid, block, 0, stream>>>(lhs.data<double>(), rhs.data<double>(), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::Int32) { \
-        name##_kernel_device<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<uint8_t>(), n); \
+        name##_kernel_device<<<grid, block, 0, stream>>>(lhs.data<int32_t>(), rhs.data<int32_t>(), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::Int64) { \
-        name##_kernel_device<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<uint8_t>(), n); \
+        name##_kernel_device<<<grid, block, 0, stream>>>(lhs.data<int64_t>(), rhs.data<int64_t>(), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::Int8) { \
-        name##_kernel_device<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<uint8_t>(), n); \
+        name##_kernel_device<<<grid, block, 0, stream>>>(lhs.data<int8_t>(), rhs.data<int8_t>(), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::UInt8) { \
-        name##_kernel_device<<<grid, block, 0, stream>>>(a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n); \
+        name##_kernel_device<<<grid, block, 0, stream>>>(lhs.data<uint8_t>(), rhs.data<uint8_t>(), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::Bool) { \
-        name##_kernel_device<<<grid, block, 0, stream>>>(a.data<bool>(), b.data<bool>(), result.data<uint8_t>(), n); \
+        name##_kernel_device<<<grid, block, 0, stream>>>(lhs.data<bool>(), rhs.data<bool>(), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::Float16) { \
         name##_kernel_f16<<<grid, block, 0, stream>>>( \
-            reinterpret_cast<const __half*>(a.data<Float16>()), \
-            reinterpret_cast<const __half*>(b.data<Float16>()), result.data<uint8_t>(), n); \
+            reinterpret_cast<const __half*>(lhs.data<Float16>()), \
+            reinterpret_cast<const __half*>(rhs.data<Float16>()), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else if (a.dtype() == DType::BFloat16) { \
         name##_kernel_bf16<<<grid, block, 0, stream>>>( \
-            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()), \
-            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()), result.data<uint8_t>(), n); \
+            reinterpret_cast<const __nv_bfloat16*>(lhs.data<BFloat16>()), \
+            reinterpret_cast<const __nv_bfloat16*>(rhs.data<BFloat16>()), result.data<uint8_t>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } else { \
         throw std::runtime_error(#name " operation: unsupported dtype"); \

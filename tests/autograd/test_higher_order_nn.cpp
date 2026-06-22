@@ -74,9 +74,18 @@ TEST_P(HigherOrderNNTest, LSTM_InnerLoop_Gradient) {
     int64_t seq_len = 3;
     int64_t batch = 1;
 
+    // The fused cuDNN LSTM train path (CudnnLSTMTrainBackward) does not implement
+    // backward_with_variables and so cannot supply second derivatives. Force the
+    // per-timestep Variable cell loop — the library's documented mechanism for the
+    // double-backward case (see lstm.cpp) — so this higher-order test exercises a
+    // real second-order graph on every backend (on CPU it already did).
+    setenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN", "1", 1);
+    struct LstmEnvGuard { ~LstmEnvGuard() { unsetenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN"); } } lstm_env_guard;
+
     auto input = Variable(randn({seq_len, batch, input_size}, DType::Float32, device), true);
 
     nn::LSTM lstm(input_size, hidden_size, 1);
+    lstm.to(device);  // move weights/biases onto the test device (matches siblings)
     lstm.train();  // selects the Variable-graph path (see lstm.cpp can_use_fused)
 
     auto output = lstm.forward_impl(input);
@@ -110,9 +119,16 @@ TEST_P(HigherOrderNNTest, GRU_InnerLoop_Gradient) {
     int64_t seq_len = 3;
     int64_t batch = 1;
 
+    // GRU's fused cuDNN train path likewise cannot supply second derivatives;
+    // force the Variable cell loop (documented double-backward mechanism, see
+    // gru.cpp) so the higher-order graph is real on every backend.
+    setenv("TENZOR_DISABLE_FUSED_GRU_TRAIN", "1", 1);
+    struct GruEnvGuard { ~GruEnvGuard() { unsetenv("TENZOR_DISABLE_FUSED_GRU_TRAIN"); } } gru_env_guard;
+
     auto input = Variable(randn({seq_len, batch, input_size}, DType::Float32, device), true);
 
     nn::GRU gru(input_size, hidden_size, 1);
+    gru.to(device);  // move weights/biases onto the test device (matches siblings)
     gru.train();  // selects the Variable-graph forward (mirrors LSTM)
 
     auto output = gru.forward_impl(input);

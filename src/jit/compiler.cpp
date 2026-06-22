@@ -1955,9 +1955,31 @@ auto LoopUnrollingPass::run(Graph& graph) -> bool {
         for (int64_t iter = 0; iter < trip_count; ++iter) {
             std::unordered_map<std::string, std::string> id_remap;
 
+            // Loop convention: body_inputs = [iter, cond, carried_0, ...];
+            // carried_ids tracks the loop's [cond, carried_0, ...]. Previously
+            // body_inputs[i] was mapped to carried_ids[i], which aligned the
+            // iteration counter (body_inputs[0]) with cond and shifted every
+            // carried value by one — computing wrong results. Map the counter to
+            // a per-iteration constant, and cond/carried (body_inputs[1..]) to
+            // carried_ids[0..].
             auto& body_inputs = body->inputs();
-            for (size_t i = 0; i < std::min(body_inputs.size(), carried_ids.size()); ++i) {
-                id_remap[body_inputs[i]->id()] = carried_ids[i];
+            if (!body_inputs.empty()) {
+                auto iter_in = body_inputs[0];
+                Tensor iter_tensor({1}, DType::Int64, iter_in->device());
+                iter_tensor.data<int64_t>()[0] = iter;
+                auto iter_node = graph.create_node(OpType::Constant);
+                iter_node->set_tensor_attr("value", iter_tensor);
+                std::string iter_val_id =
+                    iter_node->name() + "_iter_" + std::to_string(iter);
+                auto iter_val = graph.create_value(iter_val_id, {1}, DType::Int64,
+                                                   iter_in->device());
+                iter_val->set_node(iter_node);
+                iter_node->add_output(iter_val);
+                graph.add_node(iter_node);
+                id_remap[iter_in->id()] = iter_val_id;
+            }
+            for (size_t j = 0; j + 1 < body_inputs.size() && j < carried_ids.size(); ++j) {
+                id_remap[body_inputs[j + 1]->id()] = carried_ids[j];
             }
 
             for (const auto& body_node : body->nodes()) {
@@ -1989,8 +2011,12 @@ auto LoopUnrollingPass::run(Graph& graph) -> bool {
             }
         }
 
-        for (size_t i = 0; i < std::min(loop_outputs.size(), carried_ids.size()); ++i) {
-            graph.replace_value(loop_outputs[i]->id(), carried_ids[i]);
+        // loop_outputs are the final carried values [v_0_final, ...]; they map to
+        // carried_ids[1..] (carried_ids[0] is the loop cond, which is NOT a loop
+        // output). Skip the cond slot — previously loop_outputs[i] was wired to
+        // carried_ids[i], returning cond/shifted values.
+        for (size_t i = 0; i < loop_outputs.size() && (i + 1) < carried_ids.size(); ++i) {
+            graph.replace_value(loop_outputs[i]->id(), carried_ids[i + 1]);
         }
         graph.remove_node(loop_node);
         modified = true;

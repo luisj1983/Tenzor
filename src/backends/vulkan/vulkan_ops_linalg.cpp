@@ -1256,7 +1256,12 @@ void VulkanBackend::runBlockedHessenberg(Tensor& A, Tensor& tau, int64_t n,
 
         // --- Apply accumulated reflections to trailing columns ---
         int64_t trail_start = col_start + panel_cols;
-        if (trail_start < k) {
+        // Apply whenever ANY trailing column remains (< n), matching the blocked
+        // QR/Bidiag/tridiag routines above. The previous `< k` (k = n-2) bound
+        // skipped the update for panels ending at/past column n-2, leaving the
+        // last one or two columns un-reflected and corrupting the Hessenberg form
+        // (and thus the eigenvalues) for matrices spanning more than one block.
+        if (trail_start < n) {
             int64_t trail_cols = n - trail_start;
 
             for (int64_t b = 0; b < batch_size; ++b) {
@@ -2456,6 +2461,14 @@ auto VulkanBackend::dispatchSparseToDense(const Tensor& crow_indices, const Tens
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
+    // The descriptor bindings below require offset-0 (16-byte-aligned) buffers.
+    // A sparse component that arrives as an unmaterialized offset view (e.g. from
+    // COO->CSR slicing, or a densified Adam grad) would otherwise trip Vulkan's
+    // descriptor-offset alignment guard. Materialize each input.
+    crow_i32 = dispatchContiguous(crow_i32);
+    col_i32 = dispatchContiguous(col_i32);
+    Tensor values_mat = dispatchContiguous(values);
+
     // One workgroup per row: guard M against the device limit (see SpMM).
     checkSparseRowDispatch(device_id, "SparseToDense", M);
 
@@ -2469,7 +2482,7 @@ auto VulkanBackend::dispatchSparseToDense(const Tensor& crow_indices, const Tens
     size_t output_size = output.numel() * elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values_mat.data_ptr()},
         {3, output.data_ptr()},
     };
     std::vector<size_t> sizes = {crow_size, col_size, values_size, output_size};

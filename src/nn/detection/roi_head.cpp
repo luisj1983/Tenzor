@@ -384,6 +384,13 @@ auto RoIHead::forward_detections(
 
     std::vector<std::unordered_map<std::string, Tensor>> all_detections;
 
+    // Zero-initialise the loss accumulators ONCE and accumulate unconditionally
+    // below (mirrors RegionProposalNetwork::forward_proposals). Keying init on
+    // `i == 0` is fragile: if image 0 takes a branch that doesn't initialise the
+    // accumulators, later images add to a stale/uninitialised value.
+    loss_classifier_ = Variable(ops::zeros({1}, features.dtype(), features.device()), false);
+    loss_box_reg_ = Variable(ops::zeros({1}, features.dtype(), features.device()), false);
+
     // Process each image in batch
     for (size_t i = 0; i < proposals.size(); ++i) {
 
@@ -429,13 +436,16 @@ auto RoIHead::forward_detections(
             // Handle edge case: no sampled indices (e.g., empty proposals)
             if (sampled_indices.numel() == 0) {
                 auto zero_loss = Variable(ops::zeros({1}, features.dtype(), features.device()), false);
-                if (i == 0) {
-                    loss_classifier_ = zero_loss;
-                    loss_box_reg_ = zero_loss;
-                } else {
-                    loss_classifier_ = loss_classifier_ + zero_loss;
-                    loss_box_reg_ = loss_box_reg_ + zero_loss;
-                }
+                loss_classifier_ = loss_classifier_ + zero_loss;
+                loss_box_reg_ = loss_box_reg_ + zero_loss;
+                // Push an empty detection map so all_detections stays aligned
+                // with proposals (one entry per image). Skipping the push here
+                // desynced detections[i] from image i for every later image.
+                std::unordered_map<std::string, Tensor> empty_det;
+                empty_det["boxes"] = ops::zeros({0, 4}, features.dtype(), features.device());
+                empty_det["scores"] = ops::zeros({0}, features.dtype(), features.device());
+                empty_det["labels"] = ops::zeros({0}, DType::Int64, features.device());
+                all_detections.push_back(std::move(empty_det));
                 continue;  // Skip to next image
             }
 
@@ -569,24 +579,14 @@ auto RoIHead::forward_detections(
                 );
 
                 // Accumulate losses
-                if (i == 0) {
-                    loss_classifier_ = cls_loss;
-                    loss_box_reg_ = reg_loss;
-                } else {
-                    loss_classifier_ = loss_classifier_ + cls_loss;
-                    loss_box_reg_ = loss_box_reg_ + reg_loss;
-                }
+                loss_classifier_ = loss_classifier_ + cls_loss;
+                loss_box_reg_ = loss_box_reg_ + reg_loss;
             } else {
                 // No foreground samples - create zero regression loss
                 auto zero_reg_loss = Variable(ops::zeros({1}, features.dtype(),
                                                          features.device()), false);
-                if (i == 0) {
-                    loss_classifier_ = cls_loss;
-                    loss_box_reg_ = zero_reg_loss;
-                } else {
-                    loss_classifier_ = loss_classifier_ + cls_loss;
-                    loss_box_reg_ = loss_box_reg_ + zero_reg_loss;
-                }
+                loss_classifier_ = loss_classifier_ + cls_loss;
+                loss_box_reg_ = loss_box_reg_ + zero_reg_loss;
             }
         }
 

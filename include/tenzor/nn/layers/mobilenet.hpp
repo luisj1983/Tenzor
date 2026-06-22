@@ -155,6 +155,8 @@ private:
 
     std::shared_ptr<Module> conv_;  ///< Main conv path (Sequential)
     std::shared_ptr<Module> se_;    ///< Optional SE block
+    std::shared_ptr<Module> proj_;  ///< Pointwise projection applied AFTER SE
+                                    ///< (on the expanded tensor); null unless use_se
 };
 
 /**
@@ -217,6 +219,8 @@ private:
 
     std::shared_ptr<Module> conv_;  ///< Main conv path
     std::shared_ptr<Module> se_;    ///< Optional SE block
+    std::shared_ptr<Module> proj_;  ///< Pointwise projection applied AFTER SE
+                                    ///< (on the expanded tensor); null unless use_se
 };
 
 } // namespace nn

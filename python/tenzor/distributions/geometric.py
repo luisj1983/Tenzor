@@ -78,9 +78,13 @@ class Geometric(Distribution):
     def icdf(self, q):
         q_np = np.asarray(_to_variable(q).tensor(), dtype=np.float64)
         p_np = np.asarray(self.probs.tensor(), dtype=np.float64)
-        with np.errstate(divide="ignore"):
+        with np.errstate(divide="ignore", invalid="ignore"):
             k = np.ceil(np.log(1.0 - q_np) / np.log(1.0 - p_np)) - 1.0
-        return _wrap_numpy(np.where(q_np <= 0.0, np.zeros_like(q_np), k))
+        # q<=0 -> 0; q>=1 -> +inf (the geometric support is unbounded). Without
+        # the q>=1 guard, log(1-q) is log(0)/log(<0) = -inf/NaN garbage.
+        result = np.where(q_np <= 0.0, np.zeros_like(q_np), k)
+        result = np.where(q_np >= 1.0, np.full_like(q_np, np.inf), result)
+        return _wrap_numpy(result)
 
     def support(self):
         return "{0, 1, 2, ...}"

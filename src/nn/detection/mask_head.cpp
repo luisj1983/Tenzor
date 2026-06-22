@@ -233,6 +233,16 @@ auto process_masks(const Tensor& mask_logits,
         // Get class label and select corresponding mask
         int64_t class_idx = class_labels_data[i];
 
+        // Bounds-check the class index against mask_logits' class dim before
+        // selecting (mask_loss validates the same; process_masks did not, so a
+        // background/out-of-range label read out of bounds / threw).
+        const int64_t num_classes = mask_logits.shape()[1];
+        if (class_idx < 0 || class_idx >= num_classes) {
+            throw std::invalid_argument(
+                "MaskHead::process_masks: class index " + std::to_string(class_idx) +
+                " out of range [0, " + std::to_string(num_classes) + ")");
+        }
+
         // Extract mask logits for this class: (mask_h, mask_w)
         auto class_mask_logits = tenzor::select(tenzor::select(mask_logits, 0, i), 0, class_idx);
 

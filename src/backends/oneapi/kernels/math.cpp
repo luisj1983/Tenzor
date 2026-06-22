@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <algorithm>
@@ -1223,13 +1224,15 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
                 a_cont, b_cont, output, info, queue,
                 [](double x, double y) { return x / y; });
         } else if (a_cont.dtype() == DType::Int32) {
+            // Guard integer divide-by-zero (UB on device) in the lambda, matching
+            // the Int8/UInt8 broadcast branches below.
             sycl_broadcast_binary<int32_t, BroadcastDivInt32>(
                 a_cont, b_cont, output, info, queue,
-                [](int32_t x, int32_t y) { return x / y; });
+                [](int32_t x, int32_t y) { return y != 0 ? x / y : int32_t(0); });
         } else if (a_cont.dtype() == DType::Int64) {
             sycl_broadcast_binary<int64_t, BroadcastDivInt64>(
                 a_cont, b_cont, output, info, queue,
-                [](int64_t x, int64_t y) { return x / y; });
+                [](int64_t x, int64_t y) { return y != 0 ? x / y : int64_t(0); });
         } else if (a_cont.dtype() == DType::Float16) {
             sycl_broadcast_binary<sycl::half, BroadcastDivFloat16>(
                 a_cont, b_cont, output, info, queue,
@@ -4129,6 +4132,10 @@ auto add_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) 
         } else {
             throw std::runtime_error("add_inplace: unsupported dtype");
         }
+        // The broadcast parallel_for kernels above are launched async (unlike the
+        // contiguous path below, which .wait()s each). This is an in-place op, so
+        // the caller may read `inout` immediately — wait for completion first.
+        queue.wait();
         return inout;
     }
 
@@ -5925,9 +5932,22 @@ struct CrossKernelFloat64 {};
 struct CrossKernelFloat16 {};
 struct CrossKernelBFloat16 {};
 
-auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, sycl::queue& queue) -> Tensor {
+auto cross_kernel(const Tensor& a_in, const Tensor& b_in, int64_t dim, sycl::queue& queue) -> Tensor {
+    // get_data_ptr indexes the operands as contiguous; materialize first.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     auto shape = a.shape();
     int64_t ndim = shape.size();
+    // Normalize a negative dim and validate before indexing shape[dim]: the
+    // size-3 axis must exist on both operands of equal rank.
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim || static_cast<int64_t>(b.shape().size()) != ndim) {
+        throw std::runtime_error("cross: dim out of range or operand rank mismatch");
+    }
+    if (shape[dim] != 3 || b.shape()[dim] != 3) {
+        throw std::runtime_error("cross: dimension " + std::to_string(dim) +
+                                 " must have size 3");
+    }
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     Tensor output(out_shape, a.dtype(), a.device());
 
@@ -7263,6 +7283,7 @@ auto cummax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std:
     Tensor input_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
@@ -7321,6 +7342,7 @@ auto cummin_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std:
     Tensor input_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
@@ -8628,6 +8650,17 @@ auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_
         case DType::BFloat16: launch.template operator()<uint16_t>(); break;
         default: throw std::runtime_error("diag_embed: unsupported dtype");
     }
+    // The kernel placed the two diagonal axes at the trailing positions (rows at
+    // out_ndim-2, cols at out_ndim-1). Relocate them to the requested dim1/dim2,
+    // matching PyTorch diag_embed; a no-op when they are already the last two.
+    const int64_t out_ndim = ndim + 1;
+    auto norm = [out_ndim](int64_t d) { return d < 0 ? d + out_ndim : d; };
+    const int64_t d1 = norm(dim1), d2 = norm(dim2);
+    if (!((d1 == out_ndim - 2 && d2 == out_ndim - 1))) {
+        output = tenzor::movedim(output,
+            std::vector<int64_t>{out_ndim - 2, out_ndim - 1},
+            std::vector<int64_t>{d1, d2});
+    }
     return output;
 }
 
@@ -8676,12 +8709,30 @@ auto diagflat_kernel(const Tensor& input, int64_t offset, sycl::queue& queue) ->
 // ============================================================================
 // IsReal: dtype check — all non-complex types are real
 // ============================================================================
+class IsRealComplex64Tag;
+class IsRealComplex128Tag;
 auto isreal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    // All dtypes in Tenzor are real (no complex support), so return all-true
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor output(shape_vec, DType::Bool, input.device());
     uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
+    // Complex inputs: an element is real iff its imaginary part is 0. Storage is
+    // interleaved (real, imag), so the imag part is the odd-indexed scalar.
+    if (input.dtype() == DType::Complex64) {
+        const float* in = reinterpret_cast<const float*>(input.data_ptr());
+        queue.parallel_for<IsRealComplex64Tag>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out_ptr[i] = (in[2 * static_cast<int64_t>(i[0]) + 1] == 0.0f) ? uint8_t(1) : uint8_t(0);
+        }).wait();
+        return output;
+    }
+    if (input.dtype() == DType::Complex128) {
+        const double* in = reinterpret_cast<const double*>(input.data_ptr());
+        queue.parallel_for<IsRealComplex128Tag>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out_ptr[i] = (in[2 * static_cast<int64_t>(i[0]) + 1] == 0.0) ? uint8_t(1) : uint8_t(0);
+        }).wait();
+        return output;
+    }
+    // All real dtypes: every element is real.
     queue.memset(out_ptr, 1, numel * sizeof(uint8_t)).wait();
     return output;
 }

@@ -333,6 +333,13 @@ auto SparseAdam::initialize_buffers() -> void {
             // R.16: half-precision params get Float32 state buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+        } else {
+            // step_impl indexes exp_avg_[i]/exp_avg_sq_[i] by absolute param
+            // position i, so a null param must still occupy a slot or every
+            // later valid param reads the wrong (or past-the-end) buffer. Mirror
+            // on_parameters_appended_, which pushes a placeholder for nulls.
+            exp_avg_.push_back(Tensor{});
+            exp_avg_sq_.push_back(Tensor{});
         }
     }
 }

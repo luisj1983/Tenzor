@@ -331,18 +331,22 @@ __global__ void var_along_dim_kernel(
         tmp /= input_shape[d];
     }
 
-    // Welford single-pass algorithm for numerical stability
-    T mean = T(0), m2 = T(0);
+    // Welford single-pass algorithm for numerical stability. Accumulate in
+    // double regardless of T: running the mean/M2 update in float (T=Float32)
+    // drops ~3 mantissa bits per step and diverges from the CPU (double) result
+    // by several percent over long reductions.
+    using Acc = double;
+    Acc mean = 0, m2 = 0;
     int64_t count = 0;
     for (int64_t i = 0; i < dim_size; i++) {
         indices[dim] = i;
         int64_t in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
-        T val = input[in_idx];
+        Acc val = static_cast<Acc>(input[in_idx]);
         count++;
-        T delta = val - mean;
-        mean = mean + delta / T(count);
-        T delta2 = val - mean;
+        Acc delta = val - mean;
+        mean = mean + delta / static_cast<Acc>(count);
+        Acc delta2 = val - mean;
         m2 = m2 + delta * delta2;
     }
 
@@ -351,7 +355,7 @@ __global__ void var_along_dim_kernel(
     // PyTorch instead of returning 0. Build the NaN directly in T's native bit
     // width (make_qnan) rather than casting a float32 NaN to T — the float->T
     // conversion is the one ROCm's NaN helpers exist to distrust.
-    output[out_idx] = denom > 0 ? m2 / T(denom)
+    output[out_idx] = denom > 0 ? static_cast<T>(m2 / static_cast<Acc>(denom))
                                 : tenzor::rocm::make_qnan<T>();
 }
 

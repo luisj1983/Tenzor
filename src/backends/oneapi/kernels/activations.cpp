@@ -3007,8 +3007,12 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
                   in_cont.dtype(), in_cont.device());
-    Tensor mean_t({N, C}, DType::Float32, in_cont.device());
-    Tensor inv_std_t({N, C}, DType::Float32, in_cont.device());
+    // Stats are saved for the backward; storing Float64 mean/inv_std as Float32
+    // would truncate ~29 bits of mantissa and break the Float64 gradient.
+    const DType stats_dtype =
+        (in_cont.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor mean_t({N, C}, stats_dtype, in_cont.device());
+    Tensor inv_std_t({N, C}, stats_dtype, in_cont.device());
 
     bool has_weight = weight.impl() != nullptr;
     bool has_bias = bias.impl() != nullptr;
@@ -3057,8 +3061,8 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
-        float* mean_ptr = get_data_ptr<float>(mean_t);
-        float* inv_std_ptr = get_data_ptr<float>(inv_std_t);
+        double* mean_ptr = get_data_ptr<double>(mean_t);
+        double* inv_std_ptr = get_data_ptr<double>(inv_std_t);
         const double* w_ptr = has_weight ? get_data_ptr<const double>(weight) : nullptr;
         const double* b_ptr = has_bias ? get_data_ptr<const double>(bias) : nullptr;
 
@@ -3082,8 +3086,8 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
             var /= static_cast<double>(spatial_size);
             double istd = 1.0 / sycl::sqrt(var + static_cast<double>(eps));
 
-            mean_ptr[n * C + c] = static_cast<float>(m);
-            inv_std_ptr[n * C + c] = static_cast<float>(istd);
+            mean_ptr[n * C + c] = m;
+            inv_std_ptr[n * C + c] = istd;
 
             double w = w_ptr ? w_ptr[c] : 1.0;
             double b = b_ptr ? b_ptr[c] : 0.0;
@@ -3143,10 +3147,13 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
     Tensor grad_bias({C}, weight.dtype(), weight.device());
 
     bool has_weight = weight.impl() != nullptr;
-    const float* mean_ptr = get_data_ptr<const float>(mean);
-    const float* rstd_ptr = get_data_ptr<const float>(rstd);
+    // Stats (mean/rstd) carry the input's precision: Float32 for Float16/Float32
+    // input, Float64 for Float64 input. Read them per-branch with the matching
+    // type so a Float64 save is not reinterpreted as Float32.
 
     if (in_cont.dtype() == DType::Float32) {
+        const float* mean_ptr = get_data_ptr<const float>(mean);
+        const float* rstd_ptr = get_data_ptr<const float>(rstd);
         const float* in_ptr = get_data_ptr<const float>(in_cont);
         const float* g_ptr = get_data_ptr<const float>(grad_cont);
         const float* w_ptr = has_weight ? get_data_ptr<const float>(weight) : nullptr;
@@ -3202,6 +3209,8 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
         });
     }
     else if (in_cont.dtype() == DType::Float64) {
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* rstd_ptr = get_data_ptr<const double>(rstd);
         const double* in_ptr = get_data_ptr<const double>(in_cont);
         const double* g_ptr = get_data_ptr<const double>(grad_cont);
         const double* w_ptr = has_weight ? get_data_ptr<const double>(weight) : nullptr;
@@ -3212,10 +3221,8 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
             int64_t n = id[0];
             int64_t c = id[1];
             int64_t base = (n * C + c) * spatial_size;
-            float mf = mean_ptr[n * C + c];
-            float rf = rstd_ptr[n * C + c];
-            double m = static_cast<double>(mf);
-            double r = static_cast<double>(rf);
+            double m = mean_ptr[n * C + c];
+            double r = rstd_ptr[n * C + c];
             double w = w_ptr ? w_ptr[c] : 1.0;
 
             double ds = 0.0, db = 0.0;

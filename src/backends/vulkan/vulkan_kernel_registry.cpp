@@ -587,13 +587,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Ones, [](std::span<const Tensor>, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchOnes(attrs.get_int_list(AttrKey::Shape), dtype_from_string(attrs.get_string(AttrKey::Dtype)))};
+        auto device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchOnes(attrs.get_int_list(AttrKey::Shape),
+            dtype_from_string(attrs.get_string(AttrKey::Dtype)), Device(Device::Type::Vulkan, device_id))};
     });
 
     table.register_kernel(OpId::Full, [](std::span<const Tensor>, const OpAttributes& attrs) {
         // Pass value as double so Float64 subnormals are preserved.
+        auto device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
         return std::vector<Tensor>{get_vulkan_backend()->dispatchFull(attrs.get_int_list(AttrKey::Shape),
-            attrs.get_float(AttrKey::Value, 0.0), dtype_from_string(attrs.get_string(AttrKey::Dtype)))};
+            attrs.get_float(AttrKey::Value, 0.0), dtype_from_string(attrs.get_string(AttrKey::Dtype)),
+            Device(Device::Type::Vulkan, device_id))};
     });
 
     table.register_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

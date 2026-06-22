@@ -347,7 +347,9 @@ auto DTensor::from_global(const Tensor& tensor,
 
     for (int64_t mesh_dim = 0; mesh_dim < mesh->ndim(); ++mesh_dim) {
         if (auto* shard = std::get_if<Shard>(&placements[mesh_dim])) {
-            auto shard_dim = shard->dim;
+            // Shard stores a raw dim; normalize Python-style negatives against
+            // the local tensor rank before indexing.
+            auto shard_dim = shard->dim < 0 ? shard->dim + local.ndim() : shard->dim;
             auto mesh_size = mesh->shape()[mesh_dim];
             auto dim_size = local.size(shard_dim);
 

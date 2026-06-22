@@ -57,8 +57,12 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
     Tensor idx_b({n}, DType::Int32, input.device());
     Tensor histo_buf({static_cast<int64_t>(256 * n_wgs)}, DType::Int32, input.device());
 
-    // Initialize indices to [0, 1, 2, ...]
-    idx_a = dispatchArange(0.0f, static_cast<float>(n), 1.0f, DType::Int32, input.device());
+    // Initialize indices to [0, 1, 2, ...]. The Int32 arange path runs in
+    // float32, so for n > 2^24 consecutive integer indices collapse to the same
+    // value and the sort returns duplicate/garbage indices. Use the exact 64-bit
+    // arange shader and narrow to Int32 (n is bounded by the Int32 index space).
+    idx_a = dispatchArange(0.0, static_cast<double>(n), 1.0, DType::Int64, input.device())
+                .to(DType::Int32);
 
     auto* hist_pipeline = getPipeline(hist_shader, device_id);
     auto* prefix_pipeline = getPipeline("radix_prefix_sum", device_id);
@@ -722,13 +726,19 @@ auto VulkanBackend::dispatchMode(const Tensor& input, int64_t dim, bool keepdim)
     // GPU index remapping: compute flat_idx = arange(num_slices) * slice_size + mode_indices_flat
     // then gather: orig_indices = sorted_indices.flatten().index_select(0, flat_idx)
     // No CPU roundtrip needed — all done with existing GPU dispatch ops.
-    Tensor slice_offsets = dispatchArange(0.0f, static_cast<float>(num_slices), 1.0f,
-                                          DType::Int32, input.device());
-    Tensor stride_tensor = dispatchFull({num_slices}, static_cast<float>(slice_size), DType::Int32);
-    stride_tensor = stride_tensor.to(input.device());
+    // Compute the flat gather index in Int64: num_slices * slice_size can exceed
+    // the Int32 range (and the Int32 arange path runs in float32, collapsing
+    // indices past 2^24). Exact 64-bit arange + 64-bit mul/add, widening the
+    // per-slice mode indices, prevents both overflow and the float collapse.
+    Tensor slice_offsets = dispatchArange(0.0, static_cast<double>(num_slices), 1.0,
+                                          DType::Int64, input.device());
+    Tensor stride_tensor = dispatchFull({num_slices}, static_cast<double>(slice_size),
+                                        DType::Int64, input.device());
     Tensor flat_idx = dispatchBinaryOp("add",
                          dispatchBinaryOp("mul", slice_offsets, stride_tensor),
-                         mode_indices_flat);
+                         mode_indices_flat.dtype() == DType::Int64
+                             ? mode_indices_flat
+                             : mode_indices_flat.to(DType::Int64));
     // Cast to Int64 to match sorted index dtype
     flat_idx = flat_idx.to(DType::Int64);
     Tensor flat_sort_indices = dispatchReshape(indices_contig, {num_slices * slice_size});

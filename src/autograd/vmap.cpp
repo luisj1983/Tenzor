@@ -541,8 +541,12 @@ static auto vmap_loop_and_stack(const std::function<Variable(const Variable&)>& 
     // both the unsqueeze and the cat.
     int64_t insert_axis = batch_dim;
     for (int64_t i = 0; i < batch_size; ++i) {
-        auto slice = tenzor::select(input_tensor, batch_dim, i);
-        Variable slice_var(slice, batched_input.requires_grad());
+        // Build the per-slice input through DIFFERENTIABLE ops (narrow + squeeze)
+        // so the backward edge reaches batched_input. Raw tenzor::select made
+        // slice_var a fresh leaf with no grad_fn, so backward through a vmapped
+        // function never propagated gradients to the batched input.
+        Variable slice_var = tenzor::squeeze(
+            tenzor::narrow(batched_input, batch_dim, i, 1), batch_dim);
         auto output = func(slice_var);
         if (i == 0) {
             insert_axis = std::min<int64_t>(batch_dim, output.tensor().ndim());

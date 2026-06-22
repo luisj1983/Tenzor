@@ -171,13 +171,15 @@ auto FSDPUnit::shard_params() -> void {
     int ws = pg_->world_size();
     int rank = pg_->rank();
 
-    // Compute shard size: pad total_numel to be divisible by world_size
-    shard_numel_ = (total_numel_ + ws - 1) / ws;
-    shard_offset_ = rank * shard_numel_;
-
-    // Clamp the last rank's shard if total_numel is not evenly divisible
-    size_t actual_end = std::min(shard_offset_ + shard_numel_, total_numel_);
-    size_t actual_shard_numel = actual_end - shard_offset_;
+    // Compute shard size (ceil division; trailing ranks zero-padded). A high
+    // rank's shard_offset_ can land at or beyond total_numel_ (e.g.
+    // total_numel_=5, ws=4 -> shard_numel_=2, rank 3 -> shard_offset_=6); that
+    // rank holds only padding. compute_shard_range clamps the valid length so
+    // the unsigned subtraction below cannot underflow into a ~1.8e19 slice.
+    const auto range = FSDPUnit::compute_shard_range(total_numel_, ws, rank);
+    shard_numel_ = range.shard_numel;
+    shard_offset_ = range.shard_offset;
+    size_t actual_shard_numel = range.valid_numel;
 
     // Extract this rank's shard from the flat buffer
     auto dtype = flat_param_.dtype();

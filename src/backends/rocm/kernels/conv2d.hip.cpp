@@ -1197,9 +1197,9 @@ auto conv2d_forward_kernel(
 // ============================================================================
 
 auto conv2d_backward_kernel(
-    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
-    const Tensor& input,         // (batch, in_channels, height, width)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
+    const Tensor& grad_output_in,// (batch, out_channels, out_h, out_w)
+    const Tensor& input_in,      // (batch, in_channels, height, width)
+    const Tensor& weight_in,     // (out_channels, in_channels, kernel_h, kernel_w)
     int64_t stride_h,
     int64_t stride_w,
     int64_t pad_h,
@@ -1213,6 +1213,12 @@ auto conv2d_backward_kernel(
     hipStream_t stream,
     DataLayout layout = DataLayout::NCHW
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // The grad kernels (incl. the grad_bias reduction) index with hard-coded
+    // contiguous offset arithmetic; materialize contiguous tensors so a
+    // non-contiguous grad_output/input/weight is read correctly.
+    Tensor grad_output = grad_output_in.contiguous();
+    Tensor input = input_in.contiguous();
+    Tensor weight = weight_in.contiguous();
     // Float16: upcast to Float32, compute, convert back
     if (input.dtype() == DType::Float16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);

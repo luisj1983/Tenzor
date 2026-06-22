@@ -18,7 +18,7 @@ auto contiguous_kernel(const Tensor& input) -> Tensor;
 
 // CPU transform kernels
 
-auto fill_kernel(const Tensor& input, float value) -> Tensor {
+auto fill_kernel(const Tensor& input, double value) -> Tensor {
     // Create result tensor (clone)
     Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
@@ -48,13 +48,13 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
         }
     } else if (input.dtype() == DType::Float16) {
         auto* data = result.data<Float16>();
-        Float16 val(value);
+        Float16 val(static_cast<float>(value));
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::BFloat16) {
         auto* data = result.data<BFloat16>();
-        BFloat16 val(value);
+        BFloat16 val(static_cast<float>(value));
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
@@ -108,25 +108,25 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
         }
     } else if (input.dtype() == DType::FP8_E4M3) {
         auto* data = result.data<FP8_E4M3>();
-        FP8_E4M3 val(value);
+        FP8_E4M3 val(static_cast<float>(value));
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::FP8_E5M2) {
         auto* data = result.data<FP8_E5M2>();
-        FP8_E5M2 val(value);
+        FP8_E5M2 val(static_cast<float>(value));
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::FP8_E4M3FNUZ) {
         auto* data = result.data<FP8_E4M3FNUZ>();
-        FP8_E4M3FNUZ val(value);
+        FP8_E4M3FNUZ val(static_cast<float>(value));
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::FP8_E5M2FNUZ) {
         auto* data = result.data<FP8_E5M2FNUZ>();
-        FP8_E5M2FNUZ val(value);
+        FP8_E5M2FNUZ val(static_cast<float>(value));
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }

@@ -1215,7 +1215,13 @@ auto Graph::infer_symbolic_types() -> void {
                 if (!input_sym_shapes.empty()) {
                     auto sym_shape = input_sym_shapes[0];
                     int64_t dim = node->get_int_attr("dim");
-                    if (dim < static_cast<int64_t>(sym_shape.rank())) {
+                    // Normalize a negative dim (e.g. squeeze(-1)) before indexing;
+                    // the concrete infer_types path does this too. Without it, the
+                    // cast to size_t below turns -1 into SIZE_MAX -> OOB read.
+                    if (dim < 0) {
+                        dim += static_cast<int64_t>(sym_shape.rank());
+                    }
+                    if (dim >= 0 && dim < static_cast<int64_t>(sym_shape.rank())) {
                         auto& d = sym_shape[static_cast<size_t>(dim)];
                         // Only squeeze if concrete and equal to 1
                         if (d.is_concrete() && d.value() == 1) {
@@ -2427,7 +2433,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
 
         case OpType::Pow:
-            if (!input_vars.empty()) {
+            if (input_vars.size() >= 2) {
+                // Binary form: the exponent is a second (Constant) SCALAR input.
+                // The ConstantFolding/StrengthReduction passes model Pow this
+                // way, so reading only the "exponent" attr would use a stale/
+                // default value once the exponent has been moved to an input.
+                auto exp_cpu = input_vars[1].tensor().to(DType::Float32).to(Device::cpu());
+                float exponent = exp_cpu.data<float>()[0];
+                auto result = tenzor::pow(input_vars[0].tensor(), exponent);
+                outputs.push_back(Variable(result, false));
+            } else if (!input_vars.empty()) {
                 float exponent = node->get_attr("exponent");
                 auto result = tenzor::pow(input_vars[0].tensor(), exponent);
                 outputs.push_back(Variable(result, false));
@@ -2815,8 +2830,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 }
 
                 auto scores = tenzor::matmul(Q, K.transpose(-2, -1));
+                // Match the score dtype (Q/K may be Float64/half); a hardcoded
+                // Float32 scalar would force/round the scaled scores to Float32,
+                // diverging from eager for non-Float32 traces.
                 auto scaled = scores * Variable(
-                    tenzor::full({1}, scale, DType::Float32), false);
+                    tenzor::full({1}, scale, scores.tensor().dtype()), false);
 
                 // Add the additive mask (4th input) before softmax when the
                 // matched pattern attached one (FuseAttentionPass appends it as

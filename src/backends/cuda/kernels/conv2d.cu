@@ -698,8 +698,8 @@ void matmul_f16(
 
 // Conv2d forward using im2col + cuBLAS gemm
 auto conv2d_forward_kernel(
-    const Tensor& input,         // (batch, in_channels, height, width)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
+    const Tensor& input_in,      // (batch, in_channels, height, width)
+    const Tensor& weight_in,     // (out_channels, in_channels, kernel_h, kernel_w)
     const Tensor* bias,          // (out_channels) or nullptr
     int64_t stride,
     int64_t padding,
@@ -707,6 +707,11 @@ auto conv2d_forward_kernel(
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
+    // Kernels index with hard-coded contiguous NCHW offset arithmetic;
+    // materialize contiguous input/weight so non-contiguous (sliced/transposed)
+    // tensors are read correctly (mirrors conv3d_forward_kernel).
+    Tensor input = input_in.contiguous();
+    Tensor weight = weight_in.contiguous();
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1054,9 +1059,9 @@ auto conv2d_forward_kernel(
 
 // Complete FP16 Conv2d backward pass using Tensor Core matmul
 auto conv2d_backward_f16(
-    const Tensor& grad_output,
-    const Tensor& input,
-    const Tensor& weight,
+    const Tensor& grad_output_in,
+    const Tensor& input_in,
+    const Tensor& weight_in,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
@@ -1066,6 +1071,11 @@ auto conv2d_backward_f16(
     bool compute_grad_bias,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Kernels index with hard-coded contiguous NCHW arithmetic; materialize
+    // contiguous tensors so non-contiguous inputs are read correctly.
+    Tensor grad_output = grad_output_in.contiguous();
+    Tensor input = input_in.contiguous();
+    Tensor weight = weight_in.contiguous();
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1279,9 +1289,9 @@ auto conv2d_backward_f16(
 
 // Conv2d backward - computes gradients w.r.t input, weight, and bias
 auto conv2d_backward_kernel(
-    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
-    const Tensor& input,         // (batch, in_channels, height, width)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
+    const Tensor& grad_output_in,// (batch, out_channels, out_h, out_w)
+    const Tensor& input_in,      // (batch, in_channels, height, width)
+    const Tensor& weight_in,     // (out_channels, in_channels, kernel_h, kernel_w)
     int64_t stride,
     int64_t padding,
     int64_t dilation,
@@ -1291,6 +1301,11 @@ auto conv2d_backward_kernel(
     bool compute_grad_bias,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Kernels index with hard-coded contiguous NCHW arithmetic; materialize
+    // contiguous tensors so non-contiguous inputs are read correctly.
+    Tensor grad_output = grad_output_in.contiguous();
+    Tensor input = input_in.contiguous();
+    Tensor weight = weight_in.contiguous();
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1842,8 +1857,8 @@ __global__ void conv_transpose2d_forward_kernel_f16(
 // M12 fix: per-axis stride/padding/output_padding/dilation wrapper. The
 // scalar version is preserved as a thin shim below for back-compat.
 auto conv_transpose2d_forward_kernel(
-    const Tensor& input,          // (batch, in_channels, in_h, in_w)
-    const Tensor& weight,         // (in_channels, out_channels/groups, kernel_h, kernel_w)
+    const Tensor& input_in,       // (batch, in_channels, in_h, in_w)
+    const Tensor& weight_in,      // (in_channels, out_channels/groups, kernel_h, kernel_w)
     const Tensor* bias,           // (out_channels) or nullptr
     int64_t stride_h,
     int64_t stride_w,
@@ -1856,6 +1871,10 @@ auto conv_transpose2d_forward_kernel(
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
+    // Kernels index with hard-coded contiguous NCHW arithmetic; materialize
+    // contiguous input/weight so non-contiguous tensors are read correctly.
+    Tensor input = input_in.contiguous();
+    Tensor weight = weight_in.contiguous();
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -2203,14 +2222,18 @@ auto depthwise_conv2d_forward_kernel(
 }
 
 auto depthwise_conv2d_forward_kernel(
-    const Tensor& input,
-    const Tensor& weight,
+    const Tensor& input_in,
+    const Tensor& weight_in,
     const Tensor* bias,
     int64_t stride_h, int64_t stride_w,
     int64_t pad_h, int64_t pad_w,
     int64_t dil_h, int64_t dil_w,
     cudaStream_t stream
 ) -> Tensor {
+    // Kernels index with hard-coded contiguous NCHW arithmetic; materialize
+    // contiguous input/weight so non-contiguous tensors are read correctly.
+    Tensor input = input_in.contiguous();
+    Tensor weight = weight_in.contiguous();
     // BFloat16 has no dedicated depthwise kernel (only Float16 does). Widen to
     // Float32, compute, then narrow back. Mirrors the widen path other conv2d
     // entry points use; without this BF16 hit "unsupported dtype".

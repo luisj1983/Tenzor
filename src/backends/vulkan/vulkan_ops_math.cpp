@@ -1006,13 +1006,18 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
 }
 
 auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
-                                             const Tensor& input) -> Tensor {
+                                             const Tensor& input_in) -> Tensor {
     // Complex sin/cos need dedicated shaders because the generic
     // trigonometric shader treats memory as real-valued floats.
     if ((op_name == "sin" || op_name == "cos") &&
-        (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128)) {
-        return dispatchUnaryOp(op_name, input);
+        (input_in.dtype() == DType::Complex64 || input_in.dtype() == DType::Complex128)) {
+        return dispatchUnaryOp(op_name, input_in);
     }
+
+    // The trig shader indexes the buffer linearly (storage order); a
+    // non-contiguous / offset input (sliced/transposed view) would be read in
+    // the wrong order. Materialize a contiguous copy first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
 
     // Map operation name to opcode (see trigonometric.comp shader)
     // 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
@@ -1296,6 +1301,14 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     } push_constants;
     push_constants.n = static_cast<uint32_t>(a.numel());
     push_constants.op = opcode;
+
+    // Materialize offset/non-contiguous views to zero-offset buffers before
+    // binding (as dispatchUnaryOp/dispatchBinaryOp do). The descriptor write
+    // rejects a non-16-byte-aligned storage offset; comparison inputs can be
+    // offset views (e.g. the row-pointer slices SparseTensor::coalesce compares
+    // via Ne), which previously tripped that guard.
+    a = dispatchContiguous(a);
+    b = dispatchContiguous(b);
 
     // Get VkBuffer handles from tensor data pointers
     const void* buffer_a = a.data_ptr();

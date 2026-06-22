@@ -338,7 +338,10 @@ auto LRSchedulerCallback::on_epoch_end(int epoch, [[maybe_unused]] float train_l
     } else if (schedule_type_ == "cosine") {
         // Cosine annealing
         float pi = 3.14159265359f;
+        // Clamp progress to [0, 1]: past decay_epochs cos(pi*progress) would swing
+        // back up and the LR would rise again instead of holding at min_lr.
         float progress = static_cast<float>(epoch) / std::max(decay_epochs_, 1);
+        progress = std::min(progress, 1.0f);
         new_lr = min_lr_ + (initial_lr_ - min_lr_) *
                  (1.0f + std::cos(pi * progress)) / 2.0f;
     } else if (schedule_type_ == "plateau") {

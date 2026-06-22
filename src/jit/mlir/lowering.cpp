@@ -341,7 +341,10 @@ auto render_one(std::ostream& os, T v) -> void {
             }
             return;
         }
-        os << std::scientific << std::setprecision(9) << d;
+        // Float64 needs 17 significant digits to round-trip; 9 (enough for
+        // float) truncates double constants. Pick precision by element width.
+        constexpr int prec = std::is_same_v<T, double> ? 17 : 9;
+        os << std::scientific << std::setprecision(prec) << d;
     } else if constexpr (std::is_unsigned_v<T>) {
         // Unsigned integer payloads: print as unsigned so the full range
         // (including UInt64 values with the high bit set) renders as a

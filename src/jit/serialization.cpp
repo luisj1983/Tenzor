@@ -637,6 +637,17 @@ auto GraphReader::read_tensor() -> Tensor {
             ") does not match tensor byte size (" + std::to_string(expected) + ")");
     }
 
+    // Bound the declared size against what is actually left in the file before
+    // allocating, like every other reader here (read_values/read_nodes/...).
+    // Without this a crafted shape (e.g. {1, 1<<40}) passes the data_size ==
+    // expected check and triggers a multi-TB allocation from a tiny file.
+    if (data_size > remaining_bytes()) {
+        throw std::runtime_error(
+            "GraphReader::read_tensor: declared data_size (" +
+            std::to_string(data_size) + ") exceeds remaining file bytes (" +
+            std::to_string(remaining_bytes()) + ")");
+    }
+
     // Mirror write_tensor: bytes were serialized from a CPU copy. Read into
     // a CPU tensor first (fstream::read needs a host pointer), then migrate
     // to the recorded device if needed. Allocation happens only after the

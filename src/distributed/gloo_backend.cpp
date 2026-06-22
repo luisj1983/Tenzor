@@ -585,6 +585,28 @@ auto GlooBackend::broadcast(Tensor& tensor, int src_rank) -> void {
     }
 }
 
+// Finish an AVG reduction in place. Integer dtypes are averaged by widening to
+// Float64, dividing, and ROUND-to-nearest before narrowing back — matching
+// MPIBackend::apply_avg_in_place. A plain integer `tensor /= world_size` would
+// truncate toward zero, so identical data averaged on Gloo vs MPI disagreed.
+static void gloo_finish_avg(Tensor& t, int world_size) {
+    if (world_size <= 0) return;
+    if (is_integer_type(t.dtype())) {
+        const DType orig = t.dtype();
+        Tensor widened = t.to(DType::Float64);
+        auto divisor = tenzor::full({1}, static_cast<double>(world_size),
+                                    DType::Float64, widened.device());
+        widened /= divisor;
+        Tensor rounded = tenzor::round(widened).to(orig);
+        t.zero_();
+        t += rounded.to(t.device());
+        return;
+    }
+    auto scalar = tenzor::full({1}, static_cast<double>(world_size),
+                               t.dtype(), t.device());
+    t /= scalar;
+}
+
 auto GlooBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     validate_cpu_accessible(tensor);
     // ring_all_reduce only dispatches Float32/Float64. Widen Float16/BFloat16
@@ -613,12 +635,7 @@ auto GlooBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     }
     ring_all_reduce(tensor, ring_op);
     if (op == ReduceOp::AVG && world_size_ > 0) {
-        // dtype/device-matched in-place divide: preserves Int32/Int64 dtype
-        // (truncating division) instead of promoting to Float32 like
-        // tenzor::div, matching NCCL/MPI/ProcessGroup AVG semantics.
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   tensor.dtype(), tensor.device());
-        tensor /= scalar;
+        gloo_finish_avg(tensor, world_size_);
     }
 }
 
@@ -638,9 +655,7 @@ auto GlooBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
         // finish the average here. Without this, reduce(AVG) returned the
         // unaveraged sum (off by world_size); ring_all_reduce divides similarly.
         if (op == ReduceOp::AVG && world_size_ > 0) {
-            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                       tensor.dtype(), tensor.device());
-            tensor /= scalar;
+            gloo_finish_avg(tensor, world_size_);
         }
     } else {
         // Send to destination
@@ -785,9 +800,7 @@ auto GlooBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
     output = accum[rank_];
 
     if (op == ReduceOp::AVG && world_size_ > 0) {
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   output.dtype(), output.device());
-        output /= scalar;
+        gloo_finish_avg(output, world_size_);
     }
 }
 

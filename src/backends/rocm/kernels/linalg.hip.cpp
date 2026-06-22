@@ -688,6 +688,18 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
     int64_t nrhs = b_is_1d ? 1 : b_shape[b_ndim - 1];
     int64_t nbatch = batch_size(LU_data);
 
+    // A 1D B (single RHS vector) reshapes to one (n,1) block. With a BATCHED LU
+    // the per-batch loop below would index b*n*nrhs past that single block —
+    // an out-of-bounds device read/write into rocsolver getrs. This shape combo
+    // is unsupported (the 1D contract squeezes the result back to 1D, which only
+    // makes sense for a single matrix); reject it loudly rather than corrupt memory.
+    if (b_is_1d && nbatch > 1) {
+        throw std::invalid_argument(
+            "linalg::lu_solve: a 1D B is only valid with a single (non-batched) "
+            "LU; got a batched LU with " + std::to_string(nbatch) +
+            " matrices. Provide a batched B of shape (batch, n, nrhs).");
+    }
+
     // Materialize B as a (..., n, nrhs) tensor so the transpose-to-col-major
     // trick below is well-defined even for 1D B (reshaped to (n, 1)).
     Tensor B2 = b_is_1d ? B.reshape({n, 1}) : B;
@@ -1802,6 +1814,11 @@ inline std::pair<double, double> eig_symmetry_metrics(const T* d_A,
                                                       int64_t nbatch,
                                                       int64_t n,
                                                       hipStream_t stream) {
+    // Empty batch (e.g. shape {0, n, n}): nothing to probe, and a grid dim of 0
+    // is an invalid kernel launch. Return neutral metrics; the caller's
+    // nbatch==0 early-return then produces the correct empty result.
+    if (nbatch == 0 || n == 0) return {0.0, 0.0};
+
     // RAII-managed probe buffer so a throwing HIP_CHECK_LINALG below frees it
     // instead of leaking on every transient device error.
     HipBuffer pair_buf(2 * sizeof(double));

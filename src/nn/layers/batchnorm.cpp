@@ -274,18 +274,28 @@ auto BatchNorm2dBackward::backward_with_variables(std::vector<Variable> grad_out
 
     auto grad_x_hat = grad_out * weight_bc;
 
-    auto grad_x_hat_r = reshape(grad_x_hat, {N, C, spatial_size});
-    auto x_hat_r = reshape(x_hat, {N, C, spatial_size});
+    // Eval mode: running stats are constants, so the input gradient flows
+    // straight through the affine normalization with NO batch-mean/variance
+    // correction terms. The training-mode formula (below) would wrongly subtract
+    // them. This mirrors the first-order backward()'s training_ branch.
+    auto grad_input = [&]() -> Variable {
+        if (training_) {
+            auto grad_x_hat_r = reshape(grad_x_hat, {N, C, spatial_size});
+            auto x_hat_r = reshape(x_hat, {N, C, spatial_size});
 
-    auto sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);
-    auto mean_gxh = sum_grad / static_cast<float>(batch_size);
+            auto sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);
+            auto mean_gxh = sum_grad / static_cast<float>(batch_size);
 
-    auto sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
-    auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
+            auto sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
+            auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
 
-    auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
-    auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
-    auto grad_input = reshape(grad_input_r, {N, C, H, W});
+            auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
+            auto grad_input_r =
+                (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
+            return reshape(grad_input_r, {N, C, H, W});
+        }
+        return grad_x_hat * invstd_bc;
+    }();
 
     auto go_xhat = reshape(grad_out * x_hat, {N, C, spatial_size});
     auto grad_gamma = sum(sum(go_xhat, 0, false), 1, false);
@@ -1011,26 +1021,34 @@ public:
             x_hat_r = x_hat;
         }
 
-        Variable sum_grad, sum_grad_xhat;
-        if (is_3d) {
-            sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);
-            sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
-        } else {
-            sum_grad = sum(grad_x_hat_r, 0, true);
-            sum_grad_xhat = sum(grad_x_hat_r * x_hat_r, 0, true);
-        }
-        auto mean_gxh = sum_grad / static_cast<float>(batch_size);
-        auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
+        // Eval mode: running stats are constants, so the input gradient passes
+        // straight through the affine normalization with NO batch-mean/variance
+        // correction terms (mirrors the first-order backward()'s training_ branch).
+        Variable grad_input;
+        if (training_) {
+            Variable sum_grad, sum_grad_xhat;
+            if (is_3d) {
+                sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);
+                sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
+            } else {
+                sum_grad = sum(grad_x_hat_r, 0, true);
+                sum_grad_xhat = sum(grad_x_hat_r * x_hat_r, 0, true);
+            }
+            auto mean_gxh = sum_grad / static_cast<float>(batch_size);
+            auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
 
-        Variable invstd_r;
-        if (is_3d) {
-            invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
-        } else {
-            invstd_r = unsqueeze(invstd_var, 0);
-        }
+            Variable invstd_r;
+            if (is_3d) {
+                invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
+            } else {
+                invstd_r = unsqueeze(invstd_var, 0);
+            }
 
-        auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
-        Variable grad_input = is_3d ? reshape(grad_input_r, {N, C, L}) : grad_input_r;
+            auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
+            grad_input = is_3d ? reshape(grad_input_r, {N, C, L}) : grad_input_r;
+        } else {
+            grad_input = grad_x_hat * invstd_bc;
+        }
 
         // grad_gamma and grad_beta
         Variable grad_gamma, grad_beta;

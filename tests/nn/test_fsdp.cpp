@@ -92,6 +92,40 @@ TEST(FSDPUnitTest, ShardSize) {
     EXPECT_EQ(unit.shard_numel(), unit.total_numel());
 }
 
+// Regression: high ranks whose shard offset lands at/beyond total_numel must
+// report 0 valid elements, not underflow the unsigned length subtraction (which
+// previously produced a ~1.8e19-element OOB slice). Covers ceil-division
+// padding and verifies the shards exactly tile [0, total_numel).
+TEST(FSDPUnitTest, ShardRangeNoUnderflowForHighRanks) {
+    struct Case { size_t total; int ws; };
+    const Case cases[] = {
+        {5, 4}, {5, 8}, {8, 4}, {7, 3}, {1, 4}, {0, 4}, {16, 1}, {1000, 7},
+    };
+    for (const auto& c : cases) {
+        size_t covered = 0;
+        for (int rank = 0; rank < c.ws; ++rank) {
+            auto r = dist::FSDPUnit::compute_shard_range(c.total, c.ws, rank);
+            // valid_numel never exceeds the padded shard length...
+            EXPECT_LE(r.valid_numel, r.shard_numel) << "total=" << c.total
+                << " ws=" << c.ws << " rank=" << rank;
+            if (r.valid_numel == 0) {
+                // An empty shard is entirely padding: its offset is at or beyond
+                // the end (offset can legitimately exceed total_numel here).
+                EXPECT_GE(r.shard_offset, c.total) << "empty shard must be all-padding";
+            } else {
+                // A non-empty window stays within [0, total_numel).
+                EXPECT_LT(r.shard_offset, c.total) << "total=" << c.total
+                    << " ws=" << c.ws << " rank=" << rank;
+                EXPECT_LE(r.shard_offset + r.valid_numel, c.total) << "total=" << c.total
+                    << " ws=" << c.ws << " rank=" << rank;
+            }
+            covered += r.valid_numel;
+        }
+        // Every real element is owned by exactly one rank.
+        EXPECT_EQ(covered, c.total) << "total=" << c.total << " ws=" << c.ws;
+    }
+}
+
 // ============================================================================
 // FullyShardedDataParallel Tests
 // ============================================================================

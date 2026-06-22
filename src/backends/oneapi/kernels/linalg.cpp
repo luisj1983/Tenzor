@@ -457,14 +457,18 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // ============================================================================
 // LinalgInv - Matrix inverse via LU (getrf + getri)
 // ============================================================================
-auto linalg_inv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto linalg_inv_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
     // Float16 / BFloat16: widen to Float32, compute, narrow back (oneMKL getrf
     // is not overloaded for half precision). Mirrors linalg_det_kernel.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        const DType orig_dtype = input.dtype();
-        return linalg_inv_kernel(input.to(DType::Float32), queue).to(orig_dtype);
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input_in.dtype();
+        return linalg_inv_kernel(input_in.to(DType::Float32), queue).to(orig_dtype);
     }
 
+    // oneMKL repacks input into a col-major device buffer via get_data_ptr(),
+    // which assumes a contiguous source; a non-contiguous input would be read
+    // with the wrong layout. Materialize a contiguous copy first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape = input.shape();
     int64_t n = shape[shape.size() - 1];
 

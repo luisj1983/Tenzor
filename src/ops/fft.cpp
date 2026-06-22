@@ -648,9 +648,11 @@ Tensor dct2_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
     // Build index tensor: [0, 2, 4, ..., 2*ceil(N/2)-2, 2*floor(N/2)-1, ..., 3, 1]
     // i.e., even indices ascending, then odd indices descending
     auto even_idx = tenzor::arange(0.0, static_cast<double>(N), 2.0, DType::Int64, device);
-    // Odd indices descending: N-1, N-3, ...
-    auto odd_idx = tenzor::arange(static_cast<double>(N - 1),
-                                  0.0 - 1.0, -2.0, DType::Int64, device);
+    // Odd indices descending: largest odd index <= N-1, then -2 each step.
+    // For odd N, N-1 is EVEN, so start at N-2 (the largest odd index) instead;
+    // otherwise the ramp re-emits even indices (e.g. N=3 -> [2,0] not [1]).
+    const double odd_start = static_cast<double>((N % 2 == 0) ? (N - 1) : (N - 2));
+    auto odd_idx = tenzor::arange(odd_start, 0.0 - 1.0, -2.0, DType::Int64, device);
     auto reorder_idx = tenzor::cat({even_idx, odd_idx}, 0);
 
     auto y = tenzor::index_select(input, d, reorder_idx);

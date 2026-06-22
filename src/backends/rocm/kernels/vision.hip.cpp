@@ -794,8 +794,17 @@ __global__ void interpolate_trilinear_backward_kernel_hip(
         float sd = align_corners ? od * scd : (od + 0.5f) * scd - 0.5f;
         float sh = align_corners ? oh * sch : (oh + 0.5f) * sch - 0.5f;
         float sw = align_corners ? ow * scw : (ow + 0.5f) * scw - 0.5f;
+        // Clamp the source coord to [0, in-1] BEFORE flooring so the backward is
+        // the exact transpose of the (clamping) forward at the borders; otherwise
+        // a negative src floors to -1, its (1-f) tap is dropped, and the border
+        // plane loses gradient mass (CPU parity — see cpu/kernels/vision.cpp).
+        sd = fminf(fmaxf(sd, 0.0f), static_cast<float>(in_d - 1));
+        sh = fminf(fmaxf(sh, 0.0f), static_cast<float>(in_h - 1));
+        sw = fminf(fmaxf(sw, 0.0f), static_cast<float>(in_w - 1));
         int64_t d0 = static_cast<int64_t>(floorf(sd)), h0 = static_cast<int64_t>(floorf(sh)), w0 = static_cast<int64_t>(floorf(sw));
-        int64_t d1 = d0 + 1, h1 = h0 + 1, w1 = w0 + 1;
+        int64_t d1 = (d0 + 1 < in_d) ? d0 + 1 : in_d - 1;
+        int64_t h1 = (h0 + 1 < in_h) ? h0 + 1 : in_h - 1;
+        int64_t w1 = (w0 + 1 < in_w) ? w0 + 1 : in_w - 1;
         float fd = sd - d0, fh = sh - h0, fw = sw - w0;
         float g = static_cast<float>(grad_out[idx]);
         int64_t base = b * (channels * in_d * in_h * in_w) + c * (in_d * in_h * in_w);

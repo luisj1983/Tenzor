@@ -476,8 +476,12 @@ TEST_P(QuantizationConversionTest, DynamicQuantization) {
 // ===========================================================================
 
 TEST_P(QuantizationConversionTest, StaticQuantization) {
-    // Create model
-    auto model = std::make_shared<Linear>(128, 64);
+    // quantize_static inserts activation observers into an nn::Sequential
+    // container (see quantize_api.cpp's prepare step); the quantizable layer must
+    // therefore live inside a Sequential. A bare Linear has nowhere to attach
+    // observers and quantize_static rejects it by design (use quantize_dynamic).
+    auto model = std::make_shared<Sequential>();
+    model->add_module(std::make_shared<Linear>(128, 64));
     model->to(device_);
 
     // Define calibration function

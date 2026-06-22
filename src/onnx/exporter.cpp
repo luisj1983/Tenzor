@@ -1750,6 +1750,18 @@ auto ONNXExporter::export_lstm(const Tensor& input,
     // So mapping: ONNX[0]=T[0](i), ONNX[1]=T[3](o), ONNX[2]=T[1](f), ONNX[3]=T[2](g)
 
     int64_t num_directions = bidirectional ? 2 : 1;
+    // This API only receives a single direction's weights (weight_ih/hh are
+    // [4*hidden, *]). Emitting a [2, 4*hidden, *] W/R/B and copying only one
+    // direction would serialize the reverse-direction slab as uninitialized
+    // heap memory. Refuse rather than write garbage; bidirectional export
+    // requires the reverse-direction weights to be plumbed through this API.
+    if (bidirectional) {
+        throw std::runtime_error(
+            "ONNXExporter::export_lstm: bidirectional export is not supported — "
+            "reverse-direction weights are not provided to this API, so the "
+            "second direction cannot be emitted (would serialize uninitialized "
+            "memory).");
+    }
     auto wih_shape = weight_ih.shape();
     int64_t input_size = wih_shape[1]; // weight_ih: (4*hidden_size, input_size)
 
@@ -1899,6 +1911,16 @@ auto ONNXExporter::export_gru(const Tensor& input,
     // So mapping: ONNX[0]=T[1](z), ONNX[1]=T[0](r), ONNX[2]=T[2](n/h)
 
     int64_t num_directions = bidirectional ? 2 : 1;
+    // See export_lstm: this API only receives single-direction weights, so a
+    // bidirectional emit would serialize the reverse slab as uninitialized
+    // memory. Refuse rather than write garbage.
+    if (bidirectional) {
+        throw std::runtime_error(
+            "ONNXExporter::export_gru: bidirectional export is not supported — "
+            "reverse-direction weights are not provided to this API, so the "
+            "second direction cannot be emitted (would serialize uninitialized "
+            "memory).");
+    }
     auto wih_shape = weight_ih.shape();
     int64_t input_size = wih_shape[1]; // weight_ih: (3*hidden_size, input_size)
 
@@ -2512,6 +2534,21 @@ auto ONNXExporter::export_adaptive_avgpool2d(const Tensor& input,
         int64_t w_in = input_shape[3];
         int64_t h_out = output_size[0];
         int64_t w_out = output_size[1];
+
+        // A single fixed-kernel/stride AveragePool only equals adaptive pooling
+        // when the windows are uniform, i.e. h_out divides h_in (and w). For the
+        // non-divisible case PyTorch/Tenzor use variable per-cell windows
+        // (start=floor(i*in/out), end=ceil((i+1)*in/out)) that ONNX AveragePool
+        // cannot express, so emitting one here would silently produce wrong
+        // results. Reject it rather than mis-export.
+        if (h_out == 0 || w_out == 0 || h_in % h_out != 0 || w_in % w_out != 0) {
+            throw std::runtime_error(
+                "ONNXExporter::export_adaptive_avgpool2d: adaptive average pooling "
+                "with non-uniform windows (input " + std::to_string(h_in) + "x" +
+                std::to_string(w_in) + " not divisible by output " +
+                std::to_string(h_out) + "x" + std::to_string(w_out) + ") cannot be "
+                "represented as a single ONNX AveragePool.");
+        }
 
         int64_t stride_h = h_in / h_out;
         int64_t stride_w = w_in / w_out;
@@ -3572,9 +3609,12 @@ auto ONNXExporter::convert_jit_node_to_onnx(
             } else {
                 onnx_node.set_attr("epsilon", 1e-5f); // default
             }
-            float momentum = node->get_attr("momentum");
-            if (momentum > 0.0f) {
-                onnx_node.set_attr("momentum", momentum);
+            // Emit momentum whenever it was recorded, INCLUDING 0.0 (a valid
+            // value that freezes running-stat updates). Gating on `> 0` dropped a
+            // genuine 0.0, so ONNX fell back to its 0.9 default and the exported
+            // BatchNorm silently updated running stats it was meant to freeze.
+            if (node->has_float_attr("momentum")) {
+                onnx_node.set_attr("momentum", node->get_attr("momentum"));
             }
             break;
         }
@@ -3637,12 +3677,16 @@ auto ONNXExporter::convert_jit_node_to_onnx(
         }
         case jit::OpType::Clamp: {
             // ONNX Clip has no attributes in opset 11+; min/max are inputs.
-            // For simplicity we add them as float attrs if present.
-            float min_val = node->get_attr("min");
-            float max_val = node->get_attr("max");
-            if (min_val != 0.0f || max_val != 0.0f) {
-                onnx_node.set_attr("min", min_val);
-                onnx_node.set_attr("max", max_val);
+            // For simplicity we add them as float attrs if present. Emit each
+            // bound based on whether it is actually SET (has_float_attr), not a
+            // `!= 0.0` sentinel: clamp(x, min=0[, max=0]) is a real clamp, and
+            // the sentinel both dropped it and emitted an unset bound when only
+            // the other was present.
+            if (node->has_float_attr("min")) {
+                onnx_node.set_attr("min", node->get_attr("min"));
+            }
+            if (node->has_float_attr("max")) {
+                onnx_node.set_attr("max", node->get_attr("max"));
             }
             break;
         }
@@ -4186,38 +4230,87 @@ auto ONNXExporter::export_cumsum(const Tensor& input, int64_t axis,
 auto ONNXExporter::export_cumprod(const Tensor& input, int64_t axis,
                                    const Tensor& output,
                                    const std::string& output_name) -> void {
-    // ONNX has no native CumProd. Decompose via log-domain:
-    //   cumprod(x) = exp(cumsum(log(x)))
-    // This is numerically valid for positive inputs (the common case for
-    // probability chains, attention products, etc.).
+    // ONNX has no native CumProd. The naive log-domain decomposition
+    // exp(cumsum(log(x))) yields NaN for x<0 and is degenerate for x==0, which
+    // are both valid CumProd inputs. Decompose instead as sign * magnitude:
+    //   magnitude = exp(cumsum(log(|x|)))   -- log(0) = -inf so the running
+    //               product is exactly 0 at and after any zero (correct), and
+    //               |x|>0 elsewhere keeps the log finite.
+    //   sign      = (-1)^(running count of negatives) = 1 - 2*(count mod 2).
+    //   cumprod   = sign * magnitude.
     std::string input_name = get_tensor_name(input, "cumprod_input");
+    const DType dt = input.dtype();
 
-    // Step 1: Log(x)
-    std::string log_out = context_.generate_name("cumprod_log");
-    ONNXExportNode log_node("Log", context_.generate_name("cumprod_log"));
-    log_node.add_input(input_name);
-    log_node.add_output(log_out);
-    graph_.add_node(log_node);
+    auto scalar_init = [&](double v, const char* tag) -> std::string {
+        std::string nm = context_.generate_name(tag);
+        Tensor t({1}, dt, Device::cpu());
+        if (dt == DType::Float64) { *t.data<double>() = v; }
+        else { *t.data<float>() = static_cast<float>(v); }
+        add_initializer_tensor(t, nm);
+        return nm;
+    };
 
-    // Step 2: CumSum(log(x), axis)
-    std::string cumsum_out = context_.generate_name("cumprod_cumsum");
-    ONNXExportNode cumsum_node("CumSum", context_.generate_name("cumprod_cumsum"));
-    cumsum_node.add_input(log_out);
-
+    // Shared axis initializer for the two CumSums.
     std::string axis_name = context_.generate_name("cumprod_axis");
     Tensor axis_tensor({1}, DType::Int64, Device::cpu());
     *axis_tensor.data<int64_t>() = axis;
     add_initializer_tensor(axis_tensor, axis_name);
-    cumsum_node.add_input(axis_name);
 
-    cumsum_node.add_output(cumsum_out);
-    graph_.add_node(cumsum_node);
+    auto add_unary = [&](const char* op, const std::string& in,
+                         const char* tag) -> std::string {
+        std::string out = context_.generate_name(tag);
+        ONNXExportNode n(op, context_.generate_name(tag));
+        n.add_input(in); n.add_output(out); graph_.add_node(n);
+        return out;
+    };
+    auto add_binary = [&](const char* op, const std::string& a,
+                          const std::string& b, const char* tag) -> std::string {
+        std::string out = context_.generate_name(tag);
+        ONNXExportNode n(op, context_.generate_name(tag));
+        n.add_input(a); n.add_input(b); n.add_output(out); graph_.add_node(n);
+        return out;
+    };
+    auto add_cumsum = [&](const std::string& in, const char* tag) -> std::string {
+        std::string out = context_.generate_name(tag);
+        ONNXExportNode n("CumSum", context_.generate_name(tag));
+        n.add_input(in); n.add_input(axis_name); n.add_output(out);
+        graph_.add_node(n);
+        return out;
+    };
 
-    // Step 3: Exp(cumsum(log(x)))
-    ONNXExportNode exp_node("Exp", context_.generate_name("cumprod_exp"));
-    exp_node.add_input(cumsum_out);
-    exp_node.add_output(output_name);
-    graph_.add_node(exp_node);
+    // magnitude = exp(cumsum(log(|x|)))
+    std::string abs_out = add_unary("Abs", input_name, "cumprod_abs");
+    std::string log_out = add_unary("Log", abs_out, "cumprod_log");
+    std::string magcs   = add_cumsum(log_out, "cumprod_magcumsum");
+    std::string mag_out = add_unary("Exp", magcs, "cumprod_mag");
+
+    // sign = 1 - 2*((cumsum of (x<0)) mod 2)
+    std::string zero_name = scalar_init(0.0, "cumprod_zero");
+    std::string neg_bool  = add_binary("Less", input_name, zero_name, "cumprod_less");
+    // Cast the bool mask to the working float dtype (1.0 where negative).
+    std::string neg_f = context_.generate_name("cumprod_negf");
+    {
+        ONNXExportNode cast_node("Cast", context_.generate_name("cumprod_cast"));
+        cast_node.add_input(neg_bool); cast_node.add_output(neg_f);
+        cast_node.set_attr("to", static_cast<int64_t>(
+            dt == DType::Float64 ? 11 /*DOUBLE*/ : 1 /*FLOAT*/));
+        graph_.add_node(cast_node);
+    }
+    std::string negcs   = add_cumsum(neg_f, "cumprod_negcumsum");
+    std::string two_name = scalar_init(2.0, "cumprod_two");
+    std::string one_name = scalar_init(1.0, "cumprod_one");
+    std::string half    = add_binary("Div", negcs, two_name, "cumprod_half");
+    std::string fl      = add_unary("Floor", half, "cumprod_floor");
+    std::string twofl   = add_binary("Mul", fl, two_name, "cumprod_twofl");
+    std::string mod2    = add_binary("Sub", negcs, twofl, "cumprod_mod2");
+    std::string two_mod = add_binary("Mul", two_name, mod2, "cumprod_twomod");
+    std::string sign    = add_binary("Sub", one_name, two_mod, "cumprod_sign");
+
+    // cumprod = sign * magnitude
+    ONNXExportNode mul_node("Mul", context_.generate_name("cumprod_mul"));
+    mul_node.add_input(sign); mul_node.add_input(mag_out);
+    mul_node.add_output(output_name);
+    graph_.add_node(mul_node);
     context_.register_tensor(output, output_name);
 }
 

@@ -137,6 +137,10 @@ add_executable(test_quantized_linear_int4
     ${CMAKE_SOURCE_DIR}/src/backends/cpu/kernels/quantization/quantized_linear_int4.cpp)
 target_link_libraries(test_quantized_linear_int4 PRIVATE
     tenzor_core tenzor_backend_cpu GTest::gtest_main)
+# fused_qlinear_dequant lives in a header-only kernel; expose its directory so
+# the INT4 regression test can include and exercise it directly.
+target_include_directories(test_quantized_linear_int4 PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/backends/cpu/kernels)
 set_target_properties(test_quantized_linear_int4 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
 tenzor_discover_tests(test_quantized_linear_int4

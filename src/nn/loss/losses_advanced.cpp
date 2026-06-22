@@ -478,26 +478,32 @@ auto ctc_loss_single(
     // Compute gradients: grad[t][c] = -exp(alpha[t][s] + beta[t][s] - log_prob)
     // where s maps to label c
     std::vector<float> grad(T * C, 0.0f);
+    // Track which classes have an accumulated posterior this timestep with an
+    // explicit flag. The accumulated quantity is a log-domain value (alpha+beta)
+    // that can legitimately be exactly 0.0 (posterior prob 1), so 0.0f cannot
+    // double as a "nothing accumulated yet" sentinel without dropping that term.
+    std::vector<char> accumulated(C, 0);
 
     for (int64_t t = 0; t < T; ++t) {
+        std::fill(accumulated.begin(), accumulated.end(), static_cast<char>(0));
         // For each position in extended label, accumulate posterior
         for (int64_t s = 0; s < L; ++s) {
             float posterior = alpha[t * L + s] + beta[t * L + s];
             if (posterior > NEG_INF + 1.0f) {
                 int32_t c = ext_label[s];
                 // Accumulate in log-space, then convert
-                float old_val = grad[t * C + c];
-                if (old_val == 0.0f) {
+                if (!accumulated[c]) {
                     grad[t * C + c] = posterior;
+                    accumulated[c] = 1;
                 } else {
-                    grad[t * C + c] = log_sum_exp(old_val, posterior);
+                    grad[t * C + c] = log_sum_exp(grad[t * C + c], posterior);
                 }
             }
         }
 
         // Convert from log-posterior to gradient
         for (int64_t c = 0; c < C; ++c) {
-            if (grad[t * C + c] != 0.0f) {
+            if (accumulated[c]) {
                 grad[t * C + c] = std::exp(log_probs[t * C + c]) -
                                   std::exp(grad[t * C + c] - log_prob);
             } else {

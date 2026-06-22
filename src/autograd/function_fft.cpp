@@ -78,6 +78,17 @@ namespace {
 template <typename T>
 void cumprod_backward_exact_kernel(const T* x, const T* g, T* gi,
                                    int64_t outer, int64_t n) {
+    // Complex inputs follow the Wirtinger/conjugate convention (matching the
+    // Log/Exp complex backwards): the running product is over conj(x_j). Real
+    // types are left unchanged.
+    auto cj = [](const T& v) -> T {
+        if constexpr (std::is_same_v<T, std::complex<float>> ||
+                      std::is_same_v<T, std::complex<double>>) {
+            return std::conj(v);
+        } else {
+            return v;
+        }
+    };
     for (int64_t o = 0; o < outer; ++o) {
         const T* xr = x + o * n;
         const T* gr = g + o * n;
@@ -85,14 +96,14 @@ void cumprod_backward_exact_kernel(const T* x, const T* g, T* gi,
         for (int64_t i = 0; i < n; ++i) {
             // prefix_excl = prod_{j<i} x_j   (the j!=i, j<=k=i term base).
             T prefix_excl = T(1);
-            for (int64_t j = 0; j < i; ++j) prefix_excl *= xr[j];
+            for (int64_t j = 0; j < i; ++j) prefix_excl *= cj(xr[j]);
             // Accumulate sum_{k>=i} grad_k * prod_{j<=k, j!=i} x_j.
             // running = prod_{j<=k, j!=i} x_j, starting at k=i (= prefix_excl,
             // since the j==i factor is skipped), then multiply by x_k for k>i.
             T running = prefix_excl;
             T acc = T(0);
             for (int64_t k = i; k < n; ++k) {
-                if (k > i) running *= xr[k];
+                if (k > i) running *= cj(xr[k]);
                 acc += gr[k] * running;
             }
             gir[i] = acc;

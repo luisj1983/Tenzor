@@ -8014,6 +8014,12 @@ JvpMultiResult jvp_adapter_linalg_lu_s15(std::span<const Tensor> primals,
         for (int64_t i = 0; i < n; ++i) rowidx[i] = i;
         for (int64_t i = 0; i < n; ++i) {
             int64_t j = static_cast<int64_t>(p[b * n + i]) - 1;  // 1-based
+            // The pivot vector is untrusted (LU may emit junk on a degenerate
+            // factorization); a stray index would swap/scribble out of bounds.
+            if (j < 0 || j >= n) {
+                throw std::runtime_error(
+                    "LU JVP: pivot index out of range [1, " + std::to_string(n) + "]");
+            }
             std::swap(rowidx[i], rowidx[j]);
         }
         for (int64_t i = 0; i < n; ++i) {

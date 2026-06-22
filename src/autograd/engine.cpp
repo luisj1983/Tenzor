@@ -548,15 +548,17 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 // Apply hooks (access through impl_ for handle pattern)
                 // Take shared_lock for thread-safe iteration, then copy hooks
                 // to local before iterating — a hook may register/unregister
+                // Capture the hooks at this wider scope so the create_graph path
+                // below can apply the SAME transform to the graph-carrying gradient.
+                std::map<size_t, std::function<Tensor(const Tensor&)>> applied_hooks;
                 if (var.impl_) {
-                    std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_copy;
                     {
                         std::shared_lock lock(var.impl_->hooks_mutex_);
                         if (!var.impl_->hooks_.empty()) {
-                            hooks_copy = var.impl_->hooks_;
+                            applied_hooks = var.impl_->hooks_;
                         }
                     }
-                    for (auto& [id, hook] : hooks_copy) {
+                    for (auto& [id, hook] : applied_hooks) {
                         grad_to_apply = hook(grad_to_apply);
                     }
                 }
@@ -625,14 +627,27 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                         // level so grad_fn chains through all contributing
                         // paths.
                         if (need_graph_update) {
+                            // Apply the SAME backward hooks to the graph-carrying
+                            // gradient so grad_variable() (consumed by second-order
+                            // diff: Hessian/HVP, WGAN-GP, MAML) reflects the hook,
+                            // not just .grad(). Hooks are opaque Tensor->Tensor
+                            // maps, so the second derivative does not flow THROUGH
+                            // the hook (inherent to Tensor hooks), but the gradient
+                            // VALUE is now consistent between .grad() and grad_variable().
+                            Variable graph_grad = var_input_grads[i];
+                            if (!applied_hooks.empty()) {
+                                Tensor hv = graph_grad.tensor();
+                                for (auto& [id, hook] : applied_hooks) hv = hook(hv);
+                                graph_grad = Variable(hv, graph_grad.requires_grad());
+                            }
                             std::shared_ptr<VariableImpl> new_impl;
                             if (!existing_graph_impl) {
-                                new_impl = var_input_grads[i].impl_;
+                                new_impl = graph_grad.impl_;
                             } else {
                                 Variable existing_var;
                                 existing_var.impl_ = existing_graph_impl;
                                 new_impl =
-                                    (existing_var + var_input_grads[i]).impl_;
+                                    (existing_var + graph_grad).impl_;
                             }
                             {
 #ifndef NDEBUG
@@ -1119,15 +1134,17 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 // crashed inside the accumulation or in a user hook.
                 validate_grad_shape_or_throw(var, grad_to_apply, function->name(), i);
 
+                // Capture the hooks at this wider scope so the create_graph path
+                // below can apply the SAME transform to the graph-carrying gradient.
+                std::map<size_t, std::function<Tensor(const Tensor&)>> applied_hooks;
                 if (var.impl_) {
-                    std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_copy;
                     {
                         std::shared_lock lock(var.impl_->hooks_mutex_);
                         if (!var.impl_->hooks_.empty()) {
-                            hooks_copy = var.impl_->hooks_;
+                            applied_hooks = var.impl_->hooks_;
                         }
                     }
-                    for (auto& [id, hook] : hooks_copy) {
+                    for (auto& [id, hook] : applied_hooks) {
                         grad_to_apply = hook(grad_to_apply);
                     }
                 }
@@ -1179,14 +1196,27 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                         // create_graph is set; sum at the Variable level so
                         // grad_fn chains through every contributing path.
                         if (need_graph_update) {
+                            // Apply the SAME backward hooks to the graph-carrying
+                            // gradient so grad_variable() (consumed by second-order
+                            // diff: Hessian/HVP, WGAN-GP, MAML) reflects the hook,
+                            // not just .grad(). Hooks are opaque Tensor->Tensor
+                            // maps, so the second derivative does not flow THROUGH
+                            // the hook (inherent to Tensor hooks), but the gradient
+                            // VALUE is now consistent between .grad() and grad_variable().
+                            Variable graph_grad = var_input_grads[i];
+                            if (!applied_hooks.empty()) {
+                                Tensor hv = graph_grad.tensor();
+                                for (auto& [id, hook] : applied_hooks) hv = hook(hv);
+                                graph_grad = Variable(hv, graph_grad.requires_grad());
+                            }
                             std::shared_ptr<VariableImpl> new_impl;
                             if (!existing_graph_impl) {
-                                new_impl = var_input_grads[i].impl_;
+                                new_impl = graph_grad.impl_;
                             } else {
                                 Variable existing_var;
                                 existing_var.impl_ = existing_graph_impl;
                                 new_impl =
-                                    (existing_var + var_input_grads[i]).impl_;
+                                    (existing_var + graph_grad).impl_;
                             }
                             {
 #ifndef NDEBUG

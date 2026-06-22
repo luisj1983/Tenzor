@@ -855,6 +855,28 @@ private:
                     }
                 }
 
+                // Validate the attacker-controlled sizes before they reach
+                // Tensor allocation / memcpy downstream: reject negative numel or
+                // dims and a shape product that overflows int64 (a negative or
+                // overflowed numel would size a buffer wrongly / underflow byte
+                // counts).
+                if (desc.numel < 0) {
+                    throw std::runtime_error(
+                        "pytorch_loader: negative storage numel in pickle stream");
+                }
+                int64_t shape_prod = 1;
+                for (int64_t d : shape) {
+                    if (d < 0) {
+                        throw std::runtime_error(
+                            "pytorch_loader: negative tensor dimension in pickle stream");
+                    }
+                    if (d != 0 && shape_prod > std::numeric_limits<int64_t>::max() / d) {
+                        throw std::runtime_error(
+                            "pytorch_loader: tensor shape numel overflows int64");
+                    }
+                    shape_prod *= d;
+                }
+
                 result_[key.str_val] = {desc, shape};
             }
         }

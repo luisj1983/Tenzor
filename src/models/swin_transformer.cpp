@@ -296,7 +296,10 @@ auto BasicLayer::forward_impl(const Variable& input) -> Variable {
             // Use gradient checkpointing: don't save activations during forward,
             // recompute them during backward. Saves ~50-80% memory.
             x = autograd::checkpoint(
-                [&block](const Variable& in) -> Variable {
+                // Capture `block` BY VALUE (a shared_ptr copy): checkpoint stores
+                // this lambda in the grad node and invokes it during backward,
+                // long after this loop's `block` reference has gone out of scope.
+                [block](const Variable& in) -> Variable {
                     return block->forward(in);
                 },
                 x
@@ -407,7 +410,7 @@ SwinTransformer::SwinTransformer(int64_t img_size,
     : num_classes_(num_classes)
     , num_layers_(depths.size())
     , embed_dim_(embed_dim)
-    , num_features_(embed_dim * (1 << (num_layers_ - 1)))  // embed_dim * 2^(num_layers-1)
+    , num_features_(embed_dim * (depths.empty() ? 1 : (1 << (depths.size() - 1))))  // 2^(num_layers-1); guard empty depths (avoids 1<<-1 UB)
     , use_checkpoint_(use_checkpoint)
 {
     // Patch embedding

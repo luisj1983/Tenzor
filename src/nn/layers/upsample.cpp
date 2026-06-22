@@ -2,9 +2,13 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/vision.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace tenzor::nn {
 
@@ -23,17 +27,36 @@ public:
         throw std::runtime_error("UpsampleBackward::forward should not be called");
     }
 
+    // The adjoint of interpolation is a scatter-add of each output pixel's
+    // gradient back onto its source pixels (OpId::InterpolateBackward), NOT a
+    // re-interpolation of the gradient — re-interpolating drops/averages the
+    // fan-in and yields numerically wrong input gradients. Mirrors
+    // UpsampleBilinearBackward (src/autograd/function_shape.cpp).
+    auto make_backward_attrs() const -> OpAttributes {
+        std::string size_str;
+        for (size_t i = 0; i < input_spatial_size_.size(); ++i) {
+            if (i) size_str += ",";
+            size_str += std::to_string(input_spatial_size_[i]);
+        }
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputShape, size_str);
+        attrs.set(AttrKey::Mode, mode_);
+        attrs.set(AttrKey::AlignCorners, align_corners_);
+        return attrs;
+    }
+
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        // Downsample gradient back to input size using the same interpolation mode
-        auto grad_input = ops::interpolate(grad_outputs[0], input_spatial_size_,
-                                           mode_, align_corners_);
-        return {grad_input};
+        OpAttributes attrs = make_backward_attrs();
+        std::vector<Tensor> dispatch_inputs = {grad_outputs[0]};
+        auto results = tenzor::dispatch(OpId::InterpolateBackward, dispatch_inputs, attrs);
+        return {results[0]};
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        auto grad_tensor = ops::interpolate(grad_outputs[0].tensor(), input_spatial_size_,
-                                            mode_, align_corners_);
-        return {Variable(grad_tensor, true)};
+        OpAttributes attrs = make_backward_attrs();
+        std::vector<Tensor> dispatch_inputs = {grad_outputs[0].tensor()};
+        auto results = tenzor::dispatch(OpId::InterpolateBackward, dispatch_inputs, attrs);
+        return {Variable(results[0], true)};
     }
 
     // P4.2d: upsample is linear (fixed interpolation weights); second

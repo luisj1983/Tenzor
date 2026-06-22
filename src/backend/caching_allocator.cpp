@@ -1,4 +1,5 @@
 #include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/loader_fwd.hpp"  // is_backend_registry_alive()
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -30,6 +31,14 @@ CachingAllocator::CachingAllocator()
 }
 
 CachingAllocator::~CachingAllocator() {
+    // get() is a function-local static, so this runs during process static
+    // destruction, when the CUDA runtime may already be torn down — cudaFree()
+    // would then hit a stale context (error/crash). Skip cleanup if the backend
+    // registry is already shut down; the OS reclaims the memory at exit anyway.
+    // Mirrors OneAPICachingAllocator / VulkanCachingAllocator::is_alive().
+    if (!is_backend_registry_alive()) {
+        return;
+    }
     // Release all cached memory
     empty_cache(-1);
 }

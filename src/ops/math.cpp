@@ -74,6 +74,22 @@ auto binary_op_raw(const char* name, const Tensor& a, const Tensor& b) -> Tensor
     return dispatch<Op>(inputs)[0];
 }
 
+// Binary op with promotion + EXPLICIT broadcast expansion. For backend kernels
+// that index both operands with a single linear index (no per-operand broadcast
+// strides) — e.g. hypot/copysign/nextafter/gcd/lcm and the special functions.
+// Those kernels would otherwise read the smaller operand out of bounds and
+// return a wrong-shaped result. (add/mul keep binary_op_promoted; their kernels
+// broadcast via strides.) Mirrors the addcmul broadcast handling.
+template<OpId Op>
+auto binary_op_promoted_broadcast(const char* name, const Tensor& a, const Tensor& b) -> Tensor {
+    auto [ap, bp] = promote_inputs(a, b);
+    validate_broadcast_shapes(name, ap.shape(), bp.shape());
+    auto bshape = broadcast_shapes(ap.shape(), bp.shape());
+    std::vector<Tensor> inputs = {broadcast_to(ap, bshape).contiguous(),
+                                  broadcast_to(bp, bshape).contiguous()};
+    return dispatch<Op>(inputs)[0];
+}
+
 // Simple unary op: just dispatch
 template<OpId Op>
 auto unary_op(const Tensor& input) -> Tensor {
@@ -587,7 +603,7 @@ auto polygamma(int64_t n, const Tensor& input) -> Tensor {
 }
 
 auto beta(const Tensor& a, const Tensor& b) -> Tensor {
-    return detail::binary_op_promoted<OpId::Beta>("beta", a, b);
+    return detail::binary_op_promoted_broadcast<OpId::Beta>("beta", a, b);
 }
 
 auto betainc(const Tensor& a, const Tensor& b, const Tensor& x) -> Tensor {
@@ -616,7 +632,7 @@ auto bessel_i1(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Be
 auto sinc(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Sinc>(input); }
 
 auto zeta(const Tensor& x, const Tensor& q) -> Tensor {
-    return detail::binary_op_promoted<OpId::Zeta>("zeta", x, q);
+    return detail::binary_op_promoted_broadcast<OpId::Zeta>("zeta", x, q);
 }
 
 auto isnan(const Tensor& input) -> Tensor { return detail::unary_op<OpId::IsNan>(input); }
@@ -671,6 +687,13 @@ auto cross(const Tensor& input, const Tensor& other, int64_t dim) -> Tensor {
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim)
         throw std::invalid_argument("cross: dim out of range");
+
+    // Validate equal rank BEFORE indexing shape_b[dim]: if `other` has fewer
+    // dims than `input`, shape_b[dim] would read past the end of its shape
+    // vector (the full-shape equality check below runs too late to catch it).
+    if (static_cast<int64_t>(shape_b.size()) != ndim)
+        throw std::invalid_argument(
+            "cross: input tensors must have the same number of dimensions");
 
     if (shape_a[dim] != 3 || shape_b[dim] != 3)
         throw std::invalid_argument("cross: dimension " + std::to_string(dim) +
@@ -847,15 +870,15 @@ auto diff(const Tensor& input, int64_t n, int64_t dim) -> Tensor {
 }
 
 auto logaddexp(const Tensor& a, const Tensor& b) -> Tensor {
-    return detail::binary_op_promoted<OpId::LogAddExp>("logaddexp", a, b);
+    return detail::binary_op_promoted_broadcast<OpId::LogAddExp>("logaddexp", a, b);
 }
 
 auto logaddexp2(const Tensor& a, const Tensor& b) -> Tensor {
-    return detail::binary_op_promoted<OpId::LogAddExp2>("logaddexp2", a, b);
+    return detail::binary_op_promoted_broadcast<OpId::LogAddExp2>("logaddexp2", a, b);
 }
 
 auto xlogy(const Tensor& x, const Tensor& y) -> Tensor {
-    return detail::binary_op_promoted<OpId::XLogY>("xlogy", x, y);
+    return detail::binary_op_promoted_broadcast<OpId::XLogY>("xlogy", x, y);
 }
 
 auto i0e(const Tensor& x) -> Tensor {
@@ -890,6 +913,11 @@ auto cosine_similarity(const Tensor& x1, const Tensor& x2,
     // in MEMORY.md.
     int64_t ndim = static_cast<int64_t>(x1.shape().size());
     int64_t actual_dim = (dim < 0) ? dim + ndim : dim;
+    if (actual_dim < 0 || actual_dim >= ndim) {
+        throw std::invalid_argument(
+            "cosine_similarity: dim " + std::to_string(dim) +
+            " is out of range for a rank-" + std::to_string(ndim) + " input");
+    }
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, actual_dim);
     attrs.set(AttrKey::Eps, eps);
@@ -971,23 +999,23 @@ auto atanh(const Tensor& input) -> Tensor {
 }
 
 auto hypot(const Tensor& x, const Tensor& y) -> Tensor {
-    return detail::binary_op_promoted<OpId::Hypot>("hypot", x, y);
+    return detail::binary_op_promoted_broadcast<OpId::Hypot>("hypot", x, y);
 }
 
 auto copysign(const Tensor& magnitude, const Tensor& sign) -> Tensor {
-    return detail::binary_op_promoted<OpId::Copysign>("copysign", magnitude, sign);
+    return detail::binary_op_promoted_broadcast<OpId::Copysign>("copysign", magnitude, sign);
 }
 
 auto nextafter(const Tensor& from, const Tensor& to) -> Tensor {
-    return detail::binary_op_promoted<OpId::Nextafter>("nextafter", from, to);
+    return detail::binary_op_promoted_broadcast<OpId::Nextafter>("nextafter", from, to);
 }
 
 auto gcd(const Tensor& a, const Tensor& b) -> Tensor {
-    return detail::binary_op_promoted<OpId::Gcd>("gcd", a, b);
+    return detail::binary_op_promoted_broadcast<OpId::Gcd>("gcd", a, b);
 }
 
 auto lcm(const Tensor& a, const Tensor& b) -> Tensor {
-    return detail::binary_op_promoted<OpId::Lcm>("lcm", a, b);
+    return detail::binary_op_promoted_broadcast<OpId::Lcm>("lcm", a, b);
 }
 
 auto addcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
@@ -1018,11 +1046,11 @@ auto addcdiv(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
 }
 
 auto igamma(const Tensor& a, const Tensor& x) -> Tensor {
-    return detail::binary_op_promoted<OpId::Igamma>("igamma", a, x);
+    return detail::binary_op_promoted_broadcast<OpId::Igamma>("igamma", a, x);
 }
 
 auto igammac(const Tensor& a, const Tensor& x) -> Tensor {
-    return detail::binary_op_promoted<OpId::Igammac>("igammac", a, x);
+    return detail::binary_op_promoted_broadcast<OpId::Igammac>("igammac", a, x);
 }
 
 auto gammainc(const Tensor& a, const Tensor& x) -> Tensor {

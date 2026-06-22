@@ -126,7 +126,11 @@ auto AlbertEncoder::forward(const Variable& hidden_states,
     // Apply the SAME layer multiple times (parameter sharing)
     // This reduces parameters by ~91% compared to BERT
     for (int64_t i = 0; i < config_.num_hidden_layers; ++i) {
-        output = shared_layer_->forward(output, attention_mask, Tensor{});
+        // attention_mask is a [batch, seq_len] key-padding mask, which is the
+        // THIRD arg (src_key_padding_mask). The 2nd arg is src_mask, an
+        // [seq_len, seq_len] attention mask — passing the padding mask there
+        // gives the wrong shape and semantics.
+        output = shared_layer_->forward(output, Tensor{}, attention_mask);
     }
 
     return output;

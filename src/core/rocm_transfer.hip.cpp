@@ -8,6 +8,8 @@
 
 #include <atomic>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace tenzor {
@@ -53,8 +55,15 @@ auto do_copy(void* dst, const void* src, std::size_t bytes, int device, hipMemcp
     std::call_once(g_init_flag, init_streams);
     (void)hipSetDevice(device);
     hipStream_t stream = g_streams[g_round_robin.fetch_add(1, std::memory_order_relaxed) % kNumStreams];
-    if (hipMemcpyAsync(dst, src, bytes, kind, stream) != hipSuccess) {
-        return nullptr;
+    // A nullptr return means "no event / nothing to wait on" and callers treat
+    // it as already-completed (see transfer_engine cpu_to_gpu_async). A failed
+    // DMA must therefore NOT share that sentinel, or the never-filled
+    // destination tensor would silently be reported as a completed transfer.
+    if (hipError_t err = hipMemcpyAsync(dst, src, bytes, kind, stream);
+        err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("rocm_transfer::do_copy: hipMemcpyAsync failed: ") +
+            hipGetErrorString(err));
     }
     hipEvent_t event = acquire_event();
     (void)hipEventRecord(event, stream);

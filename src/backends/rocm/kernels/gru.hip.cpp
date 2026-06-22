@@ -863,20 +863,57 @@ auto gru_forward_miopen(
     tenzor::rocm::HipBuffer weight_buf(weight_space_size);
     HIP_CHECK(hipMemsetAsync(weight_buf.ptr, 0, weight_space_size, stream));
 
-    // Copy W_ih, W_hh, bias into packed layout
-    size_t W_ih_bytes = W_ih.numel() * sizeof(float);
-    size_t W_hh_bytes = W_hh.numel() * sizeof(float);
-    HIP_CHECK(hipMemcpyAsync(weight_buf.ptr, W_ih.data<float>(),
-                   W_ih_bytes, hipMemcpyDeviceToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(
-        static_cast<char*>(weight_buf.ptr) + W_ih_bytes,
-        W_hh.data<float>(), W_hh_bytes, hipMemcpyDeviceToDevice, stream));
+    // Create the 1D weight descriptor up front: MIOpen needs it to locate each
+    // linear layer's sub-buffer within the packed weight space.
+    MiopenTensorDescGuard w_desc_guard;
+    {
+        std::array<int, 1> w_dim = {static_cast<int>(weight_space_size / sizeof(float))};
+        std::array<int, 1> w_stride = {1};
+        MIOPEN_CHECK(miopenSetTensorDescriptor(
+            w_desc_guard.desc, miopenFloat, 1, w_dim.data(), w_stride.data()));
+    }
 
-    if (bias.numel() > 0) {
-        size_t bias_bytes = bias.numel() * sizeof(float);
-        HIP_CHECK(hipMemcpyAsync(
-            static_cast<char*>(weight_buf.ptr) + W_ih_bytes + W_hh_bytes,
-            bias.data<float>(), bias_bytes, hipMemcpyDeviceToDevice, stream));
+    // MIOpen does NOT store RNN parameters as a flat [W_ih | W_hh | bias]
+    // concatenation — each gate's matrix/bias lives at an internal offset.
+    // Place each via miopenGetRNNLinLayerMatrixParams / ...BiasParams. PyTorch's
+    // W_ih/W_hh are (r,z,n)-gate-ordered, matching MIOpen's linLayerID 0,1,2 =
+    // input-to-hidden gates and 3,4,5 = hidden-to-hidden gates.
+    {
+        const int in_dims[2]    = {static_cast<int>(hidden), static_cast<int>(input_size)};
+        const int in_strides[2] = {static_cast<int>(input_size), 1};
+        const int hh_dims[2]    = {static_cast<int>(hidden), static_cast<int>(hidden)};
+        const int hh_strides[2] = {static_cast<int>(hidden), 1};
+        const int b_dims[1]     = {static_cast<int>(hidden)};
+        const int b_strides[1]  = {1};
+        const int64_t in_gate_elems  = hidden * input_size;
+        const int64_t hid_gate_elems = hidden * hidden;
+        MiopenTensorDescGuard pdesc;
+        for (int g = 0; g < 3; ++g) {
+            // input-to-hidden matrix for gate g (paramID g)
+            MIOPEN_CHECK(miopenSetTensorDescriptor(pdesc.desc, miopenFloat, 2, in_dims, in_strides));
+            MIOPEN_CHECK(miopenSetRNNLayerParam(
+                miopen_guard.handle, rnn_desc_guard.desc, /*layer=*/0,
+                x_descs[0], w_desc_guard.desc, weight_buf.ptr, g, pdesc.desc,
+                W_ih.data<float>() + g * in_gate_elems));
+            // hidden-to-hidden matrix for gate g (paramID 3+g)
+            MIOPEN_CHECK(miopenSetTensorDescriptor(pdesc.desc, miopenFloat, 2, hh_dims, hh_strides));
+            MIOPEN_CHECK(miopenSetRNNLayerParam(
+                miopen_guard.handle, rnn_desc_guard.desc, /*layer=*/0,
+                x_descs[0], w_desc_guard.desc, weight_buf.ptr, 3 + g, pdesc.desc,
+                W_hh.data<float>() + g * hid_gate_elems));
+        }
+        if (bias.numel() > 0) {
+            for (int g = 0; g < 3; ++g) {
+                // input-side bias for gate g (biasID g). The hidden-side bias
+                // (biasID 3+g) is left zero (weight_buf was memset), matching
+                // PyTorch when bias_hh is absent.
+                MIOPEN_CHECK(miopenSetTensorDescriptor(pdesc.desc, miopenFloat, 1, b_dims, b_strides));
+                MIOPEN_CHECK(miopenSetRNNLayerBias(
+                    miopen_guard.handle, rnn_desc_guard.desc, /*layer=*/0,
+                    x_descs[0], w_desc_guard.desc, weight_buf.ptr, g, pdesc.desc,
+                    bias.data<float>() + g * hidden));
+            }
+        }
     }
 
     // Get workspace
@@ -887,11 +924,7 @@ auto gru_forward_miopen(
 
     tenzor::rocm::HipBuffer workspace(workspace_size);
 
-    // Create weight descriptor for MIOpen (1D flattened)
-    MiopenTensorDescGuard w_desc_guard;
-    std::array<int, 1> w_dim = {static_cast<int>(weight_space_size / sizeof(float))};
-    std::array<int, 1> w_stride = {1};
-    MIOPEN_CHECK(miopenSetTensorDescriptor(w_desc_guard.desc, miopenFloat, 1, w_dim.data(), w_stride.data()));
+    // (weight descriptor w_desc_guard already created above for param placement)
 
     // GRU does not have cell state — pass nullptr for cx/cy descriptors
     MIOPEN_CHECK(miopenRNNForwardInference(

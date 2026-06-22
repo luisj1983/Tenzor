@@ -404,9 +404,22 @@ void register_jit(py::module_& m) {
         // The C++ side stores the callable in N-input form; the Python
         // wrapper unpacks the span as positional arguments so user code
         // can keep writing `def f(x):` or `def f(x, y, z):` naturally.
+        // Hold the Python callable through a GIL-aware deleter. The CompiledFunction
+        // that owns this lambda can be destroyed from a context where the GIL is
+        // released (CompiledFunction::operator() runs under gil_scoped_release
+        // below) or during interpreter finalization; releasing a py::function's
+        // refcount there aborts with a PyGILState_Check failure. Deleting the
+        // captured function under an acquired GIL avoids that.
+        auto fn_holder = std::shared_ptr<py::function>(
+            new py::function(std::move(fn)),
+            [](py::function* p) {
+                py::gil_scoped_acquire acquire;
+                delete p;
+            });
         auto cpp_fn =
-            [fn](std::span<const tenzor::Variable> inputs) -> tenzor::Variable {
+            [fn_holder](std::span<const tenzor::Variable> inputs) -> tenzor::Variable {
             py::gil_scoped_acquire acquire;
+            const py::function& fn = *fn_holder;
             if (inputs.size() == 1) {
                 auto result = fn(inputs[0]);
                 return result.cast<tenzor::Variable>();
@@ -509,9 +522,23 @@ void register_jit(py::module_& m) {
     jit.def("compile_function",
         [](py::function fn, std::string backend, std::string target,
            bool fallback_to_eager) {
-            auto cpp_fn = [fn](std::span<const tenzor::Variable> inputs)
+            // Hold the Python callable through a GIL-aware deleter and capture
+            // only the shared_ptr. The CompiledFunction ctor below runs with the
+            // GIL released (line ~563), and constructing/moving/destroying this
+            // lambda inside a std::function must not dec_ref a py::function while
+            // the GIL is dropped (that aborts with a PyGILState_Check failure).
+            // Copying the shared_ptr only bumps an atomic refcount; the wrapped
+            // py::function is freed exactly once, under an acquired GIL.
+            auto fn_holder = std::shared_ptr<py::function>(
+                new py::function(std::move(fn)),
+                [](py::function* p) {
+                    py::gil_scoped_acquire acquire;
+                    delete p;
+                });
+            auto cpp_fn = [fn_holder](std::span<const tenzor::Variable> inputs)
                 -> tenzor::Variable {
                 py::gil_scoped_acquire acquire;
+                const py::function& fn = *fn_holder;
                 // Forward inputs as positional arguments. Use pybind11's
                 // automatic conversion (same path the previous single-input
                 // form took when calling fn(input)) by building the args

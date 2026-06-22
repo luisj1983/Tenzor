@@ -1257,6 +1257,15 @@ auto VulkanBackend::dispatchMaxPool1dForward(const Tensor& input, const OpAttrib
 
 auto VulkanBackend::dispatchMaxPool1dBackward(const Tensor& grad_output, const Tensor& indices,
                                                int64_t L_in) -> Tensor {
+    // F16/BF16: the packed-word backward shaders bind half-width (numel*2)
+    // buffers and overrun by a 32-bit word / drop the tail gradient for odd
+    // element counts. Compute the scatter in Float32 on the GPU and narrow back
+    // (stays on the device — not a CPU fallback).
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        return dispatchMaxPool1dBackward(grad_output.to(DType::Float32), indices, L_in)
+            .to(orig);
+    }
     auto grad_out_shape = grad_output.shape();
     int64_t N = grad_out_shape[0];
     int64_t C = grad_out_shape[1];
@@ -1556,6 +1565,14 @@ auto VulkanBackend::dispatchAdaptiveAvgPool1d(const Tensor& input, int64_t outpu
 
 auto VulkanBackend::dispatchAdaptiveMaxPool1dBackward(const Tensor& grad_output, const Tensor& indices,
                                                         const std::vector<int64_t>& input_shape) -> Tensor {
+    // F16/BF16: the packed-word backward shaders bind half-width buffers and
+    // overrun / drop the tail gradient for odd element counts. Compute in
+    // Float32 on the GPU and narrow back (stays on the device).
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        return dispatchAdaptiveMaxPool1dBackward(grad_output.to(DType::Float32), indices,
+                                                 input_shape).to(orig);
+    }
     int64_t grad_out_numel = grad_output.numel();
     int64_t grad_in_numel = 1;
     for (auto s : input_shape) grad_in_numel *= s;

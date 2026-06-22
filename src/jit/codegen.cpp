@@ -594,6 +594,15 @@ auto execute_fused(const FusionGroup& group,
 #else
     auto gpu_device = Device::cuda(0);
 #endif
+    // Prefer the device of an input already resident on a GPU, so a model on
+    // cuda:1 / rocm:1 doesn't get its output allocated on device 0 (which would
+    // make the kernel access memory across devices). Fall back to the default.
+    for (const auto& inp : inputs) {
+        if (inp.device().type != Device::Type::CPU) {
+            gpu_device = inp.device();
+            break;
+        }
+    }
     std::vector<Tensor> gpu_inputs;
     gpu_inputs.reserve(inputs.size());
     for (const auto& inp : inputs) {

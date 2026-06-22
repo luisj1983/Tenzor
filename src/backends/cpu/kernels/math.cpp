@@ -475,7 +475,9 @@ static void matmul_blocked_int32(
 static void matmul_microkernel_int8(
     const int8_t* A, const int8_t* B, int32_t* C,
     int64_t M, int64_t N, int64_t K,
-    int64_t lda, int64_t ldb, int64_t ldc) {
+    int64_t lda, int64_t ldb, int64_t ldc,
+    std::vector<int8_t>& b_packed_storage,
+    std::vector<int32_t>& b_col_sum_storage) {
 
 #if defined(__AVX512VNNI__) || defined(__AVX2__)
     // Pack the (K, N) tile of B into a thread-local (N, K_padded) contiguous
@@ -492,7 +494,9 @@ static void matmul_microkernel_int8(
     constexpr int64_t SIMD_K = 32;
 #endif
     const int64_t K_padded = (K + SIMD_K - 1) / SIMD_K * SIMD_K;
-    thread_local std::vector<int8_t> b_packed_storage;
+    // b_packed_storage / b_col_sum_storage are per-thread scratch owned by the
+    // caller's omp-parallel region (NOT thread_local): OpenMP workers in a
+    // dlopen'd lib may skip TLS init, leaving thread_local vectors null.
     if (static_cast<int64_t>(b_packed_storage.size()) < N * K_padded) {
         b_packed_storage.assign(static_cast<size_t>(N * K_padded), 0);
     } else {
@@ -515,7 +519,6 @@ static void matmul_microkernel_int8(
     // Per-column bias correction (sum of B column entries) for the
     // unsigned-A offset trick used by VNNI / maddubs. Computed once,
     // reused for every i in the outer loop.
-    thread_local std::vector<int32_t> b_col_sum_storage;
     if (static_cast<int64_t>(b_col_sum_storage.size()) < N) {
         b_col_sum_storage.assign(static_cast<size_t>(N), 0);
     }
@@ -743,8 +746,15 @@ static void matmul_blocked_int8(
     }
 #endif
 
-    // Cache-friendly blocked algorithm with OpenMP parallelization
-    #pragma omp parallel for collapse(2) if(M * N > ::tenzor::OmpThresholds::medium())
+    // Cache-friendly blocked algorithm with OpenMP parallelization. Per-thread
+    // scratch buffers are declared INSIDE the parallel region (heap-allocated by
+    // each worker via normal C++), matching the F16/BF16 paths — 'thread_local'
+    // is unsafe in a dlopen'd lib where OpenMP workers may skip TLS init.
+    #pragma omp parallel if(M * N > ::tenzor::OmpThresholds::medium())
+    {
+    std::vector<int8_t> b_packed_storage;
+    std::vector<int32_t> b_col_sum_storage;
+    #pragma omp for collapse(2)
     for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
         for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
             int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
@@ -762,10 +772,12 @@ static void matmul_blocked_int8(
                     B + kk * N + jj,
                     C_i32.data() + ii * N + jj,
                     block_m, block_n, block_k,
-                    K, N, N
+                    K, N, N,
+                    b_packed_storage, b_col_sum_storage
                 );
             }
         }
+    }
     }
 
     // Saturate int32 results to int8
@@ -2844,7 +2856,11 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
 }
 
 // Clamp kernel - clamps tensor values to [min_val, max_val]
-auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor {
+auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Tensor {
+    // data<T>() returns storage+offset WITHOUT applying strides, so a
+    // non-contiguous view would be read as if contiguous (wrong data). Operate
+    // on a contiguous copy, matching sqrt_kernel/neg_kernel/abs_kernel.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -2979,7 +2995,9 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor
 }
 
 // Clamp min kernel - clamps tensor values to min_val (x >= min_val)
-auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
+auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -3095,7 +3113,9 @@ auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
 }
 
 // Clamp max kernel - clamps tensor values to max_val (x <= max_val)
-auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
+auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -3211,7 +3231,9 @@ auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
 }
 
 // Log kernel - natural logarithm (OpenMP + SIMD optimized)
-auto log_kernel(const Tensor& input) -> Tensor {
+auto log_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -3279,7 +3301,9 @@ auto log_kernel(const Tensor& input) -> Tensor {
 }
 
 // Exp kernel - exponential (OpenMP + SIMD optimized)
-auto exp_kernel(const Tensor& input) -> Tensor {
+auto exp_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -3526,7 +3550,9 @@ auto pow_kernel(const Tensor& input, double exponent) -> Tensor {
 }
 
 // Sign kernel - sign function
-auto sign_kernel(const Tensor& input) -> Tensor {
+auto sign_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -4502,12 +4528,14 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 // Trigonometric functions (SIMD + OpenMP optimized)
-auto sin_kernel(const Tensor& input) -> Tensor {
+auto sin_kernel(const Tensor& input_in) -> Tensor {
     // Float16/BFloat16: upcast to Float32, compute, cast back.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto orig_dtype = input.dtype();
-        return sin_kernel(input.to(DType::Float32)).to(orig_dtype);
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto orig_dtype = input_in.dtype();
+        return sin_kernel(input_in.to(DType::Float32)).to(orig_dtype);
     }
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
@@ -4563,12 +4591,14 @@ auto sin_kernel(const Tensor& input) -> Tensor {
     return output;
 }
 
-auto cos_kernel(const Tensor& input) -> Tensor {
+auto cos_kernel(const Tensor& input_in) -> Tensor {
     // Float16/BFloat16: upcast to Float32, compute, cast back.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto orig_dtype = input.dtype();
-        return cos_kernel(input.to(DType::Float32)).to(orig_dtype);
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto orig_dtype = input_in.dtype();
+        return cos_kernel(input_in.to(DType::Float32)).to(orig_dtype);
     }
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
@@ -9236,7 +9266,9 @@ auto log_ndtr_kernel(const Tensor& input) -> Tensor {
 // Multigammaln: Multivariate log-gamma
 // sum_{j=0}^{d-1} lgamma(x - j/2.0) + d*(d-1)/4 * log(π)
 // =========================================================================
-auto multigammaln_kernel(const Tensor& input, int64_t d) -> Tensor {
+auto multigammaln_kernel(const Tensor& input_in, int64_t d) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     double log_pi_coeff = static_cast<double>(d) * static_cast<double>(d - 1) / 4.0 * std::log(M_PI);
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());

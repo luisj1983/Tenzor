@@ -137,7 +137,7 @@ auto SafeTensorsSerializer::parse_header_json(const std::string& json)
     std::unordered_map<std::string, TensorMeta> result;
 
     size_t pos = 0;
-    auto skip_ws = [&]() { while (pos < json.size() && std::isspace(json[pos])) ++pos; };
+    auto skip_ws = [&]() { while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) ++pos; };
     auto expect = [&](char c) {
         skip_ws();
         if (pos >= json.size() || json[pos] != c)
@@ -172,7 +172,7 @@ auto SafeTensorsSerializer::parse_header_json(const std::string& json)
         skip_ws();
         size_t start = pos;
         if (pos < json.size() && json[pos] == '-') ++pos;
-        while (pos < json.size() && std::isdigit(json[pos])) ++pos;
+        while (pos < json.size() && std::isdigit(static_cast<unsigned char>(json[pos]))) ++pos;
         return std::stoll(json.substr(start, pos - start));
     };
 

@@ -3933,6 +3933,24 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+
+    // Fail loudly on a singular factor: lu_kernel writes a LAPACK-style flag
+    // (info = k+1) per batch element, and lu_inv_kernel divides by the zero
+    // pivot otherwise — silently returning inf/NaN. Mirror the cuSOLVER path's
+    // check_cusolver_info.
+    {
+        std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+        CUDA_CHECK_LINALG(cudaMemcpy(h_info.data(), d_info,
+                                     nbatch * sizeof(int), cudaMemcpyDeviceToHost));
+        for (int64_t b = 0; b < nbatch; ++b) {
+            if (h_info[b] != 0) {
+                throw std::runtime_error(
+                    "linalg_inv: matrix is singular (zero pivot at row " +
+                    std::to_string(h_info[b]) + " of batch element " +
+                    std::to_string(b) + ")");
+            }
+        }
+    }
     return result;
 }
 
@@ -3942,11 +3960,15 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) -> Tensor {
     validate_linalg_dtype(A, "solve");
+    // Compute in Float32 but narrow the result back to the input's half dtype,
+    // otherwise solve() silently returns a Float32 tensor for half inputs.
     if (A.dtype() == DType::Float16) {
-        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream);
+        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream)
+            .to(DType::Float16);
     }
     if (A.dtype() == DType::BFloat16) {
-        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream);
+        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream)
+            .to(DType::BFloat16);
     }
 
     auto work_a = A.contiguous().clone();
@@ -3996,6 +4018,21 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    // Fail loudly on a singular factor instead of returning inf/NaN from
+    // lu_solve_kernel's divide-by-zero pivot (mirrors the cuSOLVER info check).
+    {
+        std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+        CUDA_CHECK_LINALG(cudaMemcpy(h_info.data(), d_info,
+                                     nbatch * sizeof(int), cudaMemcpyDeviceToHost));
+        for (int64_t b = 0; b < nbatch; ++b) {
+            if (h_info[b] != 0) {
+                throw std::runtime_error(
+                    "linalg_solve: matrix is singular (zero pivot at row " +
+                    std::to_string(h_info[b]) + " of batch element " +
+                    std::to_string(b) + ")");
+            }
+        }
+    }
     return work_b;
 }
 

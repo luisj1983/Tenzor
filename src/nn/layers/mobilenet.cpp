@@ -171,30 +171,41 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
     layers->add_module(std::make_shared<BatchNorm2d>(hidden_dim));
     layers->add_module(act);
 
-    // 3. Squeeze-and-Excitation (optional)
+    // 3. Squeeze-and-Excitation (optional). SE recalibrates the EXPANDED feature
+    // map (hidden_dim channels) and must run BEFORE the pointwise projection, so
+    // when use_se the projection moves into a separate module applied after SE.
     if (use_se) {
         // SE reduction ratio of 4 (standard for MobileNetV3/EfficientNet),
         // adjusted to a divisor of hidden_dim so the SE ctor never throws.
         int64_t se_reduction = se_reduction_for(hidden_dim);
         se_ = std::make_shared<SqueezeExcitation>(hidden_dim, se_reduction, activation);
         register_module("se", se_);
-    }
 
-    // 4. Pointwise projection: hidden_dim -> out_channels
-    // NO activation (linear bottleneck)
-    layers->add_module(std::make_shared<Conv2d>(hidden_dim, out_channels, 1, 1, 0));
-    layers->add_module(std::make_shared<BatchNorm2d>(out_channels));
+        // 4a. Pointwise projection (hidden_dim -> out_channels), applied after SE.
+        auto proj = std::make_shared<Sequential>();
+        proj->add_module(std::make_shared<Conv2d>(hidden_dim, out_channels, 1, 1, 0));
+        proj->add_module(std::make_shared<BatchNorm2d>(out_channels));
+        proj_ = proj;
+        register_module("proj", proj_);
+    } else {
+        // 4b. Pointwise projection appended to the main path (no SE in between).
+        // NO activation (linear bottleneck).
+        layers->add_module(std::make_shared<Conv2d>(hidden_dim, out_channels, 1, 1, 0));
+        layers->add_module(std::make_shared<BatchNorm2d>(out_channels));
+    }
 
     conv_ = layers;
     register_module("conv", conv_);
 }
 
 auto InvertedResidual::forward_impl(const Variable& input) -> Variable {
+    // conv_ ends at hidden_dim when use_se (projection deferred), else out_channels.
     auto x = conv_->forward(input);
 
-    // Apply SE if present
+    // SE recalibrates the expanded tensor, then project down to out_channels.
     if (se_) {
         x = se_->forward(x);
+        x = proj_->forward(x);
     }
 
     // Add skip connection if conditions are met
@@ -248,19 +259,28 @@ FusedMBConv::FusedMBConv(int64_t in_channels,
         layers->add_module(std::make_shared<BatchNorm2d>(hidden_dim));
         layers->add_module(act);
 
-        // 2. Squeeze-and-Excitation (optional)
+        // 2. Squeeze-and-Excitation (optional). SE recalibrates the expanded
+        // (hidden_dim) tensor and must run BEFORE the projection, so when use_se
+        // the projection moves into a separate post-SE module.
         if (use_se) {
             // SE reduction ratio of 4, adjusted to a divisor of hidden_dim so
             // the SE ctor never throws on non-multiple-of-4 hidden_dim.
             int64_t se_reduction = se_reduction_for(hidden_dim);
             se_ = std::make_shared<SqueezeExcitation>(hidden_dim, se_reduction, activation);
             register_module("se", se_);
-        }
 
-        // 3. Pointwise projection: hidden_dim -> out_channels
-        // NO activation (linear bottleneck)
-        layers->add_module(std::make_shared<Conv2d>(hidden_dim, out_channels, 1, 1, 0));
-        layers->add_module(std::make_shared<BatchNorm2d>(out_channels));
+            // 3a. Pointwise projection applied after SE (linear bottleneck).
+            auto proj = std::make_shared<Sequential>();
+            proj->add_module(std::make_shared<Conv2d>(hidden_dim, out_channels, 1, 1, 0));
+            proj->add_module(std::make_shared<BatchNorm2d>(out_channels));
+            proj_ = proj;
+            register_module("proj", proj_);
+        } else {
+            // 3b. Pointwise projection: hidden_dim -> out_channels
+            // NO activation (linear bottleneck)
+            layers->add_module(std::make_shared<Conv2d>(hidden_dim, out_channels, 1, 1, 0));
+            layers->add_module(std::make_shared<BatchNorm2d>(out_channels));
+        }
     } else {
         // No expansion, just 3x3 conv
         layers->add_module(std::make_shared<Conv2d>(
@@ -278,11 +298,13 @@ FusedMBConv::FusedMBConv(int64_t in_channels,
 }
 
 auto FusedMBConv::forward_impl(const Variable& input) -> Variable {
+    // conv_ ends at hidden_dim when use_se (projection deferred), else out_channels.
     auto x = conv_->forward(input);
 
-    // Apply SE if present
+    // SE recalibrates the expanded tensor, then project down to out_channels.
     if (se_) {
         x = se_->forward(x);
+        x = proj_->forward(x);
     }
 
     // Add skip connection if conditions are met

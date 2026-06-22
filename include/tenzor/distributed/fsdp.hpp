@@ -167,6 +167,39 @@ public:
      */
     auto shard_numel() const -> size_t { return shard_numel_; }
 
+    /** @brief A rank's contiguous range within the flattened parameter buffer. */
+    struct ShardRange {
+        size_t shard_numel{0};   ///< padded shard length (same for every rank)
+        size_t shard_offset{0};  ///< start offset of this rank's shard
+        size_t valid_numel{0};   ///< elements actually backed by real data
+                                 ///< (0 when the shard is entirely padding)
+    };
+
+    /**
+     * @brief Compute a rank's shard range over `total_numel` elements split
+     *        across `world_size` ranks (ceil division; trailing ranks padded).
+     *
+     * `valid_numel` is clamped so that a high rank whose offset lands at or
+     * beyond `total_numel` (e.g. total_numel=5, world_size=4, rank 3 -> offset 6)
+     * reports 0 valid elements rather than underflowing the unsigned length
+     * subtraction, which would otherwise request a ~1.8e19-element slice.
+     */
+    static auto compute_shard_range(size_t total_numel, int world_size, int rank)
+        -> ShardRange {
+        ShardRange r{};
+        if (world_size <= 0 || rank < 0) {
+            return r;
+        }
+        r.shard_numel = (total_numel + static_cast<size_t>(world_size) - 1) /
+                        static_cast<size_t>(world_size);
+        r.shard_offset = static_cast<size_t>(rank) * r.shard_numel;
+        if (r.shard_offset < total_numel) {
+            const size_t remaining = total_numel - r.shard_offset;
+            r.valid_numel = remaining < r.shard_numel ? remaining : r.shard_numel;
+        }
+        return r;
+    }
+
     /**
      * @brief Get the flat parameter buffer (full or sharded depending on state).
      */

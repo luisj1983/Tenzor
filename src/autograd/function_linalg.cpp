@@ -649,7 +649,6 @@ auto QrBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
 
     auto ndim = R.ndim();
     auto Rt = transpose(R, ndim - 2, ndim - 1);
-    auto Qt = transpose(Q, Q.ndim() - 2, Q.ndim() - 1);
 
     // audit-2026-05-03 — corrected to PyTorch's convention:
     //   M = R · grad_R^T - grad_Q^T · Q

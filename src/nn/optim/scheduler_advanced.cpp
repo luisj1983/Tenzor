@@ -174,6 +174,10 @@ auto ReduceLROnPlateau::step(double metric) -> void {
         if (is_better(metric, best_metric_)) {
             best_metric_ = metric;
         }
+        // PyTorch's ReduceLROnPlateau zeroes num_bad_epochs on every in-cooldown
+        // step, so the patience window starts fresh when cooldown ends instead of
+        // carrying stale bad-epoch counts that could trigger an immediate reduce.
+        num_bad_epochs_ = 0;
         return;
     }
 

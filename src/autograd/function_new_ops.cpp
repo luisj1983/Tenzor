@@ -569,7 +569,7 @@ auto RenormBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto RenormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
     const auto& input = saved_tensors_[0];
-    const auto& output = saved_tensors_[1];  // y = renorm(input)
+    [[maybe_unused]] const auto& output = saved_tensors_[1];  // y = renorm(input)
     const auto& grad = grad_outputs[0];       // dL/dy
 
     // For each slice along dim_ the op is y = s · x with
@@ -587,13 +587,9 @@ auto RenormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    // Per-slice scale s = y / x (safe at x==0: y is also 0 there, so we
-    // clamp the divisor to ±eps).
+    // eps for clamping the norm denominator below.
     auto eps_t = full(input_shape, detail::dtype_epsilon(input.dtype()),
                       input.dtype(), input.device());
-    auto zeros_t = zeros(input_shape, input.dtype(), input.device());
-    auto safe_input = where(eq(input, zeros_t), eps_t, input);
-    auto scale_tensor = div(output, safe_input);
 
     // Reduce |x|^p over all dims except dim_ to recover ||x||_p^p per
     // slice (kept with size-1 dims so broadcasting works).
@@ -611,19 +607,20 @@ auto RenormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     // "clipped" indicator broadcast over the slice: 1 where s < 1 − ε.
     auto one_t = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(), norm_p_per_slice.shape().end()), 1.0,
                       input.dtype(), input.device());
-    // Per-slice scale value (just pick one element; all entries in the
-    // slice share the same scale by construction).
-    Tensor scale_per_slice = scale_tensor;
-    for (int64_t d = 0; d < ndim; ++d) {
-        if (d == dim_) continue;
-        // A 0-th element slice is sufficient since every entry in the
-        // non-dim_ direction carries the same scale factor.
-        scale_per_slice = sum(scale_per_slice, d, /*keepdim=*/true);
-        auto slice_count = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(), norm_p_per_slice.shape().end()),
-                                static_cast<double>(input_shape[d]),
-                                input.dtype(), input.device());
-        scale_per_slice = div(scale_per_slice, slice_count);
-    }
+    // True per-slice scale s = min(1, maxnorm / ||x||_p), recovered from the
+    // norm. (Averaging y/x is wrong: that ratio is 0 at zero-valued input
+    // elements, which both drags the per-slice scale below s and corrupts the
+    // first gradient term below.)
+    auto scale_shape = std::vector<int64_t>(norm_p_per_slice.shape().begin(),
+                                            norm_p_per_slice.shape().end());
+    Tensor norm_per_slice = (p_ == 2.0) ? sqrt(norm_p_per_slice)
+                                        : pow(norm_p_per_slice, 1.0 / p_);
+    auto maxnorm_t = full(scale_shape, maxnorm_, input.dtype(), input.device());
+    auto norm_eps  = full(scale_shape, detail::dtype_epsilon(input.dtype()),
+                          input.dtype(), input.device());
+    Tensor scale_per_slice = div(maxnorm_t, add(norm_per_slice, norm_eps));
+    // Clamp to <= 1: slices already within maxnorm are an identity map (s = 1).
+    scale_per_slice = where(lt(scale_per_slice, one_t), scale_per_slice, one_t);
     auto clipped = lt(scale_per_slice, sub(one_t, eps_t));  // bool tensor
     auto clipped_f = clipped.to(input.dtype());
 
@@ -645,7 +642,7 @@ auto RenormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
                                 norm_p_safe),
                             scale_per_slice);
 
-    auto grad_in = sub(mul(grad, scale_tensor), correction);
+    auto grad_in = sub(mul(grad, scale_per_slice), correction);
     return {grad_in};
 }
 
@@ -660,17 +657,13 @@ auto RenormBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     // previous body dropped the correction term entirely.
     require_saved_tensors(2);
     const Tensor& input = saved_tensors_[0];
-    const Tensor& output = saved_tensors_[1];
+    [[maybe_unused]] const Tensor& output = saved_tensors_[1];
     const Variable& grad_var = grad_outputs[0];
 
     auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
     auto eps_t = full(input_shape, detail::dtype_epsilon(input.dtype()),
                       input.dtype(), input.device());
-    auto zeros_t = zeros(input_shape, input.dtype(), input.device());
-    auto safe_input = where(eq(input, zeros_t), eps_t, input);
-    auto scale_tensor = div(output, safe_input);
-
     auto abs_x = abs(input);
     Tensor xp_contrib = (p_ == 2.0) ? mul(abs_x, abs_x) : pow(abs_x, p_);
     Tensor norm_p_per_slice = xp_contrib;
@@ -681,23 +674,25 @@ auto RenormBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     auto one_t = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(),
                                             norm_p_per_slice.shape().end()),
                       1.0, input.dtype(), input.device());
-    Tensor scale_per_slice = scale_tensor;
-    for (int64_t d = 0; d < ndim; ++d) {
-        if (d == dim_) continue;
-        scale_per_slice = sum(scale_per_slice, d, /*keepdim=*/true);
-        auto slice_count = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(),
-                                                      norm_p_per_slice.shape().end()),
-                                static_cast<double>(input_shape[d]),
-                                input.dtype(), input.device());
-        scale_per_slice = div(scale_per_slice, slice_count);
-    }
+    // True per-slice scale s = min(1, maxnorm / ||x||_p), recovered from the
+    // norm (NOT averaged from y/x — that ratio is 0 at zero-valued input
+    // elements and corrupts both the scale and the first gradient term).
+    auto scale_shape = std::vector<int64_t>(norm_p_per_slice.shape().begin(),
+                                            norm_p_per_slice.shape().end());
+    Tensor norm_per_slice = (p_ == 2.0) ? sqrt(norm_p_per_slice)
+                                        : pow(norm_p_per_slice, 1.0 / p_);
+    auto maxnorm_t = full(scale_shape, maxnorm_, input.dtype(), input.device());
+    auto norm_eps  = full(scale_shape, detail::dtype_epsilon(input.dtype()),
+                          input.dtype(), input.device());
+    Tensor scale_per_slice = div(maxnorm_t, add(norm_per_slice, norm_eps));
+    scale_per_slice = where(lt(scale_per_slice, one_t), scale_per_slice, one_t);
     auto clipped = lt(scale_per_slice, sub(one_t, eps_t));
     auto clipped_f = clipped.to(input.dtype());
     Tensor sgn = sign(input);
     Tensor corr_factor = (p_ == 2.0) ? input : mul(sgn, pow(abs_x, p_ - 1.0));
     auto norm_p_safe = add(norm_p_per_slice, eps_t);
 
-    Variable scale_var(scale_tensor, /*requires_grad=*/false);
+    Variable scale_var(scale_per_slice, /*requires_grad=*/false);
     Variable input_var(input, /*requires_grad=*/false);
     Variable corr_per_norm_var(
         mul(div(mul(corr_factor, clipped_f), norm_p_safe), scale_per_slice),

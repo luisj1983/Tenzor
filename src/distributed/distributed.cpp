@@ -178,21 +178,16 @@ auto CommunicationBackend::all_to_all_single(Tensor& output, const Tensor& input
             "CommunicationBackend::all_to_all_single: output and input must have identical dtype.");
     }
 
-    // The trivial single-rank case is a memcpy. For multi-rank, the
-    // backend must override.
-    int64_t world_size_guess = input_shape[0];
-    if (world_size_guess == 1) {
-        std::memcpy(output.data_ptr(),
-                    input.data_ptr(),
-                    static_cast<size_t>(input.numel()) * dtype_size(input.dtype()));
-        return;
-    }
-
-    throw std::runtime_error(
-        "CommunicationBackend::all_to_all_single: no default fallback for "
-        "world_size > 1 (this backend lacks a rank accessor). Use NCCL which "
-        "overrides this method natively, or switch to the ProcessGroupBase "
-        "hierarchy whose default does support multi-rank via all_gather + slice.");
+    // This base fallback has no rank accessor, so it can only serve the
+    // single-rank case, where all_to_all_single is the identity. The previous
+    // code inferred world_size from input_shape[0] and threw whenever the leading
+    // dimension was > 1 — conflating the tensor's batch dimension with the
+    // process-group size, so an ordinary single-rank tensor with batch > 1 was
+    // wrongly rejected. Multi-rank backends (e.g. NCCL, or ProcessGroupBase)
+    // override this method to perform the real cross-rank exchange.
+    std::memcpy(output.data_ptr(),
+                input.data_ptr(),
+                static_cast<size_t>(input.numel()) * dtype_size(input.dtype()));
 }
 
 auto ProcessGroup::send(const Tensor& tensor, int dst_rank) -> void {

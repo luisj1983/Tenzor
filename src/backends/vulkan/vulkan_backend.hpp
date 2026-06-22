@@ -640,8 +640,10 @@ public:
     auto dispatchZeros(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto dispatchFill(const Tensor& input, double value) -> Tensor;
     auto dispatchClone(const Tensor& input) -> Tensor;
-    auto dispatchFull(const std::vector<int64_t>& shape, double value, DType dtype) -> Tensor;
-    auto dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
+    auto dispatchFull(const std::vector<int64_t>& shape, double value, DType dtype,
+                      const Device& device = Device(Device::Type::Vulkan, 0)) -> Tensor;
+    auto dispatchOnes(const std::vector<int64_t>& shape, DType dtype,
+                      const Device& device = Device(Device::Type::Vulkan, 0)) -> Tensor;
     auto dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRandint(int64_t low, int64_t high, const std::vector<int64_t>& shape,

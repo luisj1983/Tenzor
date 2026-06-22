@@ -9213,6 +9213,14 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
         throw std::runtime_error("histc ROCm: bins must be positive");
     }
 
+    // A degenerate range (min==max — e.g. all-equal input, or an unresolved
+    // auto-range) yields a zero-width bin: bin_width=0 -> div-by-zero and an
+    // out-of-bounds atomicAdd. Expand it like PyTorch's histc.
+    if (min_val == max_val) {
+        min_val -= 1.0;
+        max_val += 1.0;
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     int64_t n = input_cont.numel();
     const auto device = input_cont.device();

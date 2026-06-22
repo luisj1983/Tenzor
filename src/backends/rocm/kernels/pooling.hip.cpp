@@ -1555,6 +1555,10 @@ __global__ void adaptive_maxpool2d_backward_kernel(
         int64_t n = idx / (out_W * out_H * C);
 
         int64_t max_idx = indices[idx];
+        // An empty pooling window (forward sets max_idx=-1 when output>input)
+        // has no source pixel; scattering with -1 would write grad_input[...-1]
+        // out of bounds. Skip it.
+        if (max_idx < 0) continue;
         int64_t grad_input_idx = n * (C * in_H * in_W) + c * (in_H * in_W) + max_idx;
         atomicAdd(&grad_input[grad_input_idx], grad_output[idx]);
     }
@@ -2614,7 +2618,7 @@ __global__ void maxpool3d_forward_kernel(
         int64_t w_start = ow * sW - pW;
 
         T max_val = std::numeric_limits<T>::lowest();
-        int64_t max_idx = 0;
+        int64_t max_idx = -1;  // -1 sentinel for an all-padding window (matches 1D/2D)
 
         for (int64_t kd = 0; kd < kD; ++kd) {
             for (int64_t kh = 0; kh < kH; ++kh) {
@@ -2665,7 +2669,7 @@ __global__ void maxpool3d_forward_kernel_fp16(
         int64_t w_start = ow * sW - pW;
 
         float max_val = std::numeric_limits<float>::lowest();
-        int64_t max_idx = 0;
+        int64_t max_idx = -1;  // -1 sentinel for an all-padding window (matches 1D/2D)
 
         for (int64_t kd = 0; kd < kD; ++kd) {
             for (int64_t kh = 0; kh < kH; ++kh) {

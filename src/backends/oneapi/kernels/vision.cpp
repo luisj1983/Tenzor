@@ -72,8 +72,12 @@ auto nms_kernel(
     }
 
     // Convert to Float32 on device if needed (avoids host roundtrip for FP16/BF16/FP64)
+    // The kernels read these linearly; the else-branch aliased a possibly
+    // non-contiguous input. Materialize contiguous copies.
     Tensor boxes_f32 = (boxes.dtype() != DType::Float32) ? boxes.to(DType::Float32) : boxes;
+    if (!boxes_f32.is_contiguous()) boxes_f32 = boxes_f32.contiguous();
     Tensor scores_f32 = (scores.dtype() != DType::Float32) ? scores.to(DType::Float32) : scores;
+    if (!scores_f32.is_contiguous()) scores_f32 = scores_f32.contiguous();
 
     const float* boxes_f32_ptr = get_data_ptr<const float>(boxes_f32);
     const float* scores_f32_ptr = get_data_ptr<const float>(scores_f32);
@@ -1053,12 +1057,15 @@ auto gather_relative_position_bias_kernel(
  * @return Resized tensor: (N, C, H_out, W_out)
  */
 auto interpolate_kernel(
-    const Tensor& input,
+    const Tensor& input_in,
     const std::vector<int64_t>& size,
     const std::string& mode,
     bool align_corners,
     sycl::queue& queue
 ) -> Tensor {
+    // Kernels read input with packed-NCHW offset arithmetic; materialize a
+    // contiguous copy so non-contiguous inputs are read correctly.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto input_shape = input.shape();
 
     // 1D interpolate (N,C,L): reduce to the validated 4D path via a degenerate
@@ -2094,8 +2101,17 @@ static void interp_trilinear_backward_dispatch(
         T sd = align_corners ? static_cast<T>(od) * scd : (static_cast<T>(od) + T(0.5)) * scd - T(0.5);
         T sh = align_corners ? static_cast<T>(oh) * sch : (static_cast<T>(oh) + T(0.5)) * sch - T(0.5);
         T sw = align_corners ? static_cast<T>(ow) * scw : (static_cast<T>(ow) + T(0.5)) * scw - T(0.5);
+        // Clamp the source coord to [0, in-1] BEFORE flooring so the backward is
+        // the exact transpose of the (clamping) forward at the borders. Without
+        // this a negative src (e.g. od=0 -> src=-0.25) floors to -1, its (1-f)
+        // tap is dropped by the bounds check, and the entire border plane loses
+        // that gradient mass — diverging from CPU. Matches interpolate_trilinear_
+        // backward_impl in src/backends/cpu/kernels/vision.cpp.
+        sd = sycl::clamp(sd, T(0), static_cast<T>(in_d - 1));
+        sh = sycl::clamp(sh, T(0), static_cast<T>(in_h - 1));
+        sw = sycl::clamp(sw, T(0), static_cast<T>(in_w - 1));
         int64_t d0 = static_cast<int64_t>(sycl::floor(sd)), h0 = static_cast<int64_t>(sycl::floor(sh)), w0 = static_cast<int64_t>(sycl::floor(sw));
-        int64_t d1 = d0 + 1, h1 = h0 + 1, w1 = w0 + 1;
+        int64_t d1 = std::min(d0 + 1, in_d - 1), h1 = std::min(h0 + 1, in_h - 1), w1 = std::min(w0 + 1, in_w - 1);
         T fd = sd - static_cast<T>(d0), fh = sh - static_cast<T>(h0), fw = sw - static_cast<T>(w0);
         T g = grad_out_ptr[idx];
         int64_t base = b * (C * in_d * in_h * in_w) + c * (in_d * in_h * in_w);

@@ -1040,6 +1040,19 @@ auto movedim(const Tensor& input, std::vector<int64_t> source, std::vector<int64
     for (auto& s : source) { if (s < 0) s += ndim; }
     for (auto& d : destination) { if (d < 0) d += ndim; }
 
+    // Validate ranges before indexing the ndim-sized perm/used_* vectors below;
+    // an out-of-range (or still-negative) dim would otherwise read/write OOB.
+    for (auto s : source) {
+        if (s < 0 || s >= ndim)
+            throw std::invalid_argument("movedim: source dim out of range [0, " +
+                std::to_string(ndim) + ")");
+    }
+    for (auto d : destination) {
+        if (d < 0 || d >= ndim)
+            throw std::invalid_argument("movedim: destination dim out of range [0, " +
+                std::to_string(ndim) + ")");
+    }
+
     // Build the permutation
     // Start with all dims not in source, then place source dims at destination positions
     std::vector<int64_t> perm(ndim, -1);

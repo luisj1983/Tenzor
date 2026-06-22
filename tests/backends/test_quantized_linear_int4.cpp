@@ -13,6 +13,10 @@
 #include <cstdint>
 #include <vector>
 
+// Header-only fused INT8xINT4 dequantizing matmul used by QuantizedLinear's
+// QInt4x2 path. Exercised directly below (out_features>1 regression).
+#include "fused_quantized_ops.hpp"
+
 namespace tenzor {
 namespace nn {
 namespace quantization {
@@ -140,6 +144,141 @@ TEST(QuantizedLinearInt4, Batch1WideFeatures) {
             weights[i] = static_cast<int8_t>((static_cast<int>(i * 7) % 16) - 8);  // [-8, 7]
         }
         check_case(/*batch=*/1, in, out, input, weights);
+    }
+}
+
+// --------------------------------------------------------------------------
+// Fused INT8xINT4 dequantizing matmul (cpu::fused_qlinear_dequant) regression.
+//
+// This is the kernel QuantizedLinear actually calls for QInt4x2 weights
+// (src/nn/quantization/quantized_layers.cpp). The QInt4x2 buffer is
+// out-feature-major: channel n's `in_features` nibbles are contiguous. A prior
+// bug indexed the unpacked weights as a [K,N] stream (w_data[k*N+n]) — the
+// transpose of the real [N,K] layout — so every out_features>1 case silently
+// returned wrong values. These cases pin the correct numerics for
+// out_features>1 (where the transpose actually differs) and the asymmetric
+// activation zero-point correction path.
+void check_fused_case(int64_t batch, int64_t in_features, int64_t out_features,
+                      const std::vector<int8_t>& input,    // [batch, in]
+                      const std::vector<int8_t>& weights,  // [out, in], in [-8,7]
+                      const std::vector<float>& bias,      // [out] or empty
+                      float act_scale, float weight_scale, int32_t act_zp) {
+    ASSERT_EQ(in_features % 2, 0) << "INT4 kernel requires even in_features";
+
+    const int64_t packed_features = in_features / 2;
+    std::vector<uint8_t> packed(static_cast<size_t>(out_features * packed_features));
+    for (int64_t o = 0; o < out_features; ++o) {
+        for (int64_t p = 0; p < packed_features; ++p) {
+            int8_t lo = weights[o * in_features + 2 * p];
+            int8_t hi = weights[o * in_features + 2 * p + 1];
+            packed[o * packed_features + p] = pack_pair(lo, hi);
+        }
+    }
+
+    std::vector<float> output(static_cast<size_t>(batch * out_features), 0.0f);
+    tenzor::cpu::fused_qlinear_dequant(
+        input.data(), packed.data(), bias.empty() ? nullptr : bias.data(),
+        output.data(), batch, out_features, in_features,
+        act_scale, weight_scale, act_zp);
+
+    const float combined = act_scale * weight_scale;
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t o = 0; o < out_features; ++o) {
+            int32_t ref = 0;
+            for (int64_t k = 0; k < in_features; ++k) {
+                ref += (static_cast<int32_t>(input[b * in_features + k]) - act_zp) *
+                       static_cast<int32_t>(weights[o * in_features + k]);
+            }
+            float expected = static_cast<float>(ref) * combined;
+            if (!bias.empty()) expected += bias[static_cast<size_t>(o)];
+            EXPECT_FLOAT_EQ(output[b * out_features + o], expected)
+                << "fused mismatch at batch " << b << " out " << o;
+        }
+    }
+}
+
+// out_features>1 is precisely where the [K,N]-vs-[N,K] transpose differs.
+TEST(QuantizedLinearInt4Fused, OutFeaturesGreaterThanOne) {
+    const int64_t in = 8, out = 4, batch = 3;
+    std::vector<int8_t> input(static_cast<size_t>(batch * in));
+    for (size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<int8_t>((static_cast<int>(i * 3) % 13) - 6);
+    }
+    std::vector<int8_t> weights = {
+        -8, 7, -1, 1, 0, 3, -4, 5,
+         7, -8, 2, -2, 6, -6, 1, -1,
+        -2, 2, -8, 4, 7, -5, -3, 6,
+         3, -3, 5, -5, -1, 1, 0, 2,
+    };
+    check_fused_case(batch, in, out, input, weights, /*bias=*/{},
+                     /*act_scale=*/1.0f, /*weight_scale=*/1.0f, /*act_zp=*/0);
+}
+
+// Non-unit scales + bias, still out_features>1.
+TEST(QuantizedLinearInt4Fused, ScalesAndBias) {
+    const int64_t in = 16, out = 5, batch = 2;
+    std::vector<int8_t> input(static_cast<size_t>(batch * in));
+    for (size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<int8_t>((static_cast<int>(i * 7) % 15) - 7);
+    }
+    std::vector<int8_t> weights(static_cast<size_t>(out * in));
+    for (size_t i = 0; i < weights.size(); ++i) {
+        weights[i] = static_cast<int8_t>((static_cast<int>(i * 5) % 16) - 8);
+    }
+    std::vector<float> bias = {0.5f, -1.25f, 2.0f, -0.75f, 3.5f};
+    check_fused_case(batch, in, out, input, weights, bias,
+                     /*act_scale=*/0.05f, /*weight_scale=*/0.1f, /*act_zp=*/0);
+}
+
+// Asymmetric activation zero-point exercises the col_sum_w correction, which
+// also depends on the corrected per-channel layout.
+TEST(QuantizedLinearInt4Fused, AsymmetricActZeroPoint) {
+    const int64_t in = 12, out = 6, batch = 3;
+    std::vector<int8_t> input(static_cast<size_t>(batch * in));
+    for (size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<int8_t>((static_cast<int>(i * 11) % 200) - 100);
+    }
+    std::vector<int8_t> weights(static_cast<size_t>(out * in));
+    for (size_t i = 0; i < weights.size(); ++i) {
+        weights[i] = static_cast<int8_t>((static_cast<int>(i * 3) % 16) - 8);
+    }
+    check_fused_case(batch, in, out, input, weights, /*bias=*/{},
+                     /*act_scale=*/0.02f, /*weight_scale=*/0.03f, /*act_zp=*/7);
+}
+
+// The fused kernel and the reference quantized_linear_int4_kernel must agree
+// element-for-element on the same packed buffer (unit scales, no zero-point).
+TEST(QuantizedLinearInt4Fused, MatchesReferenceKernel) {
+    const int64_t in = 16, out = 7, batch = 4;
+    std::vector<int8_t> input(static_cast<size_t>(batch * in));
+    for (size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<int8_t>((static_cast<int>(i * 13) % 13) - 6);
+    }
+    std::vector<int8_t> weights(static_cast<size_t>(out * in));
+    for (size_t i = 0; i < weights.size(); ++i) {
+        weights[i] = static_cast<int8_t>((static_cast<int>(i * 9) % 16) - 8);
+    }
+    const int64_t packed_features = in / 2;
+    std::vector<uint8_t> packed(static_cast<size_t>(out * packed_features));
+    for (int64_t o = 0; o < out; ++o) {
+        for (int64_t p = 0; p < packed_features; ++p) {
+            packed[o * packed_features + p] =
+                pack_pair(weights[o * in + 2 * p], weights[o * in + 2 * p + 1]);
+        }
+    }
+
+    std::vector<float> fused_out(static_cast<size_t>(batch * out), 0.0f);
+    tenzor::cpu::fused_qlinear_dequant(input.data(), packed.data(), nullptr,
+                                       fused_out.data(), batch, out, in,
+                                       1.0f, 1.0f, 0);
+
+    std::vector<float> ref_out(static_cast<size_t>(batch * out), 0.0f);
+    tenzor::nn::quantization::kernels::quantized_linear_int4_kernel(
+        input.data(), packed.data(), nullptr, ref_out.data(), batch, in, out,
+        1.0f, 1.0f, 1.0f);
+
+    for (size_t i = 0; i < fused_out.size(); ++i) {
+        EXPECT_FLOAT_EQ(fused_out[i], ref_out[i]) << "fused vs reference at " << i;
     }
 }
 

@@ -1453,7 +1453,12 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
                   input.dtype(), input.device());
-    Tensor rrms({batch_size}, input.dtype(), input.device());
+    // Store rrms (1/sqrt(var)) at >= Float32 precision: in Float16/BFloat16 the
+    // reciprocal-sqrt can overflow to Inf, producing NaN gradients. Half inputs
+    // use Float32; Float32/Float64 keep their own dtype.
+    DType rrms_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+                           ? DType::Float32 : input.dtype();
+    Tensor rrms({batch_size}, rrms_dtype, input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -1518,7 +1523,7 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         const sycl::half* w_ptr = get_data_ptr<const sycl::half>(weight);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-        sycl::half* rrms_ptr = get_data_ptr<sycl::half>(rrms);
+        float* rrms_ptr = get_data_ptr<float>(rrms);  // rrms is Float32 for half inputs
 
         queue.parallel_for<FusedRMSNormKernelFloat16>(
             sycl::range<1>(batch_size),
@@ -1534,7 +1539,7 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
                 ss /= static_cast<float>(norm_size);
 
                 float rr = 1.0f / sycl::sqrt(ss + eps);
-                rrms_ptr[b] = sycl::half(rr);
+                rrms_ptr[b] = rr;  // Float32 rrms (no half overflow)
 
                 sycl::half* out_row = out_ptr + b * norm_size;
                 for (int64_t i = 0; i < norm_size; ++i) {
@@ -1547,7 +1552,7 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         const uint16_t* w_ptr = get_data_ptr<const uint16_t>(weight);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-        uint16_t* rrms_ptr = get_data_ptr<uint16_t>(rrms);
+        float* rrms_ptr = get_data_ptr<float>(rrms);  // rrms is Float32 for half inputs
 
         queue.parallel_for<FusedRMSNormKernelBFloat16>(
             sycl::range<1>(batch_size),
@@ -1563,7 +1568,7 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
                 ss /= static_cast<float>(norm_size);
 
                 float rr = 1.0f / sycl::sqrt(ss + eps);
-                rrms_ptr[b] = f32_to_bf16(rr);
+                rrms_ptr[b] = rr;  // Float32 rrms (no bf16 overflow)
 
                 uint16_t* out_row = out_ptr + b * norm_size;
                 for (int64_t i = 0; i < norm_size; ++i) {

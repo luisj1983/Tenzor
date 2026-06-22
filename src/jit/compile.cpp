@@ -105,22 +105,42 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
 
     auto key = shape_key(inputs);
 
-    // Fast path: check cache without lock
+    // Fast path: look up the compiled module under the lock, copy the handle
+    // out, then RELEASE the lock before executing. Previously mutex_ was held
+    // across forward()/replay/capture, serializing every concurrent call on
+    // this CompiledFunction (despite the "without lock" comment).
+    std::shared_ptr<CompiledModule> compiled_module;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = cache_.find(key);
         if (it != cache_.end()) {
-            auto& compiled_module = it->second;
-
-            // reduce-overhead mode: capture and replay CUDA graphs
+            compiled_module = it->second;
+        }
+    }
+    if (compiled_module) {
+            // reduce-overhead mode: capture and replay CUDA graphs. This path
+            // mutates shared CUDA-graph state and warmup_count_; serialize it.
             if (config_.mode == "reduce-overhead") {
+                std::lock_guard<std::mutex> lock(mutex_);
                 std::vector<Tensor> input_tensors;
                 input_tensors.reserve(inputs.size());
                 for (const auto& v : inputs) input_tensors.push_back(v.tensor());
 
                 if (compiled_module->has_cuda_graph()) {
-                    // Replay captured graph
-                    compiled_module->replay_cuda_graph(input_tensors);
+                    // Replay the captured graph: it copies the fresh inputs into
+                    // the captured device buffers, replays the recorded GPU work,
+                    // and leaves the results in captured_outputs_. Return THOSE
+                    // (via replay_cuda_graph_outputs) — re-running forward() here
+                    // would discard the replayed result and defeat the capture.
+                    if (compiled_module->replay_cuda_graph(input_tensors)) {
+                        auto outs = compiled_module->replay_cuda_graph_outputs();
+                        if (outs.empty()) {
+                            throw std::runtime_error(
+                                "CompiledFunction: CUDA graph replay produced no outputs");
+                        }
+                        return Variable(outs[0], /*requires_grad=*/false);
+                    }
+                    // Replay failed — fall back to a single eager forward.
                     if (inputs.size() == 1) {
                         return compiled_module->forward(inputs[0]);
                     }
@@ -165,7 +185,6 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
                     "CompiledFunction: compiled graph produced no outputs");
             }
             return outs[0];
-        }
     }
 
     // Cache miss: trace, compile, and cache

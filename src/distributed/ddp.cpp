@@ -269,29 +269,43 @@ auto DistributedDataParallel::register_grad_hooks() -> void {
 }
 
 auto DistributedDataParallel::mark_param_ready(const void* param_ptr) -> void {
-    std::lock_guard<std::mutex> lock(bucket_mutex_);
+    size_t bucket_idx = 0;
+    bool should_reduce = false;
+    {
+        std::lock_guard<std::mutex> lock(bucket_mutex_);
 
-    auto it = param_to_bucket_.find(param_ptr);
-    if (it == param_to_bucket_.end()) {
-        return; // Unknown parameter, skip
+        auto it = param_to_bucket_.find(param_ptr);
+        if (it == param_to_bucket_.end()) {
+            return; // Unknown parameter, skip
+        }
+
+        bucket_idx = it->second;
+        GradBucket& bucket = buckets_[bucket_idx];
+
+        if (bucket.ready) {
+            return; // Already all-reduced this iteration
+        }
+
+        bucket.pending_count++;
+
+        // Check if all parameters in this bucket have their gradients ready.
+        if (bucket.pending_count >= bucket.params.size()) {
+            // Mark ready up-front (under the lock) so a concurrent/duplicate
+            // hook and the later synchronize_gradients() sweep both early-return,
+            // then run the collective OUTSIDE the lock. A synchronous (non-GPU)
+            // pg_->all_reduce() previously ran while holding bucket_mutex_,
+            // serializing every other parameter's backward hook behind a
+            // network-blocking collective (and risking deadlock).
+            bucket.ready = true;
+            should_reduce = true;
+        }
     }
 
-    size_t bucket_idx = it->second;
-    GradBucket& bucket = buckets_[bucket_idx];
-
-    if (bucket.ready) {
-        return; // Already all-reduced this iteration
-    }
-
-    bucket.pending_count++;
-
-    // Check if all parameters in this bucket have their gradients ready
-    if (bucket.pending_count >= bucket.params.size()) {
-        // All gradients in this bucket are ready -- fire async all-reduce.
-        // On GPU backends, this launches the NCCL all-reduce on the
-        // dedicated comm stream, allowing it to overlap with backward
-        // computation of earlier layers still running on the compute stream.
-        all_reduce_bucket_async(bucket, bucket_idx);
+    if (should_reduce) {
+        // On GPU backends this launches the NCCL all-reduce on the dedicated
+        // comm stream (overlapping backward); on others it runs the synchronous
+        // collective — now without holding bucket_mutex_.
+        all_reduce_bucket_async(buckets_[bucket_idx], bucket_idx);
     }
 }
 
@@ -339,6 +353,12 @@ auto DistributedDataParallel::synchronize_gradients() -> void {
     // Note: all_reduce_bucket already skips params without gradients,
     // so unused parameters are automatically excluded from communication.
     for (size_t i = 0; i < buckets_.size(); ++i) {
+        // Skip buckets already all-reduced by the backward hooks
+        // (mark_param_ready set ready=true when the bucket filled). Re-reducing
+        // them here would all-reduce those gradients a second time and corrupt
+        // the average. Buckets that never filled (e.g. unused params with
+        // auto-sync, or auto-sync disabled) still have ready=false and run here.
+        if (buckets_[i].ready) continue;
         all_reduce_bucket_async(buckets_[i], i);
     }
 

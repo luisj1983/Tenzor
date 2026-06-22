@@ -441,10 +441,15 @@ void unpack_grads(cudnnRNNDescriptor_t rnn_desc,
                         static_cast<size_t>(g) * per_gate_b,
                     b_addr, per_gate_b, cudaMemcpyDeviceToDevice, stream));
             } else {
+                // Zero ONLY this gate's slice, not the whole bias buffer —
+                // memsetting out_b_ih[pl].numel() bytes wiped the other gates'
+                // gradients that were already copied in earlier iterations.
+                const size_t per_gate_b =
+                    static_cast<size_t>(hidden_size) * elem_bytes;
                 CUDA_CHECK(cudaMemsetAsync(
-                    out_b_ih[pl].data_ptr(), 0,
-                    static_cast<size_t>(out_b_ih[pl].numel()) * elem_bytes,
-                    stream));
+                    static_cast<char*>(out_b_ih[pl].data_ptr()) +
+                        static_cast<size_t>(g) * per_gate_b,
+                    0, per_gate_b, stream));
             }
 
             // W_hh

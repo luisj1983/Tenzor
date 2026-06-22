@@ -228,17 +228,31 @@ auto compare_gradients(
     result.max_rel_error = 0.0;
     result.failing_elements = 0;
 
-    const bool is_float32 = numerical.dtype() == DType::Float32;
+    const bool both_float32 = numerical.dtype() == DType::Float32 &&
+                              analytical.dtype() == DType::Float32;
 
     // Transfer to CPU for pointer-based computation
     Device num_device = numerical.device();
-    Tensor numerical_cpu = (num_device == Device::cpu()) ? numerical : numerical.to(Device::cpu());
-    Tensor analytical_cpu = (num_device == Device::cpu()) ? analytical : analytical.to(Device::cpu());
+    // .contiguous(): data<T>()[i] walks raw storage order, but the analytical
+    // gradient from backward() can be a non-contiguous (e.g. transposed) view,
+    // which would otherwise be compared in the wrong element order.
+    Tensor numerical_cpu =
+        ((num_device == Device::cpu()) ? numerical : numerical.to(Device::cpu())).contiguous();
+    Tensor analytical_cpu =
+        ((num_device == Device::cpu()) ? analytical : analytical.to(Device::cpu())).contiguous();
+
+    // Float16/BFloat16 gradients reach here (numerical_gradient widens then casts
+    // back to the input dtype); data<double>() throws on them. Read the all-Float32
+    // case directly, otherwise widen both to Float64 so the loop reads uniformly.
+    if (!both_float32) {
+        if (numerical_cpu.dtype() != DType::Float64) numerical_cpu = numerical_cpu.to(DType::Float64);
+        if (analytical_cpu.dtype() != DType::Float64) analytical_cpu = analytical_cpu.to(DType::Float64);
+    }
 
     for (int64_t i = 0; i < total; ++i) {
         double num_val, ana_val;
 
-        if (is_float32) {
+        if (both_float32) {
             num_val = static_cast<double>(numerical_cpu.data<float>()[i]);
             ana_val = static_cast<double>(analytical_cpu.data<float>()[i]);
         } else {

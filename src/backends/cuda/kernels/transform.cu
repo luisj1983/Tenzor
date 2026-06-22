@@ -2020,9 +2020,12 @@ __global__ void nhwc_to_nchw_transform(
     }
 }
 
-auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream_ptr) -> Tensor {
+auto to_memory_format_kernel(const Tensor& input_in, MemoryFormat format, void* stream_ptr) -> Tensor {
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
 
+    // The transform kernels index input.data<T>() with flat NCHW offsets, so a
+    // non-contiguous input would be read in the wrong order. Materialize first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape = input.shape();
 
     if (shape.size() != 4) {

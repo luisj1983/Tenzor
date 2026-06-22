@@ -56,6 +56,33 @@ TEST_P(DCTTest, DCT2KnownValues) {
     }
 }
 
+// Odd-length DCT-II. The Makhoul reorder builds the odd-index ramp as
+// arange(N-1, -1, -2); for odd N, N-1 is even, so it re-emitted even indices
+// (a duplicated/missing permutation) and the transform was wrong for every
+// odd length. Verify against the analytical DCT-II for N=3 and N=5.
+TEST_P(DCTTest, DCT2KnownValuesOddLength) {
+    const double pi = 3.14159265358979323846;
+    for (int N : {3, 5}) {
+        auto input = tenzor::add(
+            tenzor::arange(0.0f, static_cast<float>(N), 1.0f, DType::Float32, device),
+            tenzor::full({1}, 1.0f, DType::Float32, device));  // [1, 2, ..., N]
+
+        auto result = fft::dct(input, 2, std::nullopt, -1, "backward");
+        auto result_cpu = result.to(Device::cpu());
+        const float* data = result_cpu.data<float>();
+
+        for (int k = 0; k < N; ++k) {
+            double expected = 0.0;
+            for (int n = 0; n < N; ++n) {
+                expected += (n + 1) * std::cos(pi * (2 * n + 1) * k / (2.0 * N));
+            }
+            expected *= 2.0;
+            EXPECT_NEAR(data[k], static_cast<float>(expected), 1e-4f)
+                << "odd-length DCT-II mismatch at N=" << N << " k=" << k;
+        }
+    }
+}
+
 // Round-trip test: idct(dct(x, type=2), type=2) ~= x
 TEST_P(DCTTest, RoundTripDCT2) {
     auto input = tenzor::rand({16}, DType::Float32, device);

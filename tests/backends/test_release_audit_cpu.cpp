@@ -359,3 +359,51 @@ TEST(ReleaseAuditCpu, RandintReproducibleAcrossThreadCounts) {
     GTEST_SKIP() << "OpenMP not enabled in this translation unit";
 #endif
 }
+
+// Stride family: unary CPU kernels read data<T>() (storage+offset, strides NOT
+// applied), so a non-contiguous view must be materialized first. Each op on a
+// transposed view must equal the op on an explicit contiguous copy of it.
+// Pre-fix, the non-contiguous calls read scrambled storage and diverge.
+TEST(ReleaseAuditCpu, UnaryKernelsHonorNonContiguous) {
+    Tensor base({3, 4}, DType::Float32, Device::cpu());
+    float* bp = base.data<float>();
+    for (int i = 0; i < 12; ++i) bp[i] = 0.25f * static_cast<float>(i + 1);  // >0 for log
+    Tensor view = base.transpose(0, 1);   // [4,3], non-contiguous
+    ASSERT_FALSE(view.is_contiguous());
+    Tensor cont = view.contiguous();      // identical logical values, contiguous
+
+    auto check = [&](const char* name, Tensor a, Tensor b) {
+        a = a.contiguous();
+        b = b.contiguous();
+        ASSERT_EQ(a.numel(), b.numel()) << name;
+        const float* pa = a.data<float>();
+        const float* pb = b.data<float>();
+        for (int64_t i = 0; i < a.numel(); ++i)
+            EXPECT_FLOAT_EQ(pa[i], pb[i]) << name << " mismatch at " << i;
+    };
+    check("clamp", tenzor::clamp(view, 0.5, 2.0), tenzor::clamp(cont, 0.5, 2.0));
+    check("log",   tenzor::log(view),  tenzor::log(cont));
+    check("exp",   tenzor::exp(view),  tenzor::exp(cont));
+    check("sin",   tenzor::sin(view),  tenzor::sin(cont));
+    check("cos",   tenzor::cos(view),  tenzor::cos(cont));
+    check("sign",  tenzor::sign(view), tenzor::sign(cont));
+}
+
+// unfold (im2col) indexes input with a contiguous (n*C+c)*H*W formula; a
+// non-contiguous NCHW view must be materialized. Calls the kernel directly.
+TEST(ReleaseAuditCpu, UnfoldKernelHonorsNonContiguous) {
+    Tensor base({1, 2, 3, 3}, DType::Float32, Device::cpu());  // N,C,H,W
+    float* bp = base.data<float>();
+    for (int i = 0; i < 18; ++i) bp[i] = static_cast<float>(i + 1);
+    Tensor view = base.transpose(2, 3);   // [1,2,3,3] non-contiguous (H<->W)
+    ASSERT_FALSE(view.is_contiguous());
+    Tensor cont = view.contiguous();
+
+    auto uv = tenzor::cpu::unfold_kernel(view, 2, 2, 1, 1, 0, 0, 1, 1).contiguous();
+    auto uc = tenzor::cpu::unfold_kernel(cont, 2, 2, 1, 1, 0, 0, 1, 1).contiguous();
+    ASSERT_EQ(uv.numel(), uc.numel());
+    const float* pv = uv.data<float>();
+    const float* pc = uc.data<float>();
+    for (int64_t i = 0; i < uv.numel(); ++i)
+        EXPECT_FLOAT_EQ(pv[i], pc[i]) << "unfold mismatch at " << i;
+}

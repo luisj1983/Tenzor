@@ -1290,6 +1290,13 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, hipStream_t st
     }
 
     int64_t dim_size = shape[dim];
+    // Normalize shift into [0, dim_size): the kernel computes
+    // src = (dim_idx - shift + dim_size) % dim_size, which only stays in bounds
+    // for shift in [0, dim_size). A negative or large shift would otherwise read
+    // out of bounds / wrap incorrectly.
+    if (dim_size > 0) {
+        shift = ((shift % dim_size) + dim_size) % dim_size;
+    }
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < static_cast<int64_t>(shape.size()); ++d) {
         inner_size *= shape[d];

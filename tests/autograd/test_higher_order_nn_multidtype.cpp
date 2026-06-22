@@ -70,6 +70,12 @@ TEST_P(HigherOrderNNMultiDTypeTest, LSTM_InnerLoop_Gradient) {
     int64_t seq_len = 3;
     int64_t batch = 1;
 
+    // The fused cuDNN LSTM train path cannot supply second derivatives; force the
+    // Variable cell loop (documented double-backward mechanism, see lstm.cpp) so
+    // the Float32/CUDA case exercises a real second-order graph like the others.
+    setenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN", "1", 1);
+    struct LstmEnvGuard { ~LstmEnvGuard() { unsetenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN"); } } lstm_env_guard;
+
     auto input = Variable(createRandn({seq_len, batch, input_size}), true);
 
     nn::LSTM lstm(input_size, hidden_size, 1);
@@ -105,6 +111,11 @@ TEST_P(HigherOrderNNMultiDTypeTest, GRU_InnerLoop_Gradient) {
     int64_t hidden_size = 8;
     int64_t seq_len = 3;
     int64_t batch = 1;
+
+    // GRU's fused cuDNN train path cannot supply second derivatives; force the
+    // Variable cell loop (documented double-backward mechanism, see gru.cpp).
+    setenv("TENZOR_DISABLE_FUSED_GRU_TRAIN", "1", 1);
+    struct GruEnvGuard { ~GruEnvGuard() { unsetenv("TENZOR_DISABLE_FUSED_GRU_TRAIN"); } } gru_env_guard;
 
     auto input = Variable(createRandn({seq_len, batch, input_size}), true);
 

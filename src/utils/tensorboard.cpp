@@ -234,11 +234,13 @@ SummaryWriter::~SummaryWriter() {
 }
 
 auto SummaryWriter::add_scalar(std::string_view tag, float value, int64_t step) -> void {
+    // Check is_open UNDER the lock: close() flushes and clears is_open while
+    // holding the mutex, so a pre-lock check could pass and then write to a
+    // closed stream after close() returns.
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }
-
-    std::lock_guard<std::mutex> lock(impl_->mutex);
 
     auto data = serialize_scalar(value);
     write_event(tag, data, step, /*is_scalar=*/true);
@@ -412,11 +414,13 @@ auto build_graph_def(const std::shared_ptr<Function>& root) -> GraphDefResult {
 
 auto SummaryWriter::add_graph(std::string_view model_name,
                              const Variable& output) -> void {
+    // Check is_open UNDER the lock: close() flushes and clears is_open while
+    // holding the mutex, so a pre-lock check could pass and then write to a
+    // closed stream after close() returns.
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }
-
-    std::lock_guard<std::mutex> lock(impl_->mutex);
 
     // Walk the autograd graph rooted at `output.grad_fn()` and build a real
     // GraphDef protobuf message.

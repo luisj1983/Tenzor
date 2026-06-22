@@ -137,14 +137,14 @@ auto LazyNode::materialize_with(const std::function<Tensor()>& compute) -> Tenso
 
 auto LazyGraph::add_input(const Tensor& t) -> std::shared_ptr<LazyNode> {
     auto node = std::make_shared<LazyNode>(t);
-    nodes_.push_back(node);
+    canonical_mut()->nodes_.push_back(node);
     return node;
 }
 
 auto LazyGraph::add_placeholder(std::vector<int64_t> shape, DType dtype, Device device,
                                 const std::string& name) -> std::shared_ptr<LazyNode> {
     auto node = std::make_shared<LazyNode>(std::move(shape), dtype, device, name);
-    nodes_.push_back(node);
+    canonical_mut()->nodes_.push_back(node);
     return node;
 }
 
@@ -153,7 +153,7 @@ auto LazyGraph::add_node(OpId op, std::vector<std::shared_ptr<LazyNode>> inputs,
                          Device output_device) -> std::shared_ptr<LazyNode> {
     auto node = std::make_shared<LazyNode>(op, std::move(inputs),
                                             std::move(output_shape), output_dtype, output_device);
-    nodes_.push_back(node);
+    canonical_mut()->nodes_.push_back(node);
     return node;
 }
 
@@ -164,7 +164,7 @@ auto LazyGraph::add_node(OpId op, std::vector<std::shared_ptr<LazyNode>> inputs,
     auto node = std::make_shared<LazyNode>(op, std::move(inputs),
                                             std::move(output_shape), output_dtype, output_device,
                                             std::move(attrs));
-    nodes_.push_back(node);
+    canonical_mut()->nodes_.push_back(node);
     return node;
 }
 

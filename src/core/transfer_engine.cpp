@@ -209,7 +209,7 @@ auto TransferEngine::find_memory_type(uint32_t type_filter, VkMemoryPropertyFlag
     vkGetPhysicalDeviceMemoryProperties(vk_physical_device_, &memProperties);
 
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((type_filter & (1 << i)) &&
+        if ((type_filter & (1u << i)) &&  // 1u: `1 << 31` is signed-overflow UB
             (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
             return i;
         }

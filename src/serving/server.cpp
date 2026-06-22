@@ -887,10 +887,18 @@ auto InferenceServer::serve_loop() -> void {
                             ++it;
                         }
                     }
+                    // Mop up any remaining over-cap entries that tie the cutoff
+                    // timestamp, but ONLY those at-or-below the cutoff — never a
+                    // newer (possibly recently-throttled) bucket, whose recreation
+                    // with a full burst would let it momentarily exceed its rate.
                     for (auto it = rate_limit_buckets.begin();
                          it != rate_limit_buckets.end() &&
                          rate_limit_buckets.size() > kHardMaxBuckets;) {
-                        it = rate_limit_buckets.erase(it);
+                        if (it->second.last_refill <= cutoff) {
+                            it = rate_limit_buckets.erase(it);
+                        } else {
+                            ++it;
+                        }
                     }
                 }
             }

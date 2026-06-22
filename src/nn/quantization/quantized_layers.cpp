@@ -642,11 +642,14 @@ auto QuantizedBatchNorm2d::from_float(const Module& fp_bn, [[maybe_unused]] cons
     // Extract BatchNorm parameters from state_dict
     auto state_dict = fp_bn.state_dict();
 
-    // BatchNorm parameters: weight (gamma), bias (beta), running_mean, running_var
-    Tensor gamma = state_dict.at("weight");
-    Tensor beta = state_dict.at("bias");
-    Tensor running_mean = state_dict.at("running_mean");
-    Tensor running_var = state_dict.at("running_var");
+    // BatchNorm parameters: weight (gamma), bias (beta), running_mean, running_var.
+    // Fold in Float32 so the derived scale_/bias_ match the dequantized (Float32)
+    // input in forward_quantized; a Float16/BFloat16 source BN would otherwise
+    // produce half-precision scale_/bias_ and a dtype mismatch at `deq * scale_`.
+    Tensor gamma = state_dict.at("weight").to(DType::Float32);
+    Tensor beta = state_dict.at("bias").to(DType::Float32);
+    Tensor running_mean = state_dict.at("running_mean").to(DType::Float32);
+    Tensor running_var = state_dict.at("running_var").to(DType::Float32);
 
     // Fold BatchNorm parameters into scale and bias
     // Formula:
@@ -964,6 +967,17 @@ auto QuantizedConv2dReLU::forward_quantized_output(
 
 auto QuantizedConv2dReLU::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedConv2dReLU> {
+    // forward_quantized reads the weight buffer as contiguous int8; INT4/UINT4
+    // pack two values per byte (ceil(numel/2) bytes), causing out-of-bounds
+    // reads at inference. Reject here, matching the sibling from_float methods
+    // (QuantizedLinear/Conv2d/Conv1d/ConvTranspose2d).
+    if (qconfig.weight_dtype() != QuantDType::INT8 &&
+        qconfig.weight_dtype() != QuantDType::UINT8) {
+        throw std::invalid_argument(
+            "QuantizedConv2dReLU::from_float: only INT8/UINT8 weight quantization "
+            "is supported; INT4/UINT4 packing is incompatible with the int8 weight reader");
+    }
+
     // Extract weight and bias from float Conv2d
     auto state_dict = fp_conv.state_dict();
 

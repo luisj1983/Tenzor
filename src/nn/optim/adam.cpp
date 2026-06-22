@@ -296,14 +296,32 @@ auto Adam::initialize_buffers() -> void {
     exp_avg_sq_.clear();
     max_exp_avg_sq_.clear();
 
-    for (auto& param : parameters_) {
-        if (param) {
-            // R.16: half-precision params get Float32 state buffers.
-            exp_avg_.push_back(make_optim_state(param->tensor()));
-            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (amsgrad_) {
-                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            }
+    // AMSGrad must honour the per-group override, not just the optimizer-wide
+    // amsgrad_: a group with amsgrad=true under an amsgrad_=false optimizer
+    // otherwise gets no max_exp_avg_sq_ slot and silently runs plain Adam.
+    auto group_amsgrad = [this](size_t i) -> bool {
+        const auto* g = find_group_for_param(i);
+        if (!g) return amsgrad_;
+        return ParamGroup::or_else(g->amsgrad, amsgrad_);
+    };
+    // Preserve the "max_exp_avg_sq_ stays empty unless some parameter uses
+    // AMSGrad" invariant that serialization relies on. When at least one param
+    // (per-group) needs it, keep the buffer index-aligned with the other state
+    // (placeholder Tensor{} for the non-AMSGrad params); step_impl() guards each
+    // access with `i < max_exp_avg_sq_.size()` and the resolved per-group flag.
+    bool any_amsgrad = false;
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        if (parameters_[i] && group_amsgrad(i)) { any_amsgrad = true; break; }
+    }
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        const auto& param = parameters_[i];
+        if (!param) continue;
+        // R.16: half-precision params get Float32 state buffers.
+        exp_avg_.push_back(make_optim_state(param->tensor()));
+        exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+        if (any_amsgrad) {
+            max_exp_avg_sq_.push_back(
+                group_amsgrad(i) ? make_optim_state(param->tensor()) : Tensor{});
         }
     }
 }
@@ -689,14 +707,32 @@ auto AdamW::initialize_buffers() -> void {
     exp_avg_sq_.clear();
     max_exp_avg_sq_.clear();
 
-    for (auto& param : parameters_) {
-        if (param) {
-            // R.16: half-precision params get Float32 state buffers.
-            exp_avg_.push_back(make_optim_state(param->tensor()));
-            exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (amsgrad_) {
-                max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            }
+    // AMSGrad must honour the per-group override, not just the optimizer-wide
+    // amsgrad_: a group with amsgrad=true under an amsgrad_=false optimizer
+    // otherwise gets no max_exp_avg_sq_ slot and silently runs plain Adam.
+    auto group_amsgrad = [this](size_t i) -> bool {
+        const auto* g = find_group_for_param(i);
+        if (!g) return amsgrad_;
+        return ParamGroup::or_else(g->amsgrad, amsgrad_);
+    };
+    // Preserve the "max_exp_avg_sq_ stays empty unless some parameter uses
+    // AMSGrad" invariant that serialization relies on. When at least one param
+    // (per-group) needs it, keep the buffer index-aligned with the other state
+    // (placeholder Tensor{} for the non-AMSGrad params); step_impl() guards each
+    // access with `i < max_exp_avg_sq_.size()` and the resolved per-group flag.
+    bool any_amsgrad = false;
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        if (parameters_[i] && group_amsgrad(i)) { any_amsgrad = true; break; }
+    }
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        const auto& param = parameters_[i];
+        if (!param) continue;
+        // R.16: half-precision params get Float32 state buffers.
+        exp_avg_.push_back(make_optim_state(param->tensor()));
+        exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+        if (any_amsgrad) {
+            max_exp_avg_sq_.push_back(
+                group_amsgrad(i) ? make_optim_state(param->tensor()) : Tensor{});
         }
     }
 }

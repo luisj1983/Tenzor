@@ -871,8 +871,23 @@ void TcpRpcAgent::accept_loop() {
             // inbound fd was already here, close it first.
             auto it = inbound_connections_.find(peer_id);
             if (it != inbound_connections_.end()) {
-                ::close(it->second);
-                fd_write_mutexes_.erase(it->second);
+                int old_fd = it->second;
+                // A receive_loop on old_fd may be inside send_framed_locked,
+                // holding only the per-fd write mutex (it drops
+                // connections_mutex_ before sending). Acquire that write mutex
+                // before ::close so we never close the fd / erase its mutex
+                // mid-write (fd reuse / use-after-close). Matches shutdown().
+                auto mit = fd_write_mutexes_.find(old_fd);
+                if (mit != fd_write_mutexes_.end()) {
+                    std::shared_ptr<std::mutex> mtx = mit->second;
+                    {
+                        std::lock_guard<std::mutex> wlock(*mtx);
+                        ::close(old_fd);
+                    }
+                    fd_write_mutexes_.erase(mit);
+                } else {
+                    ::close(old_fd);
+                }
             }
             inbound_connections_[peer_id] = cfd;
             fd_write_mutexes_[cfd] = std::make_shared<std::mutex>();

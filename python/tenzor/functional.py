@@ -2249,7 +2249,7 @@ def dropout2d(input: Variable, p: float = 0.5,
     # Bernoulli mask over channels: shape (N, C, 1, 1) so it broadcasts.
     n, c = shape[0], shape[1]
     x_dtype = input.tensor().dtype
-    mask = (tz.rand([n, c, 1, 1], dtype=x_dtype) >= p).to(x_dtype)
+    mask = (tz.rand([n, c, 1, 1]) >= p).to(x_dtype)
     scale = 1.0 / (1.0 - p)
     # Q.13 / J.3: multiply at Variable level so autograd records the
     # dropout mask as a constant cotangent multiplier (grad_fn survives).
@@ -2275,7 +2275,7 @@ def alpha_dropout(input: Variable, p: float = 0.5,
     x_dtype = input.tensor().dtype
     x_shape = list(input.tensor().shape)
     shape = x_shape
-    keep = (tz.rand(shape, dtype=x_dtype) >= p).to(x_dtype)
+    keep = (tz.rand(shape) >= p).to(x_dtype)
     # Affine constants: a * (mask * x + (1 - mask) * alpha) + b.
     a = ((1 - p) * (1 + p * alpha * alpha)) ** -0.5
     b = -a * alpha * p

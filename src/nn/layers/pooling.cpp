@@ -461,6 +461,11 @@ public:
                             int64_t h_end = ((h_out + 1) * H_in_) / H_out_;
                             int64_t w_start = (w_out * W_in_) / W_out_;
                             int64_t w_end = ((w_out + 1) * W_in_) / W_out_;
+                            // Guarantee a non-empty window (count>=1) when the output is larger than the
+                            // input; otherwise count==0 -> division by zero (inf/NaN). Only the degenerate
+                            // out>in cells are touched; normal pooling (out<=in) is unchanged.
+                            if (h_end <= h_start) h_end = std::min(h_start + 1, H_in_);
+                            if (w_end <= w_start) w_end = std::min(w_start + 1, W_in_);
 
                             int64_t count = (h_end - h_start) * (w_end - w_start);
                             int64_t out_idx = ((n * C + c) * H_out_ + h_out) * W_out_ + w_out;
@@ -488,6 +493,11 @@ public:
                             int64_t h_end = ((h_out + 1) * H_in_) / H_out_;
                             int64_t w_start = (w_out * W_in_) / W_out_;
                             int64_t w_end = ((w_out + 1) * W_in_) / W_out_;
+                            // Guarantee a non-empty window (count>=1) when the output is larger than the
+                            // input; otherwise count==0 -> division by zero (inf/NaN). Only the degenerate
+                            // out>in cells are touched; normal pooling (out<=in) is unchanged.
+                            if (h_end <= h_start) h_end = std::min(h_start + 1, H_in_);
+                            if (w_end <= w_start) w_end = std::min(w_start + 1, W_in_);
 
                             int64_t count = (h_end - h_start) * (w_end - w_start);
                             int64_t out_idx = ((n * C + c) * H_out_ + h_out) * W_out_ + w_out;
@@ -521,6 +531,11 @@ public:
                             int64_t h_end = ((h_out + 1) * H_in_) / H_out_;
                             int64_t w_start = (w_out * W_in_) / W_out_;
                             int64_t w_end = ((w_out + 1) * W_in_) / W_out_;
+                            // Guarantee a non-empty window (count>=1) when the output is larger than the
+                            // input; otherwise count==0 -> division by zero (inf/NaN). Only the degenerate
+                            // out>in cells are touched; normal pooling (out<=in) is unchanged.
+                            if (h_end <= h_start) h_end = std::min(h_start + 1, H_in_);
+                            if (w_end <= w_start) w_end = std::min(w_start + 1, W_in_);
 
                             int64_t count = (h_end - h_start) * (w_end - w_start);
                             int64_t out_idx = ((n * C + c) * H_out_ + h_out) * W_out_ + w_out;

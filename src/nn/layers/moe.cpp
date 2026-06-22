@@ -124,8 +124,23 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
         // Rows routed to expert e (and only those). nonzero materializes the
         // count, so M is known host-side without a separate reduction/sync.
         Tensor routed = tenzor::nonzero(w_e);   // [M, 1] int64
+        if (routed.shape()[0] == 0) continue;   // expert unused for this batch
+        // Switch-Transformer per-expert capacity: an expert processes at most
+        //   expert_capacity = ceil(capacity_factor * N * top_k / num_experts)
+        // tokens. Overflow tokens (highest original row index first, since
+        // nonzero() returns ascending indices) are DROPPED — they receive no
+        // contribution from this expert, matching fixed-buffer MoE semantics.
+        // capacity_factor_ <= 0 disables the cap (process every routed token).
+        if (capacity_factor_ > 0.0) {
+            int64_t expert_capacity = static_cast<int64_t>(std::ceil(
+                capacity_factor_ * static_cast<double>(N) *
+                static_cast<double>(top_k_) / static_cast<double>(num_experts_)));
+            if (expert_capacity < 1) expert_capacity = 1;
+            if (routed.shape()[0] > expert_capacity) {
+                routed = tenzor::narrow(routed, 0, 0, expert_capacity);
+            }
+        }
         const int64_t M = routed.shape()[0];
-        if (M == 0) continue;                   // expert unused for this batch
         Tensor routed_idx = tenzor::reshape(routed, std::vector<int64_t>{M});
 
         // Gather ONLY the routed rows and run the expert FFN on that subset —

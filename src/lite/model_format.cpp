@@ -460,7 +460,11 @@ auto read_file_bytes(const std::string& path) -> std::vector<uint8_t> {
     if (!file.is_open()) {
         throw std::runtime_error("TZLiteReader: failed to open file: " + path);
     }
-    auto size = static_cast<size_t>(file.tellg());
+    auto pos = file.tellg();
+    if (pos < 0) {
+        throw std::runtime_error("TZLiteReader: failed to determine size of file: " + path);
+    }
+    auto size = static_cast<size_t>(pos);
     file.seekg(0, std::ios::beg);
     std::vector<uint8_t> buffer(size);
     if (size > 0 &&

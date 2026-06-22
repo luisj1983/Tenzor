@@ -191,10 +191,16 @@ __global__ void topk_slice_kernel(
         __syncthreads();
     }
 
-    // Sort the k results using parallel odd-even transposition sort
+    // Sort the k results using parallel odd-even transposition sort. Each thread
+    // strides over ALL the pairs assigned to it so the sort covers every position
+    // even when k > 2*blockDim — previously a thread only handled pair
+    // i = 2*tid + (phase&1), so positions >= 2*blockDim (k>512 with 256 threads)
+    // were never compared and the tail came out unsorted. Pairs within a phase
+    // are non-overlapping (disjoint i, i+1), so a thread can do its swaps without
+    // intra-phase synchronization; the __syncthreads() separates phases.
     for (int64_t phase = 0; phase < k; ++phase) {
-        int64_t i = 2 * tid + (phase & 1);
-        if (i + 1 < k) {
+        for (int64_t j = tid; 2 * j + (phase & 1) + 1 < k; j += nthreads) {
+            int64_t i = 2 * j + (phase & 1);
             bool should_swap = largest ?
                 hip_lt(s_topk_vals[i], s_topk_vals[i + 1]) :
                 hip_gt(s_topk_vals[i], s_topk_vals[i + 1]);

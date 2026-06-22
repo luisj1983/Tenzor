@@ -126,7 +126,11 @@ auto LazyLinear::to(Device device) -> void {
     Module::to(device);
 }
 
-auto LazyLinear::forward_impl(const Variable& input) -> Variable {
+auto LazyLinear::forward_impl(const Variable& input_raw) -> Variable {
+    // Local, reassignable copy so we can move the input onto the parameter
+    // device when an explicit to(Device) request differs from the input's device
+    // (see after materialize below). Variable copies share storage — cheap.
+    Variable input = input_raw;
     auto input_shape = input.shape();
 
     if (input_shape.empty()) {
@@ -166,6 +170,19 @@ auto LazyLinear::forward_impl(const Variable& input) -> Variable {
             throw std::runtime_error(
                 "LazyLinear: input features (" + std::to_string(last_dim) +
                 ") don't match materialized in_features (" + std::to_string(in_features_) + ")");
+        }
+    }
+
+    // If an explicit to(Device) placed the parameters on a device that differs
+    // from the input's, run on the PARAMETER device by moving the input there
+    // (autograd-aware) so the explicit request wins. The generic path below
+    // otherwise moves the WEIGHT to the input's device, silently undoing the
+    // requested placement and producing output on the wrong device.
+    if (requested_device_.has_value()) {
+        const Device pdev = parameters_["weight"]->tensor().device();
+        const Device idev = input.tensor().device();
+        if (pdev.type != idev.type || pdev.index != idev.index) {
+            input = autograd::to_device(input, pdev);
         }
     }
 

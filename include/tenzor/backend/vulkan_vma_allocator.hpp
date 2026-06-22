@@ -127,8 +127,15 @@ public:
         // Use mapped pointer for host-visible, synthetic address for device-local
         void* ptr = allocation_info.pMappedData;
         if (!ptr) {
-            // For device-local non-mapped memory, use the allocation handle as a key
-            ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(allocation));
+            // Device-local non-mapped memory: hand out a disjoint synthetic
+            // [base, base+size) range from a monotonic counter (page-aligned,
+            // size-spaced) so interval lookup can never alias two allocations.
+            // Using the opaque VmaAllocation handle as a base could overlap.
+            uintptr_t base = next_synthetic_base_;
+            size_t span = ((size + 4095) / 4096) * 4096;
+            if (span == 0) span = 4096;  // never advance by 0 for a 0-byte alloc
+            next_synthetic_base_ += span;
+            ptr = reinterpret_cast<void*>(base);
         }
 
         // Track allocation for later deallocation. Store base+size so view
@@ -288,6 +295,12 @@ private:
     std::unordered_map<int, VmaAllocator> allocators_;
     std::unordered_map<int, VkDevice> devices_;
     std::unordered_map<void*, AllocationInfo> alloc_map_;
+    // Monotonic synthetic base for device-local (non-host-mapped) allocations.
+    // VmaAllocation handles are opaque and unspaced, so using them as bases let
+    // two allocations' [base, base+size) ranges overlap and find_buffer_and_offset
+    // resolve a view to the wrong buffer. Hand out disjoint, size-spaced ranges
+    // from a high base instead (kept clear of real host-mapped pointers).
+    uintptr_t next_synthetic_base_ = (uintptr_t{1} << 46);
 };
 
 } // namespace backend

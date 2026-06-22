@@ -986,14 +986,15 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
 
                 const float* a_data = a_f32.data<float>();
                 const float* b_data = b_f32.data<float>();
-                float* c_data = result.data<float>();
 
                 float alpha = 1.0f;
                 float beta = 0.0f;
 
-                // Need Float32 result tensor for computation
+                // result is BFloat16, so compute into an FP32 staging tensor and
+                // narrow back below — result.data<float>() throws on a BF16
+                // tensor (the previous premature read did exactly that).
                 Tensor result_f32({M}, DType::Float32, a_contig.device());
-                c_data = result_f32.data<float>();
+                float* c_data = result_f32.data<float>();
 
                 ROCBLAS_CHECK(rocblas_sgemm(
                     handle.get(),

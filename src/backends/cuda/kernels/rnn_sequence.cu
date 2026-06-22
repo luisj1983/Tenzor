@@ -698,6 +698,12 @@ auto bilstm_forward_cuda(
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
+    // input_rev was produced by the reverse kernel on `stream`; lstm_forward_cuda
+    // reads it via cuBLAS on a (potentially different) handle stream. Synchronize
+    // so the reversal is complete before that read — otherwise the backward LSTM
+    // consumes a partially-written buffer (race / wrong results).
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+
     Tensor h0_bwd = h0.slice(0, 1, 2).squeeze(0).contiguous();
     Tensor c0_bwd = c0.slice(0, 1, 2).squeeze(0).contiguous();
     auto bwd_result = lstm_forward_cuda(

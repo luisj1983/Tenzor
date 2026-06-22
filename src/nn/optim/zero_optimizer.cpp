@@ -537,7 +537,7 @@ auto ZeROStage1Optimizer::load_state_dict_unlocked(
 
     // Verify rank and world_size match
     if (state.count("rank")) {
-        int saved_rank = state.at("rank").data<int32_t>()[0];
+        int saved_rank = state.at("rank").to(Device::cpu()).data<int32_t>()[0];
         if (saved_rank != config_.rank) {
             throw std::runtime_error(
                 "Rank mismatch: saved=" + std::to_string(saved_rank) +
@@ -547,7 +547,7 @@ auto ZeROStage1Optimizer::load_state_dict_unlocked(
     }
 
     if (state.count("world_size")) {
-        int saved_world_size = state.at("world_size").data<int32_t>()[0];
+        int saved_world_size = state.at("world_size").to(Device::cpu()).data<int32_t>()[0];
         if (saved_world_size != config_.world_size) {
             throw std::runtime_error(
                 "World size mismatch: saved=" + std::to_string(saved_world_size) +
@@ -5584,21 +5584,36 @@ auto ZeROStage3Optimizer::adaptive_offload_decision() -> void {
 
         auto& state = it->second;
 
-        // Offload the gathered parameter if available
+        // Offload the gathered parameter if available. Use the synchronous
+        // offload_to_cpu and REBIND state.full_param to the returned CPU copy.
+        // The legacy code called offload_to_cpu_async and discarded its handle,
+        // so the GPU storage was never actually freed (yet accounting claimed it
+        // was) and the in-flight async copy could race a subsequent gather/step
+        // mutating the same buffer. Mirrors the Phase-D4 fix in the per-param
+        // offload path above.
         if (state.is_gathered && !state.gathered_on_cpu) {
-            offload_engine_->offload_to_cpu_async(state.full_param);
-            state.gathered_on_cpu = true;
-            offloaded_bytes += state.size_bytes;
-
-            // Update statistics
-            perf_stats_.current_gathered_memory -= state.size_bytes;
+            try {
+                state.full_param = offload_engine_->offload_to_cpu(state.full_param);
+                state.gathered_on_cpu = true;
+                offloaded_bytes += state.size_bytes;
+                perf_stats_.current_gathered_memory -= state.size_bytes;
+            } catch (const std::exception& e) {
+                TENZOR_LOG_WARN("ZeROStage3Optimizer: adaptive gathered-param CPU "
+                                "offload failed: {} -- keeping GPU-resident", e.what());
+            }
         }
 
-        // Offload the local partition if not already on CPU
+        // Offload the local partition if not already on CPU.
         if (!state.partition_on_cpu && state.local_partition.numel() > 0) {
-            offload_engine_->offload_to_cpu_async(state.local_partition);
-            state.partition_on_cpu = true;
-            offloaded_bytes += state.partition_size;
+            try {
+                state.local_partition =
+                    offload_engine_->offload_to_cpu(state.local_partition);
+                state.partition_on_cpu = true;
+                offloaded_bytes += state.partition_size;
+            } catch (const std::exception& e) {
+                TENZOR_LOG_WARN("ZeROStage3Optimizer: adaptive partition CPU "
+                                "offload failed: {} -- keeping GPU-resident", e.what());
+            }
         }
     }
 }

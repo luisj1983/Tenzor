@@ -3119,6 +3119,7 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
 
 auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_size,
                        const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                       bool count_include_pad,
                        sycl::queue& queue) -> Tensor {
     auto shape = input.shape();
     if (shape.size() != 5) {
@@ -3126,6 +3127,10 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
     }
     const int64_t N = shape[0], Ch = shape[1], D_in = shape[2], H_in = shape[3], W_in = shape[4];
     const int64_t kD = kernel_size[0], kH = kernel_size[1], kW = kernel_size[2];
+    // count_include_pad=true (PyTorch default) divides by the full kernel volume
+    // (padding cells contribute 0 to the sum but count in the divisor); =false
+    // divides by the number of in-bounds (non-pad) cells only.
+    const int64_t pool_volume = kD * kH * kW;
     const int64_t sD = stride[0], sH = stride[1], sW = stride[2];
     const int64_t pD = padding[0], pH = padding[1], pW = padding[2];
     const int64_t D_out = (D_in + 2*pD - kD) / sD + 1;
@@ -3156,7 +3161,8 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                     }
                 }
             }
-            out_p[gid] = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            out_p[gid] = divisor > 0 ? sum / static_cast<float>(divisor) : 0.0f;
         }).wait();
     } else if (input.dtype() == DType::Float64) {
         const double* in_p = get_data_ptr<const double>(input);
@@ -3179,7 +3185,8 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                     }
                 }
             }
-            out_p[gid] = count > 0 ? sum / static_cast<double>(count) : 0.0;
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            out_p[gid] = divisor > 0 ? sum / static_cast<double>(divisor) : 0.0;
         }).wait();
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_p = get_data_ptr<const sycl::half>(input);
@@ -3202,7 +3209,8 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                     }
                 }
             }
-            out_p[gid] = sycl::half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            out_p[gid] = sycl::half(divisor > 0 ? sum / static_cast<float>(divisor) : 0.0f);
         }).wait();
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_p = get_data_ptr<const uint16_t>(input);
@@ -3225,7 +3233,8 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                     }
                 }
             }
-            out_p[gid] = f32_to_bf16(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            out_p[gid] = f32_to_bf16(divisor > 0 ? sum / static_cast<float>(divisor) : 0.0f);
         }).wait();
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool3d_forward");

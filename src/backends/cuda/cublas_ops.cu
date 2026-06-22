@@ -126,6 +126,10 @@ void cublas_gemm_ex(
     // Convert data types
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
     cublasComputeType_t compute_type = select_compute_type(dtype);
+    // INT8 GEMM accumulates in INT32: the C (output) operand must be CUDA_R_32I,
+    // not CUDA_R_8I — cublasGemmEx rejects an INT8 output with 32I compute
+    // (CUBLAS_STATUS_NOT_SUPPORTED). The caller allocates the result as Int32.
+    cudaDataType_t c_cuda_dtype = (dtype == DType::Int8) ? CUDA_R_32I : cuda_dtype;
 
     // Set alpha and beta
     // Note: We use FP32 alpha/beta even for FP16 operations (cuBLAS requirement)
@@ -185,7 +189,7 @@ void cublas_gemm_ex(
         lda,            // Leading dimension of A
         beta,
         C,              // C matrix
-        cuda_dtype,     // Data type of C
+        c_cuda_dtype,   // Data type of C (Int32 accumulation for Int8)
         ldc,            // Leading dimension of C
         compute_type,   // Compute type (FP32 for FP16/BF16 Tensor Cores)
         CUBLAS_GEMM_DEFAULT_TENSOR_OP  // Enable Tensor Core operations
@@ -233,6 +237,10 @@ void cublas_batched_gemm_ex(
     // Convert data types
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
     cublasComputeType_t compute_type = select_compute_type(dtype);
+    // INT8 GEMM accumulates in INT32: the C (output) operand must be CUDA_R_32I,
+    // not CUDA_R_8I — cublasGemmEx rejects an INT8 output with 32I compute
+    // (CUBLAS_STATUS_NOT_SUPPORTED). The caller allocates the result as Int32.
+    cudaDataType_t c_cuda_dtype = (dtype == DType::Int8) ? CUDA_R_32I : cuda_dtype;
 
     // Set alpha and beta (same as non-batched version)
     const float alpha_f = 1.0f;
@@ -295,7 +303,7 @@ void cublas_batched_gemm_ex(
             stride_a,
             beta,
             C_off,          // C matrix batch
-            cuda_dtype,
+            c_cuda_dtype,
             ldc,
             stride_c,
             batch_chunk,
@@ -432,7 +440,7 @@ auto cublas_batched_matmul_scaled(const Tensor& a, const Tensor& b, float scale)
         throw std::runtime_error("Matrix dimension mismatch for batched matmul");
     }
 
-    Tensor result({batch_size, M, N}, a.dtype(), a.device());
+    Tensor result({batch_size, M, N}, (a.dtype() == DType::Int8 ? DType::Int32 : a.dtype()), a.device());
 
     // Make the tensors' device current so the device-keyed cuBLAS handle is
     // fetched on the GPU the GEMM runs on. Restored on scope exit.
@@ -470,7 +478,7 @@ auto cublas_matmul(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     // Create output tensor
-    Tensor result({M, N}, a.dtype(), a.device());
+    Tensor result({M, N}, (a.dtype() == DType::Int8 ? DType::Int32 : a.dtype()), a.device());
 
     // Get data pointers based on dtype
     const void* a_ptr = a.data_ptr();
@@ -514,7 +522,7 @@ auto cublas_batched_matmul(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     // Create output tensor
-    Tensor result({batch_size, M, N}, a.dtype(), a.device());
+    Tensor result({batch_size, M, N}, (a.dtype() == DType::Int8 ? DType::Int32 : a.dtype()), a.device());
 
     // Get data pointers
     const void* a_ptr = a.data_ptr();

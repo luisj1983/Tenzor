@@ -12,9 +12,8 @@
 namespace tenzor {
 // ============================================================================
 
-auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value, DType dtype) -> Tensor {
-    // Create tensor on first available Vulkan device
-    Device device(Device::Type::Vulkan, 0);
+auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value, DType dtype,
+                                 const Device& device) -> Tensor {
     Tensor output(shape, dtype, device);
 
     // Handle empty tensors - no GPU work needed
@@ -459,7 +458,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
 // Ones Operation - Create tensor filled with 1.0
 // ============================================================================
 
-auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
+auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
     // Route every dtype without a dedicated 32-bit "ones" shader through
     // dispatchFull(1.0), which carries the complete dtype coverage (16/64-bit
     // ints, unsigned, complex, FP8) and throws for bare quantized dtypes.
@@ -482,14 +481,14 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         case DType::QInt8:
         case DType::QUInt8:
         case DType::QInt4x2:
-            return dispatchFull(shape, 1.0, dtype);
+            return dispatchFull(shape, 1.0, dtype, device);
         default:
             break;
     }
 
     // Float64 uses dedicated ones_f64 shader
     if (dtype == DType::Float64) {
-        Device device(Device::Type::Vulkan, 0);
+        // device comes from the caller (AttrKey::Device); was hardcoded to 0
         Tensor output(shape, dtype, device);
         int32_t device_id = device.index;
 
@@ -530,7 +529,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     }
 
     // Create tensor on first available Vulkan device
-    Device device(Device::Type::Vulkan, 0);
+        // device comes from the caller (AttrKey::Device); was hardcoded to 0
     Tensor output(shape, dtype, device);
 
     int32_t device_id = device.index;
@@ -1736,7 +1735,11 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     return grad_features;
 }
 
-auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool descending) -> Tensor {
+auto VulkanBackend::dispatchArgSort(const Tensor& input_in, int64_t dim, bool descending) -> Tensor {
+    // The per-slice copies below read input.data_ptr() + slice*slice_bytes,
+    // assuming contiguous slices; materialize a contiguous copy so a
+    // non-contiguous (sliced/transposed) input is sorted correctly.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto input_shape = input.shape();
     const int ndim = static_cast<int>(input_shape.size());
 
@@ -3232,6 +3235,17 @@ auto VulkanBackend::dispatchToMemoryFormat(const Tensor& input, int format) -> T
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::runtime_error("vulkan to_memory_format: requires 4D tensor (NCHW/NHWC)");
+    }
+
+    // Half precision: BFloat16 has no dedicated shader (it fell through to the
+    // 32-bit shader with a numel*2 vs numel*4 descriptor -> OOB), and the
+    // Float16 packed-word shader binds a numel*2 descriptor and reads/writes one
+    // 32-bit word past the end for odd numel. Compute on the GPU in Float32 and
+    // narrow back — the work stays on the device (not a CPU fallback) and avoids
+    // both the mis-sized descriptor and the odd-element overrun.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        const DType orig = input.dtype();
+        return dispatchToMemoryFormat(input.to(DType::Float32), format).to(orig);
     }
 
     int32_t device_id = input.device().index;

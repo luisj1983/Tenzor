@@ -65,6 +65,13 @@ inline id<MTLBuffer> mps_buffer_for(id<MTLDevice> device, const Tensor& tensor) 
     // contiguous allocation-base tensor and use that.
     if (tensor.offset() != 0 || (tensor.storage() && tensor.storage()->data() != ptr)) {
         Tensor c = tensor.contiguous();
+        // .contiguous() is a no-op for a tensor that is already CONTIGUOUS but
+        // carries a non-zero storage offset; it then keeps a non-base
+        // (non-page-aligned) pointer that newBufferWithBytesNoCopy rejects
+        // (returns nil) -> crash on encode. Force a fresh offset-0 base buffer.
+        if (c.offset() != 0 || (c.storage() && c.storage()->data() != const_cast<void*>(c.data_ptr()))) {
+            c = c.clone();
+        }
         void* cptr = const_cast<void*>(c.data_ptr());
         if (id<MTLBuffer> pooled = pooled_buffer_for(cptr)) {
             attach_keepalive(pooled, c);

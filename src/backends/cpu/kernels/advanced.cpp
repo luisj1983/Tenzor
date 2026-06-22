@@ -483,6 +483,15 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
     // Work with Float32 for simplicity (most common case)
     // This handles all numeric dtypes by working on sorted copies
     auto do_unique = [&]<typename T>(const T* data) -> std::tuple<Tensor, Tensor, Tensor> {
+        // Empty input: no unique values. The sorted_output branch below
+        // unconditionally reads data[sort_idx[0]] with an empty sort_idx, so
+        // guard here instead of indexing out of bounds.
+        if (numel == 0) {
+            return {Tensor({0}, input.dtype(), input.device()),
+                    Tensor({0}, DType::Int64, input.device()),
+                    Tensor({0}, DType::Int64, input.device())};
+        }
+
         // Build sorted index array
         std::vector<int64_t> sort_idx(numel);
         std::iota(sort_idx.begin(), sort_idx.end(), 0);

@@ -1385,6 +1385,22 @@ auto MixUp::operator()(const Tensor& input1, const Tensor& target1,
     TransformDomain tg2_orig{};
     Tensor tg2 = enter_host_float32(target2, tg2_orig);
 
+    // The blends below iterate over input1/target1's element count and read the
+    // matching index of input2/target2, so the second operands must be at least
+    // as large. Require equal element counts (elementwise mix) to avoid reading
+    // past input2/target2's storage when a heterogeneous dataset yields a
+    // smaller second sample.
+    if (in2.numel() != in1.numel()) {
+        throw std::invalid_argument(
+            "MixUp: input1 and input2 must have the same number of elements (got " +
+            std::to_string(in1.numel()) + " vs " + std::to_string(in2.numel()) + ")");
+    }
+    if (tg2.numel() != tg1.numel()) {
+        throw std::invalid_argument(
+            "MixUp: target1 and target2 must have the same number of elements (got " +
+            std::to_string(tg1.numel()) + " vs " + std::to_string(tg2.numel()) + ")");
+    }
+
     // mixed_input = lambda * input1 + (1 - lambda) * input2
     int64_t numel = in1.numel();
     Tensor mixed_input = zeros(
@@ -1444,6 +1460,20 @@ auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
     Tensor tg2 = enter_host_float32(target2, tg2_orig);
 
     const auto& shape = in1.shape();
+
+    // The patch copy below indexes input2 with input1's C/H/W, and the target
+    // blend reads target2 over target1's element count, so input2/target2 must
+    // match input1/target1 or those reads run past the operand's storage.
+    if (std::vector<int64_t>(in2.shape().begin(), in2.shape().end()) !=
+        std::vector<int64_t>(in1.shape().begin(), in1.shape().end())) {
+        throw std::invalid_argument(
+            "CutMix: input1 and input2 must have the same shape");
+    }
+    if (tg2.numel() != tg1.numel()) {
+        throw std::invalid_argument(
+            "CutMix: target1 and target2 must have the same number of elements (got " +
+            std::to_string(tg1.numel()) + " vs " + std::to_string(tg2.numel()) + ")");
+    }
 
     // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
     // seed is drawn from the shared thread-local engine (advances per call) so

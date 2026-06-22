@@ -972,8 +972,8 @@ auto cudnn_fused_conv2d_activation_forward(
 }
 
 auto cudnn_fused_conv2d_activation_forward(
-    const Tensor& input,
-    const Tensor& weight,
+    const Tensor& input_in,
+    const Tensor& weight_in,
     const Tensor* bias,
     int64_t stride_h, int64_t stride_w,
     int64_t pad_h, int64_t pad_w,
@@ -983,6 +983,11 @@ auto cudnn_fused_conv2d_activation_forward(
     double activation_coeff,
     cudaStream_t stream
 ) -> Tensor {
+    // cuDNN reads input/weight via data_ptr() with descriptors built from shape,
+    // assuming contiguous NCHW/OIHW; a non-contiguous (sliced/permuted) input or
+    // weight would be misread. Materialize contiguous copies first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor weight = weight_in.is_contiguous() ? weight_in : weight_in.contiguous();
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -1036,9 +1041,13 @@ auto cudnn_fused_conv2d_activation_forward(
 
     // Allocate a zero bias if none provided (cudnnConvolutionBiasActivationForward requires bias)
     Tensor zero_bias;
+    Tensor bias_cont;
     const void* bias_ptr;
     if (bias != nullptr) {
-        bias_ptr = bias->data_ptr();
+        // The bias descriptor is packed [1,C,1,1]; a non-contiguous bias view
+        // would be read with the wrong strides. Materialize a contiguous copy.
+        bias_cont = bias->is_contiguous() ? *bias : bias->contiguous();
+        bias_ptr = bias_cont.data_ptr();
     } else {
         zero_bias = Tensor({out_channels}, input.dtype(), input.device());
         cudaMemsetAsync(zero_bias.data_ptr(), 0, out_channels * dtype_size(input.dtype()), stream);

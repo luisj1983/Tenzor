@@ -20,42 +20,50 @@ class JitNotEnabledError(RuntimeError):
 def _compile_function(fn: Callable, *, backend: str, target: str,
                       fallback_to_eager: bool) -> Any:
     """Delegate to the C++ binding if available; raise JitNotEnabledError otherwise."""
+    # Deferred-error wrapper: keeps the decorator usable as a no-op for builds
+    # without the JIT, but loudly tells the user how to enable it the moment they
+    # actually try to compile.
+    def _disabled_stub(fn_: Callable, msg: str) -> Any:
+        class _JitDisabledStub:
+            def __init__(self, f: Callable):
+                self._fn = f
+                functools.update_wrapper(self, f)
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                raise JitNotEnabledError(msg)
+        return _JitDisabledStub(fn_)
+
+    _MLIR_OFF_MSG = (
+        "@tz.jit: MLIR JIT is not enabled in this build. "
+        "Rebuild Tenzor with -DTENZOR_USE_MLIR_JIT=ON to enable it. "
+        "See docs/jit-mlir-setup.md for installation instructions.")
+
     try:
         from . import tenzor_core as _core  # type: ignore[import]
-        return _core.jit.compile_function(
-            fn, backend=backend, target=target,
-            fallback_to_eager=fallback_to_eager)
-    except AttributeError:
-        # tenzor_core exists but jit submodule not compiled in (MLIR JIT OFF).
-        # Return a deferred-error wrapper that raises JitNotEnabledError on
-        # first invocation — keeps the decorator usable as a no-op for
-        # builds without the JIT, but loudly tells the user how to enable
-        # it the moment they actually try to compile.  (Audit item I.7:
-        # renamed from "_NotEnabled / placeholder" so the symbol no longer
-        # implies it is a placeholder waiting for a real implementation.)
-        class _JitDisabledStub:
-            """Deferred error: invocation raises JitNotEnabledError until
-            the build re-enables MLIR JIT."""
-            def __init__(self, fn_: Callable):
-                self._fn = fn_
-                functools.update_wrapper(self, fn_)
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                raise JitNotEnabledError(
-                    f"@tz.jit: MLIR JIT is not enabled in this build. "
-                    f"Rebuild Tenzor with -DTENZOR_USE_MLIR_JIT=ON to enable it. "
-                    f"See docs/jit-mlir-setup.md for installation instructions.")
-        return _JitDisabledStub(fn)
     except ImportError:
-        # tenzor_core not found at all — same deferred-error pattern.
-        class _CoreMissingStub:  # type: ignore[no-redef]
-            def __init__(self, fn_: Callable):
-                self._fn = fn_
-                functools.update_wrapper(self, fn_)
-            def __call__(self, *args: Any, **kwargs: Any) -> Any:
-                raise JitNotEnabledError(
-                    "@tz.jit: tenzor_core C++ module not found. "
-                    "Build the project and set PYTHONPATH to include build/python.")
-        return _CoreMissingStub(fn)
+        return _disabled_stub(
+            fn,
+            "@tz.jit: tenzor_core C++ module not found. "
+            "Build the project and set PYTHONPATH to include build/python.")
+
+    try:
+        binding = _core.jit.compile_function
+    except AttributeError:
+        # tenzor_core exists but the jit submodule was not compiled in.
+        return _disabled_stub(fn, _MLIR_OFF_MSG)
+
+    try:
+        return binding(fn, backend=backend, target=target,
+                       fallback_to_eager=fallback_to_eager)
+    except JitNotEnabledError:
+        raise
+    except RuntimeError as e:
+        # The jit submodule IS compiled but TENZOR_USE_MLIR_JIT is OFF, so the
+        # C++ binding raises a generic RuntimeError (rather than the submodule
+        # being absent). Treat that exactly like a disabled build so callers get
+        # the consistent JitNotEnabledError contract.
+        if "TENZOR_USE_MLIR_JIT" in str(e):
+            return _disabled_stub(fn, _MLIR_OFF_MSG)
+        raise
 
 
 def jit(fn: Callable[..., Any] | None = None, *,

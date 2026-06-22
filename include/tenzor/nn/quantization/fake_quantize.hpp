@@ -140,6 +140,11 @@ public:
      * @brief Get underlying observer.
      */
     auto observer() -> Observer* { return observer_.get(); }
+    /// The quant dtype/scheme this module was configured with (from the QConfig
+    /// at prepare time) — so calibration derives qparams in the right format
+    /// instead of assuming INT8/PerTensorSymmetric.
+    auto quant_dtype() const -> QuantDType { return dtype_; }
+    auto quant_scheme() const -> QuantizationScheme { return scheme_; }
 
     /**
      * @brief Check if parameters are learnable.
