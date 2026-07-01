@@ -696,6 +696,13 @@ auto bilstm_forward_cuda(
             input.data<double>(), input_rev.data<double>(),
             seq_len, batch, shape[2]);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else {
+        // No reverse kernel was launched for this dtype, so input_rev would be
+        // left uninitialized and the backward LSTM below would consume garbage.
+        // Fail loudly instead of silently producing NaNs.
+        throw std::runtime_error(
+            "bidirectional LSTM (CUDA): unsupported input dtype for sequence "
+            "reversal; only Float32 and Float64 are implemented");
     }
 
     // input_rev was produced by the reverse kernel on `stream`; lstm_forward_cuda

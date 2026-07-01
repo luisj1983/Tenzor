@@ -382,9 +382,18 @@ HRMBlock::HRMBlock(int64_t d_model, int64_t n_heads, int64_t d_feedforward,
     // Dropout
     dropout_ = std::make_shared<Dropout>(dropout);
 
-    // Rotary position embeddings
-    int64_t head_dim = d_model / n_heads;
-    rope_ = std::make_shared<RotaryPositionEmbedding>(head_dim, max_seq_len);
+    // NOTE: RoPE is intentionally NOT instantiated here. RoPE must rotate the
+    // per-head query/key tensors AFTER the internal q/k projection (input shape
+    // (batch, seq, n_heads, head_dim)), but self_attn_/cross_attn_ are
+    // MultiheadAttention modules that project and reshape q/k/v internally and
+    // expose no hook (and no rope option) to inject the rotation. Applying RoPE
+    // to the block input x before MHA is mathematically wrong (RoPE on the
+    // shared embedding is not RoPE on the projected per-head q/k). The previous
+    // code registered a RotaryPositionEmbedding submodule that was never applied
+    // — dead code. RotaryPositionEmbedding has no trainable parameters, so its
+    // removal has no effect on the optimizer or autograd. max_seq_len is
+    // retained in the signature for API stability.
+    (void)max_seq_len;
 
     // Register submodules
     register_module("self_attn", self_attn_);
@@ -394,7 +403,6 @@ HRMBlock::HRMBlock(int64_t d_model, int64_t n_heads, int64_t d_feedforward,
     register_module("norm2", norm2_);
     register_module("norm3", norm3_);
     register_module("dropout", dropout_);
-    register_module("rope", rope_);
 }
 
 auto HRMBlock::forward(const Variable& x, const Variable& context,
@@ -1021,19 +1029,31 @@ auto HRM::forward_with_segments(const Variable& input,
     for (int64_t seg = 0; seg < config_.max_segments; ++seg) {
         actual_segments++;
 
-        // Run N high-level cycles within this segment
+        // Run N high-level cycles within this segment.
+        //
+        // HRM 1-step approximate gradient: detach BETWEEN cycles so the
+        // recurrence graph stays O(1) in depth, but DO NOT detach after the
+        // LAST cycle — segment_output below is built from h_state, so detaching
+        // the final cycle here would sever the graph from segment_output back to
+        // h_module_/l_module_ and the init projections, giving them zero grad.
+        // Mirrors the fixed forward_with_aux. Cross-segment detach is performed
+        // once per segment at the end of this loop body.
         for (int64_t n = 0; n < config_.n_high_cycles; ++n) {
             auto output = run_h_cycle(h_state, l_state, mask);
+            (void)output;  // side effect: updates h_state/l_state in place
             total_cycles++;
 
-            // CRITICAL: Detach for approximate gradient
-            h_state = h_state.detach();
-            l_state = l_state.detach();
-            h_state.set_requires_grad(true);
-            l_state.set_requires_grad(true);
+            if (n + 1 < config_.n_high_cycles) {
+                h_state = h_state.detach();
+                l_state = l_state.detach();
+                h_state.set_requires_grad(true);
+                l_state.set_requires_grad(true);
+            }
         }
 
-        // Compute output for this segment
+        // Compute output for this segment from the graph-carrying state so the
+        // deep-supervision loss on this segment backpropagates into the H/L
+        // modules and projections.
         auto normed = output_norm_->forward(h_state);
         Variable segment_output;
         if (output_proj_) {
@@ -1077,6 +1097,16 @@ auto HRM::forward_with_segments(const Variable& input,
                 q_dones.push_back(false);
             }
         }
+
+        // CROSS-SEGMENT detach: the next segment starts from a detached state
+        // so the 1-step approximate gradient stays O(1) across segments. The
+        // current segment's graph was already consumed into segment_output (and
+        // any Q-learning states) above, so this does not sever within-segment
+        // gradient — it only breaks the recurrence between segments.
+        h_state = h_state.detach();
+        l_state = l_state.detach();
+        h_state.set_requires_grad(true);
+        l_state.set_requires_grad(true);
     }
 
     // Update next_states for Q-learning (shift by one)

@@ -148,11 +148,13 @@ void neg_f64(const double* a, double* out, size_t size) {
 #if defined(__AVX512F__)
     size_t i = 0;
     // Negate via XOR with sign bit mask
-    __m512d sign_bit = _mm512_castsi512_pd(
-        _mm512_set1_epi64(static_cast<int64_t>(0x8000000000000000ll)));
+    // Use AVX512F integer bitwise ops (_mm512_xor_si512) rather than the packed-
+    // float _mm512_xor_pd, which requires AVX512DQ and would fail to compile/run
+    // on AVX512F-only hosts (e.g. KNL) reached through the same runtime dispatch.
+    __m512i sign_bit = _mm512_set1_epi64(static_cast<int64_t>(0x8000000000000000ll));
     for (; i + 8 <= size; i += 8) {
-        __m512d va = _mm512_loadu_pd(a + i);
-        _mm512_storeu_pd(out + i, _mm512_xor_pd(va, sign_bit));
+        __m512i vi = _mm512_castpd_si512(_mm512_loadu_pd(a + i));
+        _mm512_storeu_pd(out + i, _mm512_castsi512_pd(_mm512_xor_si512(vi, sign_bit)));
     }
     for (; i < size; ++i) out[i] = -a[i];
 #elif defined(__AVX2__)
@@ -172,11 +174,11 @@ void abs_f64(const double* a, double* out, size_t size) {
 #if defined(__AVX512F__)
     size_t i = 0;
     // Clear sign bit via AND with 0x7FFFFFFFFFFFFFFF
-    __m512d sign_mask = _mm512_castsi512_pd(
-        _mm512_set1_epi64(static_cast<int64_t>(0x7FFFFFFFFFFFFFFFll)));
+    // AVX512F integer AND (see neg_f64): _mm512_and_pd is AVX512DQ-only.
+    __m512i sign_mask = _mm512_set1_epi64(static_cast<int64_t>(0x7FFFFFFFFFFFFFFFll));
     for (; i + 8 <= size; i += 8) {
-        __m512d va = _mm512_loadu_pd(a + i);
-        _mm512_storeu_pd(out + i, _mm512_and_pd(va, sign_mask));
+        __m512i vi = _mm512_castpd_si512(_mm512_loadu_pd(a + i));
+        _mm512_storeu_pd(out + i, _mm512_castsi512_pd(_mm512_and_si512(vi, sign_mask)));
     }
     for (; i < size; ++i) out[i] = std::abs(a[i]);
 #elif defined(__AVX2__)
@@ -201,10 +203,11 @@ void neg_f32(const float* a, float* out, size_t size) {
 #if defined(__AVX512F__)
     size_t i = 0;
     // XOR with sign bit mask
-    __m512 sign_bit = _mm512_castsi512_ps(_mm512_set1_epi32(static_cast<int>(0x80000000u)));
+    // AVX512F integer XOR (see neg_f64): _mm512_xor_ps is AVX512DQ-only.
+    __m512i sign_bit = _mm512_set1_epi32(static_cast<int>(0x80000000u));
     for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        _mm512_storeu_ps(out + i, _mm512_xor_ps(va, sign_bit));
+        __m512i vi = _mm512_castps_si512(_mm512_loadu_ps(a + i));
+        _mm512_storeu_ps(out + i, _mm512_castsi512_ps(_mm512_xor_si512(vi, sign_bit)));
     }
     for (; i < size; ++i) out[i] = -a[i];
 #elif defined(__AVX2__)
@@ -223,10 +226,11 @@ void neg_f32(const float* a, float* out, size_t size) {
 void abs_f32(const float* a, float* out, size_t size) {
 #if defined(__AVX512F__)
     size_t i = 0;
-    __m512 sign_mask = _mm512_castsi512_ps(_mm512_set1_epi32(0x7FFFFFFF));
+    // AVX512F integer AND (see neg_f64): _mm512_and_ps is AVX512DQ-only.
+    __m512i sign_mask = _mm512_set1_epi32(0x7FFFFFFF);
     for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        _mm512_storeu_ps(out + i, _mm512_and_ps(va, sign_mask));
+        __m512i vi = _mm512_castps_si512(_mm512_loadu_ps(a + i));
+        _mm512_storeu_ps(out + i, _mm512_castsi512_ps(_mm512_and_si512(vi, sign_mask)));
     }
     for (; i < size; ++i) out[i] = std::abs(a[i]);
 #elif defined(__AVX2__)

@@ -94,6 +94,12 @@ auto ASGD::step_impl() -> void {
         // Compute step-dependent learning rate: eta_t = lr / (1 + lambd * lr * t)^alpha
         double eta = hp.lr / std::pow(1.0 + hp.lambd * hp.lr * static_cast<double>(step_count_), hp.alpha);
 
+        // ASGD weight shrinkage (decay) term, applied to the parameter BEFORE
+        // the gradient step: param *= (1 - lambd * eta). This is the averaged-
+        // SGD regulariser from the reference ASGD (PyTorch); omitting it makes
+        // the update collapse to plain decayed-lr SGD.
+        param_hi = param_hi * scalar(1.0 - hp.lambd * eta);
+
         // SGD update with decayed learning rate
         param_hi = param_hi - grad * scalar(eta);
         param_tensor = needs_upcast ? param_hi.to(param_dt) : param_hi;

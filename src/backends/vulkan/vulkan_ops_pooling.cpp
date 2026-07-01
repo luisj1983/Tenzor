@@ -536,7 +536,7 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input_orig, const OpA
     int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
     int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : attrs.get_int(AttrKey::Padding, 0);
     int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
-    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 0);
+    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);  // include-pad default (matches CPU/other backends + AvgPool1d/3d)
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -815,7 +815,7 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
     int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
     int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : attrs.get_int(AttrKey::Padding, 0);
     int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
-    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 0);
+    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);  // include-pad default (matches CPU/other backends + AvgPool1d/3d)
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];

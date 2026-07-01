@@ -161,6 +161,32 @@ namespace {
 // length cannot trigger a multi-gigabyte allocation.
 constexpr uint32_t kMaxRendezvousResponse = 16u * 1024u * 1024u;
 
+// Wire byte order. All multi-byte integer prefixes/metadata exchanged over the
+// rendezvous-store TCP protocol, the peer handshake, and the tensor send/recv
+// header (numel/dtype) are written big-endian ("network" order) and converted
+// back to host order on receipt, so the wire format is endian-independent. The
+// swap is symmetric (host->wire and wire->host are the same operation) and a
+// no-op on big-endian hosts, so same-endian peers are byte-for-byte unchanged.
+//
+// NOTE: the raw tensor DATA payload (send_tensor/recv_tensor body) is still
+// transferred verbatim in host byte order — true big/little-endian tensor
+// interop would additionally require per-element payload swapping (incl. float/
+// complex), which is out of scope. Only the integer headers are converted here.
+inline uint32_t bswap_if_le32(uint32_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return v;
+#else
+    return __builtin_bswap32(v);
+#endif
+}
+inline uint64_t bswap_if_le64(uint64_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return v;
+#else
+    return __builtin_bswap64(v);
+#endif
+}
+
 // Write exactly `len` bytes; throw on short write or error so a desync of the
 // length-prefixed protocol fails loudly instead of silently corrupting it.
 auto send_all(int fd, const void* data, size_t len, const char* what) -> void {
@@ -212,7 +238,8 @@ auto RendezvousStore::set(const std::string& key, const std::string& value) -> v
     // desync the master's length-prefixed protocol.
     std::string command = "SET:" + key + ":" + value;
     uint32_t len = static_cast<uint32_t>(command.size());
-    send_all(socket_fd_, &len, sizeof(len), "set len");
+    uint32_t len_wire = bswap_if_le32(len);
+    send_all(socket_fd_, &len_wire, sizeof(len_wire), "set len");
     send_all(socket_fd_, command.c_str(), len, "set payload");
 }
 
@@ -222,13 +249,15 @@ auto RendezvousStore::get(const std::string& key) -> std::string {
     // Send GET command (full byte count verified).
     std::string command = "GET:" + key;
     uint32_t len = static_cast<uint32_t>(command.size());
-    send_all(socket_fd_, &len, sizeof(len), "get len");
+    uint32_t len_wire = bswap_if_le32(len);
+    send_all(socket_fd_, &len_wire, sizeof(len_wire), "get len");
     send_all(socket_fd_, command.c_str(), len, "get payload");
 
     // Receive response. response_len is peer-controlled, so bound it before
     // allocating and verify the full body arrives.
     uint32_t response_len = 0;
     recv_all(socket_fd_, &response_len, sizeof(response_len), "get response len");
+    response_len = bswap_if_le32(response_len);  // wire is big-endian
     if (response_len > kMaxRendezvousResponse) {
         throw std::runtime_error(
             "RendezvousStore::get: implausible response length " +
@@ -266,7 +295,8 @@ auto RendezvousStore::delete_key(const std::string& key) -> bool {
         connect_to_master();
         std::string command = "DEL:" + key;
         uint32_t len = command.size();
-        send_all(socket_fd_, &len, sizeof(len), "del len");
+        uint32_t len_wire = bswap_if_le32(len);
+        send_all(socket_fd_, &len_wire, sizeof(len_wire), "del len");
         send_all(socket_fd_, command.c_str(), len, "del payload");
         return true;
     } catch (...) {
@@ -290,11 +320,13 @@ auto RendezvousStore::add(const std::string& key, int64_t delta) -> int64_t {
 
     std::string command = "ADD:" + key + ":" + std::to_string(delta);
     uint32_t len = static_cast<uint32_t>(command.size());
-    send_all(socket_fd_, &len, sizeof(len), "add len");
+    uint32_t len_wire = bswap_if_le32(len);
+    send_all(socket_fd_, &len_wire, sizeof(len_wire), "add len");
     send_all(socket_fd_, command.c_str(), len, "add payload");
 
     uint32_t response_len = 0;
     recv_all(socket_fd_, &response_len, sizeof(response_len), "add response len");
+    response_len = bswap_if_le32(response_len);  // wire is big-endian
     if (response_len > kMaxRendezvousResponse) {
         throw std::runtime_error(
             "RendezvousStore::add: implausible response length " +
@@ -437,6 +469,7 @@ auto RendezvousStore::run_master_server() -> void {
                 ::close(client_fd);
                 continue;
             }
+            cmd_len = bswap_if_le32(cmd_len);  // wire is big-endian
 
             // cmd_len is fully attacker-controlled: any local process can connect
             // to the INADDR_ANY-bound rendezvous port. Bound it before allocating
@@ -490,7 +523,8 @@ auto RendezvousStore::run_master_server() -> void {
                 // miss instead of hanging forever waiting for a response that
                 // the old "only reply if non-empty" path never sent.
                 uint32_t response_len = static_cast<uint32_t>(value.size());
-                ::send(client_fd, &response_len, sizeof(response_len), 0);
+                uint32_t rl_wire = bswap_if_le32(response_len);
+                ::send(client_fd, &rl_wire, sizeof(rl_wire), 0);
                 if (response_len > 0) {
                     ::send(client_fd, value.c_str(), value.size(), 0);
                 }
@@ -521,7 +555,8 @@ auto RendezvousStore::run_master_server() -> void {
                     }
                     std::string value = std::to_string(new_val);
                     uint32_t response_len = value.size();
-                    ::send(client_fd, &response_len, sizeof(response_len), 0);
+                    uint32_t rl_wire = bswap_if_le32(response_len);
+                    ::send(client_fd, &rl_wire, sizeof(rl_wire), 0);
                     ::send(client_fd, value.c_str(), value.size(), 0);
                 }
             }
@@ -961,7 +996,10 @@ auto GlooBackend::init_connections() -> void {
             // spuriously fail the handshake for a valid peer.
             int received_rank = -1;
             try {
-                recv_all(client_fd, &received_rank, sizeof(int), "handshake rank id");
+                // Rank id travels as a big-endian uint32 (endian-independent wire).
+                uint32_t rr_wire = 0;
+                recv_all(client_fd, &rr_wire, sizeof(rr_wire), "handshake rank id");
+                received_rank = static_cast<int>(bswap_if_le32(rr_wire));
             } catch (...) {
                 ::close(client_fd);
                 throw;
@@ -975,7 +1013,8 @@ auto GlooBackend::init_connections() -> void {
             // Send our rank ID (full-transfer write; a short send would
             // truncate the peer's matching recv and fail its rank check).
             try {
-                send_all(client_fd, &rank_, sizeof(int), "handshake rank id");
+                uint32_t rank_wire = bswap_if_le32(static_cast<uint32_t>(rank_));
+                send_all(client_fd, &rank_wire, sizeof(rank_wire), "handshake rank id");
             } catch (...) {
                 ::close(client_fd);
                 throw;
@@ -1067,7 +1106,8 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
             // Send our rank ID (full-transfer write; a short send would
             // truncate the peer's matching recv and fail its rank check).
             try {
-                send_all(sockfd, &rank_, sizeof(int), "handshake rank id");
+                uint32_t rank_wire = bswap_if_le32(static_cast<uint32_t>(rank_));
+                send_all(sockfd, &rank_wire, sizeof(rank_wire), "handshake rank id");
             } catch (...) {
                 ::close(sockfd);
                 throw;
@@ -1078,7 +1118,10 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
             // split across TCP segments, spuriously failing a valid handshake.
             int received_rank = -1;
             try {
-                recv_all(sockfd, &received_rank, sizeof(int), "handshake rank id");
+                // Rank id travels as a big-endian uint32 (endian-independent wire).
+                uint32_t rr_wire = 0;
+                recv_all(sockfd, &rr_wire, sizeof(rr_wire), "handshake rank id");
+                received_rank = static_cast<int>(bswap_if_le32(rr_wire));
             } catch (...) {
                 ::close(sockfd);
                 throw;
@@ -1176,11 +1219,13 @@ auto GlooBackend::send_tensor(const Tensor& tensor, int peer_rank) -> void {
 
     Tensor cpu_tensor = get_cpu_buffer(tensor);
 
-    // Send metadata
+    // Send metadata (big-endian header; raw data payload stays host-order).
     uint64_t numel = cpu_tensor.numel();
     uint32_t dtype = static_cast<uint32_t>(cpu_tensor.dtype());
-    conn->send(&numel, sizeof(numel));
-    conn->send(&dtype, sizeof(dtype));
+    uint64_t numel_wire = bswap_if_le64(numel);
+    uint32_t dtype_wire = bswap_if_le32(dtype);
+    conn->send(&numel_wire, sizeof(numel_wire));
+    conn->send(&dtype_wire, sizeof(dtype_wire));
 
     // Send data
     size_t data_size = numel * dtype_size(cpu_tensor.dtype());
@@ -1193,11 +1238,13 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
         throw std::runtime_error("No connection to rank " + std::to_string(peer_rank));
     }
 
-    // Receive metadata
+    // Receive metadata (big-endian header; raw data payload stays host-order).
     uint64_t numel;
     uint32_t dtype;
     conn->recv(&numel, sizeof(numel));
     conn->recv(&dtype, sizeof(dtype));
+    numel = bswap_if_le64(numel);
+    dtype = bswap_if_le32(dtype);
 
     Tensor cpu_tensor = get_cpu_buffer(tensor);
 
@@ -1251,23 +1298,35 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
 }
 
 auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceOp op) -> void {
+    // Update `result` IN PLACE through its existing storage. A plain
+    // `result = result <op> operand` rebinds the caller's Tensor& to a freshly
+    // allocated impl, detaching any aliased Variable/view/grad that shares the
+    // original storage (the same H6 aliasing hazard the reduce/all_reduce
+    // write-back paths avoid). The in-place operators (+=, *=) and the
+    // zero_()/+= write-back pattern all write through the original strides.
     switch (op) {
         case ReduceOp::SUM:
         case ReduceOp::AVG:
-            result = result + operand;
+            result += operand;
             break;
         case ReduceOp::PRODUCT:
-            result = result * operand;
+            result *= operand;
             break;
-        case ReduceOp::MIN:
+        case ReduceOp::MIN: {
             // Stride-aware element-wise minimum. The previous data_ptr() loop
             // indexed linearly and corrupted non-contiguous result/operand.
-            result = tenzor::minimum(result, operand);
+            Tensor m = tenzor::minimum(result, operand);
+            result.zero_();
+            result += m;
             break;
-        case ReduceOp::MAX:
+        }
+        case ReduceOp::MAX: {
             // Stride-aware element-wise maximum (see MIN).
-            result = tenzor::maximum(result, operand);
+            Tensor m = tenzor::maximum(result, operand);
+            result.zero_();
+            result += m;
             break;
+        }
         default:
             throw std::invalid_argument("Unsupported reduce operation");
     }
@@ -1413,8 +1472,21 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
     // aliased Variable/view/grad that shares the original storage (the same H6
     // aliasing hazard the MPI/NCCL backends were rewritten to avoid). zero_() +=
     // writes through the original strides/storage, preserving aliases.
-    tensor.zero_();
-    tensor += cpu_tensor.to(tensor.device());
+    //
+    // CRITICAL: get_cpu_buffer() returns the caller's tensor ITSELF when it is a
+    // contiguous CPU tensor (no copy). In that case the ring reduced `tensor` in
+    // place already, and `cpu_tensor` aliases `tensor`; doing `tensor.zero_()`
+    // would also zero `cpu_tensor`, so `tensor += cpu_tensor` would add zero and
+    // destroy the result (observably zeroing the output at world_size==1, where
+    // the ring loops are no-ops). Only write back when cpu_tensor is a DISTINCT
+    // buffer (GPU input, or a non-contiguous CPU copy).
+    const bool aliases_caller =
+        cpu_tensor.device().type == tensor.device().type &&
+        cpu_tensor.data_ptr() == tensor.data_ptr();
+    if (!aliases_caller) {
+        tensor.zero_();
+        tensor += cpu_tensor.to(tensor.device());
+    }
 }
 
 auto GlooBackend::get_cpu_buffer(const Tensor& tensor) -> Tensor {

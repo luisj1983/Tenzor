@@ -140,15 +140,46 @@ inline auto jacrev(Fn f) -> Fn {
 /**
  * @brief Create a function that computes the forward-mode Jacobian of @p f.
  *
- * Equivalent to jacrev for correctness, but uses forward-mode AD internally
- * (more efficient when output dimension > input dimension).
+ * Assembles the Jacobian column-by-column using forward-mode AD (JVP) against
+ * the input-space basis vectors. For f: R^n -> R^m this performs n forward
+ * passes, which is more efficient than reverse-mode when m >= n. The input must
+ * be floating-point (Float32/Float64).
  *
  * @param f Differentiable function
  * @return A function mapping x -> J_f(x) (as a Variable wrapping the Jacobian tensor)
  */
 inline auto jacfwd(Fn f) -> Fn {
-    // tenzor::jacobian already selects forward vs reverse mode based on dimensions
-    return jacrev(std::move(f));
+    return [f = std::move(f)](const Variable& x) -> Variable {
+        const Tensor& xt = x.tensor();
+        const int64_t n = xt.numel();
+        std::vector<int64_t> xshape(xt.shape().begin(), xt.shape().end());
+        std::vector<Tensor> columns;
+        columns.reserve(n > 0 ? static_cast<size_t>(n) : 0);
+        for (int64_t j = 0; j < n; ++j) {
+            // Basis tangent e_j, built host-side then moved to x's device.
+            Tensor basis = tenzor::zeros(xshape, xt.dtype(), Device::cpu());
+            switch (xt.dtype()) {
+                case DType::Float32: basis.data<float>()[j] = 1.0f; break;
+                case DType::Float64: basis.data<double>()[j] = 1.0; break;
+                default:
+                    throw std::invalid_argument(
+                        "jacfwd: forward-mode Jacobian requires a floating-point "
+                        "(Float32/Float64) input");
+            }
+            Tensor tangent = (xt.device() == Device::cpu()) ? basis
+                                                            : basis.to(xt.device());
+            // JVP tangent output = J * e_j = column j of the Jacobian.
+            auto jvp_result = tenzor::jvp(f, x, tangent);
+            const Tensor& col = jvp_result.second;
+            columns.push_back(tenzor::reshape(col, {col.numel()}));
+        }
+        if (columns.empty()) {
+            return Variable(tenzor::zeros({0, 0}, xt.dtype(), xt.device()), false);
+        }
+        // Stack the m-length columns along dim 1 -> (m, n) Jacobian.
+        Tensor J = tenzor::stack(columns, /*dim=*/1);
+        return Variable(J, false);
+    };
 }
 
 /**

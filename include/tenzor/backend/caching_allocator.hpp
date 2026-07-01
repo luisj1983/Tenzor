@@ -6,12 +6,15 @@
 #include <mutex>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // Forward declare CUDA types to avoid requiring cuda_runtime.h
 #ifndef __CUDACC__
 struct CUstream_st;
 typedef struct CUstream_st* cudaStream_t;
+struct CUevent_st;
+typedef struct CUevent_st* cudaEvent_t;
 #else
 #include <cuda_runtime.h>
 #endif
@@ -29,6 +32,15 @@ struct Block {
     int device;             // CUDA device ID
     cudaStream_t stream;    // Associated stream (for async operations)
     void* original_ptr;     // Original cudaMalloc pointer (for merge tracking)
+
+    // Pending CUDA events that must complete before this block's memory may be
+    // safely reused on a *different* stream. One is recorded on free() against
+    // the block's last-use stream; block merges splice neighbors' events in,
+    // and a split hands still-pending events to the remainder. Empty whenever
+    // reuse needs no cross-stream synchronization. The second element of each
+    // pair is the stream the event was recorded on (used to take the
+    // same-stream fast path on reuse).
+    std::vector<std::pair<cudaEvent_t, cudaStream_t>> free_events;
 
     Block(void* p, size_t s, int dev, cudaStream_t str = nullptr)
         : ptr(p), size(s), allocated(false), device(dev), stream(str), original_ptr(p) {}
@@ -249,6 +261,22 @@ private:
      */
     bool release_block(Block* block);
 
+    // --- Stream-ordered reuse event helpers (called with device mutex held) ---
+
+    /// Take an event from the pool, creating a new timing-disabled event if the
+    /// pool is empty. Returns nullptr if event creation fails.
+    cudaEvent_t acquire_event(std::vector<cudaEvent_t>& pool);
+
+    /// Return an event to the pool for later reuse (no-op for nullptr).
+    void recycle_event(std::vector<cudaEvent_t>& pool, cudaEvent_t event);
+
+    /// Record an event on @p block 's last-use stream and stash it on the block
+    /// so a later cross-stream reuse can wait for in-flight work to finish.
+    void record_free_event(std::vector<cudaEvent_t>& pool, Block* block);
+
+    /// Destroy every event currently held in @p pool (cache teardown).
+    void destroy_event_pool(std::vector<cudaEvent_t>& pool);
+
     // Per-device data structures
     struct DeviceAllocator {
         // Per-device mutex for concurrent multi-GPU allocation
@@ -263,6 +291,10 @@ private:
         // Address-ordered index (non-owning) into all_blocks, enabling O(log n)
         // predecessor lookup for backward coalescing on free().
         std::map<void*, Block*> blocks_by_addr;
+
+        // Pool of reusable CUDA events (recorded on free, consumed on reuse) to
+        // avoid cudaEventCreate/Destroy churn on the allocation hot path.
+        std::vector<cudaEvent_t> event_pool;
 
         // Statistics
         MemoryStats stats;

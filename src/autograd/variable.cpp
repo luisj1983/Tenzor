@@ -72,6 +72,14 @@ auto Variable::grad() const -> const std::optional<Tensor>& {
     if (!impl_) {
         throw std::runtime_error("Cannot access grad of uninitialized Variable");
     }
+    // Serialize against concurrent gradient accumulation when thread_safe_ is
+    // enabled, matching has_grad()/set_grad()/mutable_grad(); reading grad_
+    // (and the metadata flags) unlocked while a backward worker writes it is a
+    // data race.
+    std::unique_lock<std::mutex> lock;
+    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
+        lock = std::unique_lock<std::mutex>(*impl_->grad_mutex_);
+    }
     // Match PyTorch: warn at most once when .grad is accessed on a
     // non-leaf Variable that has no stored gradient and was not marked
     // with retain_grad(). Use was_non_leaf_ rather than the live

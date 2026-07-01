@@ -123,9 +123,11 @@ auto ExtendedKernelCodegen::activation_expr(OpType act, const std::string& var,
             return "1.0" + F + " / (1.0" + F + " + " + exp_fn + "(-" + var + "))";
         case OpType::Tanh:    return tanh_fn + "(" + var + ")";
         case OpType::GELU:
-            return "0.5" + F + " * " + var + " * (1.0" + F + " + " + tanh_fn +
-                   "(0.7978845608" + F + " * (" + var + " + 0.044715" + F + " * " +
-                   var + " * " + var + " * " + var + ")))";
+            // Exact erf GELU 0.5*x*(1 + erf(x / sqrt(2))) to match the eager/CPU
+            // kernel and codegen.cpp; the tanh approximation diverged from the
+            // exact-erf eager op. erf has float+double device overloads.
+            return "0.5" + F + " * " + var + " * (1.0" + F + " + erf(" + var +
+                   " * 0.7071067811865476" + F + "))";
         default:
             return var;
     }
@@ -153,7 +155,18 @@ auto ExtendedKernelCodegen::generate(const ExtendedFusionGroup& group) -> std::s
     static const char* kPreamble =
         "typedef long long int64_t;\n"
         "typedef unsigned long long uint64_t;\n";
-    return std::string(kPreamble) + body;
+    // Float16/BFloat16 kernels reference __half / __nv_bfloat16 (see
+    // dtype_to_cuda_type) which are not built-in; pull in the corresponding
+    // NVRTC/hiprtc device headers when those types appear, otherwise the
+    // runtime compile fails with "identifier __half is undefined".
+    std::string includes;
+    if (body.find("__nv_bfloat16") != std::string::npos) {
+        includes += "#include <cuda_bf16.h>\n";
+    }
+    if (body.find("__half") != std::string::npos) {
+        includes += "#include <cuda_fp16.h>\n";
+    }
+    return includes + std::string(kPreamble) + body;
 }
 
 // ============================================================================
@@ -299,10 +312,10 @@ extern "C" __global__ void fused_gemm_epilogue_kernel(
     ss << R"(
     int64_t rows, int64_t cols) {
 
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= rows * cols) return;
 
-    int col = idx % cols;
+    int64_t col = idx % cols;
     // Promote to the compute type so bias add + activation run in float/double
     // (correct for the 16-bit storage types), then narrow back to T on store.
     )" << C << " val = static_cast<" << C << ">(output[idx]);\n";

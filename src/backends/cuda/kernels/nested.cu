@@ -312,6 +312,9 @@ auto nested_sum_cuda(const Tensor& values, const Tensor& offsets,
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
+    // An empty batch (B <= 0) would launch a 0-block grid, which CUDA rejects;
+    // the zero-filled output is already correct (mirrors nested_attention_cuda).
+    if (B <= 0) return output;
 
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
@@ -382,6 +385,9 @@ auto nested_mean_cuda(const Tensor& values, const Tensor& offsets,
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
+    // An empty batch (B <= 0) would launch a 0-block grid, which CUDA rejects;
+    // the zero-filled output is already correct (mirrors nested_attention_cuda).
+    if (B <= 0) return output;
 
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
@@ -904,30 +910,51 @@ __global__ void nested_layer_norm_kernel_t(
     int64_t len = end - start;
     if (len <= 0) return;
 
-    // For each row in the segment, compute LN across the D dimension
-    for (int64_t row = start; row < end; ++row) {
-        // Compute mean (T-precision accumulator)
-        T mean = T(0);
-        for (int64_t d = 0; d < D; ++d) {
-            mean += values[row * D + d];
-        }
-        mean /= static_cast<T>(D);
+    // Cooperative block reduction (interleaved addressing — valid for the
+    // non-power-of-two block sizes = min(D,256)) so mean/variance are computed
+    // once per row across the whole block, not redundantly in every thread.
+    __shared__ T sdata[256];
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
 
-        // Compute variance
-        T var = T(0);
-        for (int64_t d = 0; d < D; ++d) {
-            T diff = values[row * D + d] - mean;
-            var += diff * diff;
+    for (int64_t row = start; row < end; ++row) {
+        // --- mean ---
+        T psum = T(0);
+        for (int64_t d = tid; d < D; d += nthreads) psum += values[row * D + d];
+        sdata[tid] = psum;
+        __syncthreads();
+        for (int s = 1; s < nthreads; s *= 2) {
+            int idx = 2 * s * tid;
+            if (idx + s < nthreads) sdata[idx] += sdata[idx + s];
+            __syncthreads();
         }
-        var /= static_cast<T>(D);
+        T mean = sdata[0] / static_cast<T>(D);
+        __syncthreads();  // all threads read sdata[0] before it is overwritten
+
+        // --- variance ---
+        T pvar = T(0);
+        for (int64_t d = tid; d < D; d += nthreads) {
+            T diff = values[row * D + d] - mean;
+            pvar += diff * diff;
+        }
+        sdata[tid] = pvar;
+        __syncthreads();
+        for (int s = 1; s < nthreads; s *= 2) {
+            int idx = 2 * s * tid;
+            if (idx + s < nthreads) sdata[idx] += sdata[idx + s];
+            __syncthreads();
+        }
+        T var = sdata[0] / static_cast<T>(D);
+        __syncthreads();
 
         T inv_std = nested_rsqrt<T>(var + eps);
 
         // Normalize and apply affine
-        for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
+        for (int64_t d = tid; d < D; d += nthreads) {
             T normalized = (values[row * D + d] - mean) * inv_std;
             output[row * D + d] = normalized * weight[d] + bias[d];
         }
+        __syncthreads();  // safe reuse of sdata for the next row
     }
 }
 

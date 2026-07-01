@@ -13,6 +13,7 @@
 #include <tenzor/utils/log.hpp>
 
 #include <exception>
+#include <stdexcept>
 
 namespace tenzor::serving {
 
@@ -69,6 +70,15 @@ WorkerPool::~WorkerPool() {
 auto WorkerPool::submit(std::function<void()> task) -> void {
     {
         std::lock_guard<std::mutex> lk(mutex_);
+        if (!running_.load(std::memory_order_acquire)) {
+            // Pool already shut down (workers joined): reject instead of
+            // silently dropping the task into a queue no worker will ever
+            // drain. Mirrors DynamicBatcher::submit, which fails post-stop
+            // submissions rather than no-op'ing them. Checked under mutex_ so
+            // it cannot race with shutdown() flipping running_.
+            throw std::runtime_error(
+                "WorkerPool is not running (submit after shutdown)");
+        }
         task_queue_.push(std::move(task));
     }
     cv_.notify_one();

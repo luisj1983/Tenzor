@@ -38,15 +38,23 @@ namespace {
 template<typename T>
 using interp_acc_t = std::conditional_t<std::is_same_v<T, double>, double, float>;
 
-// Cubic interpolation coefficient function (Catmull-Rom spline).
+// Cubic convolution coefficient function.
+// Uses the cubic-convolution parameter a = -0.75, matching PyTorch's
+// `upsample_bicubic2d` (and OpenCV) reference. The previous a = -0.5
+// (Catmull-Rom) gave systematically different weights from the PyTorch
+// reference. Both the bicubic forward and backward share this function, so
+// they stay consistent.
+//   |x| <= 1 : (a+2)|x|^3 - (a+3)|x|^2 + 1
+//   1<|x|<2  : a|x|^3 - 5a|x|^2 + 8a|x| - 4a
 // Templated on the compute type so Float64 paths keep double precision.
 template<typename C>
 inline C cubic_interp_coeff(C x) {
+    constexpr C a = C(-0.75);
     C abs_x = std::abs(x);
     if (abs_x <= C(1)) {
-        return C(1.5) * abs_x * abs_x * abs_x - C(2.5) * abs_x * abs_x + C(1);
+        return ((a + C(2)) * abs_x - (a + C(3))) * abs_x * abs_x + C(1);
     } else if (abs_x < C(2)) {
-        return C(-0.5) * abs_x * abs_x * abs_x + C(2.5) * abs_x * abs_x - C(4) * abs_x + C(2);
+        return (((abs_x - C(5)) * abs_x + C(8)) * abs_x - C(4)) * a;
     }
     return C(0);
 }
@@ -678,16 +686,23 @@ inline float src_coord(int64_t dst, int64_t in_dim, int64_t out_dim, bool align_
 }
 
 // Nearest source index (PyTorch UpsampleNearest1d et al.). Floor(dst*scale).
+// Templated on the compute type so the backward uses the SAME precision as the
+// forward (interpolate_nearest_impl, which computes the source index in
+// interp_acc_t<T> — double for Float64 input). A hard-coded `float` here could
+// land a gradient on a different source pixel than the forward selected near a
+// boundary for Float64 inputs.
+template<typename Compute = float>
 inline int64_t nearest_src(int64_t dst, int64_t in_dim, int64_t out_dim) {
-    const float scale = static_cast<float>(in_dim) / static_cast<float>(out_dim);
-    return std::min(static_cast<int64_t>(std::floor(static_cast<float>(dst) * scale)),
+    const Compute scale = static_cast<Compute>(in_dim) / static_cast<Compute>(out_dim);
+    return std::min(static_cast<int64_t>(std::floor(static_cast<Compute>(dst) * scale)),
                     in_dim - 1);
 }
 
 // Nearest-exact rule per `_compute_source_index_nearest_exact`: floor((dst+0.5)*scale).
+template<typename Compute = float>
 inline int64_t nearest_exact_src(int64_t dst, int64_t in_dim, int64_t out_dim) {
-    const float scale = static_cast<float>(in_dim) / static_cast<float>(out_dim);
-    return std::min(static_cast<int64_t>(std::floor((static_cast<float>(dst) + 0.5f) * scale)),
+    const Compute scale = static_cast<Compute>(in_dim) / static_cast<Compute>(out_dim);
+    return std::min(static_cast<int64_t>(std::floor((static_cast<Compute>(dst) + Compute(0.5)) * scale)),
                     in_dim - 1);
 }
 
@@ -893,8 +908,8 @@ void nearest_backward_axis_scatter(
                     const int64_t dim_idx = tmp % out_spatial[d];
                     tmp /= out_spatial[d];
                     src_indices[d] = nearest_exact
-                        ? nearest_exact_src(dim_idx, in_spatial[d], out_spatial[d])
-                        : nearest_src(dim_idx, in_spatial[d], out_spatial[d]);
+                        ? nearest_exact_src<Compute>(dim_idx, in_spatial[d], out_spatial[d])
+                        : nearest_src<Compute>(dim_idx, in_spatial[d], out_spatial[d]);
                 }
                 for (int64_t d = spatial_dims - 1; d >= 0; --d) {
                     in_idx += src_indices[d] * in_stride;
@@ -1616,6 +1631,21 @@ auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor
     }
 
     auto idx_shape = rel_pos_index.shape();
+    // The kernel indexes idx_data[pos] for pos in [0, seq_len*seq_len) and reads
+    // seq_len from idx_shape[0]. That is only valid when rel_pos_index is exactly
+    // a square [seq_len, seq_len] table; any other rank/shape would silently
+    // misread (or read out of bounds when numel < seq_len^2). Assert the contract.
+    if (idx_shape.size() != 2 || idx_shape[0] != idx_shape[1]) {
+        std::string got = "[";
+        for (size_t d = 0; d < idx_shape.size(); ++d) {
+            got += std::to_string(idx_shape[d]);
+            if (d + 1 < idx_shape.size()) got += ", ";
+        }
+        got += "]";
+        throw std::invalid_argument(
+            "gather_relative_position_bias: rel_pos_index must be a square 2-D "
+            "[seq_len, seq_len] tensor, got " + got);
+    }
     int64_t seq_len = idx_shape[0];
     // Output: [num_heads, seq_len, seq_len]
     Tensor output({num_heads, seq_len, seq_len}, bias_table.dtype(), bias_table.device());

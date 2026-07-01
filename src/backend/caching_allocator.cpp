@@ -7,6 +7,8 @@
 #include <sstream>
 #include <iostream>
 #include <cstdlib>
+#include <utility>
+#include <vector>
 
 namespace tenzor {
 namespace backend {
@@ -140,7 +142,15 @@ void CachingAllocator::free(void* ptr, int device) {
             }
             dev_alloc->stats.cached_bytes += block->size;
 
-            // Try to merge with adjacent blocks
+            // Record a CUDA event on this block's last-use stream so any later
+            // cross-stream reuse waits for still-in-flight work to finish
+            // (prevents cross-stream use-after-free). Same-stream reuse is
+            // already ordered and skips the wait. Recorded BEFORE merging so
+            // that try_merge_blocks can splice this and the neighbors' events
+            // into the surviving coalesced block.
+            record_free_event(dev_alloc->event_pool, block);
+
+            // Try to merge with adjacent blocks (splices neighbor events in)
             if (merge_enabled_) {
                 try_merge_blocks(block);
             }
@@ -193,6 +203,10 @@ void CachingAllocator::empty_cache(int device) {
             for (Block* block : blocks_to_release) {
                 release_block(block);
             }
+
+            // Drain this device's event pool now that its freeable blocks are
+            // gone, so cached events don't linger.
+            destroy_event_pool(pair.second.event_pool);
         }
     } else {
         // Empty specific device
@@ -211,6 +225,9 @@ void CachingAllocator::empty_cache(int device) {
         for (Block* block : blocks_to_release) {
             release_block(block);
         }
+
+        // Drain this device's event pool now that its freeable blocks are gone.
+        destroy_event_pool(it->second.event_pool);
     }
 }
 
@@ -365,9 +382,59 @@ Block* CachingAllocator::try_allocate_from_cache(size_t size, int device, cudaSt
             device_alloc.stats.cached_bytes = 0;
         }
 
+        // Stream-ordered reuse: resolve the pending free events recorded when
+        // this block (and any neighbors merged into it) were freed. For each:
+        //   - same stream as the new allocation -> already ordered, recycle;
+        //   - completed (cudaEventQuery == cudaSuccess) -> fully safe, recycle;
+        //   - still pending on a different stream -> make the new stream wait on
+        //     it, and keep the event so a split remainder (which covers the same
+        //     possibly-in-flight memory) stays gated for its own future reuse.
+        std::vector<std::pair<cudaEvent_t, cudaStream_t>> carried;
+        for (const auto& [ev, ev_stream] : block->free_events) {
+            if (ev_stream == stream) {
+                recycle_event(device_alloc.event_pool, ev);          // same stream: ordered
+            } else if (cudaEventQuery(ev) == cudaSuccess) {
+                recycle_event(device_alloc.event_pool, ev);          // already complete
+            } else {
+                cudaStreamWaitEvent(stream, ev, 0);                  // gate the new stream
+                carried.emplace_back(ev, ev_stream);                 // keep for the remainder
+            }
+        }
+        block->free_events.clear();
+        // The block is now (re)bound to the requesting stream.
+        block->stream = stream;
+
         // Try to split if block is too large
+        bool did_split = false;
         if (block->size >= size + min_split_size_) {
-            split_block(block, size);
+            did_split = split_block(block, size);
+        }
+
+        if (did_split && !carried.empty()) {
+            // The returned portion is used on `stream` and is already gated by
+            // the waits issued above. The remainder went back to the free pool
+            // still covering the in-flight range, so hand the unfinished events
+            // to it for correct future cross-stream gating.
+            void* rem_ptr = static_cast<char*>(block->ptr) + block->size;
+            auto rem_it = device_alloc.blocks_by_addr.find(rem_ptr);
+            if (rem_it != device_alloc.blocks_by_addr.end()) {
+                Block* remainder = rem_it->second;
+                for (const auto& e : carried) {
+                    remainder->free_events.push_back(e);
+                }
+            } else {
+                for (const auto& e : carried) {
+                    recycle_event(device_alloc.event_pool, e.first);
+                }
+            }
+        } else {
+            // No remainder: the returned block already waited on `stream`, so
+            // the still-pending events are no longer needed — recycle them. (A
+            // recycled event is safe to re-record; the waits above already
+            // captured its state into `stream`.)
+            for (const auto& e : carried) {
+                recycle_event(device_alloc.event_pool, e.first);
+            }
         }
 
         return block;
@@ -472,11 +539,24 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
                 // Merge with next block
                 device_alloc.free_blocks.erase(next_block);
 
-                // When merging, next_block's size was already in cached_bytes
-                // Subtract it before expanding the current block to avoid double-counting
-                if (device_alloc.stats.cached_bytes >= next_block->size) {
-                    device_alloc.stats.cached_bytes -= next_block->size;
+                // cached_bytes is an exact running total of all free bytes.
+                // Both `block` (credited in free() just before this call) and
+                // next_block (credited when it was itself freed) are ALREADY
+                // counted, and the coalesced block represents exactly those same
+                // bytes — so cached_bytes must NOT change here. The old code
+                // subtracted next_block->size, under-counting cached_bytes by
+                // the neighbor's size on every merge, which broke the invariant
+                // cached_bytes == sum(free block sizes) and made
+                // enforce_cache_limit() under-evict (silently exceeding
+                // max_cached_memory).
+
+                // Inherit next_block's pending stream-reuse events so the
+                // coalesced block stays gated against in-flight work that
+                // touched the absorbed range.
+                for (const auto& e : next_block->free_events) {
+                    block->free_events.push_back(e);
                 }
+                next_block->free_events.clear();
 
                 // Expand current block
                 block->size += next_block->size;
@@ -512,12 +592,20 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
                 void* new_ptr = prev_block->ptr;
                 size_t prev_size = prev_block->size;
 
-                // prev_block is currently a free block; mirror the forward-merge
-                // accounting (subtract the absorbed block's cached bytes).
+                // prev_block is currently a free block whose bytes are already
+                // in cached_bytes; `block`'s bytes were credited in free(). The
+                // coalesced block represents the same total free bytes, so
+                // cached_bytes must NOT change here (mirrors the forward merge;
+                // the old subtraction under-counted cached_bytes on every
+                // backward merge).
                 device_alloc.free_blocks.erase(prev_block);
-                if (device_alloc.stats.cached_bytes >= prev_size) {
-                    device_alloc.stats.cached_bytes -= prev_size;
+
+                // Inherit prev_block's pending stream-reuse events before it is
+                // destroyed below so the coalesced block stays gated.
+                for (const auto& e : prev_block->free_events) {
+                    block->free_events.push_back(e);
                 }
+                prev_block->free_events.clear();
 
                 // Grow `block` downward to cover the predecessor's range.
                 block->ptr = new_ptr;
@@ -545,6 +633,13 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
 }
 
 size_t CachingAllocator::round_size(size_t size) const {
+    // Guard the round-up against size_t overflow: for size close to SIZE_MAX,
+    // (size + alignment_ - 1) wraps to a tiny value and the allocator would
+    // under-allocate, leaving subsequent writes to overrun the buffer. The
+    // request size can derive from untrusted checkpoint metadata.
+    if (size > SIZE_MAX - (alignment_ - 1)) {
+        throw std::bad_alloc();
+    }
     return ((size + alignment_ - 1) / alignment_) * alignment_;
 }
 
@@ -617,6 +712,14 @@ bool CachingAllocator::release_block(Block* block) {
     // Remove from free blocks if present
     device_alloc.free_blocks.erase(block);
 
+    // Recycle any pending stream-reuse events; the underlying allocation is
+    // about to be returned to the driver (cudaFree synchronizes the device, so
+    // the events' work is complete) and the Block object is destroyed below.
+    for (const auto& e : block->free_events) {
+        recycle_event(device_alloc.event_pool, e.first);
+    }
+    block->free_events.clear();
+
     // Free device memory. Surface the error rather than silently swallowing it
     // (a failed cudaFree means the underlying allocation leaks).
     cudaError_t err = cudaFree(block->ptr);
@@ -637,6 +740,50 @@ bool CachingAllocator::release_block(Block* block) {
     device_alloc.blocks_by_addr.erase(block->ptr);
     device_alloc.all_blocks.erase(block->ptr);
     return true;
+}
+
+cudaEvent_t CachingAllocator::acquire_event(std::vector<cudaEvent_t>& pool) {
+    if (!pool.empty()) {
+        cudaEvent_t ev = pool.back();
+        pool.pop_back();
+        return ev;
+    }
+    cudaEvent_t ev = nullptr;
+    // Timing is unnecessary; disabling it makes record/query cheaper.
+    cudaError_t err = cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
+    if (err != cudaSuccess) {
+        return nullptr;
+    }
+    return ev;
+}
+
+void CachingAllocator::recycle_event(std::vector<cudaEvent_t>& pool, cudaEvent_t event) {
+    if (event) {
+        pool.push_back(event);
+    }
+}
+
+void CachingAllocator::record_free_event(std::vector<cudaEvent_t>& pool, Block* block) {
+    cudaEvent_t ev = acquire_event(pool);
+    if (!ev) {
+        // Event creation failed: skip gating for this block rather than abort.
+        // Cross-stream reuse of this particular block won't be synchronized,
+        // but same-stream reuse (the common case) remains correct.
+        return;
+    }
+    cudaError_t err = cudaEventRecord(ev, block->stream);
+    if (err != cudaSuccess) {
+        recycle_event(pool, ev);
+        return;
+    }
+    block->free_events.emplace_back(ev, block->stream);
+}
+
+void CachingAllocator::destroy_event_pool(std::vector<cudaEvent_t>& pool) {
+    for (cudaEvent_t ev : pool) {
+        cudaEventDestroy(ev);
+    }
+    pool.clear();
 }
 
 } // namespace backend

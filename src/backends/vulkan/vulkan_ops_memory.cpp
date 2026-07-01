@@ -1444,8 +1444,9 @@ auto VulkanBackend::dispatchActivation([[maybe_unused]] const std::string& op_na
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (is_float16) {
-        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+    if (is_float16 || is_bfloat16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 half-precision per uint32).
+        // BFloat16 also packs 2/word (activations_bf16 indexes input_data[element/2]).
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
@@ -1476,7 +1477,7 @@ auto VulkanBackend::dispatchActivation([[maybe_unused]] const std::string& op_na
     // For Float16, shader processes 2 elements per thread (packed pairs)
     uint32_t num_elements = static_cast<uint32_t>(input.numel());
     uint32_t workgroups;
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {
         // Each thread handles 2 elements (pair), 256 threads per workgroup
         uint32_t num_pairs = (num_elements + 1) / 2;
         workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
@@ -1574,7 +1575,7 @@ auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::strin
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
     size_t buffer_size_input_or_output = input_or_output.numel() * input_or_output.dtype_size();
     size_t buffer_size_grad_in = grad_input.numel() * grad_input.dtype_size();
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {  // BFloat16 also packs 2/word (activations_backward_bf16)
         // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
         size_t go_pairs = (grad_output.numel() + 1) / 2;
         size_t io_pairs = (input_or_output.numel() + 1) / 2;
@@ -1607,7 +1608,7 @@ auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::strin
 
     // Dispatch compute workgroups
     // For Float16, each thread processes 2 elements (pairs)
-    uint32_t num_threads = is_float16 ? ((grad_output.numel() + 1) / 2) : grad_output.numel();
+    uint32_t num_threads = (is_float16 || is_bfloat16) ? ((grad_output.numel() + 1) / 2) : grad_output.numel();
     uint32_t workgroups = div_wg(num_threads, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 

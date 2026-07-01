@@ -98,7 +98,7 @@ __global__ void flash_attention_v2_kernel_f64_hip(
     const double scale,
     const bool causal
 ) {
-    constexpr int Bc = 32;
+    constexpr int Bc = 16;  // keep FP64 forward LDS <= 64 KiB for head_dim up to 128
     constexpr int K_STRIDE = HEAD_DIM + 4;  // pad to avoid bank conflicts
 
     const int batch_head = blockIdx.x;
@@ -655,7 +655,7 @@ auto fused_attention_hip_f64(
     Tensor lse    = create_hip_zeros_f64({batch_heads, seq_len_q},           DType::Float32, Q.device(), stream);
 
     constexpr int BLOCK_SIZE = 256;
-    constexpr int Bc = 32;
+    constexpr int Bc = 16;  // must match the forward kernel's internal Bc (LDS <= 64 KiB)
     dim3 grid(static_cast<int>(batch_heads), static_cast<int>(seq_len_q));
     dim3 threads(BLOCK_SIZE);
 
@@ -752,8 +752,12 @@ auto flash_attention_backward_hip_f64(
     Tensor dK = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device(), stream);
     Tensor dV = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device(), stream);
 
-    constexpr int Br = 32;
-    constexpr int Bc = 32;
+    // Br=Bc=8 keeps the FP64 backward shared-memory request under the 64 KiB LDS
+    // cap for every supported head_dim (up to 128): with Br=Bc=32 head_dim>=64
+    // overflowed 64 KiB and the launch threw. Tiling does not affect the result,
+    // only performance, and this path is FP64 gradcheck-only.
+    constexpr int Br = 8;
+    constexpr int Bc = 8;
     constexpr int BLOCK_SIZE = 256;
 
     int num_kv_tiles = static_cast<int>((seq_len + Bc - 1) / Bc);

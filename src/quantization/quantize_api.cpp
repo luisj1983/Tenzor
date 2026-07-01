@@ -458,9 +458,12 @@ auto calibrate(
                 for (const auto& child : seq->modules()) {
                     if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(child)) {
                         if (fq->observer() && fq->observer()->has_data()) {
+                            // Use this FakeQuantize's own configured dtype/scheme
+                            // (mirrors the top-level branch); hardcoding
+                            // INT8/PerTensorSymmetric ignored UINT8 / per-channel
+                            // / asymmetric qconfigs on nested modules.
                             auto qparams = fq->observer()->calculate_qparams(
-                                nn::quantization::QuantDType::INT8,
-                                nn::quantization::QuantizationScheme::PerTensorSymmetric
+                                fq->quant_dtype(), fq->quant_scheme()
                             );
                             std::string key = name + "." + std::to_string(idx);
                             params_map.insert_or_assign(key, std::move(qparams));

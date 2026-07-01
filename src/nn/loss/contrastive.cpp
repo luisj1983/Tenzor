@@ -13,6 +13,7 @@
 #include "tenzor/autograd/ops.hpp"
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace tenzor::nn {
 
@@ -138,7 +139,14 @@ auto scalar_var(float value, DType dtype, Device device) -> Variable {
 // ============================================================================
 
 InfoNCELoss::InfoNCELoss(double temperature, Reduction reduction)
-    : temperature_(temperature), reduction_(reduction) {}
+    : temperature_(temperature), reduction_(reduction) {
+    if (!(temperature > 0.0)) {
+        throw std::invalid_argument(
+            "InfoNCELoss: temperature must be > 0 (got " +
+            std::to_string(temperature) + "); a zero/negative temperature "
+            "produces NaN/Inf logits when scaling similarities.");
+    }
+}
 
 auto InfoNCELoss::forward(const Variable& queries, const Variable& keys) -> Variable {
     // queries: (N, D), keys: (N, D)
@@ -170,7 +178,14 @@ auto InfoNCELoss::forward(const Variable& queries, const Variable& keys) -> Vari
 // ============================================================================
 
 NTXentLoss::NTXentLoss(double temperature, Reduction reduction)
-    : temperature_(temperature), reduction_(reduction) {}
+    : temperature_(temperature), reduction_(reduction) {
+    if (!(temperature > 0.0)) {
+        throw std::invalid_argument(
+            "NTXentLoss: temperature must be > 0 (got " +
+            std::to_string(temperature) + "); a zero/negative temperature "
+            "produces NaN/Inf logits when scaling similarities.");
+    }
+}
 
 auto NTXentLoss::forward(const Variable& z_i, const Variable& z_j) -> Variable {
     // z_i: (N, D), z_j: (N, D)

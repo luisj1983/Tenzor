@@ -32,12 +32,41 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <variant>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#  include <fcntl.h>
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#  define TENZOR_HAVE_MMAP 1
+#endif
+
+namespace {
+// RAII wrapper for a read-only mmap of a checkpoint file. Lets ZipReader index
+// the archive on demand (the OS pages it in / evicts) instead of slurping the
+// whole multi-GB file into RAM.
+struct MmapHolder {
+    void* ptr = nullptr;
+    size_t size = 0;
+#ifdef TENZOR_HAVE_MMAP
+    int fd = -1;
+    ~MmapHolder() {
+        if (ptr && ptr != MAP_FAILED) ::munmap(ptr, size);
+        if (fd >= 0) ::close(fd);
+    }
+#endif
+    MmapHolder() = default;
+    MmapHolder(const MmapHolder&) = delete;
+    MmapHolder& operator=(const MmapHolder&) = delete;
+};
+}  // namespace
 
 namespace tenzor::io {
 
@@ -58,6 +87,35 @@ struct ZipEntry {
 class ZipReader {
 public:
     explicit ZipReader(const std::string& path) {
+#ifdef TENZOR_HAVE_MMAP
+        // Memory-map the archive: the OS pages it in on demand rather than
+        // copying the whole (potentially multi-GB) file into RAM up front.
+        int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd < 0) {
+            throw std::runtime_error("torch_pickle: cannot open file: " + path);
+        }
+        struct stat st {};
+        if (::fstat(fd, &st) != 0) {
+            ::close(fd);
+            throw std::runtime_error("torch_pickle: cannot stat file: " + path);
+        }
+        if (st.st_size < 22) {
+            ::close(fd);
+            throw std::runtime_error(
+                "torch_pickle: file too small to be a ZIP archive: " + path);
+        }
+        void* p = ::mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ,
+                         MAP_PRIVATE, fd, 0);
+        if (p == MAP_FAILED) {
+            ::close(fd);
+            throw std::runtime_error("torch_pickle: failed to mmap file: " + path);
+        }
+        mmap_.fd = fd;
+        mmap_.ptr = p;
+        mmap_.size = static_cast<size_t>(st.st_size);
+        data_ = std::span<const uint8_t>(static_cast<const uint8_t*>(p), mmap_.size);
+#else
+        // Portable fallback: slurp into an owned buffer.
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) {
             throw std::runtime_error("torch_pickle: cannot open file: " + path);
@@ -68,12 +126,14 @@ public:
                 "torch_pickle: file too small to be a ZIP archive: " + path);
         }
         f.seekg(0, std::ios::beg);
-        data_.resize(static_cast<size_t>(size));
-        f.read(reinterpret_cast<char*>(data_.data()), size);
+        owned_.resize(static_cast<size_t>(size));
+        f.read(reinterpret_cast<char*>(owned_.data()), size);
         if (!f) {
             throw std::runtime_error(
                 "torch_pickle: failed to read file contents: " + path);
         }
+        data_ = std::span<const uint8_t>(owned_.data(), owned_.size());
+#endif
         parse_central_directory(path);
     }
 
@@ -363,7 +423,9 @@ private:
         }
     }
 
-    std::vector<uint8_t> data_;
+    MmapHolder mmap_;            // owns the mmap (when used)
+    std::vector<uint8_t> owned_; // owns a slurped copy (fallback path only)
+    std::span<const uint8_t> data_;  // view over whichever backing store
     std::unordered_map<std::string, ZipEntry> entries_;
 };
 
@@ -1225,9 +1287,21 @@ void flatten_state_dict(const PValuePtr& node,
             }
             break;
         }
+        case PValue::Kind::List:
+        case PValue::Kind::Tuple: {
+            // A list/tuple-valued entry (e.g. a list of tensors) would otherwise
+            // be dropped, yielding a partial state dict. Recurse with an index
+            // suffix so its tensors are captured under names like "prefix.0".
+            for (size_t i = 0; i < node->seq.size(); ++i) {
+                std::string sub = prefix.empty() ? std::to_string(i)
+                                                 : prefix + "." + std::to_string(i);
+                flatten_state_dict(node->seq[i], sub, out, depth + 1);
+            }
+            break;
+        }
         default:
-            // Skip non-tensor values silently (PyTorch state_dicts sometimes
-            // include scalars or version markers).
+            // Skip genuinely non-tensor values silently (scalars, version
+            // markers, and ReduceCalls that did not resolve to a tensor).
             break;
     }
 }

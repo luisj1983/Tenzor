@@ -188,6 +188,20 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
     Tensor is_replaced_f32(shape_vec, DType::Float32, Device::cpu());
     is_replaced_f32.zero_();
 
+    // Validate the caller-provided index tensors before reinterpreting their
+    // buffers as int64 (mirrors compute_loss): a wrong-dtype or undersized tensor
+    // would drive a heap out-of-bounds read in the loop below.
+    if (masked_positions_cpu.dtype() != DType::Int64 ||
+        original_tokens_cpu.dtype() != DType::Int64) {
+        throw std::invalid_argument(
+            "ElectraForPreTraining::forward: masked_positions and original_tokens must have dtype Int64");
+    }
+    if (masked_positions_cpu.numel() < batch_size * seq_len ||
+        original_tokens_cpu.numel() < batch_size * seq_len) {
+        throw std::invalid_argument(
+            "ElectraForPreTraining::forward: masked_positions/original_tokens must have >= batch_size*seq_len elements");
+    }
+
     const int64_t* mask_data = masked_positions_cpu.data<int64_t>();
     const int64_t* orig_data = original_tokens_cpu.data<int64_t>();
     int64_t* gen_data = generated_tokens_cpu.data<int64_t>();

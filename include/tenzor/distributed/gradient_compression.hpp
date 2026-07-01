@@ -27,6 +27,7 @@
 #include "../core/dtype.hpp"
 #include <memory>
 #include <string>
+#include <mutex>
 #include <unordered_map>
 
 namespace tenzor::distributed {
@@ -269,6 +270,9 @@ private:
      * stable across training iterations for a given parameter.
      */
     std::unordered_map<const void*, Tensor> residuals_;
+    // Guards all residuals_ read/modify/rekey operations — the base-class contract
+    // permits concurrent compress() calls, and the map is otherwise unsynchronized.
+    mutable std::mutex residuals_mutex_;
 };
 
 } // namespace tenzor::distributed

@@ -212,7 +212,10 @@ auto DTensor::redistribute(const std::vector<Placement>& new_placements) -> DTen
             std::holds_alternative<Replicate>(new_p)) {
             need_pg();
             const int64_t shard_dim = std::get<Shard>(old_p).dim;
-            std::vector<Tensor> gathered;
+            // ProcessGroupBase::all_gather requires the output vector to be
+            // pre-sized to the group size (each rank's slot is filled in place);
+            // passing an empty vector made every real multi-rank gather throw.
+            std::vector<Tensor> gathered(static_cast<size_t>(mesh_size));
             pg->all_gather(gathered, current);
             if (static_cast<int64_t>(gathered.size()) != mesh_size) {
                 throw std::runtime_error(std::format(
@@ -345,11 +348,15 @@ auto DTensor::from_global(const Tensor& tensor,
 
     Tensor local = tensor;
 
+    // Store NORMALIZED shard dims so shape()/redistribute (which reject/misuse
+    // raw negative dims) see the same non-negative dims from_global computed here.
+    std::vector<Placement> norm_placements = placements;
     for (int64_t mesh_dim = 0; mesh_dim < mesh->ndim(); ++mesh_dim) {
         if (auto* shard = std::get_if<Shard>(&placements[mesh_dim])) {
             // Shard stores a raw dim; normalize Python-style negatives against
             // the local tensor rank before indexing.
             auto shard_dim = shard->dim < 0 ? shard->dim + local.ndim() : shard->dim;
+            std::get_if<Shard>(&norm_placements[mesh_dim])->dim = shard_dim;
             auto mesh_size = mesh->shape()[mesh_dim];
             auto dim_size = local.size(shard_dim);
 
@@ -370,7 +377,7 @@ auto DTensor::from_global(const Tensor& tensor,
         // Partial: the caller is responsible for providing partial data
     }
 
-    return DTensor(std::move(local), std::move(mesh), placements);
+    return DTensor(std::move(local), std::move(mesh), std::move(norm_placements));
 }
 
 } // namespace tenzor::distributed

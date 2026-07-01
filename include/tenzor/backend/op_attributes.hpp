@@ -507,7 +507,12 @@ public:
             }
             int64_t val;
             auto [ptr, ec] = std::from_chars(str.data() + trimmed, str.data() + end, val);
-            if (ec == std::errc{}) {
+            // Require the WHOLE field to be numeric: from_chars stops at the first
+            // non-digit, so "12abc" would otherwise parse as 12 with ec==success.
+            // Allow only trailing whitespace after the number.
+            const char* fend = str.data() + end;
+            while (ptr < fend && (*ptr == ' ' || *ptr == '\t')) ++ptr;
+            if (ec == std::errc{} && ptr == fend) {
                 result.push_back(val);
             } else {
                 throw std::invalid_argument(

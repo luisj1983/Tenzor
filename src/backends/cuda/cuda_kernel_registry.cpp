@@ -4889,7 +4889,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return cuda::cuda_spmm_kernel(sp, inputs[3]);
         });
 
@@ -4898,7 +4898,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return cuda::cuda_spmv_kernel(sp, inputs[3]);
         });
 
@@ -4912,8 +4912,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             int64_t N = attrs.get_int(AttrKey::N);
-            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
+            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
+            auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N}, /*validate=*/false);
             auto c = cuda::cuda_spgemm_kernel(a, b, /*stream=*/nullptr);
             return {c.crow_indices(), c.col_indices(), c.values()};
         });
@@ -4923,7 +4923,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N}, /*validate=*/false);
             return cuda::cuda_sparse_trsv_kernel(L, inputs[3], upper, /*stream=*/nullptr);
         });
 
@@ -4932,7 +4932,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N}, /*validate=*/false);
             return cuda::cuda_sparse_trsm_kernel(L, inputs[3], upper, /*stream=*/nullptr);
         });
 #else
@@ -4964,7 +4964,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return sp.to_dense();
         });
 
@@ -5201,7 +5201,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return cuda::cuda_sparse_add_kernel(sp, inputs[3]);
         });
 

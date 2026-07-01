@@ -4692,7 +4692,7 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
             }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return sparse::spmm(sp, inputs[3]);
         });
 
@@ -4708,7 +4708,7 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
             }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return sparse::spmv(sp, inputs[3]);
         });
 
@@ -4724,7 +4724,7 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
             }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return sp.to_dense();
         });
 
@@ -4747,7 +4747,7 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
             }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return sparse::add(sp, inputs[3]);
         });
 
@@ -4768,7 +4768,7 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             int64_t N = attrs.get_int(AttrKey::N);
-            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
             auto c = sparse::spgemm(a, b);
             return {c.crow_indices(), c.col_indices(), c.values()};
@@ -4786,7 +4786,7 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
             }
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N}, /*validate=*/false);
             return sparse::sparse_triangular_solve(L, inputs[3], upper);
         });
 
@@ -4802,7 +4802,7 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
             }
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N}, /*validate=*/false);
             return sparse::sparse_triangular_solve(L, inputs[3], upper);
         });
 

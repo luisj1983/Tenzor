@@ -74,15 +74,25 @@ TEST_P(InterpolateBackward, BilinearGradMatchesUpsampleBilinear) {
     }
 }
 
-TEST_P(InterpolateBackward, NearestStillDetached) {
-    // Non-bilinear modes don't yet have a backward — they return a detached
-    // Variable. Pin this expectation so the silent-detach path is explicit.
+TEST_P(InterpolateBackward, NearestGradFlows) {
+    // Nearest-mode interpolate now has a backward (InterpolateBackwardFn),
+    // so the output must carry grad_fn and gradient must flow to the input.
     auto input = Variable(randn({1, 2, 4, 4}, DType::Float32, device), true);
     auto out = nn::functional::interpolate(input, {8, 8}, "nearest", false);
-    EXPECT_FALSE(out.requires_grad())
-        << "interpolate(nearest) currently returns detached output (no "
-           "backward yet). When the nearest-mode backward lands, this test "
-           "should be flipped to expect grad-flow.";
+    ASSERT_TRUE(out.requires_grad())
+        << "interpolate(nearest) must return a grad-tracked output now that the "
+           "nearest-mode backward is wired.";
+    tenzor::sum(out).backward();
+    EXPECT_GRAD_FLOWS(input);
+    // Nearest upsampling replicates each input element across its output block;
+    // with a ones upstream gradient every input element receives the count of
+    // output cells mapped to it (here 8x8 from 4x4 => 4 per element).
+    auto gi = input.grad().value().cpu().to(DType::Float32).contiguous();
+    auto* p = gi.data<float>();
+    for (int64_t i = 0; i < gi.numel(); ++i) {
+        EXPECT_GT(p[i], 0.0f)
+            << "interpolate(nearest) gradient must be non-zero at index " << i;
+    }
 }
 
 INSTANTIATE_BACKEND_TESTS(InterpolateBackward);

@@ -200,6 +200,10 @@ auto MultiheadAttention::scaled_dot_product_attention(
                              query.device().type == Device::Type::CPU &&
                              query.dtype() == DType::Float32 &&
                              (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0) &&
+                             // The fused kernel has no additive-bias input; fall through to the
+                             // manual BMM path (which applies position_bias) when one is supplied,
+                             // mirroring the cuDNN SDPA guard below.
+                             !(position_bias.is_valid() && position_bias.shape().size() > 0) &&
                              (dropout_p <= 0.0 || !is_training());
 
     if (can_use_fused_cpu && !is_training()) {
@@ -244,11 +248,24 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // (the common inference case) still gets the fast cuDNN call.
     bool any_input_needs_grad = query.requires_grad() || key.requires_grad() || value.requires_grad();
     bool grad_path_safe = !is_grad_enabled() && !any_input_needs_grad;
+    // The cuDNN SDPA dispatch below passes only {q,k,v} — it never forwards
+    // attn_mask/key_padding_mask or position_bias to the fused kernel. So if
+    // either is present, this fast path would silently drop it and produce an
+    // unmasked / unbiased result. Exclude those calls here (mirroring the
+    // fused-CPU gate at ~202 and the flash gate at ~324, which carve themselves
+    // out when a mask is present) so they fall through to the manual BMM path
+    // below, which applies position_bias (~413) and attn_mask (~441). Note
+    // is_causal_ and attn_mask are mutually exclusive (rejected at ~172) and
+    // cuDNN handles causal natively, so only the bias/mask presence matters.
+    bool has_attn_mask = attn_mask.is_valid() && attn_mask.shape().size() > 0;
+    bool has_position_bias = position_bias.is_valid() && position_bias.shape().size() > 0;
     bool can_use_cudnn_sdpa = !need_weights &&
         dtype_supported &&
         is_op_supported(OpId::FusedAttention, query.device().type) &&
         (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256) &&
         device_supports_causal &&
+        !has_attn_mask &&     // fused dispatch can't apply an additive mask
+        !has_position_bias && // fused dispatch can't apply position bias
         !is_training() &&     // dropout/training BMM-only
         grad_path_safe;       // gradient correctness
 
@@ -321,6 +338,9 @@ auto MultiheadAttention::scaled_dot_product_attention(
                                    (dev_cpu || dev_vulkan) &&
                                    query.dtype() == DType::Float32 &&
                                    head_dim <= flash_max_head_dim &&
+                                   // Flash kernel takes no additive bias; defer to the manual
+                                   // BMM path when a position_bias is present.
+                                   !has_position_bias &&
                                    (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0);
 
     // Same grad correctness gate as cuDNN SDPA above: this fast path also
@@ -417,22 +437,41 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // Apply causal mask if is_causal_ is set (masks future tokens)
     if (is_causal_) {
-        // Create rectangular causal mask on target device using tensor ops
-        // triu with diagonal=1 gives upper-triangular 1s above the main diagonal.
+        // Bottom-right alignment per docs/internals/attention-contract.md
+        // (NestedAttention "Causal-with-cache convention"): when seq_q != seq_k
+        // (cross-attention with a KV cache) the causal boundary is shifted by
+        // offset = seq_k - seq_q so the last query attends to the last key and
+        // existing cache always remains visible. This matches GQA's mask
+        // (src/nn/layers/gqa_attention.cpp ~206-233). The previous
+        // `triu(..., 1)` was top-left aligned (query i could only see keys
+        // <= i), which diverged from GQA/the contract whenever seq_q != seq_k.
         //
-        // Causal masking here always runs at Float32: needs_attn_upcast is true
-        // for Float16/BFloat16, so score_dtype is Float32 in the half case and
-        // -inf is representable and safe (softmax(-inf)=0, no overflow). The
-        // former -1e4 half sentinel branch was gated on
-        // `!needs_attn_upcast && (Float16||BFloat16)`, which is identically
-        // false (needs_attn_upcast == (Float16||BFloat16)) — dead code, removed.
-        float neg_inf_val = -std::numeric_limits<float>::infinity();
-        // Build the additive mask as triu of an all -inf matrix: triangular_op
-        // starts from zeros() and copies only the kept (strict-upper) region,
-        // so allowed positions are a literal 0, never 0 * -inf. The previous
-        // `triu(ones) * -inf` produced NaN (0 * -inf) on every allowed position,
-        // which the subsequent add + softmax then propagated across the row.
-        auto causal = triu(full({seq_len_q, seq_len_k}, neg_inf_val, score_dtype, query.device()), 1);
+        // Masking always runs at Float32 in the half case (needs_attn_upcast
+        // makes score_dtype Float32 for Float16/BFloat16), so -inf is
+        // representable and softmax(-inf)=0 with no overflow.
+        const int64_t offset = seq_len_k - seq_len_q;
+        // row_idx[i,j] = i, col_idx[i,j] = j  (Int64 broadcast grids)
+        Tensor row_idx = tenzor::arange(0, seq_len_q, 1, DType::Int64, query.device())
+                             .reshape({seq_len_q, 1});
+        Tensor col_idx = tenzor::arange(0, seq_len_k, 1, DType::Int64, query.device())
+                             .reshape({1, seq_len_k});
+        Tensor row_exp = tenzor::expand(row_idx, std::vector<int64_t>{seq_len_q, seq_len_k});
+        Tensor col_exp = tenzor::expand(col_idx, std::vector<int64_t>{seq_len_q, seq_len_k});
+        // Per-row allowed boundary b_i = max(i + offset, 0): queries may attend
+        // to columns j <= b_i. The clamp_min(0) prevents a fully-masked row
+        // when offset < 0 (seq_k < seq_q) — without it the top queries would
+        // have i + offset < 0, masking every column and giving softmax(all
+        // -inf) = NaN.
+        Tensor boundary = tenzor::clamp_min(
+            tenzor::add(row_exp, static_cast<double>(offset)), 0.0);
+        // masked_off: true where col > boundary (future / disallowed key).
+        Tensor masked_off = gt(col_exp, boundary);
+        Tensor neg_inf = full({seq_len_q, seq_len_k},
+                              -std::numeric_limits<float>::infinity(),
+                              score_dtype, query.device());
+        Tensor zero_mask = zeros({seq_len_q, seq_len_k},
+                                 score_dtype, query.device());
+        Tensor causal = where(masked_off, neg_inf, zero_mask);
         Variable causal_var(causal, false);
         scores = scores + causal_var;
     }

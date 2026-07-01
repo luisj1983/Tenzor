@@ -238,6 +238,18 @@ auto decode_from_memory(const uint8_t* data, size_t len, ImageMode mode) -> Tens
             "decode_from_memory: image buffer too large (exceeds INT_MAX bytes)");
     }
 
+    // Validate the declared dimensions from the HEADER before the full decode,
+    // so a crafted header cannot make stb allocate a multi-GB pixel buffer
+    // (and a second copy in hwc_to_chw_tensor) before the post-decode check
+    // rejects it.
+    {
+        int info_w = 0, info_h = 0, info_c = 0;
+        if (stbi_info_from_memory(data, static_cast<int>(len), &info_w, &info_h, &info_c)) {
+            int check_channels = (desired > 0) ? desired : info_c;
+            validate_decoded_dims(info_w, info_h, check_channels);
+        }
+    }
+
     uint8_t* pixels = stbi_load_from_memory(
         data, static_cast<int>(len), &width, &height, &actual_channels, desired);
 

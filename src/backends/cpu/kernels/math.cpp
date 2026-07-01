@@ -568,26 +568,26 @@ static void matmul_microkernel_int8(
     }
 
 #elif defined(__AVX2__)
-    // AVX2 path: same packed-B layout, same offset trick. maddubs produces
-    // saturating int16, then madd horizontally pairs into int32. Scalar
-    // tail again handles bytes past the SIMD-aligned floor of K so we never
-    // read A past its real K width.
-    const int64_t K_simd = (K / 32) * 32;
+    // AVX2 path: widen int8 -> int16 and use _mm256_madd_epi16 (signed*signed ->
+    // int32, pairwise-summed with NO intermediate int16 saturation). The +128
+    // unsigned-offset + maddubs trick used by the VNNI path is unsafe here:
+    // _mm256_maddubs_epi16 sums two u8*s8 products into a SATURATING int16 lane
+    // (a single product reaches 255*128=32640, the pair sum overflows int16 and
+    // silently clamps), corrupting the result. Widening to signed int16 avoids
+    // the offset entirely, so no bias correction is needed. 16 elements/iter.
+    const int64_t K_simd = (K / 16) * 16;
     for (int64_t i = 0; i < M; ++i) {
         const int8_t* a_row = A + i * lda;
         for (int64_t j = 0; j < N; ++j) {
             __m256i acc = _mm256_setzero_si256();
             const int8_t* b_col = B_packed + j * K_padded;
             int64_t k = 0;
-            for (; k < K_simd; k += 32) {
-                __m256i a_s = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a_row + k));
-                __m256i offset = _mm256_set1_epi8(static_cast<char>(-128));
-                __m256i a_u = _mm256_sub_epi8(a_s, offset);
-                __m256i b_val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_col + k));
-                __m256i prod16 = _mm256_maddubs_epi16(a_u, b_val);
-                __m256i ones = _mm256_set1_epi16(1);
-                __m256i prod32 = _mm256_madd_epi16(prod16, ones);
-                acc = _mm256_add_epi32(acc, prod32);
+            for (; k < K_simd; k += 16) {
+                __m128i a_s8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a_row + k));
+                __m128i b_s8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b_col + k));
+                __m256i a16 = _mm256_cvtepi8_epi16(a_s8);  // sign-extend int8 -> int16
+                __m256i b16 = _mm256_cvtepi8_epi16(b_s8);
+                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(a16, b16));
             }
             __m128i lo128 = _mm256_castsi256_si128(acc);
             __m128i hi128 = _mm256_extracti128_si256(acc, 1);
@@ -596,10 +596,8 @@ static void matmul_microkernel_int8(
             sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0, 1, 0, 1)));
             int32_t sum = _mm_cvtsi128_si32(sum128);
             for (; k < K; ++k) {
-                sum += static_cast<int32_t>(static_cast<uint8_t>(a_row[k] ^ 0x80))
-                       * static_cast<int32_t>(b_col[k]);
+                sum += static_cast<int32_t>(a_row[k]) * static_cast<int32_t>(b_col[k]);
             }
-            sum -= 128 * b_col_sum[j];
             C[i * ldc + j] += sum;
         }
     }

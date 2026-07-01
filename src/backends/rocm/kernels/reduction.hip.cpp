@@ -387,21 +387,26 @@ __global__ void norm_along_dim_kernel(
         tmp /= input_shape[d];
     }
 
-    T acc = T(0);
+    // Accumulate the Lp sum in the wider reduction_accum type (double for
+    // float input) to preserve precision, matching sum_along_dim and the
+    // variance/p-norm kernels; narrow on store.
+    using Acc = reduction_accum_t<T>;
+    const Acc p_acc = static_cast<Acc>(p);
+    Acc acc = Acc(0);
     for (int64_t i = 0; i < dim_size; i++) {
         indices[dim] = i;
         int64_t in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
-        T val = input[in_idx];
-        T abs_val = val < T(0) ? -val : val;
+        Acc val = static_cast<Acc>(input[in_idx]);
+        Acc abs_val = val < Acc(0) ? -val : val;
         if (p == T(1)) acc += abs_val;
         else if (p == T(2)) acc += abs_val * abs_val;
-        else acc += pow(abs_val, p);
+        else acc += pow(abs_val, p_acc);
     }
 
-    if (p == T(1)) output[out_idx] = acc;
-    else if (p == T(2)) output[out_idx] = sqrt(acc);
-    else output[out_idx] = pow(acc, T(1) / p);
+    if (p == T(1)) output[out_idx] = static_cast<T>(acc);
+    else if (p == T(2)) output[out_idx] = static_cast<T>(sqrt(acc));
+    else output[out_idx] = static_cast<T>(pow(acc, Acc(1) / p_acc));
 }
 
 /**
@@ -3727,42 +3732,51 @@ __global__ void median_per_slice_kernel(
         base_offset += coord * strides[d];
     }
 
-    // Each thread in the block cooperates; for simplicity use thread 0
-    // (dim_size is typically small enough for a single-thread sort)
+    int64_t mid = (dim_size - 1) / 2;
+
+    // PyTorch median propagates NaN: if any slice element is NaN, the median is
+    // NaN. The count-based selection below mis-ranks NaN (all comparisons false)
+    // and would otherwise fall through to an uninitialized 0. Thread 0 scans for
+    // a NaN (O(n)) and records it; the IEEE self-inequality v != v is reliable,
+    // unlike ROCm's canonicalising isnan intrinsics. (Integer T has no NaN.)
+    __shared__ int nan_found;
     if (threadIdx.x == 0) {
-        // Allocate local arrays via dynamic shared memory would be complex;
-        // use register-based approach for small dims, else naive loop
-        // For GPU: simple insertion sort in registers (dim_size usually < 10K)
-        // We'll use a selection approach: partial sort to find median
-
-        int64_t mid = (dim_size - 1) / 2;
-
-        // Find the (mid+1)-th smallest element using repeated scans
-        // For better perf we do a simple selection algorithm
-        T pivot_val{};
-        int64_t pivot_orig_idx = 0;
-
-        // Count-based selection: for each element, count how many are smaller
-        // This is O(dim_size^2) but fully parallel-friendly
-        for (int64_t i = 0; i < dim_size; ++i) {
-            int64_t offset_i = base_offset + i * strides[dim];
-            T val_i = input[offset_i];
-            int64_t rank = 0;
-            for (int64_t j = 0; j < dim_size; ++j) {
-                T val_j = input[base_offset + j * strides[dim]];
-                if (val_j < val_i || (val_j == val_i && j < i)) {
-                    rank++;
+        nan_found = 0;
+        if constexpr (std::is_floating_point_v<T>) {
+            for (int64_t i = 0; i < dim_size; ++i) {
+                T v = input[base_offset + i * strides[dim]];
+                if (v != v) {
+                    out_values[slice_idx] = v;
+                    out_indices[slice_idx] = i;
+                    nan_found = 1;
+                    break;
                 }
             }
-            if (rank == mid) {
-                pivot_val = val_i;
-                pivot_orig_idx = i;
-                break;
+        }
+    }
+    __syncthreads();
+    if (nan_found) return;
+
+    // Count-based selection, parallelised across the block: each thread handles
+    // a strided subset of candidate indices and computes that candidate's rank
+    // (number of strictly-smaller elements, with a j<i tie-break so each index
+    // has a UNIQUE rank). Exactly one index has rank == mid, so exactly one
+    // thread writes the output — no race, no atomics. This turns the previous
+    // single-thread O(dim_size^2) into O(dim_size^2 / blockDim.x) wall-clock.
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        int64_t offset_i = base_offset + i * strides[dim];
+        T val_i = input[offset_i];
+        int64_t rank = 0;
+        for (int64_t j = 0; j < dim_size; ++j) {
+            T val_j = input[base_offset + j * strides[dim]];
+            if (val_j < val_i || (val_j == val_i && j < i)) {
+                rank++;
             }
         }
-
-        out_values[slice_idx] = pivot_val;
-        out_indices[slice_idx] = pivot_orig_idx;
+        if (rank == mid) {
+            out_values[slice_idx] = val_i;
+            out_indices[slice_idx] = i;
+        }
     }
 }
 
@@ -3818,7 +3832,10 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
     HIP_CHECK(hipMemcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, strides_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
-    int block_size = 1; // One thread per slice (selection algorithm)
+    // One block per slice; threads cooperate on the per-slice selection (the
+    // candidate loop is distributed across the block). Cap the block at the
+    // slice length so tiny slices don't launch idle threads.
+    int block_size = static_cast<int>(dim_size < 256 ? (dim_size < 1 ? 1 : dim_size) : 256);
     int num_blocks = static_cast<int>(outer_size);
 
     auto launch = [&]<typename T>(T*) {
@@ -3879,37 +3896,44 @@ __global__ void mode_per_slice_kernel(
         base_offset += coord * strides[d];
     }
 
-    if (threadIdx.x == 0) {
-        // Collect (value, original_index) pairs, sort by value, find longest run
-        // Use simple bubble sort for correctness (dim_size typically manageable)
-        // For large dims, a more sophisticated approach would be needed
+    // Count-based mode, parallelised across the block: each thread scans a
+    // strided subset of candidates, counts occurrences of each, and tracks its
+    // local best (highest count, tie-break to the smallest index). A block
+    // reduction then picks the global best with the same tie-break. This turns
+    // the previous single-thread O(dim_size^2) into O(dim_size^2 / blockDim.x).
+    __shared__ int64_t s_count[256];
+    __shared__ int64_t s_idx[256];
 
-        // First pass: find mode by counting equal neighbors after sorting indices by value
-        // We sort an index array by value using selection sort
-        // (avoids dynamic allocation on device)
-
-        T best_val = input[base_offset];
-        int64_t best_idx = 0;
-        int64_t best_count = 0;
-
-        // For each unique value, count occurrences
-        for (int64_t i = 0; i < dim_size; ++i) {
-            T val_i = input[base_offset + i * strides[dim]];
-            int64_t count = 0;
-            for (int64_t j = 0; j < dim_size; ++j) {
-                if (input[base_offset + j * strides[dim]] == val_i) {
-                    count++;
-                }
-            }
-            // Pick this value if count is higher, or same count but smaller index
-            if (count > best_count || (count == best_count && i < best_idx)) {
-                best_count = count;
-                best_val = val_i;
-                best_idx = i;
+    int64_t local_count = -1;
+    int64_t local_idx = 0;
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        T val_i = input[base_offset + i * strides[dim]];
+        int64_t count = 0;
+        for (int64_t j = 0; j < dim_size; ++j) {
+            if (input[base_offset + j * strides[dim]] == val_i) {
+                count++;
             }
         }
+        if (count > local_count || (count == local_count && i < local_idx)) {
+            local_count = count;
+            local_idx = i;
+        }
+    }
+    s_count[threadIdx.x] = local_count;
+    s_idx[threadIdx.x] = local_idx;
+    __syncthreads();
 
-        out_values[slice_idx] = best_val;
+    if (threadIdx.x == 0) {
+        int64_t best_count = -1;
+        int64_t best_idx = 0;
+        for (int t = 0; t < blockDim.x; ++t) {
+            if (s_count[t] > best_count ||
+                (s_count[t] == best_count && s_idx[t] < best_idx)) {
+                best_count = s_count[t];
+                best_idx = s_idx[t];
+            }
+        }
+        out_values[slice_idx] = input[base_offset + best_idx * strides[dim]];
         out_indices[slice_idx] = best_idx;
     }
 }
@@ -3963,7 +3987,7 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     HIP_CHECK(hipMemcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, strides_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
-    int block_size = 1;
+    int block_size = static_cast<int>(dim_size < 256 ? (dim_size < 1 ? 1 : dim_size) : 256);  // block cooperates on the selection
     int num_blocks = static_cast<int>(outer_size);
 
     auto launch = [&]<typename T>(T*) {

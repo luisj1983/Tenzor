@@ -147,7 +147,11 @@ auto compute_importance(const Tensor& weights, ImportanceCriterion criterion) ->
 auto create_mask_from_importance(const Tensor& importance, float sparsity) -> Tensor {
     // Create mask by thresholding importance scores
     int64_t total = importance.numel();
+    // Clamp to [0, total]: sparsity is caller-supplied and unvalidated, so a value
+    // outside [0,1] would otherwise drive the prune loop past the end of `scores`
+    // (heap OOB read) and write mask_data at garbage indices (OOB write).
     int64_t num_to_prune = static_cast<int64_t>(total * sparsity);
+    num_to_prune = std::max<int64_t>(0, std::min<int64_t>(num_to_prune, total));
 
     // Move to CPU first if on GPU, then convert to Float32 for processing
     Tensor imp_cpu = importance;
@@ -498,26 +502,52 @@ auto prune_channels(
         channel_importance.emplace_back(importance, oc);
     }
 
-    // Sort by importance (ascending - lowest importance first)
-    std::sort(channel_importance.begin(), channel_importance.end());
+    // Grouped-conv constraint: a grouped convolution partitions its output
+    // channels into `groups` contiguous blocks, each block wired to its own
+    // input-channel group. We must NOT prune across that boundary — the kept
+    // channels have to stay a multiple of `groups`, and each new output group
+    // must be filled from the SAME source group so the channel->input-group
+    // association is preserved. For groups == 1 this reduces to the plain
+    // global top-k (out_per_group == out_channels), leaving that path unchanged.
+    //
+    // channel_importance was filled in output-channel order above, so
+    // channel_importance[oc] holds (importance, oc) for channel oc.
+    const int64_t groups = conv->groups();
+    const int64_t out_per_group = out_channels / groups;
 
-    // Determine how many channels to keep (at least 1)
-    // Calculate directly to match test expectations
-    int64_t channels_to_keep = static_cast<int64_t>(out_channels * (1.0f - sparsity));
-    channels_to_keep = std::max(channels_to_keep, static_cast<int64_t>(1));
-    int64_t channels_to_prune = out_channels - channels_to_keep;
+    // Channels to keep PER GROUP (>= 1), so the total is a multiple of groups.
+    int64_t keep_per_group =
+        static_cast<int64_t>(out_per_group * (1.0f - sparsity));
+    keep_per_group = std::max<int64_t>(keep_per_group, 1);
+    keep_per_group = std::min<int64_t>(keep_per_group, out_per_group);
+    int64_t channels_to_keep = keep_per_group * groups;
 
-    // Collect indices of channels to keep (skip the lowest importance ones)
+    // Build kept indices group-by-group (group-major order). New output group g
+    // is therefore populated from source group g, so the rebuilt grouped conv's
+    // weight[:, in_per_group, ...] slice still lines up with input group g.
     std::vector<int64_t> keep_indices;
     keep_indices.reserve(channels_to_keep);
-    for (int64_t i = channels_to_prune; i < out_channels; ++i) {
-        keep_indices.push_back(channel_importance[i].second);
+    for (int64_t g = 0; g < groups; ++g) {
+        std::vector<std::pair<float, int64_t>> grp;
+        grp.reserve(out_per_group);
+        for (int64_t k = 0; k < out_per_group; ++k) {
+            const int64_t oc = g * out_per_group + k;
+            grp.emplace_back(channel_importance[oc].first, oc);
+        }
+        // Ascending importance; keep the highest-importance tail of the group.
+        std::sort(grp.begin(), grp.end());
+        std::vector<int64_t> kept;
+        kept.reserve(keep_per_group);
+        for (int64_t k = out_per_group - keep_per_group; k < out_per_group; ++k) {
+            kept.push_back(grp[k].second);
+        }
+        // Preserve ascending original-channel order within the group.
+        std::sort(kept.begin(), kept.end());
+        for (int64_t idx : kept) keep_indices.push_back(idx);
     }
-    std::sort(keep_indices.begin(), keep_indices.end());
 
     // Create new Conv2d with reduced out_channels, preserving the source
     // convolution's real geometry (kernel/stride/padding/dilation/groups).
-    int64_t groups = conv->groups();
     int64_t in_channels_total = in_channels_per_group * groups;
 
     auto pruned_conv = std::make_shared<Conv2d>(

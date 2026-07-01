@@ -102,6 +102,14 @@ struct FusionGroup {
     DType dtype;            ///< Data type for computation
     std::string signature;  ///< Unique signature for cache lookup
 
+    /// Target device the kernel is compiled for and cached under. A compiled
+    /// CUmodule/CUfunction (or hipModule_t) is bound to a single device's
+    /// context and compute architecture, so it MUST NOT be reused across
+    /// devices — the cache key (compute_signature) and the driver-side compile
+    /// both key off this. Defaults to GPU 0; execute_fused() sets it from the
+    /// resident input tensor before compiling.
+    Device device{Device::cuda(0)};
+
     /**
      * @brief Compute a cache key from the operation sequence.
      */
@@ -231,13 +239,14 @@ public:
      * @brief Get cache statistics.
      */
     auto num_cached() const -> size_t;
-    auto num_compilations() const -> size_t { return compilations_; }
-    auto num_cache_hits() const -> size_t { return cache_hits_; }
+    auto num_compilations() const -> size_t { std::lock_guard<std::mutex> lock(mutex_); return compilations_; }
+    auto num_cache_hits() const -> size_t { std::lock_guard<std::mutex> lock(mutex_); return cache_hits_; }
 
 private:
     KernelCache() = default;
 
-    auto compile(const std::string& source, const std::string& kernel_name)
+    auto compile(const std::string& source, const std::string& kernel_name,
+                 int device_index = 0)
         -> std::shared_ptr<CompiledKernel>;
 
     std::unordered_map<std::string, std::shared_ptr<CompiledKernel>> cache_;

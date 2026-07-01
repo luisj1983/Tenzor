@@ -953,8 +953,12 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
         return result;
     }
 
-    // CPU path: pointer-based lookup
-    Tensor input_cpu = input_tensor;
+    // CPU path: pointer-based lookup. The flat input_ptr[i] walk below assumes
+    // contiguous row-major storage; a non-contiguous index tensor (e.g. a
+    // transposed/sliced view) would otherwise read the wrong elements. Force
+    // contiguity first.
+    Tensor input_cpu =
+        input_tensor.is_contiguous() ? input_tensor : input_tensor.contiguous();
     auto input_ptr = input_cpu.data<int64_t>();
 
     // Calculate total number of indices

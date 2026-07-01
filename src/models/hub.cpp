@@ -353,7 +353,15 @@ public:
         if (expected_hash.empty()) return true;
 
         std::string actual_hash = compute_sha256(file_path);
-        bool matches = (actual_hash == expected_hash);
+        // Compare case-insensitively: compute_sha256 returns lowercase hex, but
+        // expected hashes are often quoted uppercase. A case-sensitive compare
+        // rejected otherwise-valid checksums.
+        auto to_lower = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return s;
+        };
+        bool matches = (to_lower(actual_hash) == to_lower(expected_hash));
 
         last_stats.verified = matches;
 

@@ -75,7 +75,7 @@ struct OptimizationStats {
     size_t batchnorm_relu_fused{0};   ///< analysis-only: batchnorm+relu detections (not rewritten)
     size_t linear_gelu_fused{0};      ///< analysis-only: linear+gelu detections (not rewritten)
     size_t conv_bn_relu_fused{0};     ///< analysis-only: conv+bn+relu detections (not rewritten)
-    size_t transpose_pairs_eliminated{0}; ///< analysis-only: transpose-pair detections (not rewritten)
+    size_t transpose_pairs_eliminated{0}; ///< inverse transpose-pairs spliced out of the LIVE grad_fn chain (REWRITES the graph)
     size_t reshape_chains_collapsed{0};   ///< analysis-only: reshape-chain detections (not rewritten)
     size_t dead_nodes_removed{0};     ///< Number of dead code nodes removed (REWRITES the graph)
     size_t total_optimizations{0};    ///< Total optimizations applied

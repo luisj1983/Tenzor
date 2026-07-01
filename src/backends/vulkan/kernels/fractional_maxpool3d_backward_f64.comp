@@ -27,14 +27,17 @@ uint64_t f64ToBits(float64_t val) {
 void atomicAddF64(uint idx, float64_t val) {
     uint64_t old_bits = grad_in_data[idx];
     uint64_t new_bits;
-    for (int attempt = 0; attempt < 65536; ++attempt) {
+    // Unbounded CAS retry (double has no native atomicAdd). Contention is
+    // finite (bounded by output cells mapping to one input position), so this
+    // always converges. The previous bounded loop fell back to a non-atomic
+    // store that clobbered concurrent gradient contributions.
+    while (true) {
         float64_t old_val = bitsToF64(old_bits);
         new_bits = f64ToBits(old_val + val);
         uint64_t result = atomicCompSwap(grad_in_data[idx], old_bits, new_bits);
         if (result == old_bits) return;
         old_bits = result;
     }
-    grad_in_data[idx] = new_bits;
 }
 
 void main() {

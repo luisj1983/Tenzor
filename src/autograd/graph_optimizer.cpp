@@ -37,6 +37,80 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
 
     reset_stats();
     optimize(graph);
+
+    // Live-graph rewrite: actually eliminate provably-identity inverse transpose
+    // pairs from the EXECUTABLE grad_fn chain (the analysis passes above only
+    // detect patterns on the throwaway ComputationGraph). transpose(a,b) followed
+    // by transpose(a,b) is the identity; its backward — TransposeBackward∘
+    // TransposeBackward with the same dims — is likewise the identity on the
+    // gradient. So splicing a consumer directly onto the pair's child preserves
+    // gradients EXACTLY. We only touch pairs where both nodes are single-consumer
+    // (no other path references them) and the dims match, so nothing else is
+    // affected. The engine traverses next_functions() for both the value and the
+    // higher-order (var) gradient, so rewriting next_functions covers both.
+    {
+        std::unordered_map<Function*, std::shared_ptr<Function>> reachable;
+        std::unordered_map<Function*, int> consumers;
+        std::function<void(const std::shared_ptr<Function>&)> walk =
+            [&](const std::shared_ptr<Function>& fn) {
+                if (!fn || reachable.count(fn.get())) return;
+                reachable[fn.get()] = fn;
+                for (const auto& nf : fn->next_functions()) {
+                    if (nf) {
+                        consumers[nf.get()]++;
+                        walk(nf);
+                    }
+                }
+            };
+        if (root.grad_fn()) walk(root.grad_fn());
+
+        auto is_transpose = [](const std::shared_ptr<Function>& f) {
+            return f && f->op_id() == OpId::Transpose;
+        };
+        auto tdims = [](const std::shared_ptr<Function>& f) {
+            OpAttributes a = f->saved_attributes();
+            return std::pair<int64_t, int64_t>(a.get_int(AttrKey::Dim0, 0),
+                                               a.get_int(AttrKey::Dim1, 0));
+        };
+        // A node accumulates a gradient LOCALLY (outside its next_functions) if
+        // any of its input variables is a leaf-with-grad or retains its grad.
+        // Eliminating such a node would silently drop that accumulation, so it
+        // is NOT safe to splice it out — keep it in the chain.
+        auto accumulates_locally = [](const std::shared_ptr<Function>& f) {
+            for (const auto& v : f->input_variables()) {
+                if (v.requires_grad() && (v.is_leaf() || v.retains_grad())) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        for (auto& [ptr, P] : reachable) {
+            (void)ptr;
+            std::vector<std::shared_ptr<Function>> nfs = P->next_functions();
+            bool changed = false;
+            for (size_t i = 0; i < nfs.size(); ++i) {
+                const std::shared_ptr<Function> T1 = nfs[i];
+                if (!is_transpose(T1) || consumers[T1.get()] != 1) continue;
+                if (T1->next_functions().size() != 1) continue;
+                std::shared_ptr<Function> T2 = T1->next_functions()[0];
+                if (!is_transpose(T2) || consumers[T2.get()] != 1) continue;
+                if (tdims(T1) != tdims(T2)) continue;  // must be an inverse pair
+                // Don't drop a leaf / retained-grad accumulation held by either
+                // transpose, and require a real (non-null) downstream node to
+                // reconnect to.
+                if (accumulates_locally(T1) || accumulates_locally(T2)) continue;
+                const auto& t2_next = T2->next_functions();
+                if (t2_next.empty() || !t2_next[0]) continue;
+                nfs[i] = t2_next[0];
+                changed = true;
+                ++stats_.transpose_pairs_eliminated;
+                ++stats_.total_optimizations;
+            }
+            if (changed) P->set_next_functions(nfs);
+        }
+    }
+
     return stats_;
 }
 

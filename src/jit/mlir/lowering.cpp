@@ -212,7 +212,14 @@ auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
         if (!std::isfinite(value)) {
             return int_dtype_extreme_literal(d, /*want_max=*/value > 0.0);
         }
-        s << static_cast<long long>(value);
+        // Unsigned dtypes: cast via unsigned long long — a UInt64 value above
+        // INT64_MAX cast to signed long long is UB / prints as negative.
+        if (d == DType::UInt8 || d == DType::UInt16 ||
+            d == DType::UInt32 || d == DType::UInt64) {
+            s << static_cast<unsigned long long>(value);
+        } else {
+            s << static_cast<long long>(value);
+        }
         return s.str();
     }
     if (d == DType::Bool) {
@@ -2674,10 +2681,24 @@ auto emit_causal_mask_and_add(LoweringContext& ctx, std::ostream& body,
     auto ik = ctx.fresh_name();
     body << '%' << ik
          << " = stablehlo.iota dim = 1 : tensor<" << sq << 'x' << sk << "xi32>\n";
-    // mask = (q < k)  → upper triangular cells become true.
+    // For KV-cache / cross-length decode (Sq != Sk), query row q corresponds to
+    // absolute position q + (Sk - Sq); key k must be masked when q + (Sk-Sq) < k.
+    // Shift iq by the offset before the compare (offset 0 reduces to Sq==Sk).
+    const int64_t causal_offset = sk - sq;
+    std::string iq_cmp = iq;
+    if (causal_offset != 0) {
+        auto off_c = ctx.fresh_name();
+        body << '%' << off_c << " = stablehlo.constant dense<" << causal_offset
+             << "> : tensor<" << sq << 'x' << sk << "xi32>\n";
+        auto iq_off = ctx.fresh_name();
+        body << '%' << iq_off << " = stablehlo.add %" << iq << ", %" << off_c
+             << " : tensor<" << sq << 'x' << sk << "xi32>\n";
+        iq_cmp = iq_off;
+    }
+    // mask = (q + (Sk-Sq) < k)  → cells above the (shifted) diagonal become true.
     auto mask_bool = ctx.fresh_name();
     body << '%' << mask_bool
-         << " = stablehlo.compare LT, %" << iq << ", %" << ik
+         << " = stablehlo.compare LT, %" << iq_cmp << ", %" << ik
          << " : (tensor<" << sq << 'x' << sk << "xi32>, tensor<"
          << sq << 'x' << sk << "xi32>) -> tensor<" << sq << 'x' << sk << "xi1>\n";
 
@@ -3193,23 +3214,22 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
     // already bound (i.e. aren't graph inputs).
     const auto& constants = g.constants();
     if (!constants.empty()) {
-        // Walk all nodes to find Values referenced as inputs that aren't
-        // graph inputs and have a constant tensor backing.
-        std::unordered_map<std::string, std::shared_ptr<::tenzor::jit::Value>>
-            const_value_by_id;
+        // Walk all nodes to find Values referenced as inputs that aren't graph
+        // inputs and have a constant tensor backing. Emit in the deterministic
+        // node/input walk order (deduped) — iterating an unordered_map here made
+        // constant SSA names nondeterministic, which changed the emitted MLIR run
+        // to run and defeated the content-hash compile cache.
+        std::unordered_set<std::string> emitted_const_ids;
         for (const auto& n : g.nodes()) {
             for (const auto& v : n->inputs()) {
                 if (input_ids.count(v->id())) continue;
-                if (constants.count(v->id())) {
-                    const_value_by_id[v->id()] = v;
-                }
+                if (!constants.count(v->id())) continue;
+                if (!emitted_const_ids.insert(v->id()).second) continue;  // already emitted
+                if (ctx.value_name.count(v->id())) continue;
+                const auto& t = constants.at(v->id());
+                (void)emit_tensor_constant(body, ctx, v->id(), t, v->shape(),
+                                           v->dtype());
             }
-        }
-        for (const auto& [vid, v] : const_value_by_id) {
-            if (ctx.value_name.count(vid)) continue;
-            const auto& t = constants.at(vid);
-            (void)emit_tensor_constant(body, ctx, vid, t, v->shape(),
-                                       v->dtype());
         }
     }
 

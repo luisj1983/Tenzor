@@ -430,15 +430,19 @@ auto BertModelHub::load_pretrained_weights(nn::Module& model,
     // Load PyTorch checkpoint
     auto checkpoint = load_pytorch_checkpoint(checkpoint_path);
 
-    // Verify compatibility
-    verify_checkpoint_compatibility(model, checkpoint);
-
-    // Map and load state dict
+    // Map HuggingFace parameter names to Tenzor names FIRST, so that
+    // compatibility verification compares the model's (Tenzor-named) parameters
+    // against the remapped checkpoint keys. Verifying against the raw
+    // HF-keyed checkpoint would fail for every parameter, since the model's
+    // state_dict uses Tenzor names that never appear verbatim in the checkpoint.
     std::unordered_map<std::string, Tensor> mapped_state;
     for (const auto& [hf_name, tensor] : checkpoint) {
         auto tenzor_name = map_parameter_name(hf_name);
         mapped_state[tenzor_name] = tensor;
     }
+
+    // Verify compatibility against the mapped state.
+    verify_checkpoint_compatibility(model, mapped_state);
 
     // Load into model
     model.load_state_dict(mapped_state);

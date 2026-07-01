@@ -37,8 +37,14 @@ void main() {
         float m = max(running, x);
         float diff = abs(running - x);
 
-        // For very large differences, log1p(exp(-diff)) ≈ 0
-        if (diff > 50.0) {
+        // Equal operands (including the -inf == -inf degenerate case) give
+        // log(exp(a)+exp(a)) = a + log(2). Handling it explicitly avoids
+        // diff = abs(-inf - -inf) = NaN, which previously propagated NaN
+        // instead of -inf (PyTorch logcumsumexp of all -inf is -inf).
+        if (running == x) {
+            running = m + log(2.0);
+        } else if (diff > 50.0) {
+            // For very large differences, log1p(exp(-diff)) ≈ 0
             running = m;
         } else {
             running = m + log(1.0 + exp(-diff));

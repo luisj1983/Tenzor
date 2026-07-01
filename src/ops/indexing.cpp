@@ -15,12 +15,28 @@
 
 namespace tenzor {
 
+namespace {
+// Index tensors for the dim-wise indexing ops (gather/scatter/scatter_add/
+// index_select/index_add/index_copy/take_along_dim) must be integral. A
+// float-typed index would be byte-reinterpreted into a garbage offset and
+// become an out-of-bounds read/write in the backend kernel (which trusts the
+// index dtype). Mirror the dtype guard in validate_flat_index (take/put).
+inline void validate_index_dtype(const Tensor& index, const char* op) {
+    if (index.dtype() != DType::Int32 && index.dtype() != DType::Int64) {
+        throw std::invalid_argument(
+            std::string(op) + ": index must be Int32 or Int64, got " +
+            std::string(dtype_name(index.dtype())));
+    }
+}
+}  // namespace
+
 auto slice(const Tensor& input, int64_t dim, int64_t start,
           int64_t end, int64_t step) -> Tensor {
     return input.slice(dim, start, end, step);
 }
 
 auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
+    validate_index_dtype(index, "index_select");
     // audit-6 BB.1: normalise negative dim at the dispatcher so backends that
     // index `shape[dim]` without their own normalisation don't underflow.
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
@@ -35,6 +51,7 @@ auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tens
 }
 
 auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
+    validate_index_dtype(index, "gather");
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
@@ -47,6 +64,7 @@ auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
 }
 
 auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
+    validate_index_dtype(index, "scatter");
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
@@ -59,6 +77,7 @@ auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor
 }
 
 auto scatter_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
+    validate_index_dtype(index, "scatter_add");
     // audit-6 BB.1: normalise negative dim at the dispatcher so backends that
     // index `shape[dim]` without their own normalisation don't underflow.
     // Mirrors select_scatter / slice_scatter (Y.6).
@@ -650,6 +669,7 @@ auto one_hot(const Tensor& input, int64_t num_classes) -> Tensor {
 }
 
 auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
+    validate_index_dtype(index, "index_add");
     // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
@@ -663,6 +683,7 @@ auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tens
 }
 
 auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
+    validate_index_dtype(index, "index_copy");
     // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
@@ -732,6 +753,7 @@ auto index_reduce(const Tensor& input, int64_t dim, const Tensor& index,
 }
 
 auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor {
+    validate_index_dtype(indices, "take_along_dim");
     // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6) so
     // backends that index `shape[dim]` raw don't underflow on negative dim.
     const int64_t ndim = static_cast<int64_t>(input.shape().size());

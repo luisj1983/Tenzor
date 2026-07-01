@@ -99,8 +99,16 @@ auto CheckpointFunction::backward(std::vector<Tensor> grad_outputs) -> std::vect
     // Use standard autograd backward - handles all complexity including nested checkpoints
     for (size_t i = 0; i < recomputed_outputs.size(); ++i) {
         if (recomputed_outputs[i].requires_grad() && recomputed_outputs[i].grad_fn()) {
+            // Match the seed's dtype to the recomputed output if the inner
+            // forward upcast (e.g. FP16 -> FP32); a mismatched seed dtype would
+            // throw or mis-accumulate in the recompute backward. Mirrors the
+            // dtype match in backward_with_variables below.
+            Tensor seed = grad_outputs[i];
+            if (seed.dtype() != recomputed_outputs[i].tensor().dtype()) {
+                seed = seed.to(recomputed_outputs[i].tensor().dtype());
+            }
             // retain_graph=true allows multiple outputs and nested checkpoints
-            recomputed_outputs[i].backward(grad_outputs[i], /*retain_graph=*/true);
+            recomputed_outputs[i].backward(seed, /*retain_graph=*/true);
         }
     }
 
@@ -359,7 +367,10 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
                 auto diff = tenzor::abs(outputs[i].tensor().to(DType::Float64) -
                             verify_outputs[i].tensor().to(DType::Float64));
                 auto max_diff_t = tenzor::max(diff);
-                double max_diff = *static_cast<const double*>(max_diff_t.data_ptr());
+                // max_diff_t lives on the (possibly GPU) device of the checkpointed
+                // outputs; copy to host before dereferencing its data pointer.
+                auto max_diff_host = max_diff_t.to(Device::cpu());
+                double max_diff = max_diff_host.data<double>()[0];
                 if (max_diff > 1e-6) {
                     // Audit I.4: unified logger.
                     TENZOR_LOG_WARN("Checkpoint: non-deterministic function detected "

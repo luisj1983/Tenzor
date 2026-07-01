@@ -397,6 +397,73 @@ auto fake_quantize_per_channel_with_grad(
 ) -> Variable;
 
 /**
+ * @brief Autograd Function for Learned Step Size Quantization (LSQ).
+ *
+ * Implements quantize-then-dequantize where the step size (`scale`) is a
+ * trainable input. In the backward pass:
+ *  - the activation receives the straight-through estimator (grad 1 in range,
+ *    0 when clamped), and
+ *  - `scale` receives the LSQ gradient (Esser et al. 2020):
+ *      in range  : round(x/s + z) - (x/s + z)
+ *      clamp low : qmin - z
+ *      clamp high: qmax - z
+ *
+ * The zero point is treated as a constant (captured at construction) — the
+ * default QAT zero point is a non-trainable Int32 parameter. The two
+ * differentiable inputs are {input, scale}; backward returns {grad_input,
+ * grad_scale} where grad_scale is reduced to the scale parameter shape
+ * (scalar {1} per-tensor, or {C} along the channel axis per-channel).
+ */
+class LSQFakeQuantizeFunction : public tenzor::Function {
+public:
+    /**
+     * @param zero_point Constant zero point (broadcast against the input).
+     * @param quant_min  Minimum quantized level.
+     * @param quant_max  Maximum quantized level.
+     * @param per_channel If true, scale is a per-channel vector along @p axis.
+     * @param axis       Channel axis for per-channel quantization.
+     */
+    LSQFakeQuantizeFunction(Tensor zero_point, float quant_min, float quant_max,
+                            bool per_channel, int64_t axis);
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+
+private:
+    float quant_min_;
+    float quant_max_;
+    bool per_channel_;
+    int64_t axis_;
+    Tensor zero_point_;  ///< Constant zero point captured at construction.
+};
+
+/**
+ * @brief Apply LSQ fake quantization with a trainable step size.
+ *
+ * Threads both @p input and the registered @p scale parameter Variable through
+ * an LSQFakeQuantizeFunction so the optimizer-held scale leaf accumulates the
+ * LSQ gradient and is actually updated during QAT.
+ *
+ * @param input      Variable to fake-quantize.
+ * @param scale      Registered (learnable) scale parameter Variable.
+ * @param zero_point Current zero-point value (treated as a constant).
+ * @param quant_min  Minimum quantized level.
+ * @param quant_max  Maximum quantized level.
+ * @param per_channel Whether scale is per-channel.
+ * @param axis       Channel axis for per-channel quantization.
+ * @return Fake-quantized Variable with STE + LSQ backward.
+ */
+auto lsq_fake_quantize(
+    const Variable& input,
+    const std::shared_ptr<Variable>& scale,
+    const Tensor& zero_point,
+    float quant_min,
+    float quant_max,
+    bool per_channel,
+    int64_t axis
+) -> Variable;
+
+/**
  * @brief Fold BatchNorm2d into a preceding Conv2d layer.
  *
  * Walks the model looking for Conv2d -> BatchNorm2d patterns and folds the

@@ -657,7 +657,11 @@ auto fused_layer_norm_backward_kernel(
                         Compute normalized = (Compute(load_in(b * norm_size + i)) - m) * rstd;
                         Compute go = load_go(b * norm_size + i);
                         Compute w = load_weight(i);
-                        Compute gi = rstd * w * (go - inv_n * (db + normalized * ds));
+                        // db = Σ(go·w) and ds = Σ(go·w·x_hat) are ALREADY weighted, so
+                        // the weight must apply only to the go term — multiplying the
+                        // whole expression by w double-weights the mean-correction and
+                        // gives a wrong grad_input. Matches the CPU reference.
+                        Compute gi = rstd * (w * go - inv_n * (db + normalized * ds));
                         store_gi(b * norm_size + i, gi);
                     }
                 });
@@ -1855,16 +1859,19 @@ auto fused_adam_step_kernel(
             m_ptr[idx] = m;
             v_ptr[idx] = v;
 
-            // Bias-corrected estimates
+            // Bias-corrected estimates. AMSGrad tracks the running maximum over
+            // the RAW second moment and applies bias correction AFTER, matching
+            // the CPU reference / PyTorch (maxing the bias-corrected v_hat is
+            // wrong because bias_correction2 grows toward 1 across steps).
             float m_hat = m / f_bc1;
-            float v_hat = v / f_bc2;
-
-            // AMSGrad
+            float v_hat;
             if (f_amsgrad && max_v_ptr) {
                 float max_v = max_v_ptr[idx];
-                if (v_hat > max_v) max_v = v_hat;
+                if (v > max_v) max_v = v;
                 max_v_ptr[idx] = max_v;
-                v_hat = max_v;
+                v_hat = max_v / f_bc2;
+            } else {
+                v_hat = v / f_bc2;
             }
 
             // Update parameters
@@ -1903,13 +1910,15 @@ auto fused_adam_step_kernel(
             v_ptr[idx] = v;
 
             double m_hat = m / d_bc1;
-            double v_hat = v / d_bc2;
-
+            // AMSGrad: max over RAW v, bias-correct after (matches CPU / PyTorch).
+            double v_hat;
             if (d_amsgrad && max_v_ptr) {
                 double max_v = max_v_ptr[idx];
-                if (v_hat > max_v) max_v = v_hat;
+                if (v > max_v) max_v = v;
                 max_v_ptr[idx] = max_v;
-                v_hat = max_v;
+                v_hat = max_v / d_bc2;
+            } else {
+                v_hat = v / d_bc2;
             }
 
             param_ptr[idx] = p - lr * m_hat / (sycl::sqrt(v_hat) + eps);
@@ -2500,6 +2509,14 @@ auto flash_attention_impl(
                         item.get_group(), local_max,
                         sycl::maximum<ComputeT>());
                     sycl::group_barrier(item.get_group());
+
+                    // If the entire KV tile is masked (every score -inf), block_max
+                    // is -inf; skip the tile so exp(-inf - (-inf)) = NaN does not
+                    // contaminate the running softmax (mirrors the FP64 kernel).
+                    if (block_max == -std::numeric_limits<ComputeT>::infinity()) {
+                        sycl::group_barrier(item.get_group());
+                        continue;
+                    }
 
                     // Step 2: Compute exp(score - max) and sum
                     ComputeT local_sum = ComputeT(0);

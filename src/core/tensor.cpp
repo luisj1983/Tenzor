@@ -1550,6 +1550,15 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
     if (!impl_) {
         throw std::runtime_error("Cannot reshape null tensor");
     }
+    // A general reshape cannot track the per-channel quantization axis (the
+    // copy ctor would carry a now-meaningless q_axis_, making dequantize() read
+    // scales against the wrong dim). Fail loudly; dequantize() first, or use
+    // axis-preserving ops (transpose/permute/squeeze/unsqueeze).
+    if (impl_->q_scales_.has_value()) {
+        throw std::runtime_error(
+            "reshape: cannot reshape a per-channel quantized tensor "
+            "(the per-channel quantization axis cannot be tracked)");
+    }
 
     // Handle -1 inference (one dimension can be inferred).
     // Dimension 0 is allowed for zero-element tensors.
@@ -1624,6 +1633,13 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
 auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
     if (!impl_) {
         throw std::runtime_error("Cannot view null tensor");
+    }
+    // See reshape(): the per-channel quantization axis cannot be tracked
+    // through a general view.
+    if (impl_->q_scales_.has_value()) {
+        throw std::runtime_error(
+            "view: cannot view a per-channel quantized tensor "
+            "(the per-channel quantization axis cannot be tracked)");
     }
 
     if (!is_contiguous()) {
@@ -1814,6 +1830,18 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
             static_cast<int64_t>(result.impl_->names_->size()) > d) {
             result.impl_->names_->erase(result.impl_->names_->begin() + d);
         }
+        // Remap the per-channel quantization axis: removing axis d shifts every
+        // later axis left by one. The channel axis itself cannot be squeezed
+        // away (dequantize() would then read scales against the wrong dim);
+        // fail loudly rather than leave a stale axis.
+        if (result.impl_->q_scales_.has_value()) {
+            if (d == result.impl_->q_axis_) {
+                throw std::runtime_error(
+                    "squeeze: cannot squeeze the per-channel quantization axis (axis " +
+                    std::to_string(d) + ")");
+            }
+            if (result.impl_->q_axis_ > d) result.impl_->q_axis_--;
+        }
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
@@ -1847,6 +1875,22 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_->shape = std::move(new_shape);
         result.impl_->strides = std::move(new_strides);
         if (has_valid_names) result.impl_->names_ = std::move(new_names);
+        // Remap the per-channel quantization axis to its position among the
+        // surviving (non-singleton) axes. If the channel axis is itself
+        // singleton it would be squeezed away — fail loudly instead of leaving
+        // a stale axis that dequantize() would read against the wrong dim.
+        if (result.impl_->q_scales_.has_value()) {
+            const int64_t old_axis = impl_->q_axis_;
+            if (old_axis < 0 || old_axis >= ndims || impl_->shape[old_axis] == 1) {
+                throw std::runtime_error(
+                    "squeeze: cannot squeeze the per-channel quantization axis");
+            }
+            int64_t new_axis = 0;
+            for (int64_t i = 0; i < old_axis; ++i) {
+                if (impl_->shape[i] != 1) new_axis++;
+            }
+            result.impl_->q_axis_ = new_axis;
+        }
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
@@ -1894,6 +1938,19 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
         new_stride = (dim < ndims) ? impl_->strides[dim] : 1;
     }
     result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
+    // Keep the dimension-name list the same length as the new rank: insert a
+    // wildcard at the new axis. Without this, names_ stayed one shorter than
+    // the shape and downstream code that relies on names_.size()==ndim()
+    // silently dropped or misaligned names.
+    if (result.impl_->names_.has_value() &&
+        static_cast<int64_t>(result.impl_->names_->size()) == ndims) {
+        result.impl_->names_->insert(result.impl_->names_->begin() + dim, Dimname{});
+    }
+    // Remap the per-channel quantization axis: inserting an axis at `dim` shifts
+    // every axis at or after `dim` right by one.
+    if (result.impl_->q_scales_.has_value() && result.impl_->q_axis_ >= dim) {
+        result.impl_->q_axis_++;
+    }
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 

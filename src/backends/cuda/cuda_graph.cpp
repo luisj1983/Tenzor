@@ -66,8 +66,12 @@ private:
 
 auto CUDAGraph::create(int32_t device_id) -> std::unique_ptr<CUDAGraph> {
     int device_count = 0;
-    cudaGetDeviceCount(&device_count);
-    if (device_count == 0 || device_id >= device_count) {
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess) {
+        return nullptr;
+    }
+    // Reject a negative device_id too — otherwise it flows into cudaSetDevice as
+    // an invalid ordinal (only the upper bound was previously checked).
+    if (device_count == 0 || device_id < 0 || device_id >= device_count) {
         return nullptr;
     }
     return std::make_unique<CUDAGraphImpl>(device_id);

@@ -679,11 +679,20 @@ auto MPIBackend::detect_cuda_aware() -> bool {
 
 auto MPIBackend::get_send_ptr(const Tensor& tensor, Tensor& host_buf) -> const void* {
     if (tensor.device().type == Device::Type::CPU || cuda_aware_) {
-        return tensor.data_ptr();
+        if (tensor.is_contiguous()) {
+            return tensor.data_ptr();
+        }
+        // Non-contiguous: MPI treats the send buffer as flat-contiguous, so a
+        // strided view would transmit the wrong elements (or read past the
+        // view). Stage a contiguous copy — mirrors get_recv_ptr.
+        host_buf = tensor.contiguous();
+        return host_buf.data_ptr();
     }
 
-    // Stage through host memory
-    host_buf = tensor.to(Device::cpu());
+    // Non-CUDA-aware MPI: stage through host memory. Ensure the host buffer is
+    // contiguous so MPI sends the correct flat element sequence even when the
+    // source device tensor is a strided view.
+    host_buf = tensor.to(Device::cpu()).contiguous();
     return host_buf.data_ptr();
 }
 

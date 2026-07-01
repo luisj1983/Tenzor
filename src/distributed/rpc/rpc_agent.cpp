@@ -84,25 +84,70 @@ bool write_exact(int fd, const void* buf, size_t n) {
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Wire byte order. All multi-byte integer header fields are written in
+// big-endian ("network") order and read back to host order, so the framing is
+// endian-independent across heterogeneous peers. The conversion is symmetric
+// (the same byte swap maps host->wire and wire->host) and is a no-op on
+// big-endian hosts, so same-endian peers are byte-for-byte unchanged.
+//
+// NOTE: the raw tensor DATA payload (the `nbytes` block in append_tensor) is
+// still copied verbatim in host byte order; truly mixing big- and little-endian
+// peers for tensor element data would additionally require per-element swapping
+// of the payload (and float/complex byte-order handling), which is out of scope
+// here. Only the integer framing/header fields are made endian-independent.
+inline uint32_t bswap_if_le32(uint32_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return v;
+#else
+    return __builtin_bswap32(v);
+#endif
+}
+inline uint64_t bswap_if_le64(uint64_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return v;
+#else
+    return __builtin_bswap64(v);
+#endif
+}
+
+inline void put_u32(std::vector<uint8_t>& out, uint32_t v) {
+    v = bswap_if_le32(v);
+    const uint8_t* bp = reinterpret_cast<const uint8_t*>(&v);
+    out.insert(out.end(), bp, bp + 4);
+}
+inline void put_i32(std::vector<uint8_t>& out, int32_t v) {
+    uint32_t u;
+    std::memcpy(&u, &v, 4);
+    put_u32(out, u);
+}
+inline void put_u64(std::vector<uint8_t>& out, uint64_t v) {
+    v = bswap_if_le64(v);
+    const uint8_t* bp = reinterpret_cast<const uint8_t*>(&v);
+    out.insert(out.end(), bp, bp + 8);
+}
+inline void put_i64(std::vector<uint8_t>& out, int64_t v) {
+    uint64_t u;
+    std::memcpy(&u, &v, 8);
+    put_u64(out, u);
+}
+
 // Serialize a Tensor (always materialised on CPU) onto a byte vector.
 void append_tensor(std::vector<uint8_t>& out, const Tensor& in) {
     Tensor cpu = in.device().type == Device::Type::CPU ? in.contiguous()
                                                        : in.to(Device::cpu()).contiguous();
     uint32_t dtype = static_cast<uint32_t>(cpu.dtype());
     uint32_t ndim = static_cast<uint32_t>(cpu.shape().size());
-    auto ap = [&](const void* p, size_t n) {
-        const uint8_t* bp = static_cast<const uint8_t*>(p);
-        out.insert(out.end(), bp, bp + n);
-    };
-    ap(&dtype, sizeof(dtype));
-    ap(&ndim, sizeof(ndim));
+    put_u32(out, dtype);
+    put_u32(out, ndim);
     for (auto d : cpu.shape()) {
-        int64_t v = d;
-        ap(&v, sizeof(v));
+        put_i64(out, static_cast<int64_t>(d));
     }
     uint64_t nbytes = static_cast<uint64_t>(cpu.numel()) * dtype_size(cpu.dtype());
-    ap(&nbytes, sizeof(nbytes));
-    ap(cpu.data_ptr(), nbytes);
+    put_u64(out, nbytes);
+    // Raw element data: host byte order (see NOTE above).
+    const uint8_t* bp = static_cast<const uint8_t*>(cpu.data_ptr());
+    out.insert(out.end(), bp, bp + nbytes);
 }
 
 // NOTE: a standalone read_tensor(int fd) helper used to live here but had zero
@@ -114,21 +159,20 @@ void append_tensor(std::vector<uint8_t>& out, const Tensor& in) {
 
 void serialize_message(std::vector<uint8_t>& out, const Message& m) {
     uint8_t type = static_cast<uint8_t>(m.type);
-    int32_t src = m.src_worker;
-    int32_t dst = m.dst_worker;
-    int64_t rid = m.payload.request_id;
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&type), reinterpret_cast<uint8_t*>(&type) + 1);
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&src),  reinterpret_cast<uint8_t*>(&src)  + 4);
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&dst),  reinterpret_cast<uint8_t*>(&dst)  + 4);
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&rid),  reinterpret_cast<uint8_t*>(&rid)  + 8);
+    // type is a single byte — no byte-order conversion needed. Every multi-byte
+    // field below is written big-endian via the put_* helpers (see NOTE above).
+    out.insert(out.end(), &type, &type + 1);
+    put_i32(out, m.src_worker);
+    put_i32(out, m.dst_worker);
+    put_i64(out, m.payload.request_id);
     uint32_t fn_len = static_cast<uint32_t>(m.payload.function_name.size());
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&fn_len), reinterpret_cast<uint8_t*>(&fn_len) + 4);
+    put_u32(out, fn_len);
     out.insert(out.end(), m.payload.function_name.begin(), m.payload.function_name.end());
     uint32_t extra_len = static_cast<uint32_t>(m.payload.bytes.size());
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&extra_len), reinterpret_cast<uint8_t*>(&extra_len) + 4);
+    put_u32(out, extra_len);
     out.insert(out.end(), m.payload.bytes.begin(), m.payload.bytes.end());
     uint32_t nt = static_cast<uint32_t>(m.payload.tensors.size());
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&nt), reinterpret_cast<uint8_t*>(&nt) + 4);
+    put_u32(out, nt);
     for (const auto& t : m.payload.tensors) append_tensor(out, t);
 }
 
@@ -140,6 +184,7 @@ constexpr uint32_t kMaxPayloadBytes = 1u << 30;  // 1 GiB
 std::optional<Message> deserialize_message(int fd) {
     uint32_t payload_len = 0;
     if (!read_exact(fd, &payload_len, sizeof(payload_len))) return std::nullopt;
+    payload_len = bswap_if_le32(payload_len);  // wire is big-endian
     if (payload_len > kMaxPayloadBytes) return std::nullopt;
 
     std::vector<uint8_t> buf(payload_len);
@@ -153,12 +198,28 @@ std::optional<Message> deserialize_message(int fd) {
         off += n;
         return true;
     };
+    // Typed readers that undo the big-endian wire conversion (symmetric with the
+    // put_* writers). Byte strings / raw tensor data are read directly via take().
+    auto take_u32 = [&](uint32_t& v) -> bool {
+        uint32_t t; if (!take(&t, 4)) return false; v = bswap_if_le32(t); return true;
+    };
+    auto take_i32 = [&](int32_t& v) -> bool {
+        uint32_t t; if (!take(&t, 4)) return false; t = bswap_if_le32(t);
+        std::memcpy(&v, &t, 4); return true;
+    };
+    auto take_u64 = [&](uint64_t& v) -> bool {
+        uint64_t t; if (!take(&t, 8)) return false; v = bswap_if_le64(t); return true;
+    };
+    auto take_i64 = [&](int64_t& v) -> bool {
+        uint64_t t; if (!take(&t, 8)) return false; t = bswap_if_le64(t);
+        std::memcpy(&v, &t, 8); return true;
+    };
 
     Message m;
     uint8_t type;
     int32_t src, dst;
     int64_t rid;
-    if (!take(&type, 1) || !take(&src, 4) || !take(&dst, 4) || !take(&rid, 8))
+    if (!take(&type, 1) || !take_i32(src) || !take_i32(dst) || !take_i64(rid))
         return std::nullopt;
     m.type = static_cast<MessageType>(type);
     m.src_worker = src;
@@ -166,7 +227,7 @@ std::optional<Message> deserialize_message(int fd) {
     m.payload.request_id = rid;
 
     uint32_t fn_len;
-    if (!take(&fn_len, 4)) return std::nullopt;
+    if (!take_u32(fn_len)) return std::nullopt;
     // Bound the variable-length field against the remaining buffer BEFORE the
     // assign (subtraction form avoids integer overflow). A peer controls
     // fn_len/extra_len, so without this the assign reads arbitrary heap past buf.
@@ -177,20 +238,20 @@ std::optional<Message> deserialize_message(int fd) {
     off += fn_len;
 
     uint32_t extra_len;
-    if (!take(&extra_len, 4)) return std::nullopt;
+    if (!take_u32(extra_len)) return std::nullopt;
     if (extra_len > buf.size() - off) return std::nullopt;
     m.payload.bytes.assign(buf.data() + off, buf.data() + off + extra_len);
     off += extra_len;
 
     uint32_t nt;
-    if (!take(&nt, 4)) return std::nullopt;
+    if (!take_u32(nt)) return std::nullopt;
     for (uint32_t i = 0; i < nt; ++i) {
         uint32_t dtype, ndim;
-        if (!take(&dtype, 4) || !take(&ndim, 4)) return std::nullopt;
+        if (!take_u32(dtype) || !take_u32(ndim)) return std::nullopt;
         if (ndim > 4096) return std::nullopt;  // implausible rank
         std::vector<int64_t> shape(ndim);
         for (uint32_t k = 0; k < ndim; ++k) {
-            if (!take(&shape[k], 8)) return std::nullopt;
+            if (!take_i64(shape[k])) return std::nullopt;
         }
         // Validate dims and compute the expected byte size with checked math so
         // a crafted shape/nbytes can't desync from the allocation.
@@ -200,7 +261,7 @@ std::optional<Message> deserialize_message(int fd) {
             if (__builtin_mul_overflow(numel, d, &numel)) return std::nullopt;
         }
         uint64_t nbytes;
-        if (!take(&nbytes, 8)) return std::nullopt;
+        if (!take_u64(nbytes)) return std::nullopt;
         // Subtraction form: off <= buf.size(), so this cannot overflow (unlike
         // off + nbytes, which wraps for nbytes near UINT64_MAX and bypassed the
         // bound, then memcpy'd ~exabytes out of buf).
@@ -247,7 +308,7 @@ std::optional<Message> deserialize_message(int fd) {
 bool send_framed(int fd, const Message& msg) {
     std::vector<uint8_t> payload;
     serialize_message(payload, msg);
-    uint32_t len = static_cast<uint32_t>(payload.size());
+    uint32_t len = bswap_if_le32(static_cast<uint32_t>(payload.size()));  // wire is big-endian
     if (!write_exact(fd, &len, sizeof(len))) return false;
     if (!payload.empty() && !write_exact(fd, payload.data(), payload.size())) return false;
     return true;

@@ -58,6 +58,23 @@ void register_parametrization(std::shared_ptr<Module> module,
             list.original.clone(), param->requires_grad());
         list.chain.push_back(parametrization);
 
+        // Register original_var as a trainable parameter so the OPTIMIZER sees
+        // it and actually updates it. Without this, the parameter slot
+        // (param_name) is repointed each forward to a NON-LEAF chain output
+        // (grad_fn set), so no gradient accumulates on the slot, while the real
+        // learnable leaf (original_var) is invisible to the optimizer — the
+        // reparameterized weight could therefore never change. Use the public
+        // shared-ptr overload so the optimizer's grad/momentum state binds to
+        // the exact leaf that accumulates gradient during backward (mirrors how
+        // WeightNorm/SpectralNorm register their own leaves). A namespaced key
+        // avoids clobbering the layer's original param_name slot, which the
+        // forward pass still reads as the effective (reparameterized) weight.
+        if (list.original_var->requires_grad()) {
+            module->register_parameter_shared(
+                "parametrizations." + param_name + ".original",
+                list.original_var);
+        }
+
         // Register an autograd-aware forward pre-hook. The hook builds
         // chain.forward_impl(original_var) as a *Variable* computation,
         // then swaps the parameter slot's tensor + grad_fn so downstream
@@ -156,6 +173,17 @@ void remove_parametrizations(std::shared_ptr<Module> module,
 
     // Remove the hook
     module->remove_hook(list.hook_id);
+
+    // Unregister the trainable leaf we added in register_parametrization so it
+    // no longer lingers in the optimizer's parameter set after the
+    // parametrization is removed. Guarded: it was only registered when the
+    // original parameter required grad, and unregister_parameter throws if the
+    // key is absent.
+    try {
+        module->unregister_parameter("parametrizations." + param_name + ".original");
+    } catch (const std::out_of_range&) {
+        // Not registered (param did not require grad) — nothing to remove.
+    }
 
     // Clean up registry
     mod_it->second.erase(param_it);

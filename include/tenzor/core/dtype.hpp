@@ -603,6 +603,13 @@ constexpr auto promote_types(DType a, DType b) -> DType {
 
     // Both floating: promote to wider.
     if (is_floating_type(a) && is_floating_type(b)) {
+        // Float16 and BFloat16 are incomparable (neither's range/precision
+        // dominates), so their promotion is Float32 — matching PyTorch. The
+        // priority fallback below would otherwise pick one of them arbitrarily.
+        if ((a == DType::Float16 && b == DType::BFloat16) ||
+            (a == DType::BFloat16 && b == DType::Float16)) {
+            return DType::Float32;
+        }
         return detail::dtype_priority(a) >= detail::dtype_priority(b) ? a : b;
     }
 

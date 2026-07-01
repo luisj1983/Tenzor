@@ -32,6 +32,12 @@
 #include "../jit/compiler.hpp"
 #include "traffic_router.hpp"
 
+// Forward declaration so InferenceServer can hold a pointer to the running
+// httplib server without leaking the (heavy, optional) <httplib.h> include into
+// this public header. The pointer is only ever dereferenced in server.cpp under
+// TENZOR_HAS_HTTPLIB, where the full type is available.
+namespace httplib { class Server; }
+
 namespace tenzor {
 namespace serving {
 
@@ -350,6 +356,15 @@ private:
     TrafficRouter traffic_router_;
     std::atomic<bool> running_{false};
     std::thread server_thread_;
+
+    // Handle to the httplib server that serve_loop() is blocked in. Published
+    // by serve_loop() just before it calls listen() and cleared when listen()
+    // returns, always under server_mutex_. stop() reads it under the same mutex
+    // to call svr.stop() and unblock listen(); without this, listen() never
+    // returns and shutdown hangs. The mutex also closes the stop()-before-
+    // listen() race (see server.cpp).
+    std::mutex server_mutex_;
+    httplib::Server* http_server_{nullptr};
 
     auto serve_loop() -> void;
 };

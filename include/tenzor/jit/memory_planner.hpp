@@ -127,7 +127,15 @@ public:
      *
      * @param alignment Alignment in bytes (must be power of 2)
      */
-    auto set_alignment(size_t alignment) -> void { alignment_ = alignment; }
+    auto set_alignment(size_t alignment) -> void {
+        // Alignment must be a power of 2 (and non-zero): the planner rounds sizes
+        // with `(x + a - 1) & ~(a - 1)`, which corrupts offsets for a==0 or a
+        // non-power-of-2.
+        if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+            throw std::invalid_argument("MemoryPlanner::set_alignment: alignment must be a non-zero power of 2");
+        }
+        alignment_ = alignment;
+    }
 
     /**
      * @brief Get the alignment setting.

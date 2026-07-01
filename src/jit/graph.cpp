@@ -501,7 +501,7 @@ auto Graph::infer_types() -> void {
                     auto shape = input_shapes[0];
                     int64_t dim = node->get_int_attr("dim");
                     if (dim < 0) dim += static_cast<int64_t>(shape.size()) + 1;
-                    if (dim <= static_cast<int64_t>(shape.size())) {
+                    if (dim >= 0 && dim <= static_cast<int64_t>(shape.size())) {  // guard lower bound too: a very-negative dim stays negative after normalization
                         shape.insert(shape.begin() + dim, 1);
                     }
                     output_shapes.push_back(shape);
@@ -1237,7 +1237,7 @@ auto Graph::infer_symbolic_types() -> void {
                     auto sym_shape = input_sym_shapes[0];
                     int64_t dim = node->get_int_attr("dim");
                     if (dim < 0) dim += static_cast<int64_t>(sym_shape.rank()) + 1;
-                    if (dim <= static_cast<int64_t>(sym_shape.rank())) {
+                    if (dim >= 0 && dim <= static_cast<int64_t>(sym_shape.rank())) {  // guard lower bound (see infer_types Unsqueeze)
                         sym_shape.insert(static_cast<size_t>(dim), SymbolicDim::concrete(1));
                     }
                     output_sym_shapes.push_back(std::move(sym_shape));

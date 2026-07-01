@@ -304,7 +304,6 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
         return std::unexpected("Backend factory returned null");
     }
 
-    auto name = std::string(backend->name());
     loaded_libraries_.push_back(handle);
 
     return backend;

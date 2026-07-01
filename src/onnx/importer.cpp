@@ -221,6 +221,16 @@ auto proto_to_ir_tensor(const tenzor_onnx::TensorProto& t,
         const size_t elem_size = dtype_size(onnx_to_dtype(tensor.dtype));
         tensor.raw_data.resize(count * elem_size);
         const auto& src = t.int32_data();
+        if (elem_size > sizeof(uint32_t)) {
+            // int32_data only encodes dtypes up to 4 bytes wide (int8/uint8/
+            // int16/uint16/int32/bool/float16/bfloat16 per the ONNX spec). A
+            // wider element size would make the byte-extraction shift below
+            // (v >> 8*b, b >= 4) shift a uint32_t by >= 32 bits — undefined
+            // behaviour. Reject the malformed combination loudly.
+            throw std::runtime_error(
+                "ONNX tensor '" + tensor.name +
+                "': int32_data cannot encode a dtype wider than 4 bytes");
+        }
         if (elem_size == sizeof(int32_t)) {
             std::memcpy(tensor.raw_data.data(), src.data(), tensor.raw_data.size());
         } else {
@@ -429,6 +439,15 @@ auto ONNXTensorData::to_tensor(Device device) const -> Tensor {
                 std::to_string(expected_bytes) + " bytes, got " + std::to_string(raw_data.size())
             );
         }
+    } else if (n > 0) {
+        // raw_data carries all initializer data (raw + consolidated typed
+        // fields). An empty payload with a non-zero declared element count is a
+        // malformed/hostile initializer: reject it BEFORE allocating, so a huge
+        // attacker-declared shape with no data cannot trigger a giant
+        // (multi-GB/TB) allocation.
+        throw std::runtime_error(
+            "ONNX tensor '" + name + "' declares " + std::to_string(n) +
+            " elements but carries no data");
     }
 
     Tensor tensor(shape, tenzor_dtype, device);
@@ -828,6 +847,8 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
             {"Add", {2, 1}},  {"Sub", {2, 1}},   {"Mul", {2, 1}},     {"Div", {2, 1}},
             {"Pow", {2, 1}},  {"MatMul", {2, 1}},{"Gemm", {2, 1}},    {"Where", {3, 1}},
             {"Expand", {2, 1}},{"Tile", {2, 1}}, {"Gather", {2, 1}},  {"Reshape", {2, 1}},
+            {"GatherElements", {2, 1}},              // data, indices
+
             {"Range", {3, 1}},{"LinalgSolve", {2, 1}}, {"TopK", {2, 2}},
             // Converters below subscript node.inputs past index 0 with the
             // unchecked vector operator[]; an under-supplied (untrusted) model
@@ -900,6 +921,9 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
         return std::nullopt;
     } else if (node.op_type == "Gather") {
         convert_gather(node);
+        return std::nullopt;
+    } else if (node.op_type == "GatherElements") {
+        convert_gather_elements(node);
         return std::nullopt;
     } else if (node.op_type == "Clip") {
         convert_clip(node);
@@ -1233,11 +1257,26 @@ auto ONNXImporter::convert_reshape(const ONNXImportNode& node) -> void {
     // pointer (a device pointer for a GPU import) on the host -> crash.
     auto shape = get_host_input(node.inputs[1]); // Shape tensor
 
-    // Extract shape values
+    // Extract shape values. Per the ONNX Reshape spec, a 0 in the target shape
+    // means "copy the corresponding dimension from the input" (unless the
+    // allowzero attribute is 1, in which case 0 is literal). The previous code
+    // passed 0 through and produced an empty (0-sized) dimension.
+    const bool allowzero =
+        node.get_attr("allowzero").value_or(ONNXAttribute{}).get_int(0) != 0;
+    auto in_shape = input.shape();
     std::vector<int64_t> new_shape;
     const int64_t* shape_data = shape.data<int64_t>();
     for (int64_t i = 0; i < shape.numel(); ++i) {
-        new_shape.push_back(shape_data[i]);
+        int64_t d = shape_data[i];
+        if (d == 0 && !allowzero) {
+            if (i >= static_cast<int64_t>(in_shape.size())) {
+                throw std::runtime_error(
+                    "Reshape: target dim " + std::to_string(i) +
+                    " is 0 (copy-input) but the input has no matching dimension");
+            }
+            d = in_shape[i];
+        }
+        new_shape.push_back(d);
     }
 
     auto result = input.reshape(new_shape);
@@ -1288,7 +1327,13 @@ auto ONNXImporter::convert_split(const ONNXImportNode& node) -> void {
     auto split_attr = node.get_attr("split");
     std::vector<int64_t> split_sizes;
     if (split_attr.has_value() && split_attr->ints.has_value()) {
+        // Opset-1..12: `split` is an attribute.
         split_sizes = split_attr->ints.value();
+    } else if (node.inputs.size() > 1 && !node.inputs[1].empty()) {
+        // Opset-13+: `split` migrated from attribute to a second (host) input.
+        auto split_t = get_host_input(node.inputs[1]).to(DType::Int64);
+        const int64_t* p = split_t.data<int64_t>();
+        split_sizes.assign(p, p + split_t.numel());
     } else {
         // Equal splits. Per the ONNX Split spec, when the axis length is not
         // evenly divisible by num_outputs the remainder goes to the LAST chunk;
@@ -1299,9 +1344,12 @@ auto ONNXImporter::convert_split(const ONNXImportNode& node) -> void {
             throw std::runtime_error("ONNX Split: node has no outputs");
         }
         int64_t dim = input.shape()[axis];
-        int64_t base = dim / num_outputs;
+        // ONNX/torch equal split uses CEIL-sized leading chunks (the last chunk
+        // takes the smaller remainder), not floor-with-remainder-to-last. e.g.
+        // dim=7,n=3 -> [3,3,1], not [2,2,3].
+        int64_t base = (dim + num_outputs - 1) / num_outputs;
         split_sizes.assign(num_outputs - 1, base);
-        split_sizes.push_back(dim - base * (num_outputs - 1));
+        split_sizes.push_back(std::max<int64_t>(0, dim - base * (num_outputs - 1)));
     }
 
     // The number of split chunks must match the declared output count, else
@@ -1722,6 +1770,10 @@ auto ONNXImporter::convert_batch_normalization(const ONNXImportNode& node) -> st
 
     float eps = node.get_attr("epsilon").value_or(ONNXAttribute{}).get_float(1e-5f);
 
+    if (scale.shape().empty()) {
+        throw std::runtime_error(
+            "BatchNormalization: scale (gamma) must be at least 1-D");
+    }
     int64_t num_features = scale.shape()[0];
 
     // ONNX uses a single BatchNormalization op for all ranks; pick the Tenzor
@@ -2618,6 +2670,25 @@ auto ONNXImporter::convert_pad(const ONNXImportNode& node) -> void {
 }
 
 auto ONNXImporter::convert_gather(const ONNXImportNode& node) -> void {
+    // ONNX `Gather` is a slice-select along `axis` (output rank =
+    // data.rank - 1 + indices.rank), NOT element-wise gather. That maps to
+    // tenzor::index_select, not tenzor::gather (which is torch.gather /
+    // ONNX GatherElements). The exporter mirrors this: it emits
+    // IndexSelect/Embedding -> "Gather" and Gather(element-wise) ->
+    // "GatherElements", so the importer must invert the same way.
+    auto input = get_input(node.inputs[0]);
+    auto indices = get_input(node.inputs[1]);
+    int64_t axis = node.get_attr("axis").value_or(ONNXAttribute{}).get_int(0);
+
+    auto result = tenzor::index_select(input, axis, indices);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_gather_elements(const ONNXImportNode& node) -> void {
+    // ONNX `GatherElements` == torch.gather == tenzor::gather: element-wise
+    // gather where indices has the same rank as data and the output takes the
+    // shape of indices. This is the counterpart to convert_gather (slice-select)
+    // and matches the exporter's Gather(element-wise) -> "GatherElements" map.
     auto input = get_input(node.inputs[0]);
     auto indices = get_input(node.inputs[1]);
     int64_t axis = node.get_attr("axis").value_or(ONNXAttribute{}).get_int(0);
@@ -2635,18 +2706,28 @@ auto ONNXImporter::convert_clip(const ONNXImportNode& node) -> void {
     double min_val = -std::numeric_limits<double>::infinity();
     double max_val = std::numeric_limits<double>::infinity();
 
+    // Opset-11+ Clip carries min/max as INPUTS; opset-6..10 carried them as
+    // float ATTRIBUTES. Read the inputs first, then fall back to the legacy
+    // attributes so models from either opset (and our own round-trips) import
+    // with their clamp bounds intact.
     if (node.inputs.size() > 1 && !node.inputs[1].empty()) {
         // Host-resident: dereferenced on the host below (see convert_pad).
         auto min_t = get_host_input(node.inputs[1]);
         if (min_t.numel() > 0) {
             min_val = *static_cast<const double*>(min_t.to(DType::Float64).data_ptr());
         }
+    } else if (auto min_attr = node.get_attr("min");
+               min_attr.has_value() && min_attr->f.has_value()) {
+        min_val = static_cast<double>(min_attr->f.value());
     }
     if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
         auto max_t = get_host_input(node.inputs[2]);
         if (max_t.numel() > 0) {
             max_val = *static_cast<const double*>(max_t.to(DType::Float64).data_ptr());
         }
+    } else if (auto max_attr = node.get_attr("max");
+               max_attr.has_value() && max_attr->f.has_value()) {
+        max_val = static_cast<double>(max_attr->f.value());
     }
 
     auto result = tenzor::clamp(input, min_val, max_val);
@@ -2740,7 +2821,23 @@ auto ONNXImporter::convert_resize(const ONNXImportNode& node) -> void {
         if (mode == "cubic") mode = "bicubic";
     }
 
-    auto result = tenzor::ops::interpolate(input, output_size, mode, false);
+    // Honor coordinate_transformation_mode (default "half_pixel" per the ONNX
+    // Resize spec). Tenzor's interpolate exposes a single `align_corners` knob:
+    //   - "align_corners"           -> align_corners = true
+    //   - "asymmetric" /
+    //     "half_pixel" /
+    //     "pytorch_half_pixel"      -> align_corners = false
+    // The earlier code hard-coded false, so an "align_corners" Resize sampled
+    // with the wrong coordinate mapping (visible as a sub-pixel shift). The
+    // half-pixel variants all reduce to align_corners=false here; the finer
+    // distinction between them (and the nearest-only `nearest_mode` rounding)
+    // is not representable in the current interpolate API — see report.
+    std::string coord_mode = node.get_attr("coordinate_transformation_mode")
+                                 .value_or(ONNXAttribute{})
+                                 .get_string("half_pixel");
+    bool align_corners = (coord_mode == "align_corners");
+
+    auto result = tenzor::ops::interpolate(input, output_size, mode, align_corners);
     register_output(node.outputs[0], result);
 }
 
@@ -2763,6 +2860,18 @@ static auto get_reduce_axes(const ONNXImportNode& node,
         }
     }
     return {};  // empty → reduce over all axes
+}
+
+// Opset-18+ reductions carry a `noop_with_empty_axes` attribute. When it is
+// set (=1) AND no axes are supplied, the operator is the IDENTITY — it must NOT
+// fall through to the legacy "reduce over all axes" behaviour (which is what
+// noop_with_empty_axes=0 / pre-18 opsets mean). Returns true for the identity
+// case so the caller can pass the input through untouched.
+static auto reduce_is_noop(const ONNXImportNode& node,
+                           const std::vector<int64_t>& axes) -> bool {
+    return axes.empty() &&
+           node.get_attr("noop_with_empty_axes")
+               .value_or(ONNXAttribute{}).get_int(0) != 0;
 }
 
 // Audit I2: apply `single_dim_reduce` (sum/mean/max) over the listed axes.
@@ -2808,6 +2917,11 @@ auto ONNXImporter::convert_reduce_sum(const ONNXImportNode& node) -> void {
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
         [this](const std::string& s) { return this->get_host_input(s); });
+    if (reduce_is_noop(node, axes)) {
+        // noop_with_empty_axes=1 with no axes → identity (return input as-is).
+        register_output(node.outputs[0], input);
+        return;
+    }
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::sum(t, d, k);
@@ -2820,6 +2934,11 @@ auto ONNXImporter::convert_reduce_mean(const ONNXImportNode& node) -> void {
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
         [this](const std::string& s) { return this->get_host_input(s); });
+    if (reduce_is_noop(node, axes)) {
+        // noop_with_empty_axes=1 with no axes → identity (return input as-is).
+        register_output(node.outputs[0], input);
+        return;
+    }
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::mean(t, d, k);
@@ -2832,6 +2951,11 @@ auto ONNXImporter::convert_reduce_max(const ONNXImportNode& node) -> void {
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
         [this](const std::string& s) { return this->get_host_input(s); });
+    if (reduce_is_noop(node, axes)) {
+        // noop_with_empty_axes=1 with no axes → identity (return input as-is).
+        register_output(node.outputs[0], input);
+        return;
+    }
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::max(t, d, k);
@@ -2848,6 +2972,11 @@ auto ONNXImporter::convert_reduce_min(const ONNXImportNode& node) -> void {
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
         [this](const std::string& s) { return this->get_host_input(s); });
+    if (reduce_is_noop(node, axes)) {
+        // noop_with_empty_axes=1 with no axes → identity (return input as-is).
+        register_output(node.outputs[0], input);
+        return;
+    }
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::min(t, d, k);
@@ -2860,6 +2989,11 @@ auto ONNXImporter::convert_reduce_prod(const ONNXImportNode& node) -> void {
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
         [this](const std::string& s) { return this->get_host_input(s); });
+    if (reduce_is_noop(node, axes)) {
+        // noop_with_empty_axes=1 with no axes → identity (return input as-is).
+        register_output(node.outputs[0], input);
+        return;
+    }
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::prod(t, d, k);
@@ -2873,6 +3007,11 @@ auto ONNXImporter::convert_reduce_l1(const ONNXImportNode& node) -> void {
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
         [this](const std::string& s) { return this->get_host_input(s); });
+    if (reduce_is_noop(node, axes)) {
+        // noop_with_empty_axes=1 with no axes → identity (return input as-is).
+        register_output(node.outputs[0], input);
+        return;
+    }
     auto abs_in = tenzor::abs(input);
     auto result = apply_multi_axis_reduce(abs_in, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
@@ -2887,6 +3026,11 @@ auto ONNXImporter::convert_reduce_l2(const ONNXImportNode& node) -> void {
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
         [this](const std::string& s) { return this->get_host_input(s); });
+    if (reduce_is_noop(node, axes)) {
+        // noop_with_empty_axes=1 with no axes → identity (return input as-is).
+        register_output(node.outputs[0], input);
+        return;
+    }
     auto sq = tenzor::mul(input, input);
     auto sum = apply_multi_axis_reduce(sq, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
@@ -3161,6 +3305,30 @@ auto ONNXImporter::log(const std::string& message) -> void {
 // Quantization (QDQ) Operations
 // ============================================================================
 
+// ONNX QuantizeLinear specifies round-half-to-even ("banker's rounding") when
+// mapping the scaled value to the integer grid. tenzor::round delegates to
+// std::round, which rounds halves AWAY from zero — biasing exactly-halfway
+// values (e.g. 0.5 -> 1 instead of 0, 2.5 -> 3 instead of 2) and diverging from
+// every ONNX reference runtime. Tenzor has no round-to-even op, so we implement
+// it with device-agnostic tensor ops via floor + fractional analysis:
+//   fl   = floor(v)            (toward -inf, so this is correct for negatives)
+//   frac = v - fl              in [0, 1)
+//   round up when frac > 0.5, OR (frac == 0.5 AND fl is odd) so the result
+//   lands on the even neighbour. fl is odd  <=>  fmod(fl, 2) != 0 (works for
+//   negative fl too, since fmod keeps the sign of the dividend).
+static auto round_half_even(const Tensor& v) -> Tensor {
+    Tensor fl = floor(v);
+    Tensor frac = v - fl;
+    Tensor half = full_like(v, 0.5);
+    Tensor two = full_like(v, 2.0);
+    Tensor zero = full_like(v, 0.0);
+    Tensor up = gt(frac, half);                       // frac > 0.5
+    Tensor is_half = eq(frac, half);                  // exactly halfway
+    Tensor fl_odd = ne(fmod(fl, two), zero);          // floor is odd
+    Tensor round_up = logical_or(up, logical_and(is_half, fl_odd));
+    return fl + round_up.to(v.dtype());               // fl + {0, 1}
+}
+
 auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
     // Audit I3: dtype-aware quantization. The output dtype of ONNX
     // QuantizeLinear is the dtype of `y_zero_point` (or UInt8 [0,255], the
@@ -3193,7 +3361,7 @@ auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
     }
 
     auto scaled = x / y_scale;
-    auto rounded = round(scaled);
+    auto rounded = round_half_even(scaled);  // ONNX: round-half-to-even
 
     // Determine output dtype + saturation range from zero_point dtype.
     // Per the ONNX QuantizeLinear spec, when y_zero_point is omitted the output
@@ -3244,6 +3412,11 @@ auto ONNXImporter::convert_dequantize_linear(const ONNXImportNode& node) -> void
     auto x = get_input(node.inputs[0]);
     auto x_scale = get_input(node.inputs[1]);
 
+    // Per the ONNX DequantizeLinear spec the output dtype equals the dtype of
+    // x_scale (Float16 / BFloat16 / Float32). The previous code hard-coded a
+    // Float32 result, silently widening Float16/BFloat16-scaled models.
+    const DType deq_out_dtype = x_scale.dtype();
+
     // Per-channel dequant: scale/zero_point are 1-D along `axis` (default 1);
     // reshape to broadcast along that axis instead of the trailing dim.
     auto dqaxis_attr = node.get_attr("axis");
@@ -3258,7 +3431,10 @@ auto ONNXImporter::convert_dequantize_linear(const ONNXImportNode& node) -> void
         x_scale = x_scale.reshape(dqbcast_shape(x_scale));
     }
 
-    // Convert quantized input to float
+    // Convert quantized input to float for the arithmetic (subtract zero-point,
+    // multiply by scale), then narrow the result back to x_scale's dtype so the
+    // declared output type is preserved. Computing in Float32 keeps the
+    // intermediate exact for integer inputs regardless of the scale dtype.
     auto x_float = x.to(DType::Float32);
 
     if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
@@ -3268,7 +3444,7 @@ auto ONNXImporter::convert_dequantize_linear(const ONNXImportNode& node) -> void
         x_float = x_float - zp.to(DType::Float32);
     }
 
-    auto result = x_float * x_scale;
+    auto result = (x_float * x_scale.to(DType::Float32)).to(deq_out_dtype);
 
     register_output(node.outputs[0], result);
     log("Converted DequantizeLinear: " + node.outputs[0]);

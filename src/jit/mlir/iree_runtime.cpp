@@ -246,9 +246,13 @@ struct SubprocessResult {
 auto run_subprocess(const std::vector<std::string>& argv) -> SubprocessResult {
     int out_pipe[2];
     int err_pipe[2];
-    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
-        throw JitInvokeError("pipe() failed: " +
-                             std::string(std::strerror(errno)));
+    if (pipe(out_pipe) != 0) {
+        throw JitInvokeError("pipe() failed: " + std::string(std::strerror(errno)));
+    }
+    if (pipe(err_pipe) != 0) {
+        // Close the first pipe's fds before throwing so they don't leak.
+        close(out_pipe[0]); close(out_pipe[1]);
+        throw JitInvokeError("pipe() failed: " + std::string(std::strerror(errno)));
     }
 
     pid_t pid = fork();

@@ -178,5 +178,27 @@ inline uint32_t div_wg(uint64_t n, uint32_t wg_size) {
     return static_cast<uint32_t>(result);
 }
 
+/// Same as div_wg but additionally validates the result against the device's
+/// VkPhysicalDeviceLimits::maxComputeWorkGroupCount[0]. A 1D dispatch whose
+/// groupCountX exceeds that limit is INVALID per the Vulkan spec — on
+/// spec-minimum devices (limit == 65535) this happens around ~16.7M elements at
+/// wg_size 256 and previously triggered a silent invalid dispatch / device loss
+/// (finding H16). Throwing a clear error here turns that into an actionable
+/// failure. (The single-element-per-invocation shaders would need grid-stride
+/// loops to support counts beyond the device limit; that is a separate change.)
+inline uint32_t div_wg_checked(uint64_t n, uint32_t wg_size, uint32_t max_groups,
+                               const char* op_name) {
+    uint32_t groups = div_wg(n, wg_size);
+    if (groups > max_groups) {
+        throw std::runtime_error(
+            std::string("Vulkan ") + (op_name ? op_name : "dispatch") +
+            ": workgroup count " + std::to_string(groups) +
+            " exceeds device maxComputeWorkGroupCount[0]=" + std::to_string(max_groups) +
+            " for a " + std::to_string(n) +
+            "-element 1D dispatch (too large for this device's compute limits).");
+    }
+    return groups;
+}
+
 
 } // namespace tenzor

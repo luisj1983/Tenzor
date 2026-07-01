@@ -3256,11 +3256,13 @@ void bind_compression(py::module& m) {
 
     sparse_mod.def("sparse_coo", &tenzor::SparseTensor::sparse_coo,
         "Create a COO sparse tensor",
-        py::arg("indices"), py::arg("values"), py::arg("shape"));
+        py::arg("indices"), py::arg("values"), py::arg("shape"),
+        py::arg("validate") = true);
 
     sparse_mod.def("sparse_csr", &tenzor::SparseTensor::sparse_csr,
         "Create a CSR sparse tensor",
-        py::arg("crow_indices"), py::arg("col_indices"), py::arg("values"), py::arg("shape"));
+        py::arg("crow_indices"), py::arg("col_indices"), py::arg("values"), py::arg("shape"),
+        py::arg("validate") = true);
 
     sparse_mod.def("to_sparse", &tenzor::to_sparse,
         "Convert dense tensor to sparse COO",

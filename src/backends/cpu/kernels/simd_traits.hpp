@@ -92,7 +92,17 @@ template<> inline bool MulOp::scalar<bool>(bool a, bool b) {
 
 struct DivOp {
     template<typename T>
-    static T scalar(T a, T b) { return a / b; }
+    static T scalar(T a, T b) {
+        if constexpr (std::is_integral_v<T>) {
+            // Integer/bool division by zero is a hardware trap (SIGFPE) on x86,
+            // hard-crashing the process on user-controllable tensor data. Guard
+            // it (return 0 for a zero divisor), matching the GPU integer DivOp
+            // paths; floating types keep IEEE semantics (x/0 -> inf, 0/0 -> NaN).
+            return b == T(0) ? T(0) : (a / b);
+        } else {
+            return a / b;
+        }
+    }
 };
 
 template<> inline Float16 DivOp::scalar<Float16>(Float16 a, Float16 b) {

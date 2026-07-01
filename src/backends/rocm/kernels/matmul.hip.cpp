@@ -721,8 +721,26 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
         throw std::runtime_error("matmul: only Float32, Float64, Float16, BFloat16, Int32, and Int64 dtypes are supported");
     }
 
-    // For integer types, use native HIP kernel directly (rocBLAS doesn't support integer GEMM)
+    // For integer types, use native HIP kernel directly (rocBLAS doesn't support
+    // integer GEMM). matmul_native_hip assumes >= 2D operands (it reads
+    // shape[size()-2]), so a 1D integer vector would underflow size_t and read
+    // shape out of bounds. Handle the 1D cases with PyTorch reshape semantics.
     if (a_contig.dtype() == DType::Int32 || a_contig.dtype() == DType::Int64) {
+        auto as = a_contig.shape();
+        auto bs = b_contig.shape();
+        if (as.size() == 1 && bs.size() == 1) {           // (K)·(K) -> scalar
+            auto r = matmul_native_hip(a_contig.reshape({1, as[0]}),
+                                       b_contig.reshape({bs[0], 1}), stream);
+            return r.reshape({});
+        }
+        if (as.size() == 1 && bs.size() == 2) {           // (K)·(K,N) -> (N)
+            auto r = matmul_native_hip(a_contig.reshape({1, as[0]}), b_contig, stream);
+            return r.reshape({r.shape()[1]});
+        }
+        if (as.size() == 2 && bs.size() == 1) {           // (M,K)·(K) -> (M)
+            auto r = matmul_native_hip(a_contig, b_contig.reshape({bs[0], 1}), stream);
+            return r.reshape({r.shape()[0]});
+        }
         return matmul_native_hip(a_contig, b_contig, stream);
     }
 

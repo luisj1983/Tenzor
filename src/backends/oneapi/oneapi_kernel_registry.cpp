@@ -3247,6 +3247,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                 stride[0], stride[1], padding[0], padding[1], 1, 1, 1, queue);
 
+            // conv2d_forward may run via oneDNN (its own primitive/stream); the
+            // raw SYCL BatchNorm/ReLU kernels below read conv_out, so synchronize
+            // first or they may consume a partially-written buffer (race/hang).
+            queue.wait();
+
             // Step 2: BatchNorm forward with affine (using bn_running_mean/var as mean/var for inference-style)
             Tensor bn_out = oneapi::batchnorm2d_forward_affine(
                 conv_out, inputs[5], inputs[6], inputs[3], inputs[4], eps, queue);
@@ -5347,7 +5352,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return oneapi::spmm_kernel(sp, inputs[3], get_q(inputs));
         });
 
@@ -5356,7 +5361,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return oneapi::spmv_kernel(sp, inputs[3], get_q(inputs));
         });
 
@@ -5365,7 +5370,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return oneapi::sparse_to_dense_kernel(sp, get_q(inputs));
         });
 
@@ -5381,7 +5386,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             return oneapi::sparse_add_kernel(sp, inputs[3], get_q(inputs));
         });
 
@@ -5398,7 +5403,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             int64_t N = attrs.get_int(AttrKey::N);
-            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
             auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
             auto c = oneapi::spgemm_kernel(a, b, get_q(inputs));
             return {c.crow_indices(), c.col_indices(), c.values()};
@@ -5414,7 +5419,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N}, /*validate=*/false);
             return oneapi::sparse_trsv_kernel(L, inputs[3], upper, get_q(inputs));
         });
 
@@ -5425,7 +5430,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N}, /*validate=*/false);
             return oneapi::sparse_trsm_kernel(L, inputs[3], upper, get_q(inputs));
         });
 #else
@@ -6518,9 +6523,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::NestedSum,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // Audit F11: widen-narrow for non-Float32.
+            // Widen-narrow only for dtypes without a native kernel (Float16/
+            // BFloat16/integers go through Float32). Float64 is computed
+            // natively below — routing it through Float32 silently downcast the
+            // accumulation and diverged from the CPU/CUDA Float64 path.
             const Tensor& values_in = inputs[0];
-            if (values_in.dtype() != DType::Float32) {
+            if (values_in.dtype() != DType::Float32 && values_in.dtype() != DType::Float64) {
                 DType orig = values_in.dtype();
                 Tensor widened = values_in.to(DType::Float32);
                 std::vector<Tensor> reroute = {widened, inputs[1]};
@@ -6541,26 +6549,30 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             Tensor output = tenzor::zeros({B, D}, values.dtype(), values.device());
             auto& queue = oneapi_internal::get_queue(values.device().index);
 
-            const float* vals_ptr = values.data<float>();
             const int64_t* off_ptr = offsets.data<int64_t>();
-            float* out_ptr = output.data<float>();
             int64_t D_val = D;
 
-            // One work-item per (batch, d) pair
-            queue.parallel_for(sycl::range<2>(B, D), [=](sycl::id<2> id) {
-                int64_t b = id[0];
-                int64_t d = id[1];
-                if (d >= D_val) return;
+            // Native Float32/Float64 path (templated on the scalar type).
+            auto run = [&]<typename T>() {
+                const T* vals_ptr = values.data<T>();
+                T* out_ptr = output.data<T>();
+                queue.parallel_for(sycl::range<2>(B, D), [=](sycl::id<2> id) {
+                    int64_t b = id[0];
+                    int64_t d = id[1];
+                    if (d >= D_val) return;
 
-                int64_t start = off_ptr[b];
-                int64_t end = off_ptr[b + 1];
+                    int64_t start = off_ptr[b];
+                    int64_t end = off_ptr[b + 1];
 
-                float sum = 0.0f;
-                for (int64_t s = start; s < end; ++s) {
-                    sum += vals_ptr[s * D_val + d];
-                }
-                out_ptr[b * D_val + d] = sum;
-            }).wait();
+                    T sum = T(0);
+                    for (int64_t s = start; s < end; ++s) {
+                        sum += vals_ptr[s * D_val + d];
+                    }
+                    out_ptr[b * D_val + d] = sum;
+                }).wait();
+            };
+            if (values.dtype() == DType::Float64) run.template operator()<double>();
+            else run.template operator()<float>();
 
             return {output};
         });

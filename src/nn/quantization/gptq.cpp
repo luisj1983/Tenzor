@@ -135,21 +135,33 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
         inv_perm = ops::argsort(perm, 0, false);
     }
 
-    // Add dampening to Hessian diagonal
+    // Add dampening to the Hessian diagonal. GPTQ/OBQ dampens with
+    // percdamp * mean(diag(H)) (Frantar et al. 2022, "GPTQ"; AutoGPTQ), NOT
+    // max(diag(H)): the mean is the canonical regulariser scale. Using max
+    // over-damps when one column has a much larger second moment, biasing every
+    // per-column quant scale.
     auto h_diag = ops::diag(H);
-    float damp = config_.damp_percent * ops::max(h_diag).item<float>();
+    float damp = config_.damp_percent * ops::mean(h_diag).item<float>();
     damp = std::max(damp, 1e-6f);  // Ensure non-zero dampening
     auto damp_diag = ops::eye(in_features, std::nullopt, DType::Float32,
                               H.device()) * damp;
     H = H + damp_diag;
 
-    // Compute H_inv = inv(H). The error-compensation loop below reads H_inv
-    // entries directly via hinv_ptr (H_inv[j,j] and H_inv[j, j+1:]); it does
-    // not use a Cholesky factor or a precomputed diagonal, so neither is
-    // materialised here. (A previous version computed cholesky(H_inv) and
-    // diag(H_inv) that were never referenced — an O(n^3) waste that could also
-    // spuriously throw on a borderline-PD H_inv.)
-    auto H_inv = linalg::inv(H);
+    // GPTQ error feedback must propagate each column's quantization error through
+    // the Cholesky factor of the INVERSE Hessian, not the inverse itself
+    // (Frantar et al. 2022, Algorithm 1; AutoGPTQ). Compute Hinv = the
+    // upper-triangular Cholesky factor U of H^{-1} (so H^{-1} = U^T U). The loop
+    // below then uses U[i,i] and the row U[i, i:] exactly as the reference:
+    //   err_i     = (w_i - q_i) / U[i,i]
+    //   W[:, i:] -= err_i * U[i, i:]
+    // The Cholesky factor encodes the sequential conditioning — quantizing
+    // column i optimally adjusts every not-yet-quantized column i+1.. — which a
+    // plain matrix inverse does NOT, so using inv(H) directly under-compensates.
+    // Damping above guarantees H (hence H^{-1}) is positive-definite, so the
+    // factorisation is well-defined. .contiguous() so the raw row-major reads
+    // hinv_ptr[j*n + k] below see U.
+    auto H_inv_dense = linalg::inv(H);
+    auto H_inv = linalg::cholesky(H_inv_dense, /*upper=*/true).contiguous();
 
     // Prepare output tensors
     int64_t num_groups = (in_features + config_.group_size - 1) / config_.group_size;

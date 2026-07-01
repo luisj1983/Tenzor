@@ -266,9 +266,14 @@ auto AutotuneCache::load_default() -> void {
 
 auto AutotuneCache::make_key(const std::string& op_name,
                               const std::string& dtype,
+                              const std::string& device,
                               const std::vector<std::vector<int64_t>>& shapes) -> std::string {
     std::ostringstream oss;
-    oss << op_name << ":" << dtype;
+    // Include the device/arch in the key: this cache is persisted (save/load)
+    // and served across devices, so a key without device/arch would return a
+    // config autotuned for the wrong architecture. Mirrors the device-keying in
+    // codegen.cpp / compile.cpp.
+    oss << op_name << ":" << dtype << ":" << device;
 
     for (size_t i = 0; i < shapes.size(); ++i) {
         oss << ":";

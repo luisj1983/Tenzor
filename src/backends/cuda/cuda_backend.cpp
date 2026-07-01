@@ -509,6 +509,15 @@ public:
                         throw std::runtime_error(
                             std::string("CUDA peer copy failed: ") + cudaGetErrorString(err));
                     }
+                    // copy() is synchronous by contract: block until the async peer
+                    // copy completes before returning (the H2D/D2D path below syncs
+                    // too). Returning early let callers read the destination before
+                    // the copy landed.
+                    err = cudaStreamSynchronize(0);
+                    if (err != cudaSuccess) {
+                        throw std::runtime_error(
+                            std::string("CUDA peer copy sync failed: ") + cudaGetErrorString(err));
+                    }
                     return;
                 }
             }
@@ -517,6 +526,13 @@ public:
             // stream 0, preventing races where a kernel reads input data before
             // the H2D copy completes.
             err = cudaMemcpyAsync(dst, src, bytes, cuda_kind, nullptr);
+            // The copy() API is synchronous from the caller's perspective: on
+            // return the host may reuse/free the source (H2D) or read the
+            // destination. The Async variant only orders with stream-0 kernels;
+            // synchronize so the transfer has actually completed before return.
+            if (err == cudaSuccess) {
+                err = cudaStreamSynchronize(nullptr);
+            }
         } else {
             // D2H and H2H: use synchronous copy since host needs data immediately
             err = cudaMemcpy(dst, src, bytes, cuda_kind);

@@ -238,6 +238,9 @@ auto SummaryWriter::add_scalar(std::string_view tag, float value, int64_t step) 
     // holding the mutex, so a pre-lock check could pass and then write to a
     // closed stream after close() returns.
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open fast-path above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }
@@ -280,6 +283,9 @@ auto SummaryWriter::add_histogram(std::string_view tag,
     cpu_tensor = cpu_tensor.contiguous();
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open fast-path above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
 
     auto data = serialize_histogram(cpu_tensor, bins);
     write_event(tag, data, step);
@@ -325,6 +331,9 @@ auto SummaryWriter::add_image(std::string_view tag,
     cpu_tensor = cpu_tensor.contiguous();
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open fast-path above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
 
     auto data = serialize_image(cpu_tensor);
     write_event(tag, data, step);
@@ -418,6 +427,9 @@ auto SummaryWriter::add_graph(std::string_view model_name,
     // holding the mutex, so a pre-lock check could pass and then write to a
     // closed stream after close() returns.
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open fast-path above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }
@@ -484,6 +496,9 @@ auto SummaryWriter::flush() -> void {
     // paths must NOT call this (they would self-deadlock); they call
     // impl_->flush_locked() directly.
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open fast-path above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
     impl_->flush_locked();
 }
 
@@ -493,6 +508,9 @@ auto SummaryWriter::close() -> void {
     }
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open fast-path above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
 
     impl_->flush_locked();
     impl_->event_file.close();

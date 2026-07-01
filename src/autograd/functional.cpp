@@ -314,30 +314,39 @@ auto jvp(std::function<Variable(const Variable&)> func,
         "(see jvp_dispatch.hpp); the result is a numerical approximation, not "
         "an analytic JVP.\n");
 
-    const double eps = 1e-4;
-
-    // Half-precision eps=1e-4 is below representable resolution — the
-    // perturbation quantises to zero and the tangent collapses to ~0/garbage.
-    // Widen the FD step to Float32 and cast the tangent back at the end,
-    // mirroring hvp/vhp. The primal `output` was already computed above at the
-    // caller's native dtype, so it is returned unchanged.
     const DType orig_dtype = input.tensor().dtype();
     const bool widen = (orig_dtype == DType::Float16 ||
                         orig_dtype == DType::BFloat16);
+
+    // Half-precision eps=1e-4 is below representable resolution near O(1), so a
+    // probe cast back to half would quantise the perturbation to zero. Stage the
+    // perturbation in Float32 with a half-representable step (1e-2, matching
+    // gradcheck's half eps floor), but hand `func` a probe at the input's NATIVE
+    // dtype — `func` may capture other operands at that dtype and reject a
+    // widened Float32 probe, mirroring numerical_gradient's make_probe. The
+    // output difference is widened to Float32 to limit cancellation and the
+    // final tangent is narrowed back to the native dtype.
+    const double eps = widen ? 1e-2 : 1e-4;
 
     Tensor probe_input = widen ? input.tensor().to(DType::Float32) : input.tensor();
     Tensor probe_tangent = widen ? tangent.to(DType::Float32) : tangent;
 
     auto perturbed_data = tenzor::add(probe_input, tenzor::mul(probe_tangent, eps));
-    Variable perturbed_input(perturbed_data, false);
+    Variable perturbed_input(widen ? perturbed_data.to(orig_dtype) : perturbed_data, false);
     auto perturbed_output_fwd = func(perturbed_input);
 
     auto perturbed_data_bwd = tenzor::sub(probe_input, tenzor::mul(probe_tangent, eps));
-    Variable perturbed_input_bwd(perturbed_data_bwd, false);
+    Variable perturbed_input_bwd(widen ? perturbed_data_bwd.to(orig_dtype) : perturbed_data_bwd, false);
     auto perturbed_output_bwd = func(perturbed_input_bwd);
 
+    Tensor out_fwd = perturbed_output_fwd.tensor();
+    Tensor out_bwd = perturbed_output_bwd.tensor();
+    if (widen) {
+        out_fwd = out_fwd.to(DType::Float32);
+        out_bwd = out_bwd.to(DType::Float32);
+    }
     auto tangent_output = tenzor::mul(
-        tenzor::sub(perturbed_output_fwd.tensor(), perturbed_output_bwd.tensor()),
+        tenzor::sub(out_fwd, out_bwd),
         1.0 / (2.0 * eps)
     );
 

@@ -1,8 +1,8 @@
 #version 450
 
-// Cooley-Tukey radix-2 decimation-in-frequency FFT (complex-to-complex)
-// Uses shared memory for butterfly operations within a workgroup.
-// Multi-pass approach: each dispatch handles one FFT stage.
+// Cooley-Tukey radix-2 FFT (complex-to-complex), multi-pass: each dispatch
+// handles one butterfly stage, reading and writing global memory directly
+// (no shared-memory staging — invocations across the workgroup are independent).
 // Data layout: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
 
 layout(local_size_x_id = 0) in;
@@ -18,8 +18,6 @@ layout(push_constant) uniform PushConstants {
     uint batch_stride; // Stride between batches (in complex elements)
 };
 
-shared float shared_real[512];
-shared float shared_imag[512];
 
 const float PI = 3.14159265358979323846;
 

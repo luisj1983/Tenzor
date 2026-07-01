@@ -1816,11 +1816,12 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
 // Bucketize kernel
 // ============================================================================
 
-__global__ void bucketize_kernel_impl(const float* input, const float* boundaries,
+template <typename T>
+__global__ void bucketize_kernel_impl(const T* input, const T* boundaries,
                                        int64_t* output, int64_t n,
                                        int64_t num_boundaries, bool right) {
     TENZOR_CUDA_KERNEL_LOOP(tid, n) {
-        float val = input[tid];
+        T val = input[tid];
         // Binary search
         int64_t lo = 0, hi = num_boundaries;
         while (lo < hi) {
@@ -1840,11 +1841,17 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
                       bool right, cudaStream_t stream) -> Tensor {
     auto in_contig = input.contiguous();
     auto bound_contig = boundaries.contiguous();
-    if (in_contig.dtype() != DType::Float32) {
-        in_contig = in_contig.to(DType::Float32);
+    // Compute in Float64 when either operand is Float64 (matching the CPU/
+    // sibling kernels); only fall back to Float32 for narrower inputs. Forcing
+    // everything to Float32 silently truncated Float64 search values/boundaries.
+    const DType compute =
+        (in_contig.dtype() == DType::Float64 || bound_contig.dtype() == DType::Float64)
+            ? DType::Float64 : DType::Float32;
+    if (in_contig.dtype() != compute) {
+        in_contig = in_contig.to(compute);
     }
-    if (bound_contig.dtype() != DType::Float32) {
-        bound_contig = bound_contig.to(DType::Float32);
+    if (bound_contig.dtype() != compute) {
+        bound_contig = bound_contig.to(compute);
     }
 
     std::vector<int64_t> in_shape(in_contig.shape().begin(), in_contig.shape().end());
@@ -1854,9 +1861,15 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
 
     int threads = 256;
     int blocks = compute_grid_size(n, threads);
-    bucketize_kernel_impl<<<blocks, threads, 0, stream>>>(
-        in_contig.data<float>(), bound_contig.data<float>(),
-        result.data<int64_t>(), n, bound_contig.numel(), right);
+    if (compute == DType::Float64) {
+        bucketize_kernel_impl<double><<<blocks, threads, 0, stream>>>(
+            in_contig.data<double>(), bound_contig.data<double>(),
+            result.data<int64_t>(), n, bound_contig.numel(), right);
+    } else {
+        bucketize_kernel_impl<float><<<blocks, threads, 0, stream>>>(
+            in_contig.data<float>(), bound_contig.data<float>(),
+            result.data<int64_t>(), n, bound_contig.numel(), right);
+    }
     return result;
 }
 

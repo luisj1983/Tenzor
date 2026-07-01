@@ -16,7 +16,9 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/onnx/exporter.hpp>
 #include <tenzor/onnx/importer.hpp>
+#include <tenzor/nn/layers/linear.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -508,6 +510,58 @@ TEST(ONNXAuditFixes, ImporterClearsExternalDataDirOnBytesEntry) {
 
     fs::remove(proto_path);
     fs::remove(data_path);
+}
+
+// =========================================================================
+// C7: JIT-traced module export must not serialize each weight twice.
+//
+// export_module() emits every module parameter/buffer as a named initializer
+// up-front, and convert_jit_graph_to_onnx() then maps the same tensors when
+// they reappear as captured graph constants. Before the dedup fix, the
+// constants loop created a SECOND `const_N` initializer per weight, doubling
+// the .onnx file size. Guard: initializer count equals the parameter/buffer
+// count, and every node input still resolves (no dangling references).
+// =========================================================================
+TEST(ONNXAuditFixes, JitExportDoesNotDuplicateWeights) {
+    auto model = std::make_shared<nn::Linear>(4, 3, /*bias=*/true);
+
+    size_t expected = 0;
+    for (const auto& [name, p] : model->named_parameters()) {
+        if (p && p->is_initialized() && p->tensor().numel() > 0) ++expected;
+    }
+    for (const auto& [name, b] : model->named_buffers()) {
+        if (b && b->is_initialized() && b->tensor().numel() > 0) ++expected;
+    }
+    ASSERT_GT(expected, 0u);
+
+    ONNXExporter exporter(/*opset=*/17);
+    Tensor input = tenzor::randn({2, 4});
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     "tenzor_jit_export_dedup.onnx";
+    exporter.export_module(*model, input, tmp.string());
+
+    const auto& g = exporter.get_graph();
+    EXPECT_EQ(g.initializers.size(), expected)
+        << "Each weight was serialized more than once — the JIT constants "
+           "loop duplicated the up-front named initializers";
+
+    // No node input may dangle after dedup: it must be a graph input, an
+    // initializer, or another node's output.
+    std::vector<std::string> known;
+    for (const auto& in : g.inputs) known.push_back(in.name);
+    for (const auto& init : g.initializers) known.push_back(init.name);
+    for (const auto& n : g.nodes)
+        for (const auto& out : n.outputs) known.push_back(out);
+    for (const auto& n : g.nodes) {
+        for (const auto& in : n.inputs) {
+            if (in.empty()) continue;
+            EXPECT_NE(std::find(known.begin(), known.end(), in), known.end())
+                << "Node '" << n.name << "' references unknown input '" << in
+                << "' after weight dedup";
+        }
+    }
+
+    std::filesystem::remove(tmp);
 }
 
 // =========================================================================

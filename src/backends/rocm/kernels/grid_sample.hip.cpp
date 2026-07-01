@@ -385,7 +385,9 @@ auto affine_grid_kernel_host(const Tensor& theta, const std::vector<int64_t>& si
     int H = static_cast<int>(size[2]);
     int W = static_cast<int>(size[3]);
 
-    Tensor theta_f32 = theta.to(DType::Float32);
+    // .contiguous(): the kernel reads theta with dense strides, so a non-contiguous
+    // theta view would be read at the wrong offsets (matches grid_sample_kernel).
+    Tensor theta_f32 = theta.to(DType::Float32).contiguous();
     Tensor grid({N, H, W, 2}, DType::Float32, theta.device());
 
     int total = N * H * W;
@@ -770,7 +772,7 @@ auto affine_grid_backward_kernel_host(const Tensor& grad_grid,
     int W = static_cast<int>(size[3]);
 
     DType gr_dt = grad_grid.dtype();
-    Tensor gg_f32 = grad_grid.to(DType::Float32);
+    Tensor gg_f32 = grad_grid.to(DType::Float32).contiguous();
     Tensor gt_f32({N, 2, 3}, DType::Float32, grad_grid.device());
     HIP_CHECK(hipMemsetAsync(gt_f32.data_ptr(), 0,
         gt_f32.numel() * sizeof(float), stream));

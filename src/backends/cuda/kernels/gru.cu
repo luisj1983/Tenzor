@@ -59,7 +59,7 @@ __global__ void gru_cell_forward_fused(
     int64_t batch_size,
     int64_t hidden_size) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t total_elements = batch_size * hidden_size;
 
     if (idx < total_elements) {
@@ -119,7 +119,7 @@ __global__ void gru_cell_backward_fused(
     int64_t batch_size,
     int64_t hidden_size) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t total_elements = batch_size * hidden_size;
 
     if (idx < total_elements) {

@@ -535,13 +535,31 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
                 }
             }
         } else {
-            // Unsorted unique: preserve order of first appearance
-            // Use unordered_map with bit-pattern keys for O(n) amortized lookup
+            // Unsorted unique: preserve order of first appearance.
+            // Use an unordered_map with bit-pattern keys for O(n) lookup, but
+            // with NUMERIC equality semantics matching the sorted path (which
+            // uses `==`):
+            //   * +0.0 and -0.0 are equal — canonicalise -0.0 to +0.0 before
+            //     hashing so they collapse to one entry.
+            //   * NaN != NaN — every NaN is its own distinct value, so NaNs are
+            //     never deduplicated (bypass the map entirely for them).
             std::unordered_map<uint64_t, int64_t> seen;
             seen.reserve(std::min(numel, int64_t(65536)));
             for (int64_t i = 0; i < numel; ++i) {
+                T v = data[i];
+                if constexpr (std::is_floating_point_v<T>) {
+                    if (std::isnan(v)) {
+                        // NaN is never equal to itself: always a new unique.
+                        if (return_inverse) inverse_map[i] =
+                            static_cast<int64_t>(unique_vals.size());
+                        unique_vals.push_back(v);
+                        if (return_counts) counts_vec.push_back(1);
+                        continue;
+                    }
+                    if (v == T(0)) v = T(0);  // -0.0 -> +0.0 for the key
+                }
                 uint64_t key = 0;
-                std::memcpy(&key, &data[i], sizeof(T));
+                std::memcpy(&key, &v, sizeof(T));
                 auto [it, inserted] = seen.try_emplace(key, static_cast<int64_t>(unique_vals.size()));
                 if (inserted) {
                     unique_vals.push_back(data[i]);
@@ -867,27 +885,28 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements) -> Tensor 
             out_data[i] = test_set.count(ed[i]) > 0;
         }
     } else {
-        // Floating comparison via 64-bit bit pattern (exact for Float64/Float32/
-        // Float16/BFloat16 since all widen losslessly to double).
+        // Floating comparison with NUMERIC equality semantics (matches PyTorch
+        // isin, which compares via ==). Hashing the raw 64-bit pattern was
+        // wrong: it made +0.0 and -0.0 distinct (different sign bit) and made a
+        // NaN test element match a NaN query (identical bits). std::unordered_set
+        // <double> uses operator== for key equality, so it gives the correct
+        // IEEE-754 semantics for free: -0.0 == +0.0 (equal, and std::hash<double>
+        // is required to hash them identically), and NaN != NaN so a NaN element
+        // never matches anything. Widening to double is lossless for
+        // Float64/Float32/Float16/BFloat16.
         Tensor e = (elements.dtype() == DType::Float64) ? elements : elements.to(DType::Float64);
         Tensor t = (test_elements.dtype() == DType::Float64) ? test_elements : test_elements.to(DType::Float64);
         const double* ed = e.data<double>();
         const double* td = t.data<double>();
         const int64_t n_test = t.numel();
 
-        std::unordered_set<uint64_t> test_set;
+        std::unordered_set<double> test_set;
         test_set.reserve(static_cast<size_t>(n_test));
-        for (int64_t i = 0; i < n_test; ++i) {
-            uint64_t bits;
-            std::memcpy(&bits, &td[i], sizeof(uint64_t));
-            test_set.insert(bits);
-        }
+        for (int64_t i = 0; i < n_test; ++i) test_set.insert(td[i]);
 
         #pragma omp parallel for schedule(static) if(n_elem > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < n_elem; ++i) {
-            uint64_t bits;
-            std::memcpy(&bits, &ed[i], sizeof(uint64_t));
-            out_data[i] = test_set.count(bits) > 0;
+            out_data[i] = test_set.count(ed[i]) > 0;
         }
     }
 
@@ -1157,6 +1176,13 @@ auto nanquantile_impl(const T* data, int64_t dim_size,
 
 auto quantile_kernel(const Tensor& input, double q, int64_t dim,
                      bool keepdim) -> Tensor {
+    // q must lie in [0, 1] (PyTorch contract). Out-of-range q produces an
+    // out-of-bounds interpolation index that the per-slice clamps silently mask
+    // into a wrong-but-plausible value, so reject it up front.
+    if (!(q >= 0.0 && q <= 1.0)) {
+        throw std::invalid_argument(
+            "quantile: q must be in the range [0, 1], got " + std::to_string(q));
+    }
     if (dim < 0) dim += input.ndim();
     auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
 
@@ -1198,6 +1224,11 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim,
 
 auto nanquantile_kernel(const Tensor& input, double q, int64_t dim,
                         bool keepdim) -> Tensor {
+    // q must lie in [0, 1] (PyTorch contract); see quantile_kernel.
+    if (!(q >= 0.0 && q <= 1.0)) {
+        throw std::invalid_argument(
+            "nanquantile: q must be in the range [0, 1], got " + std::to_string(q));
+    }
     if (dim < 0) dim += input.ndim();
     auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
 
@@ -1372,6 +1403,13 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
     Tensor output({bins}, DType::Float32, input.device());
     histogram.template operator()<float>(input_f32.data<float>(), input_f32.numel(),
                                          output.data<float>());
+    // torch.histc returns a tensor of the INPUT dtype. Float16/BFloat16 inputs
+    // compute through Float32 (widen->compute) and must narrow back so the
+    // returned dtype matches the input (the bin counts are small integers, so
+    // the narrow is lossless for realistic histograms).
+    if (cont.dtype() == DType::Float16 || cont.dtype() == DType::BFloat16) {
+        return output.to(cont.dtype());
+    }
     return output;
 }
 
@@ -1542,7 +1580,15 @@ static auto segment_reduce_impl(const T* data, const int64_t* offsets,
                 }
 
                 if (mode == Mode::Mean && seg_len > 0) {
-                    acc /= static_cast<T>(seg_len);
+                    if constexpr (std::is_integral_v<T>) {
+                        // Integer T: `acc /= seg_len` would be truncating integer
+                        // division. Compute the true mean in double, then cast
+                        // back to the output dtype.
+                        acc = static_cast<T>(static_cast<double>(acc) /
+                                             static_cast<double>(seg_len));
+                    } else {
+                        acc /= static_cast<T>(seg_len);
+                    }
                 }
 
                 out_ptr[out_idx] = acc;

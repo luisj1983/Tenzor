@@ -13,6 +13,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -77,6 +78,67 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
         }
     }
 
+    // Quantized value range (shared by the learnable LSQ path and the
+    // non-learnable STE paths).
+    float quant_min = 0.0f, quant_max = 0.0f;
+    switch (dtype_) {
+        case QuantDType::INT8:  quant_min = -128.0f; quant_max = 127.0f; break;
+        case QuantDType::UINT8: quant_min =    0.0f; quant_max = 255.0f; break;
+        case QuantDType::INT4:  quant_min =   -8.0f; quant_max =   7.0f; break;
+        case QuantDType::UINT4: quant_min =    0.0f; quant_max =  15.0f; break;
+    }
+
+    // Match quantize_tensor's symmetric range: INT8 symmetric uses [-127,127]
+    // and INT4 symmetric uses [-7,7] (compute_symmetric_scale divides by the
+    // positive max). Without this, the STE could emit -128/-8, a level the
+    // real quantized inference path clamps away — a train/inference mismatch.
+    const bool symmetric = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
+                            scheme_ == QuantizationScheme::PerChannelSymmetric);
+    if (symmetric && dtype_ == QuantDType::INT8) {
+        quant_min = -127.0f;
+    } else if (symmetric && dtype_ == QuantDType::INT4) {
+        quant_min = -7.0f;
+    }
+
+    // Choose the STE branch from the ACTUAL qparams, not just scheme_. The
+    // scheme and the qparams' channel axis are tracked independently and can
+    // disagree (e.g. a per-tensor-scheme FakeQuantize that later receives a
+    // length-C per-channel scale via set_qparams()/calculate_qparams()).
+    // Keying solely on scheme_ would feed a per-channel scale vector into the
+    // scalar path and silently quantize every channel with channel 0's
+    // scale. Use the per-tensor scalar path only when the params are truly
+    // scalar (one scale element); otherwise use the per-channel path along
+    // the qparams' recorded axis (falling back to the module's axis_).
+    const bool params_per_channel =
+        (qparams_->scale.numel() > 1) || (qparams_->axis >= 0);
+    // Per-channel params are broadcast along the qparams' channel axis
+    // (fall back to the module's axis_ if unset).
+    const int64_t channel_axis = (qparams_->axis >= 0) ? qparams_->axis : axis_;
+
+    // LSQ (Esser et al. 2020, "Learned Step Size Quantization"): when this
+    // module is learnable, the step size `scale` must receive a gradient so the
+    // optimizer actually updates it — the plain STE paths below only
+    // differentiate the activation and leave scale/zero_point frozen. Thread the
+    // REGISTERED `scale` parameter Variable through a dedicated autograd Function
+    // so its gradient accumulates into the leaf the optimizer holds. Read the
+    // live value from the registered param (the optimizer rebinds the param
+    // tensor each step, so qparams_->scale would be stale). Reachable even when
+    // `input` itself does not require grad (e.g. a QuantStub on the raw network
+    // input): the scale leaf still requires grad, so the loss depends on it and
+    // it must receive the LSQ gradient. This is the QuantStub/QATHelper
+    // (learnable=true) QAT path.
+    if (learnable_) {
+        if (auto scale_param = get_parameter("scale");
+            scale_param && scale_param->requires_grad()) {
+            auto zp_param = get_parameter("zero_point");
+            Tensor zp_const =
+                zp_param ? zp_param->tensor() : qparams_->zero_point;
+            return lsq_fake_quantize(input, scale_param, zp_const,
+                                     quant_min, quant_max,
+                                     params_per_channel, channel_axis);
+        }
+    }
+
     // Both per-tensor and per-channel schemes use the autograd-enabled
     // straight-through estimator so QAT gradients thread through the
     // quantize→dequantize correctly. (Previously per-channel fell through to a
@@ -84,37 +146,6 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
     // gradients — QATHelper defaults weights to per-channel, so that was the
     // common QAT case.)
     if (input.requires_grad()) {
-        float quant_min = 0.0f, quant_max = 0.0f;
-        switch (dtype_) {
-            case QuantDType::INT8:  quant_min = -128.0f; quant_max = 127.0f; break;
-            case QuantDType::UINT8: quant_min =    0.0f; quant_max = 255.0f; break;
-            case QuantDType::INT4:  quant_min =   -8.0f; quant_max =   7.0f; break;
-            case QuantDType::UINT4: quant_min =    0.0f; quant_max =  15.0f; break;
-        }
-
-        // Match quantize_tensor's symmetric range: INT8 symmetric uses [-127,127]
-        // and INT4 symmetric uses [-7,7] (compute_symmetric_scale divides by the
-        // positive max). Without this, the STE could emit -128/-8, a level the
-        // real quantized inference path clamps away — a train/inference mismatch.
-        const bool symmetric = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
-                                scheme_ == QuantizationScheme::PerChannelSymmetric);
-        if (symmetric && dtype_ == QuantDType::INT8) {
-            quant_min = -127.0f;
-        } else if (symmetric && dtype_ == QuantDType::INT4) {
-            quant_min = -7.0f;
-        }
-
-        // Choose the STE branch from the ACTUAL qparams, not just scheme_. The
-        // scheme and the qparams' channel axis are tracked independently and can
-        // disagree (e.g. a per-tensor-scheme FakeQuantize that later receives a
-        // length-C per-channel scale via set_qparams()/calculate_qparams()).
-        // Keying solely on scheme_ would feed a per-channel scale vector into the
-        // scalar path and silently quantize every channel with channel 0's
-        // scale. Use the per-tensor scalar path only when the params are truly
-        // scalar (one scale element); otherwise use the per-channel path along
-        // the qparams' recorded axis (falling back to the module's axis_).
-        const bool params_per_channel =
-            (qparams_->scale.numel() > 1) || (qparams_->axis >= 0);
         if (!params_per_channel) {
             Tensor scale_cpu = (qparams_->scale.device() == Device::cpu())
                 ? qparams_->scale : qparams_->scale.to(Device::cpu());
@@ -126,8 +157,7 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
         }
 
         // Per-channel STE: scale/zero_point are per-channel tensors broadcast
-        // along the qparams' channel axis (fall back to axis_ if unset).
-        int64_t channel_axis = (qparams_->axis >= 0) ? qparams_->axis : axis_;
+        // along the qparams' channel axis.
         return fake_quantize_per_channel_with_grad(
             input, qparams_->scale, qparams_->zero_point,
             quant_min, quant_max, channel_axis);
@@ -467,6 +497,139 @@ auto fake_quantize_per_channel_with_grad(
         fn->set_input_variables({input});
         outputs[0].set_grad_fn(fn);
     }
+    return outputs[0];
+}
+
+// ============================================================================
+// LSQ (Learned Step Size Quantization) Function
+// ============================================================================
+
+LSQFakeQuantizeFunction::LSQFakeQuantizeFunction(Tensor zero_point,
+                                                 float quant_min, float quant_max,
+                                                 bool per_channel, int64_t axis)
+    : quant_min_(quant_min), quant_max_(quant_max),
+      per_channel_(per_channel), axis_(axis),
+      zero_point_(std::move(zero_point)) {}
+
+namespace {
+// Reduce a per-element scale-gradient contribution down to the scale parameter
+// shape: a scalar {1} for per-tensor, or {C} along `axis` for per-channel
+// (sum over every other dimension).
+Tensor reduce_to_scale(const Tensor& g, int64_t numel_scale, bool per_channel,
+                       int64_t axis, DType out_dtype) {
+    Tensor r;
+    if (!per_channel || numel_scale <= 1) {
+        r = tenzor::sum(g).reshape({1});
+    } else {
+        int64_t nd = g.ndim();
+        int64_t ax = axis < 0 ? axis + nd : axis;
+        Tensor moved = (ax == 0) ? g : g.transpose(0, ax);
+        moved = moved.contiguous();
+        int64_t rest = moved.numel() / numel_scale;
+        moved = moved.reshape({numel_scale, rest});
+        r = tenzor::sum(moved, /*dim=*/1, /*keepdim=*/false);  // -> {C}
+    }
+    if (r.dtype() != out_dtype) r = r.to(out_dtype);
+    return r;
+}
+
+// Broadcast the scale and zero-point to x's shape for the forward/backward math.
+void lsq_broadcast(const Tensor& s, const Tensor& z, const Tensor& x,
+                   bool per_channel, int64_t axis_in,
+                   Tensor& s_bc, Tensor& z_bc) {
+    if (per_channel) {
+        int64_t ndim = x.ndim();
+        int64_t axis = axis_in < 0 ? axis_in + ndim : axis_in;
+        int64_t channels = ndim > 0 ? x.shape()[static_cast<size_t>(axis)] : 1;
+        s_bc = broadcast_channel_param(s, ndim, axis, channels, x.dtype(), x.device());
+        z_bc = broadcast_channel_param(z, ndim, axis, channels, x.dtype(), x.device());
+    } else {
+        s_bc = s;
+        if (s_bc.device() != x.device()) s_bc = s_bc.to(x.device());
+        if (s_bc.dtype() != x.dtype()) s_bc = s_bc.to(x.dtype());
+        z_bc = z;
+        if (z_bc.device() != x.device()) z_bc = z_bc.to(x.device());
+        if (z_bc.dtype() != x.dtype()) z_bc = z_bc.to(x.dtype());
+    }
+}
+}  // namespace
+
+auto LSQFakeQuantizeFunction::forward(std::vector<Variable> inputs)
+    -> std::vector<Variable> {
+    auto x = inputs[0].tensor();
+    auto s = inputs[1].tensor();
+
+    Tensor s_bc, z_bc;
+    lsq_broadcast(s, zero_point_, x, per_channel_, axis_, s_bc, z_bc);
+
+    // Fake quantize: x_hat = (clamp(round(x/s + z), qmin, qmax) - z) * s
+    Tensor v = x / s_bc + z_bc;
+    Tensor q = tenzor::clamp(tenzor::round(v), quant_min_, quant_max_);
+    Tensor output = (q - z_bc) * s_bc;
+
+    // Save raw x and s; z is a constant member captured at construction.
+    save_for_backward({x, s});
+
+    bool req = inputs[0].requires_grad() || inputs[1].requires_grad();
+    return {Variable(output, req)};
+}
+
+auto LSQFakeQuantizeFunction::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    auto g = grad_outputs[0];
+    auto x = saved_tensors()[0];
+    auto s = saved_tensors()[1];
+
+    Tensor s_bc, z_bc;
+    lsq_broadcast(s, zero_point_, x, per_channel_, axis_, s_bc, z_bc);
+
+    Tensor v = x / s_bc + z_bc;           // v = x/s + z
+    Tensor r = tenzor::round(v);          // pre-clamp integer level
+
+    Tensor qmin_t = full({1}, static_cast<double>(quant_min_), x.dtype(), x.device());
+    Tensor qmax_t = full({1}, static_cast<double>(quant_max_), x.dtype(), x.device());
+
+    // Region masks from the pre-clamp level (cast to float so the arithmetic
+    // below stays in x's dtype regardless of the comparison op's result dtype).
+    Tensor small  = lt(r, qmin_t).to(x.dtype());                  // r < qmin  (clamp low)
+    Tensor big    = gt(r, qmax_t).to(x.dtype());                  // r > qmax  (clamp high)
+    Tensor middle = (ge(r, qmin_t) * le(r, qmax_t)).to(x.dtype()); // in range
+
+    // grad wrt input: straight-through estimator — identity in range, 0 clamped.
+    Tensor grad_input = g * middle;
+
+    // grad wrt scale (LSQ), per element:
+    //   in range : d/ds [ s*round(x/s+z) - s*z ] = round(v) - v   ( = round(x/s+z) - (x/s+z) )
+    //   clamp low : d/ds [ (qmin - z)*s ]        = qmin - z
+    //   clamp high: d/ds [ (qmax - z)*s ]        = qmax - z
+    Tensor ds = middle * (r - v)
+              + small  * (qmin_t - z_bc)
+              + big    * (qmax_t - z_bc);
+    Tensor grad_scale =
+        reduce_to_scale(g * ds, s.numel(), per_channel_, axis_, s.dtype());
+
+    return {grad_input, grad_scale};
+}
+
+auto lsq_fake_quantize(
+    const Variable& input,
+    const std::shared_ptr<Variable>& scale,
+    const Tensor& zero_point,
+    float quant_min,
+    float quant_max,
+    bool per_channel,
+    int64_t axis
+) -> Variable {
+    auto fn = std::make_shared<LSQFakeQuantizeFunction>(
+        zero_point, quant_min, quant_max, per_channel, axis);
+    auto outputs = fn->forward({input, *scale});
+    // Wire graph edges for BOTH differentiable inputs so the engine routes the
+    // STE gradient back to `input` and the LSQ step-size gradient into the
+    // registered `scale` leaf. grad_fn() is null for a leaf parameter; the
+    // engine then accumulates into the Variable identified via input_variables.
+    fn->set_next_functions({input.grad_fn(), scale->grad_fn()});
+    fn->set_input_variables({input, *scale});
+    outputs[0].set_grad_fn(fn);
     return outputs[0];
 }
 

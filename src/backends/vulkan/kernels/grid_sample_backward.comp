@@ -256,8 +256,12 @@ void main() {
         sum_dy += go * (wx0 * (-v00 + v10) + wx1 * (-v01 + v11));
     }
 
-    float scale_x = (params.padding_mode == 0 && !in_bounds_ix) ? 0.0 : dix_dgx;
-    float scale_y = (params.padding_mode == 0 && !in_bounds_iy) ? 0.0 : diy_dgy;
+    // For both zeros (0) and border (1) padding, an out-of-bounds (clamped)
+    // coordinate does not move the sampled value as the grid changes, so its
+    // grid-gradient is 0. The previous condition only handled zeros padding,
+    // leaving a spurious grad_grid under border padding when the coord clamped.
+    float scale_x = (params.padding_mode <= 1 && !in_bounds_ix) ? 0.0 : dix_dgx;
+    float scale_y = (params.padding_mode <= 1 && !in_bounds_iy) ? 0.0 : diy_dgy;
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }

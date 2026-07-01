@@ -563,6 +563,31 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     }
                 }
 
+                // PyTorch semantics: a backward hook transforms the gradient
+                // flowing THROUGH this variable, so the hooked gradient must
+                // also propagate to downstream Functions (next_functions),
+                // not just leaf accumulation. Write the transformed gradient
+                // back now — before accumulate_unlocked may promote its dtype
+                // for leaf storage — so the propagation loop below forwards the
+                // hooked value. (For a non-leaf this is the whole point of a
+                // hook, e.g. gradient reversal / clipping.)
+                if (!applied_hooks.empty()) {
+                    input_grads[i] = grad_to_apply;
+                    // Mirror the hook transform onto the graph-carrying cotangent
+                    // so BOTH the leaf grad_with_graph store and the
+                    // next_functions propagation below forward the hooked
+                    // Variable. Previously accumulate_grad_var() (create_graph)
+                    // forwarded an un-hooked var_input_grads[i] while the
+                    // raw/value path (input_grads[i]) above was hooked —
+                    // inconsistent gradients under backward hooks.
+                    if (create_graph && i < var_input_grads.size()) {
+                        Tensor hv = var_input_grads[i].tensor();
+                        for (auto& [id, hook] : applied_hooks) hv = hook(hv);
+                        var_input_grads[i] =
+                            Variable(hv, var_input_grads[i].requires_grad());
+                    }
+                }
+
                 // Accumulate gradient to leaf variables.
                 // When thread_safe_ is enabled, lock to prevent concurrent
                 // accumulation from corrupting the gradient tensor.
@@ -634,12 +659,11 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                             // maps, so the second derivative does not flow THROUGH
                             // the hook (inherent to Tensor hooks), but the gradient
                             // VALUE is now consistent between .grad() and grad_variable().
+                            // var_input_grads[i] was already hook-transformed
+                            // above (in lockstep with input_grads[i]), so the
+                            // graph store, leaf .grad(), and next_functions
+                            // propagation all see the same hooked cotangent.
                             Variable graph_grad = var_input_grads[i];
-                            if (!applied_hooks.empty()) {
-                                Tensor hv = graph_grad.tensor();
-                                for (auto& [id, hook] : applied_hooks) hv = hook(hv);
-                                graph_grad = Variable(hv, graph_grad.requires_grad());
-                            }
                             std::shared_ptr<VariableImpl> new_impl;
                             if (!existing_graph_impl) {
                                 new_impl = graph_grad.impl_;
@@ -1149,6 +1173,24 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                     }
                 }
 
+                // PyTorch semantics: the hooked gradient must propagate to
+                // downstream Functions (next_functions), not only to leaf
+                // accumulation. Write it back before the leaf dtype promotion
+                // so the propagation loop below forwards the transformed value.
+                if (!applied_hooks.empty()) {
+                    input_grads[i] = grad_to_apply;
+                    // Mirror the hook transform onto the graph-carrying cotangent
+                    // so the leaf grad_with_graph store and the next_functions
+                    // propagation below both forward the hooked Variable
+                    // (consistent with the raw input_grads[i] path).
+                    if (create_graph && i < var_input_grads.size()) {
+                        Tensor hv = var_input_grads[i].tensor();
+                        for (auto& [id, hook] : applied_hooks) hv = hook(hv);
+                        var_input_grads[i] =
+                            Variable(hv, var_input_grads[i].requires_grad());
+                    }
+                }
+
                 if (var.is_leaf() || var.retains_grad()) {
                     // V.4: accumulate at the promoted dtype of (existing,
                     // incoming) — never downcast incoming to a half-precision
@@ -1203,12 +1245,11 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                             // maps, so the second derivative does not flow THROUGH
                             // the hook (inherent to Tensor hooks), but the gradient
                             // VALUE is now consistent between .grad() and grad_variable().
+                            // var_input_grads[i] was already hook-transformed
+                            // above (in lockstep with input_grads[i]), so the
+                            // graph store, leaf .grad(), and next_functions
+                            // propagation all see the same hooked cotangent.
                             Variable graph_grad = var_input_grads[i];
-                            if (!applied_hooks.empty()) {
-                                Tensor hv = graph_grad.tensor();
-                                for (auto& [id, hook] : applied_hooks) hv = hook(hv);
-                                graph_grad = Variable(hv, graph_grad.requires_grad());
-                            }
                             std::shared_ptr<VariableImpl> new_impl;
                             if (!existing_graph_impl) {
                                 new_impl = graph_grad.impl_;

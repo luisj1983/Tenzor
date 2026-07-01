@@ -56,7 +56,7 @@ void write_bytes(std::vector<uint8_t>& buf, const void* data, size_t len) {
 // contiguous in [0, QInt4x2]; an out-of-range value would make dtype_size()
 // return 0 and then divide-by-zero inside empty(). Throw before that happens.
 auto checked_dtype(uint32_t raw, const std::string& name) -> DType {
-    if (raw > static_cast<uint32_t>(DType::QInt4x2)) {
+    if (raw > static_cast<uint32_t>(DType::FP8_E5M2FNUZ)) {  // last enumerator; QInt4x2 was stale and rejected valid FP8 FNUZ tensors
         throw std::runtime_error(
             "DistributedCheckpoint: invalid dtype value " + std::to_string(raw) +
             " for tensor '" + name + "'");

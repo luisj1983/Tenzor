@@ -558,11 +558,30 @@ void grid_sample_backward_impl(
                         sum_dy += dy;
                     }
 
-                    // 'zeros' padding zeros grad_grid where the (un-clamped)
-                    // sample fell outside, since the value was 0 independent
-                    // of grid coordinate.
-                    T scale_x = (padding_mode == "zeros" && !in_bounds_ix) ? T(0) : dix_dgx;
-                    T scale_y = (padding_mode == "zeros" && !in_bounds_iy) ? T(0) : diy_dgy;
+                    // grad_grid coordinate multiplier, matching PyTorch's
+                    // grid_sampler_2d backward.
+                    //
+                    // 'zeros': do NOT apply a whole-point in-bounds gate. The
+                    // per-neighbour `fetch()`/`scatter()` already return/skip 0
+                    // for out-of-bounds bilinear corners, so sum_dx/sum_dy
+                    // already only contain in-bounds contributions. The bands
+                    // ix in [-1,0) and (W-1,W) (likewise iy) have exactly one
+                    // in-bounds neighbour and a genuine non-zero gradient that
+                    // the old whole-point `!in_bounds_ix` gate incorrectly
+                    // zeroed.
+                    //
+                    // 'border': PyTorch's clip_coordinates_set_grad multiplies
+                    // by d(clamp)/d(raw), which is 0 when the raw coordinate
+                    // fell outside [0, size-1] (the clamp is flat there) and 1
+                    // otherwise. in_bounds_ix / in_bounds_iy were captured from
+                    // the PRE-clamp coordinate above, so they are exactly that
+                    // derivative.
+                    T scale_x = dix_dgx;
+                    T scale_y = diy_dgy;
+                    if (padding_mode == "border") {
+                        if (!in_bounds_ix) scale_x = T(0);
+                        if (!in_bounds_iy) scale_y = T(0);
+                    }
                     gg_data[grid_idx]     += sum_dx * scale_x;
                     gg_data[grid_idx + 1] += sum_dy * scale_y;
                 } else if (mode == "nearest") {
@@ -625,8 +644,19 @@ void grid_sample_backward_impl(
                         sum_dx += go * dval_dix;
                         sum_dy += go * dval_diy;
                     }
-                    gg_data[grid_idx]     += sum_dx * dix_dgx;
-                    gg_data[grid_idx + 1] += sum_dy * diy_dgy;
+                    // 'border': as in the bilinear path, multiply by the clamp
+                    // derivative d(clamp)/d(raw), which is 0 when the raw
+                    // coordinate fell outside [0, size-1] (PyTorch
+                    // clip_coordinates_set_grad). in_bounds_ix/iy were captured
+                    // from the pre-clamp coordinate above.
+                    T scale_x = dix_dgx;
+                    T scale_y = diy_dgy;
+                    if (padding_mode == "border") {
+                        if (!in_bounds_ix) scale_x = T(0);
+                        if (!in_bounds_iy) scale_y = T(0);
+                    }
+                    gg_data[grid_idx]     += sum_dx * scale_x;
+                    gg_data[grid_idx + 1] += sum_dy * scale_y;
                 } else {
                     throw std::invalid_argument(
                         "grid_sample_backward: unknown mode '" + mode +

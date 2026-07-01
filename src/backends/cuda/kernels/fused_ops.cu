@@ -1093,19 +1093,19 @@ __global__ void fused_layer_norm_backward_kernel(
     T batch_mean = mean[b];
     T batch_inv_std = inv_std[b];
 
-    __shared__ T shared_sum1[BLOCK_SIZE];  // For sum(grad_out * weight)
-    __shared__ T shared_sum2[BLOCK_SIZE];  // For sum(grad_out * weight * normalized)
+    __shared__ double shared_sum1[BLOCK_SIZE];  // For sum(grad_out * weight)
+    __shared__ double shared_sum2[BLOCK_SIZE];  // For sum(grad_out * weight * normalized)
 
     // Compute sums needed for input gradient
-    T sum_grad_out = 0;
-    T sum_grad_out_normalized = 0;
+    double sum_grad_out = 0.0;  // accumulate in double (forward uses double)
+    double sum_grad_out_normalized = 0.0;
 
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
         T grad_out_weighted = batch_grad_out[i] * weight[i];
 
-        sum_grad_out += grad_out_weighted;
-        sum_grad_out_normalized += grad_out_weighted * normalized;
+        sum_grad_out += static_cast<double>(grad_out_weighted);
+        sum_grad_out_normalized += static_cast<double>(grad_out_weighted) * static_cast<double>(normalized);
 
         // Accumulate weight and bias gradients atomically
         atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
@@ -1125,16 +1125,16 @@ __global__ void fused_layer_norm_backward_kernel(
         __syncthreads();
     }
 
-    T mean_grad_out = shared_sum1[0] / static_cast<T>(norm_size);
-    T mean_grad_out_normalized = shared_sum2[0] / static_cast<T>(norm_size);
+    double mean_grad_out = shared_sum1[0] / static_cast<double>(norm_size);
+    double mean_grad_out_normalized = shared_sum2[0] / static_cast<double>(norm_size);
 
     // Compute input gradients
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
         T grad_out_weighted = batch_grad_out[i] * weight[i];
 
-        batch_grad_in[i] = (grad_out_weighted - mean_grad_out -
-                           normalized * mean_grad_out_normalized) * batch_inv_std;
+        batch_grad_in[i] = static_cast<T>((static_cast<double>(grad_out_weighted) - mean_grad_out -
+                           static_cast<double>(normalized) * mean_grad_out_normalized) * static_cast<double>(batch_inv_std));
     }
 }
 
@@ -1289,7 +1289,9 @@ __global__ void fused_rms_norm_kernel(
     // T=float; F16/BF16 take the scalar widen-on-load path so sum_sq stays
     // in Acc (F32) — sums of squares of half-precision values can otherwise
     // overflow F16's max (65504) for moderate norm_size.
-    Acc sum_sq = 0;
+    // Accumulate sum-of-squares in double (matching LayerNorm); rrms is still
+    // stored as Acc so the forward/backward storage contract is unchanged.
+    double sum_sq = 0.0;
     if constexpr (std::is_same_v<T, float>) {
         // float4 requires every row offset (b*norm_size) to be 16-byte aligned,
         // which holds only when norm_size % 4 == 0; otherwise a misaligned float4
@@ -1300,17 +1302,17 @@ __global__ void fused_rms_norm_kernel(
             const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
             for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
                 float4 v = batch_in_vec[i];
-                sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+                sum_sq += static_cast<double>(v.x) * v.x + static_cast<double>(v.y) * v.y + static_cast<double>(v.z) * v.z + static_cast<double>(v.w) * v.w;
             }
         } else {
             for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-                Acc val = static_cast<Acc>(batch_in[i]);
+                double val = static_cast<double>(batch_in[i]);
                 sum_sq += val * val;
             }
         }
     } else {
         for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-            Acc val = static_cast<Acc>(batch_in[i]);
+            double val = static_cast<double>(batch_in[i]);
             sum_sq += val * val;
         }
     }
@@ -1321,7 +1323,7 @@ __global__ void fused_rms_norm_kernel(
         sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
     }
 
-    __shared__ Acc warp_sums[32];
+    __shared__ double warp_sums[32];
     int lane = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
@@ -1331,7 +1333,7 @@ __global__ void fused_rms_norm_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        sum_sq = (lane < (BLOCK_SIZE / 32)) ? warp_sums[lane] : Acc(0);
+        sum_sq = (lane < (BLOCK_SIZE / 32)) ? warp_sums[lane] : 0.0;
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
@@ -1340,12 +1342,8 @@ __global__ void fused_rms_norm_kernel(
 
     __shared__ Acc shared_rrms;
     if (threadIdx.x == 0) {
-        Acc mean_sq = sum_sq / static_cast<Acc>(norm_size);
-        if constexpr (std::is_same_v<Acc, double>) {
-            shared_rrms = rsqrt(mean_sq + eps);
-        } else {
-            shared_rrms = rsqrtf(mean_sq + eps);
-        }
+        double mean_sq = sum_sq / static_cast<double>(norm_size);
+        shared_rrms = static_cast<Acc>(rsqrt(mean_sq + static_cast<double>(eps)));
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();
@@ -3246,15 +3244,18 @@ __global__ void fused_adam_kernel(
     // Compute step size with bias correction
     T step_size = T(lr) / T(bias_correction1);
 
-    // Compute bias-corrected second moment
-    T v_hat = v / T(bias_correction2);
-
-    // AMSGrad: use maximum of past bias-corrected second moments
+    // Bias-corrected second moment. AMSGrad must track the running maximum over
+    // the RAW (un-bias-corrected) second moment and apply the bias correction
+    // AFTER, matching the CPU reference and PyTorch — maxing the already
+    // bias-corrected v_hat is wrong because bias_correction2 grows toward 1.
+    T v_hat;
     if (amsgrad && max_exp_avg_sq != nullptr) {
         T max_v = max_exp_avg_sq[idx];
-        if (v_hat > max_v) max_v = v_hat;
+        if (v > max_v) max_v = v;
         max_exp_avg_sq[idx] = max_v;
-        v_hat = max_v;
+        v_hat = max_v / T(bias_correction2);
+    } else {
+        v_hat = v / T(bias_correction2);
     }
 
     // denom = sqrt(v_hat) + eps
@@ -3316,10 +3317,12 @@ __global__ void fused_adam_kernel_vec4(
         } \
         m.comp = beta1 * m.comp + (1.0f - beta1) * g.comp; \
         v.comp = beta2 * v.comp + (1.0f - beta2) * g.comp * g.comp; \
-        { float v_hat = v.comp * bc2_inv; \
+        { float v_hat; \
           if (amsgrad && max_exp_avg_sq) { \
-              if (v_hat > mv.comp) mv.comp = v_hat; \
-              v_hat = mv.comp; \
+              if (v.comp > mv.comp) mv.comp = v.comp; /* max over RAW v */ \
+              v_hat = mv.comp * bc2_inv;              /* bias-correct after */ \
+          } else { \
+              v_hat = v.comp * bc2_inv; \
           } \
           if (weight_decay > 0.0f && decoupled_weight_decay) { \
               p.comp = p.comp * (1.0f - lr * weight_decay); \
@@ -3381,10 +3384,12 @@ __global__ void fused_adam_kernel_vec2(
         } \
         m.comp = beta1 * m.comp + (1.0 - beta1) * g.comp; \
         v.comp = beta2 * v.comp + (1.0 - beta2) * g.comp * g.comp; \
-        { double v_hat = v.comp * bc2_inv; \
+        { double v_hat; \
           if (amsgrad && max_exp_avg_sq) { \
-              if (v_hat > mv.comp) mv.comp = v_hat; \
-              v_hat = mv.comp; \
+              if (v.comp > mv.comp) mv.comp = v.comp; /* max over RAW v */ \
+              v_hat = mv.comp * bc2_inv;              /* bias-correct after */ \
+          } else { \
+              v_hat = v.comp * bc2_inv; \
           } \
           if (weight_decay > 0.0 && decoupled_weight_decay) { \
               p.comp = p.comp * (1.0 - lr * weight_decay); \
@@ -4111,16 +4116,22 @@ __global__ void fused_adam_atan2_kernel(
     // Update biased second raw moment estimate
     v = T(beta2) * v + T(1.0 - beta2) * g * g;
 
-    // Bias-corrected estimates
+    // Bias-corrected first moment estimate
     T m_hat = m / T(bias_correction1);
-    T v_hat = v / T(bias_correction2);
 
-    // AMSGrad: use maximum of past bias-corrected second moments
+    // Second moment estimate. AMSGrad must track the running maximum over the
+    // RAW (un-bias-corrected) second moment and apply the bias correction
+    // AFTER, matching the CPU reference and PyTorch. Maxing the already
+    // bias-corrected v_hat is incorrect because bias_correction2 grows toward 1
+    // across steps, so it does not preserve a consistent comparison basis.
+    T v_hat;
     if (amsgrad && max_exp_avg_sq != nullptr) {
         T max_v = max_exp_avg_sq[idx];
-        if (v_hat > max_v) max_v = v_hat;
+        if (v > max_v) max_v = v;
         max_exp_avg_sq[idx] = max_v;
-        v_hat = max_v;
+        v_hat = max_v / T(bias_correction2);
+    } else {
+        v_hat = v / T(bias_correction2);
     }
 
     // Decoupled weight decay (like AdamW) before update

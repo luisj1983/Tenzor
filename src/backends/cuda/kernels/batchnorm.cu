@@ -1180,6 +1180,9 @@ __global__ void group_norm_forward_kernel_mixed(
     }
     __syncthreads();
     mean = shared_sum[0];
+    // Ensure every thread has read the broadcast mean before any warp's
+    // lane 0 overwrites shared_sum[*] with partial variance sums (WAR hazard).
+    __syncthreads();
 
     // Variance reduction
     float local_var = 0.0f;
@@ -1265,13 +1268,13 @@ __global__ void group_norm_forward_kernel(
     int64_t group_size = channels_per_group * HW;
 
     // Compute mean using parallel reduction
-    T local_sum = T(0);
+    double local_sum = 0.0;
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
         int64_t c_offset = i / HW;
         int64_t hw = i % HW;
         int64_t c = c_start + c_offset;
         int64_t idx = (n * C + c) * HW + hw;
-        local_sum += input[idx];
+        local_sum += static_cast<double>(input[idx]);
     }
 
     // Warp reduction
@@ -1280,7 +1283,7 @@ __global__ void group_norm_forward_kernel(
     }
 
     // Shared memory for inter-warp reduction
-    __shared__ T shared_sum[32];
+    __shared__ double shared_sum[32];
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
 
@@ -1288,29 +1291,32 @@ __global__ void group_norm_forward_kernel(
     __syncthreads();
 
     // Final reduction in first warp
-    T mean = T(0);
+    double mean = 0.0;
     if (warp_id == 0) {
         int num_warps = (blockDim.x + warpSize - 1) / warpSize;
-        local_sum = (lane < num_warps) ? shared_sum[lane] : T(0);
+        local_sum = (lane < num_warps) ? shared_sum[lane] : 0.0;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
             local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
         }
         if (lane == 0) {
-            mean = local_sum / T(group_size);
+            mean = local_sum / static_cast<double>(group_size);
             shared_sum[0] = mean;
         }
     }
     __syncthreads();
     mean = shared_sum[0];
+    // Ensure every thread has read the broadcast mean before any warp's
+    // lane 0 overwrites shared_sum[*] with partial variance sums (WAR hazard).
+    __syncthreads();
 
     // Compute variance
-    T local_var = T(0);
+    double local_var = 0.0;
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
         int64_t c_offset = i / HW;
         int64_t hw = i % HW;
         int64_t c = c_start + c_offset;
         int64_t idx = (n * C + c) * HW + hw;
-        T diff = input[idx] - mean;
+        double diff = static_cast<double>(input[idx]) - mean;
         local_var += diff * diff;
     }
 
@@ -1321,19 +1327,19 @@ __global__ void group_norm_forward_kernel(
     if (lane == 0) shared_sum[warp_id] = local_var;
     __syncthreads();
 
-    T inv_std = T(0);
+    double inv_std = 0.0;
     if (warp_id == 0) {
         int num_warps = (blockDim.x + warpSize - 1) / warpSize;
-        local_var = (lane < num_warps) ? shared_sum[lane] : T(0);
+        local_var = (lane < num_warps) ? shared_sum[lane] : 0.0;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
             local_var += __shfl_down_sync(0xFFFFFFFF, local_var, offset);
         }
         if (lane == 0) {
-            T variance = local_var / T(group_size);
-            inv_std = T(1) / sqrt(variance + T(eps));
+            double variance = local_var / static_cast<double>(group_size);
+            inv_std = 1.0 / sqrt(variance + static_cast<double>(eps));
             shared_sum[0] = inv_std;
-            if (mean_out) mean_out[group_idx] = mean;
-            if (inv_std_out) inv_std_out[group_idx] = inv_std;
+            if (mean_out) mean_out[group_idx] = static_cast<T>(mean);
+            if (inv_std_out) inv_std_out[group_idx] = static_cast<T>(inv_std);
         }
     }
     __syncthreads();
@@ -1345,7 +1351,7 @@ __global__ void group_norm_forward_kernel(
         int64_t hw = i % HW;
         int64_t c = c_start + c_offset;
         int64_t idx = (n * C + c) * HW + hw;
-        T normalized = (input[idx] - mean) * inv_std;
+        T normalized = static_cast<T>((static_cast<double>(input[idx]) - mean) * inv_std);
         if (weight && bias) {
             output[idx] = normalized * weight[c] + bias[c];
         } else {

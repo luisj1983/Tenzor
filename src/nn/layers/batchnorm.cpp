@@ -23,6 +23,29 @@
 
 namespace tenzor::nn {
 
+namespace {
+
+// audit-2026-06 Fix #7: guard multi-output backend dispatch results before
+// indexing them. A backend kernel that returns fewer tensors than the
+// {output, mean, var, ...} contract would otherwise cause an out-of-bounds
+// std::vector::operator[] read (UB) instead of a clear error. Mirrors the
+// check_norm_outputs helper in normalization.cpp.
+inline auto check_norm_outputs(const std::vector<::tenzor::Tensor>& results,
+                               const char* op_name,
+                               std::size_t min_required) -> void {
+    if (results.size() < min_required) {
+        throw std::runtime_error(
+            std::string(op_name) +
+            ": backend kernel returned " +
+            std::to_string(results.size()) +
+            " tensors; the contract requires at least " +
+            std::to_string(min_required) +
+            ". Fix the backend kernel registration.");
+    }
+}
+
+}  // namespace
+
 // BatchNorm2d autograd function
 class BatchNorm2dBackward : public Function {
 public:
@@ -537,6 +560,9 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
 
             std::vector<Tensor> fused_inputs = {input_work, running_mean, running_var, weight, bias};
             std::vector<Tensor> fused_results = dispatch(OpId::BatchNorm2dFusedTraining, fused_inputs, fused_attrs);
+            // Reads indices [0..4] below ({output, running_mean, running_var,
+            // saved_mean, saved_inv_var}); guard before indexing.
+            check_norm_outputs(fused_results, "BatchNorm2dFusedTraining", /*min_required=*/5);
 
             // Update running stats from cuDNN (store back as Float32 for storage efficiency)
             rm_var_ptr->tensor() = fused_results[1].to(DType::Float32);
@@ -623,6 +649,8 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         OpAttributes mean_var_attrs;
         std::vector<Tensor> mean_var_inputs = {input_work};
         std::vector<Tensor> mean_var_results = dispatch(OpId::BatchNorm2dMeanVar, mean_var_inputs, mean_var_attrs);
+        // Reads indices [0] and [1] ({mean, var}); guard before indexing.
+        check_norm_outputs(mean_var_results, "BatchNorm2dMeanVar", /*min_required=*/2);
         batch_mean = mean_var_results[0];
         batch_var = mean_var_results[1];
 
@@ -1188,8 +1216,16 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
             // This properly handles both CPU and CUDA/GPU tensors
             auto& rm_tensor = rm_var_ptr->tensor();
             auto& rv_tensor = rv_var_ptr->tensor();
-            rm_tensor = rm_tensor * (1.0f - momentum_) + batch_mean * momentum_;
-            rv_tensor = rv_tensor * (1.0f - momentum_) + unbiased_var * momentum_;
+            // Running stats are stored as Float32, but a Float64 input is not
+            // upcast, so batch_mean/unbiased_var may be Float64. Reconcile to the
+            // buffer dtype so the EMA update stays a same-dtype op and the buffers
+            // remain Float32 (mirrors the BatchNorm2d running-stats path).
+            Tensor bm = batch_mean.dtype() == rm_tensor.dtype()
+                            ? batch_mean : batch_mean.to(rm_tensor.dtype());
+            Tensor uv = unbiased_var.dtype() == rv_tensor.dtype()
+                            ? unbiased_var : unbiased_var.to(rv_tensor.dtype());
+            rm_tensor = rm_tensor * (1.0f - momentum_) + bm * momentum_;
+            rv_tensor = rv_tensor * (1.0f - momentum_) + uv * momentum_;
 
             // Increment on the buffer's native device (avoids host roundtrip).
             auto& nbt = buffers_["num_batches_tracked"]->tensor();

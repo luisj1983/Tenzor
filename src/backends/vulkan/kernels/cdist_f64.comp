@@ -1,0 +1,58 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// CDist (pairwise Lp distance), Float64 variant — see cdist.comp. Routing
+// Float64 inputs through the Float32 cdist shader silently downcast them; this
+// variant keeps full double precision. The generic-p path uses exp/log instead
+// of pow() since GLSL has no float64 pow overload.
+//   x1: (B, P, M), x2: (B, R, M)  ->  out: (B, P, R)
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer X1Buf  { float64_t x1[]; };
+layout(binding = 1) buffer X2Buf  { float64_t x2[]; };
+layout(binding = 2) buffer OutBuf { float64_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint B;
+    uint P;
+    uint R;
+    uint M;
+    uint total;  // B*P*R
+    float p;     // Lp norm exponent; p=1 Manhattan, p=2 Euclidean
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total) return;
+
+    uint r  = idx % params.R;
+    uint pp = (idx / params.R) % params.P;
+    uint b  = idx / (params.R * params.P);
+
+    uint a_off = b * params.P * params.M + pp * params.M;
+    uint b_off = b * params.R * params.M + r * params.M;
+
+    float64_t sum = 0.0lf;
+    if (params.p == 2.0) {
+        for (uint m = 0; m < params.M; ++m) {
+            float64_t diff = x1[a_off + m] - x2[b_off + m];
+            sum += diff * diff;
+        }
+        out_data[idx] = sqrt(sum);
+    } else if (params.p == 1.0) {
+        for (uint m = 0; m < params.M; ++m) {
+            sum += abs(x1[a_off + m] - x2[b_off + m]);
+        }
+        out_data[idx] = sum;
+    } else {
+        // GLSL has no float64 pow/exp/log overloads; the generic-p terms use
+        // float pow (the common p=1 and p=2 paths above stay full double). The
+        // distance accumulation itself is still double.
+        for (uint m = 0; m < params.M; ++m) {
+            float diff = float(abs(x1[a_off + m] - x2[b_off + m]));
+            sum += float64_t(pow(diff, params.p));
+        }
+        out_data[idx] = float64_t(pow(float(sum), 1.0 / params.p));
+    }
+}

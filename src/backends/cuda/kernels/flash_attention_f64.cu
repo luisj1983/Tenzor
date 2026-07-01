@@ -364,6 +364,10 @@ __global__ void flash_attention_backward_kernel_f64(
         for (int row = tid + actual_Br; row < Br; row += BLOCK_SIZE) {
             D_tile[row] = 0.0;
         }
+        // Q_tile/dO_tile are written cooperatively above and read below by other
+        // threads; without this barrier the S_ij reads race the tile stores,
+        // corrupting FP64 gradients. Mirrors the FP32 kernel (fused_ops.cu).
+        __syncthreads();
 
         // S_ij = Q_i @ K_j^T * scale  (rebuilt every Q-tile pass).
         for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {

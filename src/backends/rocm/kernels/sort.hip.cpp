@@ -462,40 +462,40 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n,
     // was a power of two (the merge network requires it); for non-power-of-2
     // lengths it returned a wrong permutation. DeviceRadixSort is correct for
     // any length, so we route every n>1 through it.
-    int64_t* d_indices_in = nullptr;
-    HIP_CHECK(hipMalloc(&d_indices_in, n * sizeof(int64_t)));
+    // RAII scratch: a throwing HIP_CHECK (iota launch error, SortPairs failure,
+    // sync) between the allocations and the frees would otherwise leak these.
+    ScopedDevicePtr<int64_t> d_indices_in_buf(n);
+    int64_t* d_indices_in = d_indices_in_buf.get();
 
     int init_blocks = get_num_blocks(n);
     hipLaunchKernelGGL(iota_kernel, dim3(init_blocks), dim3(BLOCK_SIZE), 0, stream, d_indices_in, n);
     HIP_CHECK(hipGetLastError());
 
-    T* d_keys_out = nullptr;
-    HIP_CHECK(hipMalloc(&d_keys_out, n * sizeof(T)));
+    ScopedDevicePtr<T> d_keys_out_buf(n);
+    T* d_keys_out = d_keys_out_buf.get();
 
-    void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
-
     if (descending) {
-        HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
+        HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(nullptr, temp_storage_bytes,
             d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
-        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_bytes));
+    } else {
+        HIP_CHECK(hipcub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
+    }
+    ScopedDevicePtr<char> d_temp_buf(static_cast<int64_t>(temp_storage_bytes));
+    void* d_temp_storage = d_temp_buf.get();
+    if (descending) {
         HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
             d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
     } else {
         HIP_CHECK(hipcub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
             d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
-        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_bytes));
-        HIP_CHECK(hipcub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
     }
 
-    // audit-9 JJ.5: DeviceRadixSort::SortPairs is async on `stream`; sync
-    // before freeing the workspace + key/index temporaries so the in-flight
-    // sort doesn't read freed pages.
+    // audit-9 JJ.5: DeviceRadixSort::SortPairs is async on `stream`; sync before
+    // the RAII buffers free at scope exit so the in-flight sort doesn't read freed
+    // pages.
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_temp_storage));
-    HIP_CHECK(hipFree(d_keys_out));
-    HIP_CHECK(hipFree(d_indices_in));
 }
 
 // Scatter per-slice local argsort indices (0..dim_size-1) back into the
@@ -625,15 +625,17 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
     const auto device = input.device();
     auto policy = thrust::hip::par.on(stream);
 
+    // RAII scratch (ScopedDevicePtr): a throwing HIP_CHECK / thrust error between
+    // these allocations and the frees would otherwise leak device memory.
     // Copy and flatten input
-    T* d_sorted = nullptr;
-    HIP_CHECK(hipMalloc(&d_sorted, numel * sizeof(T)));
+    ScopedDevicePtr<T> d_sorted_buf(numel);
+    T* d_sorted = d_sorted_buf.get();
     HIP_CHECK(hipMemcpyAsync(d_sorted, input.data<T>(), numel * sizeof(T),
                              hipMemcpyDeviceToDevice, stream));
 
     // Create index mapping for inverse
-    int64_t* d_orig_idx = nullptr;
-    HIP_CHECK(hipMalloc(&d_orig_idx, numel * sizeof(int64_t)));
+    ScopedDevicePtr<int64_t> d_orig_idx_buf(numel);
+    int64_t* d_orig_idx = d_orig_idx_buf.get();
     thrust::sequence(policy, thrust::device_pointer_cast(d_orig_idx),
                      thrust::device_pointer_cast(d_orig_idx + numel), int64_t(0));
 
@@ -644,23 +646,22 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
         thrust::device_pointer_cast(d_orig_idx));
 
     // Find unique elements via run-length encoding
-    T* d_unique = nullptr;
-    int64_t* d_counts = nullptr;
-    int64_t* d_num_runs = nullptr;
-    HIP_CHECK(hipMalloc(&d_unique, numel * sizeof(T)));
-    HIP_CHECK(hipMalloc(&d_counts, numel * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_num_runs, sizeof(int64_t)));
+    ScopedDevicePtr<T> d_unique_buf(numel);
+    ScopedDevicePtr<int64_t> d_counts_buf(numel);
+    ScopedDevicePtr<int64_t> d_num_runs_buf(1);
+    T* d_unique = d_unique_buf.get();
+    int64_t* d_counts = d_counts_buf.get();
+    int64_t* d_num_runs = d_num_runs_buf.get();
 
-    void* d_temp = nullptr;
     size_t temp_bytes = 0;
     HIP_CHECK(hipcub::DeviceRunLengthEncode::Encode(
-        d_temp, temp_bytes, d_sorted, d_unique, d_counts, d_num_runs,
+        nullptr, temp_bytes, d_sorted, d_unique, d_counts, d_num_runs,
         static_cast<int>(numel), stream));
-    HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+    ScopedDevicePtr<char> d_temp_buf(static_cast<int64_t>(temp_bytes));
+    void* d_temp = d_temp_buf.get();
     HIP_CHECK(hipcub::DeviceRunLengthEncode::Encode(
         d_temp, temp_bytes, d_sorted, d_unique, d_counts, d_num_runs,
         static_cast<int>(numel), stream));
-    HIP_CHECK(hipFree(d_temp));
 
     // Get num_unique on host
     int64_t num_unique = 0;
@@ -685,17 +686,16 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
     if (return_inverse) {
         inverse_tensor = Tensor({numel}, DType::Int64, device);
 
-        int64_t* d_offsets = nullptr;
-        HIP_CHECK(hipMalloc(&d_offsets, (num_unique + 1) * sizeof(int64_t)));
+        ScopedDevicePtr<int64_t> d_offsets_buf(num_unique + 1);
+        int64_t* d_offsets = d_offsets_buf.get();
 
-        void* d_scan_temp = nullptr;
         size_t scan_temp_bytes = 0;
+        HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(nullptr, scan_temp_bytes, d_counts, d_offsets,
+                                         static_cast<int>(num_unique), stream));
+        ScopedDevicePtr<char> d_scan_temp_buf(static_cast<int64_t>(scan_temp_bytes));
+        void* d_scan_temp = d_scan_temp_buf.get();
         HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
                                          static_cast<int>(num_unique), stream));
-        HIP_CHECK(hipMalloc(&d_scan_temp, scan_temp_bytes));
-        HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
-                                         static_cast<int>(num_unique), stream));
-        HIP_CHECK(hipFree(d_scan_temp));
 
         int block = 256;
         int grid = (num_unique + block - 1) / block;
@@ -704,17 +704,11 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
             d_orig_idx, d_offsets, inverse_tensor.data<int64_t>(),
             num_unique, numel);
         HIP_CHECK(hipGetLastError());
-
-        HIP_CHECK(hipFree(d_offsets));
     }
 
+    // Sync before the RAII scratch buffers free at scope exit so in-flight async
+    // work does not read freed pages.
     HIP_CHECK(hipStreamSynchronize(stream));
-
-    HIP_CHECK(hipFree(d_sorted));
-    HIP_CHECK(hipFree(d_orig_idx));
-    HIP_CHECK(hipFree(d_unique));
-    HIP_CHECK(hipFree(d_counts));
-    HIP_CHECK(hipFree(d_num_runs));
 
     return {unique_vals, inverse_tensor, counts_tensor};
 }

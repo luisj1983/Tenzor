@@ -8,6 +8,10 @@
 #include <cmath>
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
+// Forward-declare tenzor::add (fuse bias_ih + bias_hh) instead of including
+// ops/math.hpp, whose Tensor exp()/tanh() overloads would shadow the device
+// math functions used inside the HIP kernels in this TU.
+namespace tenzor { auto add(const Tensor& a, const Tensor& b) -> Tensor; }
 #include "tenzor/core/dtype.hpp"
 #include "../rocm_error.hpp"
 #ifdef USE_MIOPEN
@@ -1133,9 +1137,12 @@ auto lstm_multi_layer_forward_kernel(
         Tensor bias_combined = bias_list[l];
         Tensor effective_bias;
         if (bias_combined.numel() > 0) {
-            // Combined bias: first half is bias_ih, second half is bias_hh
-            // For simplicity, pass the full combined bias to lstm_forward_kernel
-            effective_bias = bias_combined;
+            // Combined bias = [bias_ih (4H) | bias_hh (4H)]. lstm_forward_kernel's
+            // add_bias only applies the first 4H (bias_ih), so fuse b_ih + b_hh
+            // here (PyTorch adds both) — previously bias_hh was silently dropped.
+            int64_t half = bias_combined.numel() / 2;
+            effective_bias = tenzor::add(bias_combined.slice(0, 0, half),
+                                         bias_combined.slice(0, half, 2 * half));
         }
 
         auto result = lstm_forward_kernel(

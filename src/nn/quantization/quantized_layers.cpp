@@ -230,6 +230,16 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     }
 
     // Perform quantized matrix multiplication
+    // uint8 asymmetric activations are stored as UInt8; remap to the signed
+    // int8 the kernel expects (q_i8 = q_u8 - 128, zp_i8 = zp_u8 - 128). The
+    // dequant value scale*(q - zp) is invariant under shifting q and zp by the
+    // same constant, so the signed kernel yields identical results. Reading
+    // UInt8 storage straight through data<int8_t>() reinterpreted codes >= 128
+    // as negative and silently corrupted the output.
+    if (input_data_cpu.dtype() == DType::UInt8) {
+        input_data_cpu = sub(input_data_cpu.to(DType::Float32), 128.0).to(DType::Int8);
+        input_zp -= 128;
+    }
     const int8_t* input_data = input_data_cpu.data<int8_t>();
     // Convert bias to Float32 and CPU if needed
     std::optional<Tensor> bias_f32;
@@ -462,6 +472,16 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
         weight_data_cpu = weight_data_cpu.to(Device::cpu());
     }
 
+    // uint8 asymmetric activations are stored as UInt8; remap to the signed
+    // int8 the kernel expects (q_i8 = q_u8 - 128, zp_i8 = zp_u8 - 128). The
+    // dequant value scale*(q - zp) is invariant under shifting q and zp by the
+    // same constant, so the signed kernel yields identical results. Reading
+    // UInt8 storage straight through data<int8_t>() reinterpreted codes >= 128
+    // as negative and silently corrupted the output.
+    if (input_data_cpu.dtype() == DType::UInt8) {
+        input_data_cpu = sub(input_data_cpu.to(DType::Float32), 128.0).to(DType::Int8);
+        input_zp -= 128;
+    }
     const int8_t* input_data = input_data_cpu.data<int8_t>();
     const int8_t* weight_data = weight_data_cpu.data<int8_t>();
     // Convert bias to Float32 and CPU if needed
@@ -568,6 +588,15 @@ auto QuantizedConv2d::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
         throw std::runtime_error(
             "QuantizedConv2d::from_float: non-square kernels not supported (got " +
             std::to_string(kernel_h) + "x" + std::to_string(kernel_w) + ")");
+    }
+    // The quantized ctor stores a single scalar stride/padding/dilation; reject
+    // asymmetric geometry rather than silently using the H value for both axes
+    // (mirrors QuantizedConvTranspose2d::from_float).
+    if (fp_conv.stride_h() != fp_conv.stride_w() ||
+        fp_conv.padding_h() != fp_conv.padding_w() ||
+        fp_conv.dilation_h() != fp_conv.dilation_w()) {
+        throw std::runtime_error(
+            "QuantizedConv2d::from_float: asymmetric stride/padding/dilation not supported");
     }
 
     // Create quantized Conv2d with actual parameters from source Conv2d
@@ -1002,6 +1031,21 @@ auto QuantizedConv2dReLU::from_float(const Conv2d& fp_conv, const QConfig& qconf
     // true in_channels by multiplying by groups (matches QuantizedConv2dBnReLU).
     int64_t in_channels = weight_shape[1] * fp_conv.groups();
     int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+    // The quantized ctor stores single scalar kernel/stride/padding/dilation;
+    // reject non-square kernels and asymmetric geometry rather than silently using
+    // the H value for both axes (mirrors QuantizedConv2d::from_float).
+    if (kernel_h != kernel_w) {
+        throw std::runtime_error(
+            "QuantizedConv2dReLU::from_float: non-square kernels not supported (got " +
+            std::to_string(kernel_h) + "x" + std::to_string(kernel_w) + ")");
+    }
+    if (fp_conv.stride_h() != fp_conv.stride_w() ||
+        fp_conv.padding_h() != fp_conv.padding_w() ||
+        fp_conv.dilation_h() != fp_conv.dilation_w()) {
+        throw std::runtime_error(
+            "QuantizedConv2dReLU::from_float: asymmetric stride/padding/dilation not supported");
+    }
 
     // Create QuantizedConv2dReLU with actual parameters from source Conv2d
     auto q_conv_relu = std::shared_ptr<QuantizedConv2dReLU>(
@@ -1130,10 +1174,13 @@ auto QuantizedConv2dBnReLU::from_float(
     // Extract BatchNorm parameters from state_dict
     auto bn_state = fp_bn.state_dict();
 
-    Tensor gamma = bn_state.at("weight");
-    Tensor beta = bn_state.at("bias");
-    Tensor running_mean = bn_state.at("running_mean");
-    Tensor running_var = bn_state.at("running_var");
+    // Widen to Float32 before the raw float access below — Float16/BFloat16 BN
+    // params would otherwise be misread by .data<float>() (matches
+    // QuantizedBatchNorm2d::from_float and fake_quantize.cpp::fold_bn).
+    Tensor gamma = bn_state.at("weight").to(DType::Float32);
+    Tensor beta = bn_state.at("bias").to(DType::Float32);
+    Tensor running_mean = bn_state.at("running_mean").to(DType::Float32);
+    Tensor running_var = bn_state.at("running_var").to(DType::Float32);
 
     // Read epsilon from the source module
     double eps = 1e-5;
@@ -1149,10 +1196,10 @@ auto QuantizedConv2dBnReLU::from_float(
 
     // Get conv weights and bias
     auto conv_state = fp_conv.state_dict();
-    Tensor fp_weight = conv_state.at("weight");  // [out_channels, in_channels/groups, kH, kW]
+    Tensor fp_weight = conv_state.at("weight").to(DType::Float32);  // [out_channels, in_channels/groups, kH, kW]
     std::optional<Tensor> fp_bias;
     if (conv_state.find("bias") != conv_state.end()) {
-        fp_bias = conv_state.at("bias");
+        fp_bias = conv_state.at("bias").to(DType::Float32);
     }
 
     // Fold BN scale into conv weights
@@ -1904,9 +1951,33 @@ auto QuantizedMultiheadAttention::from_float(Module& fp_mha,
         }
     };
 
-    set_proj("q_proj", result->q_proj_);
-    set_proj("k_proj", result->k_proj_);
-    set_proj("v_proj", result->v_proj_);
+    // PyTorch's nn.MultiheadAttention packs q/k/v into a single
+    // in_proj_weight of shape [3*embed_dim, embed_dim] (with optional
+    // in_proj_bias [3*embed_dim]); separate q_proj/k_proj/v_proj weights only
+    // exist when projections are unpacked. If only the combined weight is
+    // present, split it into thirds — otherwise q/k/v stay zero-initialised and
+    // the attention output is identically zero.
+    if (Tensor* in_w = find_param("in_proj_weight")) {
+        Tensor in_w_cpu = (in_w->device() == Device::cpu()) ? *in_w : in_w->to(Device::cpu());
+        Tensor* in_b = find_param("in_proj_bias");
+        std::optional<Tensor> in_b_cpu;
+        if (in_b) in_b_cpu = (in_b->device() == Device::cpu()) ? *in_b : in_b->to(Device::cpu());
+
+        auto set_from_chunk = [&](int idx, std::shared_ptr<QuantizedLinear>& proj) {
+            Tensor w_chunk = in_w_cpu.narrow(0, idx * embed_dim, embed_dim).contiguous();
+            proj->set_weight(quantize_per_tensor_symmetric(w_chunk));
+            if (in_b_cpu) {
+                proj->set_bias(in_b_cpu->narrow(0, idx * embed_dim, embed_dim).contiguous());
+            }
+        };
+        set_from_chunk(0, result->q_proj_);
+        set_from_chunk(1, result->k_proj_);
+        set_from_chunk(2, result->v_proj_);
+    } else {
+        set_proj("q_proj", result->q_proj_);
+        set_proj("k_proj", result->k_proj_);
+        set_proj("v_proj", result->v_proj_);
+    }
     set_proj("out_proj", result->out_proj_);
 
     return result;
@@ -2226,7 +2297,7 @@ auto QuantizedConv1d::forward_quantized(const QuantizedTensor& input) -> Tensor 
         weight_zp_cpu = weight_zp_cpu.to(Device::cpu());
 
     const float input_scale = input_scale_cpu.data<const float>()[0];
-    const int32_t input_zp = input_zp_cpu.data<int32_t>()[0];
+    int32_t input_zp = input_zp_cpu.data<int32_t>()[0];
 
     const bool is_per_channel =
         (weight_params.scheme == QuantizationScheme::PerChannelSymmetric ||
@@ -2247,6 +2318,16 @@ auto QuantizedConv1d::forward_quantized(const QuantizedTensor& input) -> Tensor 
         bias_data = bias_f32->data<const float>();
     }
 
+    // uint8 asymmetric activations are stored as UInt8; remap to the signed
+    // int8 the kernel expects (q_i8 = q_u8 - 128, zp_i8 = zp_u8 - 128). The
+    // dequant value scale*(q - zp) is invariant under shifting q and zp by the
+    // same constant, so the signed kernel yields identical results. Reading
+    // UInt8 storage straight through data<int8_t>() reinterpreted codes >= 128
+    // as negative and silently corrupted the output.
+    if (input_data_cpu.dtype() == DType::UInt8) {
+        input_data_cpu = sub(input_data_cpu.to(DType::Float32), 128.0).to(DType::Int8);
+        input_zp -= 128;
+    }
     const int8_t* input_data = input_data_cpu.data<int8_t>();
     const int8_t* weight_data = weight_data_cpu.data<int8_t>();
 

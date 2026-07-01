@@ -409,7 +409,12 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
         if constexpr (std::is_floating_point_v<T>) {
             c[idx] = ieee_div(a[idx], b[idx]);
         } else {
-            c[idx] = a[idx] / b[idx];
+            // Guard integer divide-by-zero (UB on GPU) consistently with the
+            // broadcast DivOp int specializations, which return 0 for a zero
+            // divisor. The previous unguarded a/b made the same-shape path UB
+            // while the broadcast path returned 0 — a non-deterministic divergence.
+            T bd = b[idx];
+            c[idx] = (bd == T(0)) ? T(0) : (a[idx] / bd);
         }
     }
 }
@@ -2393,6 +2398,10 @@ auto pow_kernel(const Tensor& input, double exponent, hipStream_t stream) -> Ten
         hipLaunchKernelGGL(pow_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), static_cast<float>(exponent), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        // No native BF16 pow kernel: widen to Float32, compute, narrow back
+        // (mirrors clamp_kernel's half handling).
+        return pow_kernel(input.to(DType::Float32), exponent, stream).to(DType::BFloat16);
     } else {
         const double e = exponent;
         const int int_exp = (e == floor(e) && e >= 0.0) ? 1 : 0;
@@ -2487,6 +2496,9 @@ auto sign_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(sign_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        // No native BF16 sign kernel: widen to Float32, compute, narrow back.
+        return sign_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
     } else {
         TENZOR_HIP_INT_DISPATCH(input.dtype(), "sign",
             hipLaunchKernelGGL(sign_int_kernel<T>, grid, block, 0, stream,
@@ -3573,17 +3585,10 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     Tensor result({}, a.dtype(), a.device());  // Scalar output
 
     if (n == 0) {
-        // Return zero scalar
-        if (a.dtype() == DType::Float32) {
-            float zero = 0.0f;
-            HIP_CHECK(hipMemcpy(result.data<float>(), &zero, sizeof(float), hipMemcpyHostToDevice));
-        } else if (a.dtype() == DType::Float64) {
-            double zero = 0.0;
-            HIP_CHECK(hipMemcpy(result.data<double>(), &zero, sizeof(double), hipMemcpyHostToDevice));
-        } else if (a.dtype() == DType::Float16) {
-            Float16 zero = Float16(0.0f);
-            HIP_CHECK(hipMemcpy(result.data<Float16>(), &zero, sizeof(Float16), hipMemcpyHostToDevice));
-        }
+        // Zero the scalar output for ALL supported dtypes — an all-zero byte
+        // pattern is numeric zero for every integer/float/complex type. The
+        // previous per-dtype branches left Int64/Complex/BFloat16 uninitialized.
+        HIP_CHECK(hipMemset(const_cast<void*>(result.data_ptr()), 0, result.dtype_size()));
         return result;
     }
 

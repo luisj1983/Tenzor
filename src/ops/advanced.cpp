@@ -486,6 +486,14 @@ auto unique(const Tensor& input,
             return process_unique(static_cast<float*>(nullptr));
         case DType::Float64:
             return process_unique(static_cast<double*>(nullptr));
+        case DType::Int8:
+            return process_unique(static_cast<int8_t*>(nullptr));
+        case DType::UInt8:
+            return process_unique(static_cast<uint8_t*>(nullptr));
+        case DType::Int16:
+            return process_unique(static_cast<int16_t*>(nullptr));
+        case DType::UInt16:
+            return process_unique(static_cast<uint16_t*>(nullptr));
         case DType::Int32:
             return process_unique(static_cast<int32_t*>(nullptr));
         case DType::Int64:

@@ -614,8 +614,10 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
     if (step == 0.0) {
         throw std::invalid_argument("step cannot be zero");
     }
+    // Empty half-open range: NumPy/PyTorch return an empty tensor rather than
+    // throwing when start>=end with step>0 (or start<=end with step<0).
     if ((step > 0 && start >= end) || (step < 0 && start <= end)) {
-        throw std::invalid_argument("Invalid start, end, step combination");
+        return Tensor::empty_uninitialized({0}, dtype, device);
     }
 
     // Use OpId dispatch for non-CPU devices

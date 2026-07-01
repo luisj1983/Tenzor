@@ -658,7 +658,8 @@ auto PatternMatcher::match_gelu_variant(const Graph& graph, size_t start_idx,
 
     // Optional: another Mul for the sqrt(2/pi) scaling
     if (next < nodes.size() && nodes[next]->op_type() == OpType::Mul &&
-        !used.count(nodes[next].get()) && has_single_use(matched.back())) {
+        !used.count(nodes[next].get()) && has_single_use(matched.back()) &&
+        consumes_output(matched.back(), nodes[next])) {  // require a real data edge, not just adjacency
         matched.push_back(nodes[next]);
         ++next;
     }
@@ -678,7 +679,8 @@ auto PatternMatcher::match_gelu_variant(const Graph& graph, size_t start_idx,
 
         auto op = nk->op_type();
         if (op == OpType::Add || op == OpType::Mul) {
-            if (!has_single_use(matched.back())) break;
+            // require a real producer->consumer data edge, not mere adjacency
+            if (!has_single_use(matched.back()) || !consumes_output(matched.back(), nk)) break;
             matched.push_back(nk);
             ++next;
         } else {

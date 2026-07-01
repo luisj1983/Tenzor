@@ -12,6 +12,7 @@
 #include "tenzor/distributed/gloo_backend.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/math.hpp"   // round() for integer ReduceOp::AVG rounding
 #include <atomic>
 #include <stdexcept>
 #include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
@@ -750,13 +751,23 @@ auto NCCLProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 
     // AVG = SUM followed by division
     if (op == ReduceOp::AVG && world_size_ > 1) {
-        // H6 fix (mirroring MPIProcessGroup::all_reduce): in-place divide
-        // preserves the staged buffer's storage so the averaged result is
-        // written back to the caller below. Construct a dtype/device-matched
-        // scalar divisor so Float64 keeps full precision; `/=` writes through.
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                    work.dtype(), work.device());
-        work /= scalar;
+        // Mirroring MPIProcessGroup::all_reduce: in-place divide preserves the
+        // staged buffer's storage. Integer AVG rounds to nearest (matching Gloo
+        // / MPIBackend) rather than truncating via integer division.
+        if (is_integer_type(work.dtype())) {
+            const DType orig = work.dtype();
+            Tensor widened = work.to(DType::Float64);
+            auto divisor = tenzor::full({1}, static_cast<double>(world_size_),
+                                        DType::Float64, widened.device());
+            widened /= divisor;
+            Tensor rounded = tenzor::round(widened).to(orig);
+            work.zero_();
+            work += rounded.to(work.device());
+        } else {
+            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                        work.dtype(), work.device());
+            work /= scalar;
+        }
     }
 
     if (staged) {
@@ -786,8 +797,9 @@ auto NCCLProcessGroup::all_reduce_async(Tensor& tensor, ReduceOp op,
     ncclRedOp_t nccl_op = to_nccl_reduce_op(op);
 
     // Launch NCCL all-reduce on the caller-provided stream.
-    // Unlike all_reduce(), we do NOT call cudaDeviceSynchronize() --
-    // the caller is responsible for synchronization via CUDA events.
+    // Unlike all_reduce(), we do NOT call cudaDeviceSynchronize() for the
+    // non-AVG ops -- the caller is responsible for synchronization via CUDA
+    // events.
     cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
 
     NCCL_PG_CHECK(ncclAllReduce(
@@ -800,9 +812,36 @@ auto NCCLProcessGroup::all_reduce_async(Tensor& tensor, ReduceOp op,
         cuda_stream
     ));
 
-    // Note: AVG handling (divide by world_size) is done by the caller
-    // (DDP) after sync, since we cannot safely do tensor math on an
-    // async stream without additional synchronization.
+    // ReduceOp::AVG maps to ncclSum (to_nccl_reduce_op), so the collective only
+    // produces the SUM; the averaging divide must still be applied. Previously
+    // this was skipped entirely (a comment claimed the caller divides post-sync,
+    // but callers such as ZeROStage1Optimizer do NOT -- they pass AVG expecting a
+    // true average), so the AVG async path silently returned a world_size-times
+    // too-large SUM. There is no stream-aware elementwise op to enqueue the
+    // divide on cuda_stream, so for AVG we synchronize the comm stream, perform
+    // the divide, then fully synchronize so the averaged result is visible before
+    // returning. This makes AVG effectively synchronous (correctness over
+    // overlap); SUM/PRODUCT/MIN/MAX remain truly async. Integer dtypes widen to
+    // Float64 + round-to-nearest, matching the synchronous all_reduce / MPI /
+    // Gloo AVG.
+    if (op == ReduceOp::AVG && world_size_ > 1) {
+        NCCL_PG_GPU_CHECK(cudaStreamSynchronize(cuda_stream));
+        if (is_integer_type(tensor.dtype())) {
+            const DType orig = tensor.dtype();
+            Tensor widened = tensor.to(DType::Float64);
+            auto divisor = tenzor::full({1}, static_cast<double>(world_size_),
+                                        DType::Float64, widened.device());
+            widened /= divisor;
+            Tensor rounded = tenzor::round(widened).to(orig);
+            tensor.zero_();
+            tensor += rounded.to(tensor.device());
+        } else {
+            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                        tensor.dtype(), tensor.device());
+            tensor /= scalar;
+        }
+        NCCL_PG_GPU_CHECK(cudaDeviceSynchronize());
+    }
 #else
     (void)tensor;
     (void)op;
@@ -927,6 +966,17 @@ auto NCCLProcessGroup::reduce_scatter(Tensor& output,
     // Stage a contiguous receive buffer and propagate the result back.
     const bool staged = !output.is_contiguous();
     Tensor work = staged ? output.contiguous() : output;
+
+    // Validate that the total input equals output * world_size (the same
+    // check MPI and NCCLBackend enforce); a mismatch makes ncclReduceScatter
+    // read/write past the buffers it was given.
+    if (concatenated.numel() != work.numel() * static_cast<int64_t>(world_size_)) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup::reduce_scatter: total input size (" +
+            std::to_string(concatenated.numel()) + ") must equal output size (" +
+            std::to_string(work.numel()) + ") * world_size (" +
+            std::to_string(world_size_) + ")");
+    }
 
     // SUM-only by interface contract (see ProcessGroupBase::reduce_scatter);
     // averaging is performed caller-side by dividing the output by world_size.
@@ -1260,12 +1310,24 @@ auto MPIProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
                                dtype_to_mpi(tensor.dtype()),
                                reduce_op_to_mpi(op), comm));
     if (op == ReduceOp::AVG && world_size_ > 1) {
-        // H6 fix: in-place divide preserves the caller's storage pointer
-        // so any aliased Variable / view sees the result. Construct a
-        // scalar Tensor for the divisor; `/=` writes through.
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                    tensor.dtype(), tensor.device());
-        tensor /= scalar;
+        // In-place divide preserves the caller's storage pointer so aliased
+        // Variables/views see the result. Integer AVG must round to nearest
+        // (matching Gloo / MPIBackend), not truncate via integer division:
+        // widen to Float64, divide, round, narrow back, write through.
+        if (is_integer_type(tensor.dtype())) {
+            const DType orig = tensor.dtype();
+            Tensor widened = tensor.to(DType::Float64);
+            auto divisor = tenzor::full({1}, static_cast<double>(world_size_),
+                                        DType::Float64, widened.device());
+            widened /= divisor;
+            Tensor rounded = tenzor::round(widened).to(orig);
+            tensor.zero_();
+            tensor += rounded.to(tensor.device());
+        } else {
+            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                        tensor.dtype(), tensor.device());
+            tensor /= scalar;
+        }
     }
 }
 

@@ -213,8 +213,36 @@ auto ctc_loss_forward_kernel(
     const int32_t* tl_data  = tl_i32.data<int32_t>();
 
     auto tgt_shape = tgt_i32.shape();
-    int64_t S_max = tgt_shape.size() > 1 ? tgt_shape[1]
-                  : tgt_shape.size() == 1 ? tgt_shape[0] : 0;
+    // Per-sample start offsets into tgt_data and a per-sample OOB predicate.
+    //   - 2-D targets [N, S_pad]: sample n occupies a padded row, so it starts
+    //     at n * S_pad and S_n must not exceed S_pad.
+    //   - 1-D targets (PyTorch's flattened/concatenated convention): sample n
+    //     starts at the prefix sum of target_lengths, NOT at n * total_length.
+    //     The previous `tgt_data + n * S_max` (S_max == total concatenated
+    //     length) read out of bounds for every n >= 1.
+    const bool targets_2d = tgt_shape.size() > 1;
+    const int64_t S_pad = targets_2d ? tgt_shape[1] : 0;
+    const int64_t total_targets = static_cast<int64_t>(tgt_i32.numel());
+    std::vector<int64_t> tgt_offset(static_cast<size_t>(N), 0);
+    if (targets_2d) {
+        for (int64_t n = 0; n < N; ++n) tgt_offset[n] = n * S_pad;
+    } else {
+        int64_t acc = 0;
+        for (int64_t n = 0; n < N; ++n) {
+            tgt_offset[n] = acc;
+            int64_t S_n = tl_data[n];
+            if (S_n > 0) acc += S_n;
+        }
+        if (acc > total_targets) {
+            throw std::invalid_argument(
+                "ctc_loss_forward (CPU): sum(target_lengths) exceeds the "
+                "flattened targets length");
+        }
+    }
+    auto sample_oob = [&](int64_t n, int64_t S_n) -> bool {
+        return targets_2d ? (S_n > S_pad)
+                          : (tgt_offset[n] + S_n > total_targets);
+    };
 
     int64_t blank = attrs.get_int(AttrKey::Blank, 0);
     bool zero_infinity = attrs.get_bool(AttrKey::ZeroInfinity, false);
@@ -231,10 +259,10 @@ auto ctc_loss_forward_kernel(
     for (int64_t n = 0; n < N; ++n) {
         int64_t T_n = il_data[n];
         int64_t S_n = tl_data[n];
-        if (T_n <= 0 || S_n <= 0 || T_n > T_max || S_n > S_max) {
+        if (T_n <= 0 || S_n <= 0 || T_n > T_max || sample_oob(n, S_n)) {
             continue;  // inactive sample; skipped by the compute loops too
         }
-        const int32_t* tgt_n = tgt_data + n * S_max;
+        const int32_t* tgt_n = tgt_data + tgt_offset[n];
         for (int64_t s = 0; s < S_n; ++s) {
             const int64_t label = static_cast<int64_t>(tgt_n[s]);
             if (label < 0 || label >= C) {
@@ -259,7 +287,7 @@ auto ctc_loss_forward_kernel(
         for (int64_t n = 0; n < N; ++n) {
             int64_t T_n = il_data[n];
             int64_t S_n = tl_data[n];
-            if (T_n <= 0 || S_n <= 0 || T_n > T_max || S_n > S_max) {
+            if (T_n <= 0 || S_n <= 0 || T_n > T_max || sample_oob(n, S_n)) {
                 continue;
             }
 
@@ -269,7 +297,7 @@ auto ctc_loss_forward_kernel(
                     lp_n[t * C + c] = lp_data[t * N * C + n * C + c];
                 }
             }
-            const int32_t* tgt_n = tgt_data + n * S_max;
+            const int32_t* tgt_n = tgt_data + tgt_offset[n];
 
             auto [loss, grad] = ctc_single<double>(lp_n.data(), C, tgt_n, T_n, S_n, C, blank);
 
@@ -296,7 +324,7 @@ auto ctc_loss_forward_kernel(
         for (int64_t n = 0; n < N; ++n) {
             int64_t T_n = il_data[n];
             int64_t S_n = tl_data[n];
-            if (T_n <= 0 || S_n <= 0 || T_n > T_max || S_n > S_max) {
+            if (T_n <= 0 || S_n <= 0 || T_n > T_max || sample_oob(n, S_n)) {
                 continue;
             }
 
@@ -309,7 +337,7 @@ auto ctc_loss_forward_kernel(
                     lp_n[t * C + c] = lp_data[t * N * C + n * C + c];
                 }
             }
-            const int32_t* tgt_n = tgt_data + n * S_max;
+            const int32_t* tgt_n = tgt_data + tgt_offset[n];
 
             auto [loss, grad] = ctc_single<float>(lp_n.data(), C, tgt_n, T_n, S_n, C, blank);
 
@@ -326,6 +354,15 @@ auto ctc_loss_forward_kernel(
                 }
             }
         }
+    }
+
+    // S13 widen->compute->narrow contract: Float16/BFloat16 inputs were widened
+    // to Float32 for the precision-sensitive DP. Narrow the loss and grad back
+    // to the original input dtype so the kernel output matches the input dtype
+    // (Float32/Float64 inputs already computed natively and pass through).
+    if (in_dtype == DType::Float16 || in_dtype == DType::BFloat16) {
+        loss_out = loss_out.to(in_dtype);
+        grad_out = grad_out.to(in_dtype);
     }
 
     return {loss_out, grad_out};

@@ -108,7 +108,8 @@ auto composed_attention_backward(const Tensor& dO,
                                  double scale,
                                  bool causal,
                                  double dropout_p = 0.0,
-                                 uint64_t rng_seed = 0ull) -> std::vector<Tensor> {
+                                 uint64_t rng_seed = 0ull,
+                                 uint64_t philox_offset = 0ull) -> std::vector<Tensor> {
     // V.8: double scale end-to-end; audit-3 R.6 had widened only the
     // Variable form. dropout_p is also widened to keep parity with the
     // Variable path; the only downstream effect is the threshold used
@@ -224,7 +225,7 @@ auto composed_attention_backward(const Tensor& dO,
             mask_shape,
             static_cast<double>(dropout_p),
             rng_seed,
-            /*offset=*/0,
+            /*offset=*/philox_offset,
             DType::Float32);
         mask_dev = mask_cpu.to(P.device()).to(P.dtype());
         Pd = P * mask_dev;
@@ -305,6 +306,20 @@ auto try_fused_or_compose_backward(const Tensor& dO,
             seed_for_replay = static_cast<uint64_t>(static_cast<uint32_t>(seed_cpu.data<int32_t>()[0]));
         }
     }
+    // Read the saved Philox OFFSET as well: the forward may have advanced the
+    // global Philox counter (offset != 0), and the composed dropout replay must
+    // regenerate the mask at that exact offset. Hardcoding offset 0 produced a
+    // different mask than the forward whenever the forward ran with a nonzero
+    // offset, corrupting dQ/dK/dV under dropout.
+    uint64_t offset_for_replay = 0ull;
+    if (philox_offset.is_valid() && philox_offset.numel() > 0) {
+        Tensor offset_cpu = philox_offset.cpu();
+        if (offset_cpu.dtype() == DType::Int64) {
+            offset_for_replay = static_cast<uint64_t>(offset_cpu.data<int64_t>()[0]);
+        } else if (offset_cpu.dtype() == DType::Int32) {
+            offset_for_replay = static_cast<uint64_t>(static_cast<uint32_t>(offset_cpu.data<int32_t>()[0]));
+        }
+    }
 
     if (dropout_p > 0.0 || !L.is_valid() || L.shape().size() == 0) {
         // Use the composed backward when (a) there is no saved logsumexp, or
@@ -314,7 +329,8 @@ auto try_fused_or_compose_backward(const Tensor& dO,
         // path rebuilds the exact mask from the saved Philox seed, so dV/dQ/dK
         // match the masked attention pattern and are deterministic per seed.
         return composed_attention_backward(dO, Q, K, V, scale, causal,
-                                            dropout_p, seed_for_replay);
+                                            dropout_p, seed_for_replay,
+                                            offset_for_replay);
     }
     try {
         std::vector<Tensor> bwd_inputs = {dO, Q, K, V, O, L};
@@ -338,7 +354,8 @@ auto try_fused_or_compose_backward(const Tensor& dO,
                          "using composed backward. Reason: " << e.what() << std::endl;
         }
         return composed_attention_backward(dO, Q, K, V, scale, causal,
-                                            dropout_p, seed_for_replay);
+                                            dropout_p, seed_for_replay,
+                                            offset_for_replay);
     }
 }
 
@@ -805,8 +822,13 @@ auto flash_attention(const Variable& Q,
             // The additive form computes 0 * -inf = NaN at masked positions
             // and propagates NaN through softmax for certain dtype/backend
             // combinations. where() is the contract-compliant pattern.
+            // Top-left causal alignment (mask ki > qi) matching the CPU/CUDA/
+            // ROCm/OneAPI forward kernels and the composed-attention twin above.
+            // The bottom-right `1 + (S_k - S_q)` offset diverges whenever
+            // S_q != S_k (causal cross-attention / cached-KV decode), yielding
+            // wrong dQ/dK/dV on backends that hit this Float64 bypass.
             auto mask_t = ::tenzor::triu(::tenzor::ones({S_q, S_k},
-                S.tensor().dtype(), S.tensor().device()), 1 + (S_k - S_q));
+                S.tensor().dtype(), S.tensor().device()), 1);
             auto neg_inf_t = ::tenzor::full({1},
                 -std::numeric_limits<double>::infinity(),
                 S.tensor().dtype(), S.tensor().device());

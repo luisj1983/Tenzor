@@ -99,22 +99,28 @@ inline bool is_autocast_stability_critical(OpId op) {
 /// registry was never seeded with, or ops with no string name).
 inline bool autocast_is_compute_heavy(OpId op) {
     const auto& reg = nn::amp::AutocastPolicyRegistry::instance();
-    std::string name(::tenzor::op_id_to_name(op));
-    if (!name.empty()) {
-        if (reg.is_compute_heavy(name)) return true;
-        // An explicit stability-critical registration must win over the
-        // built-in compute-heavy default for the same op.
-        if (reg.is_stability_critical(name)) return false;
+    // Skip the per-dispatch string construction + two locked set lookups unless
+    // a custom policy override actually exists (lock-free check).
+    if (reg.has_overrides()) {
+        std::string name(::tenzor::op_id_to_name(op));
+        if (!name.empty()) {
+            if (reg.is_compute_heavy(name)) return true;
+            // An explicit stability-critical registration must win over the
+            // built-in compute-heavy default for the same op.
+            if (reg.is_stability_critical(name)) return false;
+        }
     }
     return is_autocast_compute_heavy(op);
 }
 
 inline bool autocast_is_stability_critical(OpId op) {
     const auto& reg = nn::amp::AutocastPolicyRegistry::instance();
-    std::string name(::tenzor::op_id_to_name(op));
-    if (!name.empty()) {
-        if (reg.is_stability_critical(name)) return true;
-        if (reg.is_compute_heavy(name)) return false;
+    if (reg.has_overrides()) {
+        std::string name(::tenzor::op_id_to_name(op));
+        if (!name.empty()) {
+            if (reg.is_stability_critical(name)) return true;
+            if (reg.is_compute_heavy(name)) return false;
+        }
     }
     return is_autocast_stability_critical(op);
 }

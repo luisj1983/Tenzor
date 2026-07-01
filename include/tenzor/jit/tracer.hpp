@@ -194,6 +194,14 @@ struct TracedOp {
     /// to surface the correct per-branch outputs from each subgraph.
     std::vector<std::string> else_outputs;
 
+    /// Control-flow sidecar: for `Loop` ops, the tensor ID produced by the
+    /// loop's condition function (`cond_fn`) on the post-body state. The body
+    /// subgraph must surface this as its FIRST output so the executor
+    /// (graph.cpp Loop case: `body outputs = [cond, carried...]`) can decide
+    /// whether to continue iterating, instead of running to `max_iter`.
+    /// Empty for all other op types.
+    std::string loop_cond_output;
+
     /**
      * @brief Construct traced operation.
      *

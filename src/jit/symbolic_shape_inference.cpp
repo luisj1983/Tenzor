@@ -271,13 +271,11 @@ auto SymbolicShapeInference::infer_reshape(const Node* node) -> std::vector<Symb
         std::vector<SymbolicDim> out_dims;
         out_dims.reserve(target_shape.size());
         for (size_t i = 0; i < target_shape.size(); ++i) {
-            if (i < in_shape.rank() && in_shape[i].is_symbolic()) {
-                // If the concrete target dim matches what the symbolic dim
-                // would have been at trace time, preserve the symbol
-                out_dims.push_back(in_shape[i]);
-            } else {
-                out_dims.emplace_back(target_shape[i]);
-            }
+            // target_shape[i] is concrete here (no wildcard). A pure input symbol
+            // cannot be verified to equal it, and the reshape forces the dim to the
+            // concrete value regardless, so emit the concrete target dim rather than
+            // (unsoundly) propagating the input symbol.
+            out_dims.emplace_back(target_shape[i]);
         }
         return {SymbolicShape(std::move(out_dims))};
     }

@@ -119,6 +119,7 @@ __global__ void im3col_kernel_nchw(
     const T* __restrict__ input,
     T* __restrict__ output,
     int64_t batch,
+    int64_t in_channels_total,   // full C_in for the per-batch stride (channels = per-group)
     int64_t channels,
     int64_t depth, int64_t height, int64_t width,
     int64_t kD, int64_t kH, int64_t kW,
@@ -150,7 +151,7 @@ __global__ void im3col_kernel_nchw(
         int64_t out_idx = out_row * col_cols + out_col;
 
         T value = (id >= 0 && id < depth && ih >= 0 && ih < height && iw >= 0 && iw < width)
-                  ? input[b * (channels * depth * height * width) +
+                  ? input[b * (in_channels_total * depth * height * width) +
                           c * (depth * height * width) +
                           id * (height * width) + ih * width + iw]
                   : T(0);
@@ -166,6 +167,7 @@ __global__ void col3im_kernel_nchw(
     const T* __restrict__ col,
     T* __restrict__ output,
     int64_t batch,
+    int64_t in_channels_total,   // full C_in for the per-batch stride (channels = per-group)
     int64_t channels,
     int64_t depth, int64_t height, int64_t width,
     int64_t kD, int64_t kH, int64_t kW,
@@ -216,10 +218,14 @@ __global__ void col3im_kernel_nchw(
             }
         }
 
+        // The batch loop decoded output_idx with the per-group `channels` stride,
+        // but grad_input is laid out with the full C_in stride; correct the batch
+        // term so batch>0 with groups>1 writes the right channel block.
+        int64_t out_write = output_idx + b * (in_channels_total - channels) * depth * height * width;
         if constexpr (std::is_same_v<T, __half>) {
-            output[output_idx] = tenzor::rocm::safe_f2h(sum);
+            output[out_write] = tenzor::rocm::safe_f2h(sum);
         } else {
-            output[output_idx] = static_cast<T>(sum);
+            output[out_write] = static_cast<T>(sum);
         }
     }
 }
@@ -415,7 +421,7 @@ auto conv3d_forward_hip(
 
             const float* input_ptr = input.data<float>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
-                input_ptr, col_buffer, N, C_in_per_group,
+                input_ptr, col_buffer, N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -461,7 +467,7 @@ auto conv3d_forward_hip(
 
             const double* input_ptr = input.data<double>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
-                input_ptr, col_buffer, N, C_in_per_group,
+                input_ptr, col_buffer, N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -503,7 +509,7 @@ auto conv3d_forward_hip(
 
             const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
-                input_ptr, col_buffer, N, C_in_per_group,
+                input_ptr, col_buffer, N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -691,7 +697,7 @@ auto conv3d_backward_input_hip(
             float* grad_input_ptr = grad_input.data<float>() + in_start * D_in * H_in * W_in;
             col3im_kernel_nchw<<<grid, block, 0, stream>>>(
                 grad_col, grad_input_ptr,
-                N, C_in_per_group,
+                N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -739,7 +745,7 @@ auto conv3d_backward_input_hip(
             double* grad_input_ptr = grad_input.data<double>() + in_start * D_in * H_in * W_in;
             col3im_kernel_nchw<<<grid, block, 0, stream>>>(
                 grad_col, grad_input_ptr,
-                N, C_in_per_group,
+                N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -790,7 +796,7 @@ auto conv3d_backward_input_hip(
             __half* grad_input_ptr = reinterpret_cast<__half*>(grad_input.data<Float16>()) + in_start * D_in * H_in * W_in;
             col3im_kernel_nchw<<<grid, block, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_col), grad_input_ptr,
-                N, C_in_per_group,
+                N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -898,7 +904,7 @@ auto conv3d_backward_weight_hip(
 
             const float* input_ptr = input.data<float>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
-                input_ptr, input_col, N, C_in_per_group,
+                input_ptr, input_col, N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -945,7 +951,7 @@ auto conv3d_backward_weight_hip(
 
             const double* input_ptr = input.data<double>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
-                input_ptr, input_col, N, C_in_per_group,
+                input_ptr, input_col, N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,
@@ -990,7 +996,7 @@ auto conv3d_backward_weight_hip(
 
             const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
-                input_ptr, reinterpret_cast<__half*>(input_col), N, C_in_per_group,
+                input_ptr, reinterpret_cast<__half*>(input_col), N, C_in, C_in_per_group,
                 D_in, H_in, W_in, kD, kH, kW,
                 stride_d, stride_h, stride_w,
                 pad_d, pad_h, pad_w,

@@ -195,8 +195,8 @@ auto read_tensor(std::ifstream& f,
     // would slip past the byte-count guard with a bogus dtype), and an
     // out-of-range Device::Type is undefined behaviour when later dispatched.
     uint32_t raw_dtype = read_uint32(f);
-    // QInt4x2 is the last enumerator in DType (uint8_t-backed, dense 0..N-1).
-    if (raw_dtype > static_cast<uint32_t>(DType::QInt4x2)) {
+    // FP8_E5M2FNUZ is the last enumerator in DType (QInt4x2 was stale and rejected valid FP8 FNUZ tensors).
+    if (raw_dtype > static_cast<uint32_t>(DType::FP8_E5M2FNUZ)) {
         throw std::runtime_error("TZEP read_tensor: unknown dtype value " +
                                  std::to_string(raw_dtype));
     }

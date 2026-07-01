@@ -1773,9 +1773,9 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
 // stats are stored Float32 (external buffer type), but accumulation +
 // normalization remain double-precision throughout — matching PyTorch's
 // LayerNorm reference implementation.
-template<typename T>
+template<typename T, typename StatsT = float>
 void layer_norm_scalar_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
-                                   float* mean_data, float* rstd_data,
+                                   StatsT* mean_data, StatsT* rstd_data,
                                    int64_t batch_size, int64_t norm_size, float eps) {
     #pragma omp parallel for if(batch_size > 16)
     for (int64_t b = 0; b < batch_size; ++b) {
@@ -1796,10 +1796,10 @@ void layer_norm_scalar_with_stats(const T* in_data, T* out_data, const T* w_data
         var /= static_cast<double>(norm_size);
         const double inv_std = 1.0 / std::sqrt(var + static_cast<double>(eps));
 
-        // Saved stats are Float32 buffers per the kernel-registry contract;
-        // narrow at the boundary only.
-        mean_data[b] = static_cast<float>(mean);
-        rstd_data[b] = static_cast<float>(inv_std);
+        // Stats stored at StatsT precision (Float64 for a Float64 input, else
+        // Float32) so the backward can reconstruct x_hat without rounding.
+        mean_data[b] = static_cast<StatsT>(mean);
+        rstd_data[b] = static_cast<StatsT>(inv_std);
 
         for (int64_t i = 0; i < norm_size; ++i) {
             const double normalized = (ln_to_double(in_ptr[i]) - mean) * inv_std;
@@ -1842,11 +1842,11 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
         std::vector<int64_t>(in_shape.begin(), in_shape.end()),
         input_cont.dtype(), input_cont.device());
 
-    // Create mean and rstd tensors (one per batch element) - always Float32
-    auto mean = Tensor::empty_uninitialized({batch_size}, DType::Float32, input_cont.device());
-    auto rstd = Tensor::empty_uninitialized({batch_size}, DType::Float32, input_cont.device());
-    float* mean_data = mean.data<float>();
-    float* rstd_data = rstd.data<float>();
+    // Store stats at Float64 for a Float64 input (else Float32) so the backward
+    // reconstructs x_hat from full-precision mean/rstd, matching group/instance norm.
+    DType stats_dtype = (input_cont.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    auto mean = Tensor::empty_uninitialized({batch_size}, stats_dtype, input_cont.device());
+    auto rstd = Tensor::empty_uninitialized({batch_size}, stats_dtype, input_cont.device());
 
     if (input_cont.dtype() == DType::Float32) {
         const float* in_data = input_cont.data<float>();
@@ -1854,20 +1854,24 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
         const float* b_data = bias.data<float>();
         float* out_data = output.data<float>();
 
-        layer_norm_simd_with_stats(in_data, out_data, w_data, b_data, mean_data, rstd_data,
+        layer_norm_simd_with_stats(in_data, out_data, w_data, b_data,
+                                    mean.data<float>(), rstd.data<float>(),
                                     batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::Float64) {
-        layer_norm_scalar_with_stats<double>(input_cont.data<double>(), output.data<double>(),
+        layer_norm_scalar_with_stats<double, double>(input_cont.data<double>(), output.data<double>(),
                                              weight.data<double>(), bias.data<double>(),
-                                             mean_data, rstd_data, batch_size, norm_size, eps);
+                                             mean.data<double>(), rstd.data<double>(),
+                                             batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::Float16) {
         layer_norm_scalar_with_stats<Float16>(input_cont.data<Float16>(), output.data<Float16>(),
                                               weight.data<Float16>(), bias.data<Float16>(),
-                                              mean_data, rstd_data, batch_size, norm_size, eps);
+                                              mean.data<float>(), rstd.data<float>(),
+                                              batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::BFloat16) {
         layer_norm_scalar_with_stats<BFloat16>(input_cont.data<BFloat16>(), output.data<BFloat16>(),
                                                weight.data<BFloat16>(), bias.data<BFloat16>(),
-                                               mean_data, rstd_data, batch_size, norm_size, eps);
+                                               mean.data<float>(), rstd.data<float>(),
+                                               batch_size, norm_size, eps);
     } else {
         throw std::runtime_error("Unsupported dtype for layer_norm_with_stats");
     }
@@ -1945,21 +1949,34 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
         std::vector<int64_t>(shape.begin(), shape.end()),
         input.dtype(), input.device());
 
+    // Empty input (or empty spatial extent): nothing to normalize, and the impl
+    // would divide by a zero group element count (NaN). Return the empty output.
+    if (input.numel() == 0 || spatial_size == 0) {
+        return output;
+    }
+
+    // group_norm_impl indexes a raw contiguous NCHW buffer ((n*C+c)*spatial+s),
+    // so a non-contiguous input (channels-last / a view) would be read with the
+    // wrong layout. Force contiguity first (weight/bias are read per-channel).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor w_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor b_c = bias.is_contiguous() ? bias : bias.contiguous();
+
     if (input.dtype() == DType::Float32) {
-        group_norm_impl<float>(input.data<float>(), output.data<float>(),
-                               weight.data<float>(), bias.data<float>(),
+        group_norm_impl<float>(in_c.data<float>(), output.data<float>(),
+                               w_c.data<float>(), b_c.data<float>(),
                                N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::Float64) {
-        group_norm_impl<double>(input.data<double>(), output.data<double>(),
-                                weight.data<double>(), bias.data<double>(),
+        group_norm_impl<double>(in_c.data<double>(), output.data<double>(),
+                                w_c.data<double>(), b_c.data<double>(),
                                 N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::Float16) {
-        group_norm_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
-                                 weight.data<Float16>(), bias.data<Float16>(),
+        group_norm_impl<Float16>(in_c.data<Float16>(), output.data<Float16>(),
+                                 w_c.data<Float16>(), b_c.data<Float16>(),
                                  N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::BFloat16) {
-        group_norm_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
-                                  weight.data<BFloat16>(), bias.data<BFloat16>(),
+        group_norm_impl<BFloat16>(in_c.data<BFloat16>(), output.data<BFloat16>(),
+                                  w_c.data<BFloat16>(), b_c.data<BFloat16>(),
                                   N, C, spatial_size, num_groups, eps);
     } else {
         throw std::runtime_error("Unsupported dtype for group_norm");
@@ -2026,25 +2043,32 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
         std::vector<int64_t>(shape.begin(), shape.end()),
         input.dtype(), input.device());
 
+    // instance_norm_impl indexes a raw contiguous NCHW buffer ((n*C+c)*spatial+s),
+    // so a non-contiguous input (channels-last / view) must be contiguified first
+    // (mirrors group_norm_kernel).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor w_c = (weight.impl() && !weight.is_contiguous()) ? weight.contiguous() : weight;
+    Tensor b_c = (bias.impl() && !bias.is_contiguous()) ? bias.contiguous() : bias;
+
     if (input.dtype() == DType::Float32) {
-        instance_norm_impl<float>(input.data<float>(), output.data<float>(),
-                                  weight.impl() ? weight.data<float>() : nullptr,
-                                  bias.impl() ? bias.data<float>() : nullptr,
+        instance_norm_impl<float>(in_c.data<float>(), output.data<float>(),
+                                  w_c.impl() ? w_c.data<float>() : nullptr,
+                                  b_c.impl() ? b_c.data<float>() : nullptr,
                                   N, C, spatial_size, eps);
     } else if (input.dtype() == DType::Float64) {
-        instance_norm_impl<double>(input.data<double>(), output.data<double>(),
-                                   weight.impl() ? weight.data<double>() : nullptr,
-                                   bias.impl() ? bias.data<double>() : nullptr,
+        instance_norm_impl<double>(in_c.data<double>(), output.data<double>(),
+                                   w_c.impl() ? w_c.data<double>() : nullptr,
+                                   b_c.impl() ? b_c.data<double>() : nullptr,
                                    N, C, spatial_size, eps);
     } else if (input.dtype() == DType::Float16) {
-        instance_norm_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
-                                    weight.impl() ? weight.data<Float16>() : nullptr,
-                                    bias.impl() ? bias.data<Float16>() : nullptr,
+        instance_norm_impl<Float16>(in_c.data<Float16>(), output.data<Float16>(),
+                                    w_c.impl() ? w_c.data<Float16>() : nullptr,
+                                    b_c.impl() ? b_c.data<Float16>() : nullptr,
                                     N, C, spatial_size, eps);
     } else if (input.dtype() == DType::BFloat16) {
-        instance_norm_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
-                                     weight.impl() ? weight.data<BFloat16>() : nullptr,
-                                     bias.impl() ? bias.data<BFloat16>() : nullptr,
+        instance_norm_impl<BFloat16>(in_c.data<BFloat16>(), output.data<BFloat16>(),
+                                     w_c.impl() ? w_c.data<BFloat16>() : nullptr,
+                                     b_c.impl() ? b_c.data<BFloat16>() : nullptr,
                                      N, C, spatial_size, eps);
     } else {
         throw std::runtime_error("Unsupported dtype for instance_norm");
@@ -2136,24 +2160,31 @@ auto group_norm_kernel_with_stats(const Tensor& input, int64_t num_groups,
     auto mean = Tensor::empty_uninitialized({N, num_groups}, stats_dtype, input.device());
     auto inv_std = Tensor::empty_uninitialized({N, num_groups}, stats_dtype, input.device());
 
+    // group_norm_impl_with_stats indexes a raw contiguous NCHW buffer; a
+    // non-contiguous input would corrupt both the output and the saved
+    // mean/inv_std feeding the backward. Contiguify (mirrors group_norm_kernel).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor w_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor b_c = bias.is_contiguous() ? bias : bias.contiguous();
+
     if (input.dtype() == DType::Float32) {
-        group_norm_impl_with_stats<float, float>(input.data<float>(), output.data<float>(),
-                                           weight.data<float>(), bias.data<float>(),
+        group_norm_impl_with_stats<float, float>(in_c.data<float>(), output.data<float>(),
+                                           w_c.data<float>(), b_c.data<float>(),
                                            mean.data<float>(), inv_std.data<float>(),
                                            N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::Float64) {
-        group_norm_impl_with_stats<double, double>(input.data<double>(), output.data<double>(),
-                                            weight.data<double>(), bias.data<double>(),
+        group_norm_impl_with_stats<double, double>(in_c.data<double>(), output.data<double>(),
+                                            w_c.data<double>(), b_c.data<double>(),
                                             mean.data<double>(), inv_std.data<double>(),
                                             N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::Float16) {
-        group_norm_impl_with_stats<Float16, float>(input.data<Float16>(), output.data<Float16>(),
-                                             weight.data<Float16>(), bias.data<Float16>(),
+        group_norm_impl_with_stats<Float16, float>(in_c.data<Float16>(), output.data<Float16>(),
+                                             w_c.data<Float16>(), b_c.data<Float16>(),
                                              mean.data<float>(), inv_std.data<float>(),
                                              N, C, spatial_size, num_groups, eps);
     } else if (input.dtype() == DType::BFloat16) {
-        group_norm_impl_with_stats<BFloat16, float>(input.data<BFloat16>(), output.data<BFloat16>(),
-                                              weight.data<BFloat16>(), bias.data<BFloat16>(),
+        group_norm_impl_with_stats<BFloat16, float>(in_c.data<BFloat16>(), output.data<BFloat16>(),
+                                              w_c.data<BFloat16>(), b_c.data<BFloat16>(),
                                               mean.data<float>(), inv_std.data<float>(),
                                               N, C, spatial_size, num_groups, eps);
     } else {
@@ -2238,28 +2269,35 @@ auto instance_norm_kernel_with_stats(const Tensor& input, const Tensor& weight,
     auto mean = Tensor::empty_uninitialized({N, C}, stats_dtype, input.device());
     auto inv_std = Tensor::empty_uninitialized({N, C}, stats_dtype, input.device());
 
+    // instance_norm_impl_with_stats indexes a raw contiguous NCHW buffer; a
+    // non-contiguous input would corrupt the output and the saved mean/inv_std
+    // used by the backward. Contiguify (mirrors group_norm_kernel).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor w_c = (weight.impl() && !weight.is_contiguous()) ? weight.contiguous() : weight;
+    Tensor b_c = (bias.impl() && !bias.is_contiguous()) ? bias.contiguous() : bias;
+
     if (input.dtype() == DType::Float32) {
-        instance_norm_impl_with_stats<float, float>(input.data<float>(), output.data<float>(),
-                                              weight.impl() ? weight.data<float>() : nullptr,
-                                              bias.impl() ? bias.data<float>() : nullptr,
+        instance_norm_impl_with_stats<float, float>(in_c.data<float>(), output.data<float>(),
+                                              w_c.impl() ? w_c.data<float>() : nullptr,
+                                              b_c.impl() ? b_c.data<float>() : nullptr,
                                               mean.data<float>(), inv_std.data<float>(),
                                               N, C, spatial_size, eps);
     } else if (input.dtype() == DType::Float64) {
-        instance_norm_impl_with_stats<double, double>(input.data<double>(), output.data<double>(),
-                                               weight.impl() ? weight.data<double>() : nullptr,
-                                               bias.impl() ? bias.data<double>() : nullptr,
+        instance_norm_impl_with_stats<double, double>(in_c.data<double>(), output.data<double>(),
+                                               w_c.impl() ? w_c.data<double>() : nullptr,
+                                               b_c.impl() ? b_c.data<double>() : nullptr,
                                                mean.data<double>(), inv_std.data<double>(),
                                                N, C, spatial_size, eps);
     } else if (input.dtype() == DType::Float16) {
-        instance_norm_impl_with_stats<Float16, float>(input.data<Float16>(), output.data<Float16>(),
-                                                weight.impl() ? weight.data<Float16>() : nullptr,
-                                                bias.impl() ? bias.data<Float16>() : nullptr,
+        instance_norm_impl_with_stats<Float16, float>(in_c.data<Float16>(), output.data<Float16>(),
+                                                w_c.impl() ? w_c.data<Float16>() : nullptr,
+                                                b_c.impl() ? b_c.data<Float16>() : nullptr,
                                                 mean.data<float>(), inv_std.data<float>(),
                                                 N, C, spatial_size, eps);
     } else if (input.dtype() == DType::BFloat16) {
-        instance_norm_impl_with_stats<BFloat16, float>(input.data<BFloat16>(), output.data<BFloat16>(),
-                                                 weight.impl() ? weight.data<BFloat16>() : nullptr,
-                                                 bias.impl() ? bias.data<BFloat16>() : nullptr,
+        instance_norm_impl_with_stats<BFloat16, float>(in_c.data<BFloat16>(), output.data<BFloat16>(),
+                                                 w_c.impl() ? w_c.data<BFloat16>() : nullptr,
+                                                 b_c.impl() ? b_c.data<BFloat16>() : nullptr,
                                                  mean.data<float>(), inv_std.data<float>(),
                                                  N, C, spatial_size, eps);
     } else {
@@ -2299,8 +2337,14 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     auto grad_bias = zeros(std::vector<int64_t>(normalized_shape.begin(), normalized_shape.end()),
                            weight.dtype(), weight.device());
 
-    const float* mean_data = mean.data<float>();
-    const float* rstd_data = rstd.data<float>();
+    // Stats are stored as Float64 for a Float64 input and Float32 otherwise. Read
+    // them at double precision so the Float64 backward uses full-precision stats;
+    // a Float32-origin value converts float->double->float exactly, so the
+    // float32/float16/bfloat16 branches are unaffected.
+    Tensor mean_d = mean.dtype() == DType::Float64 ? mean : mean.to(DType::Float64);
+    Tensor rstd_d = rstd.dtype() == DType::Float64 ? rstd : rstd.to(DType::Float64);
+    const double* mean_data = mean_d.data<double>();
+    const double* rstd_data = rstd_d.data<double>();
 
     // Dispatch based on input dtype - compute always in float for precision
     if (input_cont.dtype() == DType::Float32) {

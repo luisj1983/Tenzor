@@ -284,8 +284,17 @@ auto GPipeSchedule::execute(PipelineStage& stage, const Variable& input,
             // through the stage. The caller must have called backward() on
             // the loss which populates grad on micro_outputs[mb].
             // For pipeline purposes, we call backward on each micro-batch output
-            // with a unit gradient to propagate through the stage graph.
-            micro_outputs[mb].backward();
+            // with a unit gradient to propagate through the stage graph. A bare
+            // backward() only works for a SCALAR output; the pipeline output is
+            // generally non-scalar, so pass an explicit all-ones seed of the
+            // output shape (which is what "unit gradient" means here).
+            {
+                auto os = micro_outputs[mb].tensor().shape();
+                Tensor seed = ones(std::vector<int64_t>(os.begin(), os.end()),
+                                   micro_outputs[mb].tensor().dtype(),
+                                   micro_outputs[mb].tensor().device());
+                micro_outputs[mb].backward(std::move(seed));
+            }
         } else {
             // Receive gradient from next stage
             auto out_shape = micro_outputs[mb].tensor().shape();

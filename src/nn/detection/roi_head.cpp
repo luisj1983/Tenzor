@@ -208,6 +208,33 @@ auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
         // else: keep as -1 (ignore) for the [bg_iou_thresh_, fg_iou_thresh_) band
     }
 
+    // Force-match each GT to its highest-IoU proposal(s) (allow_low_quality_matches),
+    // mirroring torchvision Matcher.set_low_quality_matches_. Without this, a GT
+    // whose best proposal IoU falls in the [bg_iou_thresh_, fg_iou_thresh_) band gets
+    // no positive proposal. For every GT we take its max IoU over all proposals, then
+    // force each proposal achieving that max to foreground, assigning the actual class
+    // of that proposal's argmax GT (matched_idx_data already == torchvision's
+    // all_matches), consistent with the threshold path above.
+    {
+        auto iou_cpu = iou_matrix.to(Device::cpu()).to(DType::Float32);
+        const float* iou_mat = iou_cpu.data<float>();  // row-major (num_proposals, num_gt)
+        std::vector<float> best_iou_per_gt(num_gt, -1.0f);
+        for (int64_t p = 0; p < num_proposals; ++p) {
+            for (int64_t g = 0; g < num_gt; ++g) {
+                float v = iou_mat[p * num_gt + g];
+                if (v > best_iou_per_gt[g]) best_iou_per_gt[g] = v;
+            }
+        }
+        for (int64_t p = 0; p < num_proposals; ++p) {
+            for (int64_t g = 0; g < num_gt; ++g) {
+                if (best_iou_per_gt[g] > 0.0f &&
+                    iou_mat[p * num_gt + g] == best_iou_per_gt[g]) {
+                    label_data[p] = gt_labels_data[matched_idx_data[p]];
+                }
+            }
+        }
+    }
+
     // Create labels tensor and copy data to avoid dangling pointer
     // (label_data vector would be destroyed, leaving tensor pointing to freed memory)
     auto labels = zeros({num_proposals}, DType::Int64, Device::cpu());
@@ -391,6 +418,12 @@ auto RoIHead::forward_detections(
     loss_classifier_ = Variable(ops::zeros({1}, features.dtype(), features.device()), false);
     loss_box_reg_ = Variable(ops::zeros({1}, features.dtype(), features.device()), false);
 
+    // Count images that actually contributed a loss term, so the average uses that
+    // count rather than proposals.size() (mirrors RegionProposalNetwork's
+    // num_loss_images). Dividing by all images scales the loss down whenever some
+    // images lack targets / sampled ROIs.
+    int64_t num_loss_images = 0;
+
     // Process each image in batch
     for (size_t i = 0; i < proposals.size(); ++i) {
 
@@ -420,6 +453,11 @@ auto RoIHead::forward_detections(
 
             auto img_gt_boxes = (*gt_boxes)[i];
             auto img_gt_labels = (*gt_labels)[i];
+
+            // This image contributes a loss term below (both the no-sampled-ROIs
+            // branch and the normal branch accumulate onto loss_classifier_/
+            // loss_box_reg_), so count it toward the averaging denominator.
+            ++num_loss_images;
 
 
             // Match proposals to ground truth
@@ -601,10 +639,12 @@ auto RoIHead::forward_detections(
         all_detections.push_back(detections);
     }
 
-    // Average losses over batch
-    if (is_training() && gt_boxes != nullptr && !proposals.empty()) {
-        loss_classifier_ = loss_classifier_ / static_cast<double>(proposals.size());
-        loss_box_reg_ = loss_box_reg_ / static_cast<double>(proposals.size());
+    // Average losses over the number of images that actually contributed a loss
+    // (not proposals.size(), which would scale the loss down when some images lack
+    // targets / sampled ROIs). Mirrors RegionProposalNetwork::forward_proposals.
+    if (is_training() && num_loss_images > 0) {
+        loss_classifier_ = loss_classifier_ / static_cast<double>(num_loss_images);
+        loss_box_reg_ = loss_box_reg_ / static_cast<double>(num_loss_images);
     }
 
     return all_detections;

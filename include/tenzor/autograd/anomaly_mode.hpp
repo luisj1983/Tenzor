@@ -64,18 +64,22 @@ struct AnomalyMetadata {
     auto to_string() const -> std::string {
         std::string result;
         result += "  Created by: " + function_name;
-        if (!input_shapes.empty()) {
-            result += "\n    Inputs: ";
-            for (size_t i = 0; i < input_shapes.size(); ++i) {
+        auto append_shapes = [&result](const char* label,
+                                        const std::vector<std::vector<int64_t>>& shapes) {
+            if (shapes.empty()) return;
+            result += label;
+            for (size_t i = 0; i < shapes.size(); ++i) {
                 if (i > 0) result += ", ";
                 result += "[";
-                for (size_t j = 0; j < input_shapes[i].size(); ++j) {
+                for (size_t j = 0; j < shapes[i].size(); ++j) {
                     if (j > 0) result += ", ";
-                    result += std::to_string(input_shapes[i][j]);
+                    result += std::to_string(shapes[i][j]);
                 }
                 result += "]";
             }
-        }
+        };
+        append_shapes("\n    Inputs: ", input_shapes);
+        append_shapes("\n    Outputs: ", output_shapes);
         if (parent) {
             result += "\n" + parent->to_string();
         }

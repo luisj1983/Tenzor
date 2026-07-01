@@ -81,6 +81,7 @@ TopKCompressor::TopKCompressor(float ratio)
 }
 
 auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
+    std::lock_guard<std::mutex> lock(residuals_mutex_);  // guards residuals_ read-modify-write
     CompressedGradient result;
 
     // Store original metadata
@@ -97,7 +98,18 @@ auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
     // Apply error feedback: add residual from previous iteration.
     // The residual accumulates zeroed-out values so no gradient
     // information is permanently lost across iterations.
-    const void* grad_key = gradient.data_ptr();
+    //
+    // Key the residual on the Storage OBJECT identity, not the raw data_ptr().
+    // The caching allocators (caching_allocator / rocm_caching_allocator) pool
+    // the underlying device buffers and hand the SAME data_ptr() to different
+    // tensors across iterations, so a freed-then-reused address of equal numel
+    // could apply a stale residual from an unrelated parameter. Each tensor
+    // allocation wraps a fresh Storage object, so its address is a stable
+    // per-parameter identity for as long as the parameter (and its grad buffer)
+    // lives, and differs after a free/realloc — eliminating the ABA collision.
+    // The shape (numel) guard below still discards a residual whose Storage
+    // address is coincidentally reused for a differently-shaped tensor.
+    const void* grad_key = static_cast<const void*>(gradient.storage().get());
     auto residual_it = residuals_.find(grad_key);
     if (residual_it != residuals_.end()) {
         Tensor& residual = residual_it->second;
@@ -168,11 +180,11 @@ auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
     // Update the input gradient in-place to the compressed version.
     //
     // Important: we must NOT reassign `gradient` to a freshly-allocated
-    // tensor here. The error-feedback residual is keyed on
-    // `gradient.data_ptr()`; if compress() swaps the caller's buffer out
-    // for a new allocation, the next call sees a different pointer and the
-    // residual cache misses. Instead, copy the compressed values into the
-    // caller's existing storage so data_ptr() stays stable across calls.
+    // tensor here. The error-feedback residual is keyed on the gradient's
+    // Storage object identity; if compress() swaps the caller's buffer out for
+    // a new allocation, the next call sees a different Storage and the residual
+    // cache misses. Instead, copy the compressed values into the caller's
+    // existing storage so the Storage identity stays stable across calls.
     {
         Tensor compressed_reshaped = compressed.reshape(result.original_shape);
         if (gradient.is_contiguous() &&
@@ -191,19 +203,21 @@ auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
                     gradient.numel() * gradient.dtype_size(),
                     kind);
             } else {
-                // No backend — fall back to assignment. This changes
-                // gradient.data_ptr(), so re-key the residual under the new
-                // pointer; otherwise the next call's lookup misses and the
+                // No backend — fall back to assignment. This rebinds gradient
+                // to a new Storage, so re-key the residual under the new Storage
+                // identity; otherwise the next call's lookup misses and the
                 // accumulated error-feedback residual is silently dropped.
                 gradient = compressed_reshaped;
-                rekey_residual(grad_key, gradient.data_ptr());
+                rekey_residual(grad_key,
+                               static_cast<const void*>(gradient.storage().get()));
             }
         } else {
-            // Shape/dtype/device mismatch — assignment changes
-            // gradient.data_ptr(), so re-key the residual under the new
-            // pointer to preserve error feedback across iterations.
+            // Shape/dtype/device mismatch — assignment rebinds gradient to a new
+            // Storage, so re-key the residual under the new Storage identity to
+            // preserve error feedback across iterations.
             gradient = compressed_reshaped;
-            rekey_residual(grad_key, gradient.data_ptr());
+            rekey_residual(grad_key,
+                           static_cast<const void*>(gradient.storage().get()));
         }
     }
     result.data = gradient;
@@ -243,6 +257,7 @@ auto TopKCompressor::rekey_residual(const void* old_key,
     if (old_key == new_key) {
         return;
     }
+    std::lock_guard<std::mutex> lock(residuals_mutex_);
     auto it = residuals_.find(old_key);
     if (it == residuals_.end()) {
         return;
@@ -253,6 +268,7 @@ auto TopKCompressor::rekey_residual(const void* old_key,
 }
 
 auto TopKCompressor::reset() -> void {
+    std::lock_guard<std::mutex> lock(residuals_mutex_);
     residuals_.clear();
 }
 

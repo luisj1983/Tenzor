@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// MaskedScatter, 8-byte (Float64/Int64/UInt64) variant — see masked_scatter.comp.
+// It only SELECTS/MOVES elements (no arithmetic), so binding 8-byte storage as
+// float64_t copies the bits verbatim: correct for Float64 AND for Int64/UInt64
+// (the host binds the raw integer storage). Routing these through the 4-byte
+// Float32 shader corrupted values whose magnitude exceeded 2^24.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input     { float64_t input_data[]; };
+layout(binding = 1) readonly buffer Mask      { uint8_t   mask_data[]; };
+layout(binding = 2) readonly buffer Source    { float64_t source_data[]; };
+layout(binding = 3) readonly buffer PrefixSum { uint      prefix_data[]; };
+layout(binding = 4) writeonly buffer Output   { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint source_len;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    if (mask_data[idx] != uint8_t(0)) {
+        uint prefix = prefix_data[idx];
+        if (prefix >= 1u && (prefix - 1u) < params.source_len) {
+            output_data[idx] = source_data[prefix - 1u];
+        } else {
+            output_data[idx] = input_data[idx];
+        }
+    } else {
+        output_data[idx] = input_data[idx];
+    }
+}

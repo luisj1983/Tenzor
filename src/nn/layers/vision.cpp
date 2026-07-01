@@ -195,66 +195,47 @@ auto WindowAttention::compute_relative_position_index() -> void {
     }
 }
 
-auto WindowAttention::get_relative_position_bias() const -> Tensor {
-    // Gather biases using precomputed indices
-    // Use parameters_ map to get tensor (ensures offload hooks see correct device)
+auto WindowAttention::get_relative_position_bias() const -> Variable {
+    // Gather the relative-position biases THROUGH autograd so gradients flow
+    // back into the bias table and it actually trains. Previously this read
+    // `.tensor()` and gathered via a raw OpId dispatch, returning a detached
+    // Tensor; forward then did `attn + Variable(bias, false)`, severing the
+    // table from the loss so relative_position_bias_table_ never updated.
+    //
+    // Gather through the parameters_-owned Variable (the leaf the optimizer
+    // updates and that offload hooks repoint), NOT the standalone
+    // relative_position_bias_table_ copy: register_parameter() stores a *copy*,
+    // so the gradient must land on the map-owned Variable to reach the
+    // optimizer.
     auto bias_table_it = parameters_.find("relative_position_bias_table");
-    auto bias_table = (bias_table_it != parameters_.end())
-                      ? bias_table_it->second->tensor()
-                      : relative_position_bias_table_->tensor();
-    auto target_dtype = bias_table.dtype();
-    auto target_device = bias_table.device();
+    const std::shared_ptr<Variable>& table_param =
+        (bias_table_it != parameters_.end()) ? bias_table_it->second
+                                             : relative_position_bias_table_;
+    const Variable& table = *table_param;
+
     int64_t table_size = 2 * window_size_ - 1;
     int64_t num_positions = window_size_ * window_size_;
 
-    // Use operation registry to dispatch to appropriate backend
-    if (target_device.type != Device::Type::CPU) {
-        // Reshape table for gather: [table_size*table_size, num_heads]
-        auto bias_flat = bias_table.reshape({table_size * table_size, num_heads_});
+    // Flatten the table to [table_size*table_size, num_heads] (autograd reshape).
+    auto bias_flat = table.reshape({table_size * table_size, num_heads_});
 
-        // Move index tensor to target device if needed
-        auto index_on_device = relative_position_index_.device().type == target_device.type
-                               ? relative_position_index_
-                               : relative_position_index_.to(target_device);
+    // Move the (non-differentiable) gather index to the table's device and
+    // flatten to 1-D for index_select along dim 0.
+    auto target_device = table.tensor().device();
+    auto index_on_device = relative_position_index_.device().type == target_device.type
+                           ? relative_position_index_
+                           : relative_position_index_.to(target_device);
+    auto index_flat = index_on_device.reshape({num_positions * num_positions});
 
-        // Use registered gather kernel via OpId dispatch
-        OpAttributes attrs;
-        attrs.set(AttrKey::NumPositions, num_positions);
-        attrs.set(AttrKey::NumHeads, num_heads_);
-        std::vector<Tensor> inputs = {bias_flat, index_on_device};
-        auto results = dispatch(OpId::GatherRelativePositionBias,
-                                std::span<const Tensor>(inputs), attrs);
-        auto bias = results[0];
+    // Autograd index_select: backward scatter-adds grad into the table, so the
+    // bias table receives gradient through this gather.
+    auto gathered = tenzor::index_select(bias_flat, /*dim=*/0, index_flat);
 
-        // Permute to (num_heads, num_positions, num_positions)
-        return bias.permute({2, 0, 1});
-    }
+    // [num_positions*num_positions, num_heads] -> [num_positions, num_positions, num_heads]
+    auto bias = gathered.reshape({num_positions, num_positions, num_heads_});
 
-    // CPU fallback
-    auto bias_table_f32 = bias_table.to(DType::Float32).to(Device::cpu());
-    auto bias_flat = bias_table_f32.reshape({table_size * table_size, num_heads_});
-
-    auto bias = zeros({num_positions, num_positions, num_heads_}, DType::Float32, Device::cpu());
-    auto bias_data = bias.data<float>();
-    auto table_data = bias_flat.data<float>();
-
-    auto index_cpu = relative_position_index_.device().type == Device::Type::CPU
-                     ? relative_position_index_
-                     : relative_position_index_.to(Device::cpu());
-    auto index_data = index_cpu.data<int64_t>();
-
-    for (int64_t i = 0; i < num_positions; ++i) {
-        for (int64_t j = 0; j < num_positions; ++j) {
-            int64_t idx = index_data[i * num_positions + j];
-            for (int64_t h = 0; h < num_heads_; ++h) {
-                bias_data[(i * num_positions + j) * num_heads_ + h] =
-                    table_data[idx * num_heads_ + h];
-            }
-        }
-    }
-
-    auto bias_permuted = bias.permute({2, 0, 1});
-    return bias_permuted.to(target_dtype).to(target_device);
+    // Permute to (num_heads, num_positions, num_positions).
+    return bias.permute({2, 0, 1});
 }
 
 auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Variable {
@@ -307,11 +288,14 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
     // Reshape back to 4D: (B*num_heads, N, N) -> (B, num_heads, N, N)
     auto attn = attn_3d.reshape({B, num_heads_, N, N});
 
-    // Add relative position bias
-    auto bias = get_relative_position_bias();  // (num_heads, N, N)
-    // Unsqueeze to (1, num_heads, N, N) for broadcasting
-    bias = bias.unsqueeze(0);
-    attn = attn + Variable(bias, false);
+    // Add relative position bias (computed through autograd so the bias table
+    // trains). bias is a Variable carrying grad back to
+    // relative_position_bias_table_; adding it with the normal autograd add
+    // keeps that gradient path intact.
+    auto bias = get_relative_position_bias();  // Variable (num_heads, N, N)
+    // Unsqueeze to (1, num_heads, N, N) for broadcasting (autograd free fn)
+    bias = tenzor::unsqueeze(bias, 0);
+    attn = attn + bias;
 
     // Apply attention mask if provided
     if (mask.is_valid() && mask.numel() > 0) {

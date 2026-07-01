@@ -448,10 +448,29 @@ static void launch_flash_attention_f64_backward(
                         int j = idx % Bc;
                         double p = 0.0;
                         if (i < actual_Br && j < actual_Bc) {
+                            // Guard fully-masked rows: if a query row attends to
+                            // zero valid keys its recomputed LSE is -inf, and
+                            // exp(S - (-inf)) = exp(+inf) = +inf would poison dS
+                            // (and via the atomic accumulation, dQ) with NaN. A
+                            // fully-masked row contributes no gradient, so force
+                            // its softmax weights to 0. (Under pure causal masking
+                            // the diagonal keeps every row non-empty, but Float64
+                            // padding / non-square cases can produce empty rows.)
                             if (cs && (q_start + i) < (kv_start + j)) {
                                 p = 0.0;
+                            } else if (sycl::isinf(l_tile[i])) {
+                                p = 0.0;
                             } else {
-                                p = sycl::exp(S_tile[i * Bc + j] - l_tile[i]);
+                                // softmax weight: P = exp(S_ij - LSE_i). By the
+                                // definition of the log-sum-exp, S_ij <= LSE_i,
+                                // so the exponent is <= 0 and P in (0, 1]. Clamp
+                                // the exponent to <= 0 to enforce that invariant:
+                                // under the SYCL fast-math build a tiny positive
+                                // exponent (from the LSE being recomputed in a
+                                // different order than S) drove sycl::exp to
+                                // return NaN, which poisoned dS/dQ.
+                                double z = S_tile[i * Bc + j] - l_tile[i];
+                                p = sycl::exp(sycl::fmin(z, 0.0));
                             }
                         }
                         S_tile[i * Bc + j] = p;
@@ -484,7 +503,10 @@ static void launch_flash_attention_f64_backward(
                             dp += dO_tile[i * hd + d] * V_tile[j * hd + d];
                         }
                         double p_ij = S_tile[i * Bc + j];
-                        S_tile[i * Bc + j] = p_ij * (dp - D_tile[i]);
+                        // Short-circuit zero weights so a non-finite (dp - D_i)
+                        // can never form 0 * inf = NaN; a zero-weight pair has
+                        // exactly zero gradient contribution.
+                        S_tile[i * Bc + j] = (p_ij == 0.0) ? 0.0 : p_ij * (dp - D_tile[i]);
                     }
                     sycl::group_barrier(item.get_group());
 

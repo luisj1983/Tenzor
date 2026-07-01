@@ -398,6 +398,14 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
 
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
     int64_t nbatch = batch_size(work_a);
+    // B must have the same batch count as A: the per-batch loop indexes B as
+    // b_data + b*n*nrhs and LAPACKE overwrites it in place, so a batched A with a
+    // non-batched (or differently-batched) B reads/writes past the end of work_b.
+    if (batch_size(work_b) != nbatch) {
+        throw std::invalid_argument(
+            "linalg::solve: batch count of A (" + std::to_string(nbatch) +
+            ") does not match batch count of B (" + std::to_string(batch_size(work_b)) + ")");
+    }
 
     // Reject dims that would truncate in the 32-bit LAPACK index ABI.
     (void)to_lapack_int(n, "n");
@@ -1812,6 +1820,13 @@ auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
     }
     int64_t nrhs = b_shape[b_ndim - 1];
     int64_t nbatch = batch_size(work_lu);
+    // B is overwritten in place per batch (b_ptr + b*n*nrhs); require matching
+    // batch count to avoid out-of-bounds read/write when B is not batched like LU.
+    if (batch_size(work_b) != nbatch) {
+        throw std::invalid_argument(
+            "linalg::lu_solve: batch count of LU (" + std::to_string(nbatch) +
+            ") does not match batch count of B (" + std::to_string(batch_size(work_b)) + ")");
+    }
     (void)to_lapack_int(n, "n");
     (void)to_lapack_int(nrhs, "nrhs");
 
@@ -2583,6 +2598,13 @@ auto ldl_solve(const Tensor& LD, const Tensor& pivots,
     }
     int64_t nrhs = b_shape[b_ndim - 1];
     int64_t nbatch = batch_size(work_ld);
+    // B is overwritten in place per batch (b_ptr + b*n*nrhs); require matching
+    // batch count to avoid out-of-bounds read/write when B is not batched like LD.
+    if (batch_size(work_b) != nbatch) {
+        throw std::invalid_argument(
+            "linalg::ldl_solve: batch count of LD (" + std::to_string(nbatch) +
+            ") does not match batch count of B (" + std::to_string(batch_size(work_b)) + ")");
+    }
     (void)to_lapack_int(n, "n");
     (void)to_lapack_int(nrhs, "nrhs");
 
@@ -2801,13 +2823,16 @@ auto cholesky_inverse(const Tensor& L, bool upper) -> Tensor {
         I = I.contiguous();
     }
 
+    // For a complex Hermitian factor the adjoint is the conjugate transpose L^H,
+    // not the plain transpose L^T. conj is identity for real dtypes.
+    Tensor L_h = tenzor::transpose(L.is_complex() ? tenzor::conj(L) : L, ndim - 2, ndim - 1);
     if (!upper) {
-        // L is lower triangular: solve L @ Y = I, then L^T @ X = Y
+        // L is lower triangular: solve L @ Y = I, then L^H @ X = Y
         auto Y = solve_triangular(L, I, /*upper=*/false);
-        return solve_triangular(tenzor::transpose(L, ndim - 2, ndim - 1), Y, /*upper=*/true);
+        return solve_triangular(L_h, Y, /*upper=*/true);
     } else {
-        // U is upper triangular: solve U^T @ Y = I, then U @ X = Y
-        auto Y = solve_triangular(tenzor::transpose(L, ndim - 2, ndim - 1), I, /*upper=*/false);
+        // U is upper triangular: solve U^H @ Y = I, then U @ X = Y
+        auto Y = solve_triangular(L_h, I, /*upper=*/false);
         return solve_triangular(L, Y, /*upper=*/true);
     }
 }
@@ -2824,16 +2849,16 @@ auto cholesky_solve(const Tensor& B, const Tensor& L, bool upper) -> Tensor {
     // A = L @ L^T, solve A @ X = B
     // Step 1: L @ Y = B  (forward substitution)
     // Step 2: L^T @ X = Y (back substitution)
+    // Complex Hermitian factors require the conjugate transpose L^H (conj is
+    // identity for real dtypes).
+    Tensor L_h = tenzor::transpose(L.is_complex() ? tenzor::conj(L) : L, ndim - 2, ndim - 1).contiguous();
     if (!upper) {
+        // A = L @ L^H: solve L @ Y = B, then L^H @ X = Y
         auto Y = solve_triangular(L.contiguous(), B.contiguous(), /*upper=*/false);
-        auto Lt = tenzor::transpose(L, ndim - 2, ndim - 1).contiguous();
-        return solve_triangular(Lt, Y.contiguous(), /*upper=*/true);
+        return solve_triangular(L_h, Y.contiguous(), /*upper=*/true);
     } else {
-        // A = U^T @ U, solve A @ X = B
-        // Step 1: U^T @ Y = B
-        // Step 2: U @ X = Y
-        auto Ut = tenzor::transpose(L, ndim - 2, ndim - 1).contiguous();
-        auto Y = solve_triangular(Ut, B.contiguous(), /*upper=*/false);
+        // A = U^H @ U: solve U^H @ Y = B, then U @ X = Y
+        auto Y = solve_triangular(L_h, B.contiguous(), /*upper=*/false);
         return solve_triangular(L, Y, /*upper=*/true);
     }
 }

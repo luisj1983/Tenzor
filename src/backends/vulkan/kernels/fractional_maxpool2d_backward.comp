@@ -1,13 +1,14 @@
 #version 450
+#extension GL_EXT_shader_atomic_float : require
 
 // FractionalMaxPool2d Backward — scatter gradients using saved indices.
-// Each invocation processes one output gradient and atomically adds it
-// to the corresponding input gradient position using CAS loop for float atomics.
+// Each invocation processes one output gradient and atomically adds it to the
+// corresponding input gradient position using a native float atomicAdd.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) readonly buffer GradOutput { float grad_out_data[]; }; // [N, C, out_h, out_w]
 layout(binding = 1) readonly buffer Indices    { int   indices_data[]; };   // [N, C, out_h, out_w]
-layout(binding = 2)          buffer GradInput  { uint  grad_in_data[]; };   // [N, C, H, W] as uint for atomics
+layout(binding = 2)          buffer GradInput  { float grad_in_data[]; };   // [N, C, H, W]
 
 layout(push_constant) uniform PushConstants {
     uint N;
@@ -29,17 +30,8 @@ void main() {
 
     float grad_val = grad_out_data[idx];
 
-    // Atomic float add via compare-and-swap loop. Bounded to avoid GPU livelock
-    // under contention; mirrors BB.7 saturation hard-stop pattern used by
-    // embedding_backward_f64_atomic / max_pool2d_backward_f64.
-    uint expected = grad_in_data[target];
-    uint desired = expected;
-    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
-        desired = floatBitsToUint(uintBitsToFloat(expected) + grad_val);
-        uint actual = atomicCompSwap(grad_in_data[target], expected, desired);
-        if (actual == expected) return;
-        expected = actual;
-    }
-    // Saturation hard-stop — extremely contended slot; force last attempt.
-    grad_in_data[target] = desired;
+    // Native float atomic add. The previous bounded CAS loop fell back to a
+    // NON-atomic store on exhaustion, which clobbered concurrent gradient
+    // contributions to the same input position (lost gradients).
+    atomicAdd(grad_in_data[target], grad_val);
 }

@@ -531,7 +531,7 @@ auto cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor {
             inner_size *= t_shape[d];
         }
 
-        const uint8_t* src = static_cast<const uint8_t*>(t_cont.storage()->data());
+        const uint8_t* src = static_cast<const uint8_t*>(t_cont.data<uint8_t>());
         uint8_t* dst = static_cast<uint8_t*>(output.storage()->data());
 
         for (int64_t o = 0; o < outer_size; ++o) {
@@ -882,7 +882,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
         const size_t elem_size = dtype_size(input.dtype());
 
         Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
-        const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+        const auto* src = static_cast<const uint8_t*>(cont.data<uint8_t>());
         auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
         // Reorder data from NCHW to NHWC
@@ -917,7 +917,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
         const size_t elem_size = dtype_size(input.dtype());
 
         Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
-        const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+        const auto* src = static_cast<const uint8_t*>(cont.data<uint8_t>());
         auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
         // Reorder data from NCDHW to NDHWC
@@ -965,7 +965,7 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
     // Normalize shift to [0, dim_size)
     shift = ((shift % dim_size) + dim_size) % dim_size;
     if (shift == 0) {
-        std::memcpy(output.storage()->data(), cont.storage()->data(),
+        std::memcpy(output.storage()->data(), cont.data<uint8_t>(),
                     total * dtype_size(input.dtype()));
         return output;
     }
@@ -976,7 +976,7 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
     }
 
     const size_t elem_size = dtype_size(input.dtype());
-    const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+    const auto* src = static_cast<const uint8_t*>(cont.data<uint8_t>());
     auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
     #pragma omp parallel for if(total > ::tenzor::OmpThresholds::simple())
@@ -1031,7 +1031,7 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     }
 
     const size_t elem_size = dtype_size(input.dtype());
-    const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+    const auto* src = static_cast<const uint8_t*>(cont.data<uint8_t>());
     auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
     // For each output element: map back to input
@@ -1142,7 +1142,7 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     }
 
     const size_t elem_size = dtype_size(input.dtype());
-    const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+    const auto* src = static_cast<const uint8_t*>(cont.data<uint8_t>());
     auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
     // Binary search to find which input element owns a given output dim index

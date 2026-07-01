@@ -175,18 +175,27 @@ static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
     dim3 grid, block;
     OCCUPANCY_CONFIG(matmul_fp16_saturate_kernel, n, grid, block);
     matmul_fp16_saturate_kernel<<<grid, block, 0, stream>>>(data, n, d_count);
-    TENZOR_CUDA_CHECK(cudaGetLastError());
 
-    if (do_warn && d_count) {
-        unsigned long long h_count = 0;
-        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(unsigned long long),
-                                          cudaMemcpyDeviceToHost, stream));
-        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
-        TENZOR_CUDA_CHECK(cudaFreeAsync(d_count, stream));
-        if (h_count > 0) {
-            fprintf(stderr, "[tenzor::cuda] Warning: FP16 matmul saturated %llu values to +/-65504\n",
-                    h_count);
+    // Free d_count on EVERY exit path — a throwing TENZOR_CUDA_CHECK (launch error,
+    // memcpy, or sync) between the malloc and the free would otherwise leak it.
+    try {
+        TENZOR_CUDA_CHECK(cudaGetLastError());
+        if (do_warn && d_count) {
+            unsigned long long h_count = 0;
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(unsigned long long),
+                                              cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+            if (h_count > 0) {
+                fprintf(stderr, "[tenzor::cuda] Warning: FP16 matmul saturated %llu values to +/-65504\n",
+                        h_count);
+            }
         }
+    } catch (...) {
+        if (d_count) cudaFreeAsync(d_count, stream);
+        throw;
+    }
+    if (do_warn && d_count) {
+        TENZOR_CUDA_CHECK(cudaFreeAsync(d_count, stream));
     }
 }
 

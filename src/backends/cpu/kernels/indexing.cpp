@@ -1683,15 +1683,22 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor
         throw std::invalid_argument(msg);
     }
 
+    // The mask is indexed flat over input.numel(); broadcast it to input's shape
+    // (PyTorch accepts any broadcastable mask) and force contiguity so every flat
+    // index is in range. Without this a smaller/broadcast mask (e.g. (1,S)) would
+    // be read out of bounds. broadcast_to throws if the mask is not broadcastable.
+    std::vector<int64_t> input_shape_vec(input.shape().begin(), input.shape().end());
+    Tensor mask_bc = tenzor::broadcast_to(mask, input_shape_vec).contiguous();
+
     Tensor mask_f32;
     const bool use_float_mask = mask_is_floating;
     const bool* bool_mask_ptr = nullptr;
     const float* float_mask_ptr = nullptr;
     if (mask_is_bool) {
-        bool_mask_ptr = mask.data<bool>();
+        bool_mask_ptr = mask_bc.data<bool>();
     } else {
         // Widen Float64/Float16/BFloat16 masks to Float32 (no-op for Float32).
-        mask_f32 = (mask.dtype() == DType::Float32) ? mask : mask.to(DType::Float32);
+        mask_f32 = (mask_bc.dtype() == DType::Float32) ? mask_bc : mask_bc.to(DType::Float32);
         float_mask_ptr = mask_f32.data<float>();
     }
     auto is_mask_true = [use_float_mask, bool_mask_ptr, float_mask_ptr](int64_t i) -> bool {

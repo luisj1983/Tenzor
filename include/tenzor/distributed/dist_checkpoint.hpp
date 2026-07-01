@@ -195,7 +195,7 @@ public:
 private:
     CheckpointConfig config_;
 
-    static constexpr uint32_t MAGIC = 0x5A43'5A54;  // "TZCK" in little-endian
+    static constexpr uint32_t MAGIC = 0x5A43'5A54;  // "TZCZ" in little-endian (0x54 5A 43 5A). NOTE: keep this value to stay compatible with already-written checkpoints.
     // Format version written by this build. v1 files remain readable.
     static constexpr uint32_t VERSION = 2;
     static constexpr uint32_t VERSION_LEGACY_NO_SHARD_META = 1;

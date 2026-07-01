@@ -473,6 +473,23 @@ if(NOT spdlog_FOUND)
     FetchContent_MakeAvailable(spdlog)
 endif()
 
+# D.1: fmt — the PUBLIC logging header (utils/logging.hpp) inlines
+# ::fmt::format, so any consumer using the TENZOR_LOG* macros instantiates fmt
+# symbols. With a system (compiled) fmt that requires an explicit link, fmt is
+# therefore part of Tenzor's public interface and must be propagated (spdlog
+# itself stays PRIVATE behind utils/log.cpp). System spdlog's CONFIG pulls fmt
+# in transitively; ensure the target explicitly. When spdlog is FetchContent'd
+# with bundled header-only fmt, no separate fmt::fmt target exists and none is
+# needed (the inline format is fully header-only) — the link below is guarded.
+if(NOT TARGET fmt::fmt)
+    find_package(fmt QUIET CONFIG)
+endif()
+if(TARGET fmt::fmt)
+    set(TENZOR_FMT_PUBLIC TRUE)
+else()
+    set(TENZOR_FMT_PUBLIC FALSE)
+endif()
+
 # Include CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 

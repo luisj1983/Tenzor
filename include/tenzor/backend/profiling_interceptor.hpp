@@ -132,7 +132,13 @@ private:
 inline DispatchInterceptor make_profiling_interceptor() {
     return [](OpId op, std::span<const Tensor> inputs,
               const OpAttributes& attrs, DispatchNext next) -> std::vector<Tensor> {
-        if (!OpProfiler::instance().is_enabled()) {
+        // Take the timing path when EITHER op-profiling or trace mode is on.
+        // Gating the trace recording behind OpProfiler::is_enabled() dropped
+        // every forward trace event whenever the op profiler happened to be
+        // off (the common case for pure tracing).
+        const bool prof_enabled = OpProfiler::instance().is_enabled();
+        const bool trace_enabled = AutogradProfiler::instance().is_trace_enabled();
+        if (!prof_enabled && !trace_enabled) {
             return next(op, inputs, attrs);
         }
 
@@ -141,10 +147,12 @@ inline DispatchInterceptor make_profiling_interceptor() {
         auto end = std::chrono::steady_clock::now();
 
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-        OpProfiler::instance().record(op, ns);
+        if (prof_enabled) {
+            OpProfiler::instance().record(op, ns);
+        }
 
         // Record per-invocation trace event when trace mode is active
-        if (AutogradProfiler::instance().is_trace_enabled()) {
+        if (trace_enabled) {
             AutogradProfiler::instance().record_trace(
                 "OpId:" + std::to_string(static_cast<int>(op)),
                 start, ns, ProfilePhase::Forward);
@@ -170,10 +178,16 @@ inline DispatchInterceptor make_profiling_interceptor() {
 class ProfilingInterceptorGuard {
 public:
     ProfilingInterceptorGuard() {
-        DispatchInterceptorStack::push(make_profiling_interceptor());
+        // Install GLOBALLY (all threads) rather than only on the constructing
+        // thread. OpProfiler / trace enable is process-global, so the profiling
+        // interceptor must fire on every thread's dispatch — otherwise ops run
+        // on DataLoader / autograd-engine worker threads are silently never
+        // recorded. The interceptor itself remains a no-op unless OpProfiler or
+        // trace mode is enabled, so the global install costs nothing when idle.
+        DispatchInterceptorStack::push_global(make_profiling_interceptor());
     }
     ~ProfilingInterceptorGuard() {
-        DispatchInterceptorStack::pop();
+        DispatchInterceptorStack::pop_global();
     }
     ProfilingInterceptorGuard(const ProfilingInterceptorGuard&) = delete;
     ProfilingInterceptorGuard& operator=(const ProfilingInterceptorGuard&) = delete;

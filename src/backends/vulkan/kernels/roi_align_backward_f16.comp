@@ -65,15 +65,24 @@ void main() {
     float roi_width = roi_x2 - roi_x1;
     float roi_height = roi_y2 - roi_y1;
 
+    // Non-aligned mode clamps ROI extent to a minimum of 1 (torchvision / CPU
+    // reference); the aligned path intentionally does not clamp. Must match the
+    // forward kernel exactly or forward/backward sampling grids diverge.
+    if (params.aligned == 0u) {
+        roi_width = max(roi_width, 1.0);
+        roi_height = max(roi_height, 1.0);
+    }
+
     float bin_size_h = roi_height / float(params.output_h);
     float bin_size_w = roi_width / float(params.output_w);
 
+    // Clamp adaptive grid to >= 1 (degenerate ROI -> bin_size<=0 -> count==0).
     uint roi_bin_grid_h = (params.sampling_ratio > 0)
         ? params.sampling_ratio
-        : uint(ceil(bin_size_h));
+        : max(1u, uint(ceil(bin_size_h)));
     uint roi_bin_grid_w = (params.sampling_ratio > 0)
         ? params.sampling_ratio
-        : uint(ceil(bin_size_w));
+        : max(1u, uint(ceil(bin_size_w)));
 
     uint count = roi_bin_grid_h * roi_bin_grid_w;
     float grad_val = float(grad_output_data[idx]) / float(count);

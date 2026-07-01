@@ -117,6 +117,14 @@ TENZOR_BUILD_PYTHON = "ON"
 # compiles a baseline target and runtime-dispatches the *_avx512.cpp TUs via
 # CPUID/XCR0, which is what a published wheel must use.
 TENZOR_PORTABLE = "ON"
+# GPU backends default to ON in CMakeLists.txt, so a `pip install` on a host
+# with CUDA/ROCm/Vulkan/oneAPI toolkits present would build (and try to bundle)
+# a GPU runtime — contradicting the CPU-only wheel contract below. Pin them OFF.
+TENZOR_BUILD_CUDA = "OFF"
+TENZOR_BUILD_ROCM = "OFF"
+TENZOR_BUILD_VULKAN = "OFF"
+TENZOR_BUILD_ONEAPI = "OFF"
+TENZOR_BUILD_MPS = "OFF"
 TENZOR_BUILD_TESTS = "OFF"
 TENZOR_BUILD_EXAMPLES = "OFF"
 TENZOR_BUILD_BENCHMARKS = "OFF"

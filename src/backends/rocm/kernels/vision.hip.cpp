@@ -371,11 +371,15 @@ __global__ void interpolate_nearest_backward_kernel_hip(
 
 // Bicubic interpolation helper function
 __device__ inline float cubic_interp1d(float x) {
+    // Cubic-convolution weight with a=-0.75, matching CPU cubic_interp_coeff,
+    // PyTorch upsample_bicubic2d, and this file's own backward tz_bicubic_coeff_hip.
+    // (The previous a=-0.5 Catmull-Rom coefficients diverged from every other
+    // backend and from this op's own gradient.)
     float abs_x = fabsf(x);
     if (abs_x <= 1.0f) {
-        return 1.5f * abs_x * abs_x * abs_x - 2.5f * abs_x * abs_x + 1.0f;
+        return 1.25f * abs_x * abs_x * abs_x - 2.25f * abs_x * abs_x + 1.0f;
     } else if (abs_x < 2.0f) {
-        return -0.5f * abs_x * abs_x * abs_x + 2.5f * abs_x * abs_x - 4.0f * abs_x + 2.0f;
+        return -0.75f * abs_x * abs_x * abs_x + 3.75f * abs_x * abs_x - 6.0f * abs_x + 3.0f;
     }
     return 0.0f;
 }
@@ -724,11 +728,12 @@ auto interpolate_kernel(const Tensor& input,
 // the bilinear path with integer fractional parts (the same shape simplification
 // the CUDA host function makes).
 // ============================================================================
-// Catmull-Rom cubic convolution weight (a=-0.5); matches CPU cubic_interp_coeff.
+// Cubic convolution weight (a=-0.75); matches CPU cubic_interp_coeff and
+// PyTorch upsample_bicubic2d.
 __device__ __forceinline__ float tz_bicubic_coeff_hip(float x) {
     float a = fabsf(x);
-    if (a <= 1.0f) return 1.5f * a * a * a - 2.5f * a * a + 1.0f;
-    if (a < 2.0f)  return -0.5f * a * a * a + 2.5f * a * a - 4.0f * a + 2.0f;
+    if (a <= 1.0f) return 1.25f * a * a * a - 2.25f * a * a + 1.0f;
+    if (a < 2.0f)  return -0.75f * a * a * a + 3.75f * a * a - 6.0f * a + 3.0f;
     return 0.0f;
 }
 
@@ -962,10 +967,11 @@ __global__ void box_iou_kernel(
     const T* boxes1, const T* boxes2, T* output,
     int64_t N, int64_t M, int iou_type)
 {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Grid-stride loop: the launch caps the block count (get_num_blocks -> 65535),
+    // so a single flat index would leave the tail of a large N*M output
+    // uninitialized (garbage IoU). Stride over all pairs instead.
     int64_t total = N * M;
-    if (idx >= total) return;
-
+    HIP_GRID_STRIDE_LOOP(idx, total) {
     int64_t i = idx / M;
     int64_t j = idx % M;
 
@@ -1043,6 +1049,7 @@ __global__ void box_iou_kernel(
     }
 
     output[i * M + j] = iou;
+    }  // HIP_GRID_STRIDE_LOOP
 }
 
 auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type,

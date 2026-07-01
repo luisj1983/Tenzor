@@ -141,17 +141,24 @@ auto XLogYBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
     auto x_shape = std::vector<int64_t>(x.shape().begin(), x.shape().end());
     auto x_is_zero = eq(x, zeros(x_shape, x.dtype(), x.device()));
 
+    // Local derivatives do not depend on grad_outputs; wrap them as detached
+    // Variables and keep grad_outputs[0] connected so double-backward works
+    // (mirrors LogAddExpBackward::backward_with_variables).
     auto log_y = tenzor::log(y);
-    auto grad_x_raw = mul(grad_outputs[0].tensor(), log_y);
-    auto grad_x_unreduced_t = where(x_is_zero, zeros_like(grad_x_raw), grad_x_raw);
-    auto grad_x_unreduced = Variable(grad_x_unreduced_t, false);
+    // d/dx xlogy = log(y), zeroed where x == 0
+    auto deriv_x_t = where(x_is_zero, zeros_like(log_y), log_y);
+    Variable deriv_x(deriv_x_t, false);
 
     auto y_shape = std::vector<int64_t>(y.shape().begin(), y.shape().end());
     auto eps_y = full(y_shape, detail::dtype_epsilon(y.dtype()), y.dtype(), y.device());
     auto safe_y = where(eq(y, zeros(y_shape, y.dtype(), y.device())), eps_y, y);
-    auto grad_y_raw = mul(grad_outputs[0].tensor(), div(x, safe_y));
-    auto grad_y_unreduced_t = where(x_is_zero, zeros_like(grad_y_raw), grad_y_raw);
-    auto grad_y_unreduced = Variable(grad_y_unreduced_t, false);
+    // d/dy xlogy = x / y, zeroed where x == 0
+    auto deriv_y_raw = div(x, safe_y);
+    auto deriv_y_t = where(x_is_zero, zeros_like(deriv_y_raw), deriv_y_raw);
+    Variable deriv_y(deriv_y_t, false);
+
+    auto grad_x_unreduced = grad_outputs[0] * deriv_x;
+    auto grad_y_unreduced = grad_outputs[0] * deriv_y;
 
     auto grad_x = reduce_grad_var_for_broadcasting(grad_x_unreduced, input_shape_x_);
     auto grad_y = reduce_grad_var_for_broadcasting(grad_y_unreduced, input_shape_y_);
@@ -1949,8 +1956,12 @@ auto ZetaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto s_plus_one = add(s_t, one_t);
     auto zeta_next = tenzor::zeta(s_plus_one, q_t);
     auto deriv_q = neg(mul(s_t, zeta_next));
+    // grad_s is zero (s is non-differentiable here) shaped to s's own shape.
     auto grad_s = zeros(s_shape, s_t.dtype(), s_t.device());
-    auto grad_q = mul(grad_outputs[0], deriv_q);
+    // grad_q picks up the broadcast shape of (s, q); reduce back to q's shape.
+    auto q_shape = std::vector<int64_t>(q_t.shape().begin(), q_t.shape().end());
+    auto grad_q_full = mul(grad_outputs[0], deriv_q);
+    auto grad_q = reduce_grad_for_broadcasting(grad_q_full, q_shape);
     std::vector<Tensor> out;
     out.push_back(grad_s);
     out.push_back(grad_q);
@@ -2299,19 +2310,21 @@ auto HypotBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 // copysign(magnitude, sign_src) returns |magnitude| * sign(sign_src).
-// d/d(magnitude) = sign(sign_src) (treating |.| as having sign-of-mag local
-//                  Jacobian; the product simplifies to sign(sign_src))
+// d/d(magnitude) = sign(magnitude) * sign(sign_src) (|.| contributes its
+//                  sign-of-magnitude local Jacobian)
 // d/d(sign_src)  = 0 almost everywhere.
 auto CopysignBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
     throw std::runtime_error("CopysignBackward::forward should not be called directly");
 }
 auto CopysignBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    require_saved_tensors(1);
-    const auto& sign_src = saved_tensors_[0];
+    require_saved_tensors(2);
+    const auto& magnitude = saved_tensors_[0];
+    const auto& sign_src = saved_tensors_[1];
     const auto& grad = grad_outputs[0];
 
-    // grad_mag = grad * sign(sign_src)
-    auto grad_mag_unreduced = mul(grad, tenzor::sign(sign_src));
+    // grad_mag = grad * sign(magnitude) * sign(sign_src)
+    auto grad_mag_unreduced =
+        mul(grad, mul(tenzor::sign(magnitude), tenzor::sign(sign_src)));
     auto grad_mag = reduce_grad_for_broadcasting(grad_mag_unreduced, input_shape_mag_);
 
     // grad_sign_src = 0 a.e.; emit a zero buffer of the sign source's
@@ -2833,18 +2846,26 @@ auto LogcumsumexpBackward::backward(std::vector<Tensor> grad_outputs) -> std::ve
     TENZOR_CHECK_SHAPE(dim >= 0 && dim < ndim,
         "LogcumsumexpBackward: dim out of range for saved input rank");
 
-    // z = grad * exp(-y)
-    auto neg_y = neg(y);
-    auto exp_neg_y = exp(neg_y);
-    auto z = mul(grad, exp_neg_y);
-
-    // rev_cum = flip(cumsum(flip(z, dim), dim), dim)
-    auto flipped = flip(z, {dim});
-    auto cum = cumsum(flipped, dim);
-    auto rev_cum = flip(cum, {dim});
-
-    // grad_x = exp(x) * rev_cum
-    auto grad_x = mul(exp(x), rev_cum);
+    // grad_x_i = sum_{j>=i} grad_j * exp(x_i - y_j), where y = logcumsumexp(x).
+    // Because y_j >= x_i for all j>=i, every exponent x_i - y_j <= 0, so each
+    // term is bounded in (0, 1]. Computing exp(x) and exp(-y) SEPARATELY (the
+    // old approach) overflows/underflows for large |x|: exp(x)=inf, exp(-y)=0,
+    // and inf*0 = NaN. Stay in log-space instead, splitting grad into its
+    // positive and negative parts so each contribution is a logsumexp:
+    //   grad_x = exp(x + rlse(log(g+) - y)) - exp(x + rlse(log(g-) - y))
+    // where rlse is the reverse (suffix) logcumsumexp along dim. log(0) = -inf
+    // for absent parts is absorbed correctly by logcumsumexp (and exp(-inf)=0).
+    const double inf = std::numeric_limits<double>::infinity();
+    auto reverse_logcumsumexp = [&](const Tensor& t) {
+        return flip(::tenzor::logcumsumexp(flip(t, {dim}), dim), {dim});
+    };
+    auto g_pos = ::tenzor::clamp(grad, 0.0, inf);        // max(grad, 0)
+    auto g_neg = ::tenzor::clamp(neg(grad), 0.0, inf);   // max(-grad, 0)
+    auto log_term_pos = sub(::tenzor::log(g_pos), y);
+    auto log_term_neg = sub(::tenzor::log(g_neg), y);
+    auto contrib_pos = exp(add(x, reverse_logcumsumexp(log_term_pos)));
+    auto contrib_neg = exp(add(x, reverse_logcumsumexp(log_term_neg)));
+    auto grad_x = sub(contrib_pos, contrib_neg);
     return {grad_x};
 }
 

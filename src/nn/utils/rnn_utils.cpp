@@ -1,6 +1,7 @@
 #include "tenzor/nn/utils/rnn_utils.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -287,19 +288,23 @@ auto pack_sequence(const std::vector<Tensor>& sequences, bool enforce_sorted)
         max_len = std::max(max_len, lengths[i]);
     }
 
-    // Create padded tensor (batch_first format)
-    Tensor padded = zeros({batch_size, max_len, features},
-                          sequences[0].dtype(), sequences[0].device());
-
-    // Copy each sequence
+    // Assemble the padded tensor (batch_first) with on-device tensor ops. The
+    // sequences may live on a GPU, so a host std::memcpy over data_ptr() (the
+    // previous approach) would dereference a device pointer and segfault. cat()
+    // and stack() run the copy on the tensor's own device/backend.
+    std::vector<Tensor> rows;
+    rows.reserve(batch_size);
     for (int64_t i = 0; i < batch_size; ++i) {
-        auto seq = sequences[i].contiguous();
-        std::memcpy(
-            static_cast<char*>(padded.data_ptr()) + i * max_len * features * padded.dtype_size(),
-            seq.data_ptr(),
-            lengths[i] * features * padded.dtype_size()
-        );
+        Tensor seq = sequences[i].contiguous();
+        if (lengths[i] < max_len) {
+            Tensor pad_block = zeros({max_len - lengths[i], features},
+                                     sequences[0].dtype(), sequences[0].device());
+            rows.push_back(cat({seq, pad_block}, /*dim=*/0));
+        } else {
+            rows.push_back(seq);
+        }
     }
+    Tensor padded = stack(rows, /*dim=*/0);
 
     // Create lengths tensor
     Tensor lengths_tensor = zeros({batch_size}, DType::Int64, Device::cpu());
@@ -354,21 +359,27 @@ auto pad_sequence(const std::vector<Tensor>& sequences,
     std::vector<int64_t> padded_shape = {batch_size, max_len};
     padded_shape.insert(padded_shape.end(), trailing.begin(), trailing.end());
 
-    Tensor out = full(padded_shape, padding_value,
-                      sequences[0].dtype(), sequences[0].device());
-
-    // Copy each sequence using memcpy (same pattern as pack_sequence)
-    int64_t row_stride = max_len * trail_elems;
-    size_t elem_size = out.dtype_size();
+    // Assemble (batch, max_len, *trailing) with on-device tensor ops: the
+    // sequences may be GPU-resident, so a host std::memcpy over data_ptr()
+    // (the previous approach) would dereference a device pointer and segfault.
+    // cat()/stack() perform the copy on the tensor's own device/backend.
+    (void)padded_shape;
+    std::vector<Tensor> rows;
+    rows.reserve(batch_size);
     for (int64_t i = 0; i < batch_size; ++i) {
-        auto seq = sequences[i].contiguous();
+        Tensor seq = sequences[i].contiguous();
         int64_t length = seq.shape()[0];
-        std::memcpy(
-            static_cast<char*>(out.data_ptr()) + i * row_stride * elem_size,
-            seq.data_ptr(),
-            length * trail_elems * elem_size
-        );
+        if (length < max_len) {
+            std::vector<int64_t> pad_shape = {max_len - length};
+            pad_shape.insert(pad_shape.end(), trailing.begin(), trailing.end());
+            Tensor pad_block = full(pad_shape, padding_value,
+                                    sequences[0].dtype(), sequences[0].device());
+            rows.push_back(cat({seq, pad_block}, /*dim=*/0));
+        } else {
+            rows.push_back(seq);
+        }
     }
+    Tensor out = stack(rows, /*dim=*/0);
 
     // Permute to (max_len, batch, *trailing) if not batch_first
     if (!batch_first) {

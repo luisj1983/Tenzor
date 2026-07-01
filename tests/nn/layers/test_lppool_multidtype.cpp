@@ -2,7 +2,7 @@
  * @file test_lppool_multidtype.cpp
  * @brief Multi-dtype tests for LPPool1d / LPPool2d.
  *
- * LPPool computes (sum(|x|^p) / kernel_size)^(1/p). Until this file there were
+ * LPPool computes (sum(|x|^p))^(1/p) (matching torch.nn.LPPool). Until this file there were
  * no dedicated unit tests — only the backend_parity sweep covered it. This
  * file exercises forward shape correctness, p=2 (L2) numerical correctness,
  * dtype preservation, gradient flow, and parity against a hand-computed
@@ -44,7 +44,7 @@ TEST_P(LPPool1dMultiDTypeTest, ForwardShape_L1) {
 }
 
 TEST_P(LPPool1dMultiDTypeTest, ForwardL2_KnownValue) {
-    // L2 pool of [3, 4] with kernel=2 stride=2 ⇒ sqrt((9 + 16) / 2) ≈ 3.5355
+    // L2 pool of [3, 4] with kernel=2 stride=2 ⇒ sqrt(9 + 16) = 5.0 (torch.nn.LPPool)
     LPPool1d pool(/*norm_type=*/2, /*kernel_size=*/2, /*stride=*/2);
     Tensor input = zeros({1, 1, 2}, dtype(), device());
     Tensor scratch_cpu = zeros({1, 1, 2}, DType::Float32, Device::cpu());
@@ -55,7 +55,7 @@ TEST_P(LPPool1dMultiDTypeTest, ForwardL2_KnownValue) {
     auto x = Variable(input, false);
     auto y = pool.forward(x);
     auto out_cpu = y.tensor().to(Device::cpu()).to(DType::Float32);
-    EXPECT_NEAR(out_cpu.data<float>()[0], 3.5355339f, atol() * 10.0f);
+    EXPECT_NEAR(out_cpu.data<float>()[0], 5.0f, atol() * 10.0f);
 }
 
 // LPPool1d now uses Variable-level abs/pow/avg_pool throughout; this test
@@ -100,7 +100,7 @@ TEST_P(LPPool2dMultiDTypeTest, ForwardShape_L1_Square) {
 }
 
 TEST_P(LPPool2dMultiDTypeTest, ForwardL2_AllOnes) {
-    // L2 pool of all-ones with kernel 3x3 ⇒ each output = sqrt(9/9) = 1.
+    // L2 pool of all-ones with kernel 3x3 ⇒ each output = sqrt(9) = 3 (torch.nn.LPPool).
     // Previously failed on Vulkan+Float16 for odd-numel outputs because:
     //   (1) the backend queried `shaderFloat16` support but never enabled
     //       the feature on the logical device, leaving F16 compute-shader
@@ -116,7 +116,7 @@ TEST_P(LPPool2dMultiDTypeTest, ForwardL2_AllOnes) {
     auto y = pool.forward(x);
     auto out_cpu = y.tensor().to(Device::cpu()).to(DType::Float32);
     for (int64_t i = 0; i < out_cpu.numel(); ++i) {
-        EXPECT_NEAR(out_cpu.data<float>()[i], 1.0f, atol() * 10.0f);
+        EXPECT_NEAR(out_cpu.data<float>()[i], 3.0f, atol() * 10.0f);
     }
 }
 

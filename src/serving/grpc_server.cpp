@@ -267,6 +267,12 @@ private:
     /// while gRPC enforced neither.
     grpc::Status enforce_access(grpc::ServerContext* context) {
         // ---- Authentication ----
+        // Fail CLOSED when auth is enabled but misconfigured (no keys): deny
+        // rather than waving every RPC through unauthenticated.
+        if (auth_.enabled && auth_.api_keys.empty()) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                "authentication is enabled but no API keys are configured");
+        }
         if (auth_.enabled && !auth_.api_keys.empty()) {
             // gRPC metadata keys are lowercased by the core; look up the
             // configured header in lowercase. The token is sent verbatim
@@ -367,6 +373,14 @@ void start_grpc_server(ModelRepository& repository, const ServerConfig& config,
     builder.RegisterService(&service);
 
     auto server = builder.BuildAndStart();
+    if (!server) {
+        // BuildAndStart returns null when the port can't be bound (in use, bad
+        // address, bad TLS credentials). Fail loudly instead of printing a
+        // false "listening" message and then dereferencing a null server.
+        throw std::runtime_error(
+            "[TenzorServing] failed to start gRPC server on " + server_address +
+            " (port in use, invalid address, or bad TLS credentials)");
+    }
     std::cout << "[TenzorServing] gRPC server listening on " << server_address << std::endl;
 
     // Wait until signalled to stop

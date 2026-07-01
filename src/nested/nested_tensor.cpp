@@ -197,9 +197,16 @@ auto NestedTensor::from_jagged(Tensor values, Tensor offsets,
         throw std::runtime_error(
             "NestedTensor::from_jagged: offsets must be Int64");
     }
-    if (offsets.ndim() != 1 || offsets.numel() < 2) {
+    // offsets has B+1 elements. A single element (B == 0) is the well-formed
+    // EMPTY nested tensor (zero batch elements): from_padded already constructs
+    // such tensors directly, and ragged-dim reductions of an empty batch must be
+    // able to round-trip through from_jagged. Only reject numel == 0 (no valid
+    // offsets[0] = 0 endpoint) — the empty partition is validated below like any
+    // other (offsets[0] == 0 == total value rows).
+    if (offsets.ndim() != 1 || offsets.numel() < 1) {
         throw std::runtime_error(
-            "NestedTensor::from_jagged: offsets must be 1D with at least 2 elements");
+            "NestedTensor::from_jagged: offsets must be 1D with at least 1 element "
+            "([0] for an empty batch, [0, ...] otherwise)");
     }
     // The class layout is hardwired to a leading ragged axis: values_ is
     // [total_ragged_len, *regular_dims], and select()/unbind()/to_padded_tensor()

@@ -96,15 +96,22 @@ void main() {
     float64_t roi_width = roi_x2 - roi_x1;
     float64_t roi_height = roi_y2 - roi_y1;
 
+    // Non-aligned mode clamps ROI extent to a minimum of 1 (must match forward).
+    if (params.aligned == 0u) {
+        roi_width = max(roi_width, float64_t(1.0));
+        roi_height = max(roi_height, float64_t(1.0));
+    }
+
     float64_t bin_size_h = roi_height / float64_t(params.output_h);
     float64_t bin_size_w = roi_width / float64_t(params.output_w);
 
+    // Clamp adaptive grid to >= 1 (degenerate ROI -> bin_size<=0 -> count==0).
     uint roi_bin_grid_h = (params.sampling_ratio > 0)
         ? params.sampling_ratio
-        : uint(ceil(bin_size_h));
+        : max(1u, uint(ceil(bin_size_h)));
     uint roi_bin_grid_w = (params.sampling_ratio > 0)
         ? params.sampling_ratio
-        : uint(ceil(bin_size_w));
+        : max(1u, uint(ceil(bin_size_w)));
 
     uint count = roi_bin_grid_h * roi_bin_grid_w;
     // Accumulate in full f64 precision (the CAS atomic add operates on f64).

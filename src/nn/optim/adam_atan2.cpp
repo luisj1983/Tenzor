@@ -157,12 +157,17 @@ auto AdamAtan2::step_impl() -> void {
         // a group that turns amsgrad on at add_param_group time still has the
         // buffer available; a group that turns it off simply skips the slot.
         if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
-            // Element-wise max using comparison
-            auto mask = max_exp_avg_sq_[i] > v_hat;
+            // AMSGrad (Reddi et al. 2018) maintains the running max of the RAW
+            // (un-bias-corrected) second moment, then bias-corrects it — NOT the
+            // max of the already-bias-corrected v_hat. Bias correction grows the
+            // denominator each step, so maxing in bias-corrected space would let
+            // the "max" shrink as the correction relaxes, violating the
+            // monotone-denominator guarantee that AMSGrad relies on.
+            auto mask = max_exp_avg_sq_[i] > exp_avg_sq_[i];
             auto mask_f = mask.to(state_dt);
             auto inv_mask = ones_like(mask_f) - mask_f;
-            max_exp_avg_sq_[i] = max_exp_avg_sq_[i] * mask_f + v_hat * inv_mask;
-            v_hat = max_exp_avg_sq_[i];
+            max_exp_avg_sq_[i] = max_exp_avg_sq_[i] * mask_f + exp_avg_sq_[i] * inv_mask;
+            v_hat = max_exp_avg_sq_[i] * scalar(1.0 / bias_correction2);
         }
 
         // Compute sqrt(v_hat) + eps

@@ -385,6 +385,20 @@ auto fused_softmax_cross_entropy_hip(
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
 
+    // Validate target labels host-side: the kernel reads row[target] with no
+    // bounds check, so an out-of-range label would read logits out of bounds.
+    if (batch_size > 0) {
+        Tensor t_host = targets.is_contiguous() ? targets : targets.contiguous();
+        t_host = t_host.to(Device::cpu());
+        const int64_t* tp = t_host.data<int64_t>();
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (tp[i] < 0 || tp[i] >= num_classes) {
+                throw std::out_of_range("cross_entropy: target " + std::to_string(tp[i]) +
+                    " out of range [0, " + std::to_string(num_classes) + ")");
+            }
+        }
+    }
+
     Tensor losses = create_hip_zeros({batch_size}, logits.dtype(), logits.device());
 
     constexpr int BLOCK_SIZE = 256;
@@ -2401,14 +2415,18 @@ __global__ void fused_adam_kernel(
         // Update biased second raw moment estimate
         v = T(beta2) * v + T(1.0 - beta2) * g * g;
 
-        // Bias-corrected second moment
-        T v_hat = v * T(bc2_inv);
-
+        // Bias-corrected second moment. AMSGrad tracks the running maximum over
+        // the RAW (un-bias-corrected) second moment and applies bias correction
+        // AFTER, matching the CPU reference and PyTorch (maxing the already
+        // bias-corrected v_hat is wrong because bias_correction2 grows toward 1).
+        T v_hat;
         if (amsgrad && max_exp_avg_sq) {
             T max_v = max_exp_avg_sq[idx];
-            if (v_hat > max_v) max_v = v_hat;
+            if (v > max_v) max_v = v;
             max_exp_avg_sq[idx] = max_v;
-            v_hat = max_v;
+            v_hat = max_v * T(bc2_inv);
+        } else {
+            v_hat = v * T(bc2_inv);
         }
 
         // Decoupled weight decay (AdamW)
@@ -2792,13 +2810,16 @@ __global__ void fused_adam_atan2_kernel(
         v = T(beta2) * v + T(1.0f - beta2) * g * g;
 
         T m_hat = m / T(bias_correction1);
-        T v_hat = v / T(bias_correction2);
-
+        // AMSGrad tracks the running maximum over the RAW second moment and
+        // applies bias correction AFTER, matching the CPU reference / PyTorch.
+        T v_hat;
         if (amsgrad && max_exp_avg_sq != nullptr) {
             T max_v = max_exp_avg_sq[idx];
-            if (v_hat > max_v) max_v = v_hat;
+            if (v > max_v) max_v = v;
             max_exp_avg_sq[idx] = max_v;
-            v_hat = max_v;
+            v_hat = max_v / T(bias_correction2);
+        } else {
+            v_hat = v / T(bias_correction2);
         }
 
         if (weight_decay > 0.0f) {

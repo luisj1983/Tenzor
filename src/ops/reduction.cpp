@@ -33,7 +33,8 @@ static bool is_small_int_dtype(DType dt) {
 
 static bool is_integer_dtype(DType dt) {
     return dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Int16 ||
-           dt == DType::Int32 || dt == DType::Int64 || dt == DType::Bool;
+           dt == DType::Int32 || dt == DType::Int64 || dt == DType::Bool ||
+           dt == DType::UInt16 || dt == DType::UInt32 || dt == DType::UInt64;
 }
 
 // audit-5 Y.7: normalise a (possibly negative) reduction dim against ndim so
@@ -451,7 +452,15 @@ auto cummin(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
 }
 
 auto isin(const Tensor& elements, const Tensor& test_elements) -> Tensor {
-    std::array<Tensor, 2> inputs = {elements.contiguous(), test_elements.contiguous()};
+    // The kernel keys its dtype branch off elements.dtype() and reads the
+    // test_elements buffer with that same element type. If test_elements is
+    // wider its buffer is reinterpreted and read out of bounds. Promote both
+    // to a common dtype before dispatch.
+    DType common = promote_types(elements.dtype(), test_elements.dtype());
+    Tensor el = (elements.dtype() != common) ? elements.to(common) : elements;
+    Tensor te = (test_elements.dtype() != common) ? test_elements.to(common)
+                                                  : test_elements;
+    std::array<Tensor, 2> inputs = {el.contiguous(), te.contiguous()};
     return dispatch<OpId::Isin>(inputs)[0];
 }
 

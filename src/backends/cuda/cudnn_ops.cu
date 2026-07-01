@@ -389,8 +389,15 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
 
     // Determine current format from input strides
     auto input_strides = input.strides();
+    // Require ALL four strides to describe a fully PACKED channels-last layout
+    // {H*W*C, 1, W*C, C}. Checking only strides[1]==1 && strides[3]==C misclassifies
+    // a spatially-sliced channels-last view (which keeps those two but has gaps in
+    // strides[0]/strides[2]) as packed NHWC, then the fast-path memcpy / stride-
+    // ignoring kernel copies the wrong bytes.
     bool input_is_nhwc = (input_strides.size() == 4 &&
+                          input_strides[0] == static_cast<int64_t>(H) * W * C &&
                           input_strides[1] == 1 &&
+                          input_strides[2] == static_cast<int64_t>(W) * C &&
                           input_strides[3] == C);
     bool input_is_nchw = !input_is_nhwc && input.is_contiguous();
 

@@ -64,6 +64,18 @@ public:
             return QuantizedConv2d::from_float(*conv2d, qconfig_);
         }
 
+        // A FakeQuantize reaching this point is a standalone calibration-only
+        // artifact: the Sequential walker bakes-and-removes the ones that sit
+        // after a quantizable layer, so any that survive have no layer to absorb
+        // their observed activation qparams. They are never part of a clean
+        // quantized inference model — drop them (return nullptr). Mirrors
+        // ModuleConverter::to_quantized() in quantize_api.cpp; the Sequential
+        // caller guards add_module on the result so the null is dropped rather
+        // than re-inserted.
+        if (std::dynamic_pointer_cast<FakeQuantize>(module)) {
+            return nullptr;
+        }
+
         // Nested Sequential containers are handled by the Sequential branch
         // above (each child is recursively converted). Arbitrary custom Module
         // containers cannot be converted in place: their forward() binds typed
@@ -231,7 +243,13 @@ private:
                     }
                 }
             }
-            quantized_seq->add_module(converted);
+            // convert_to_quantized() returns nullptr for a standalone
+            // FakeQuantize that was NOT absorbed above (no preceding quantizable
+            // layer, or absorption failed). Guard so a calibration-only artifact
+            // never leaks into the converted graph (mirrors quantize_api.cpp).
+            if (converted) {
+                quantized_seq->add_module(converted);
+            }
         }
 
         return quantized_seq;

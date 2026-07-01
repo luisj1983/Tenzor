@@ -1,11 +1,12 @@
 #version 450
+#extension GL_EXT_shader_atomic_float : require
 
 // FractionalMaxPool3d Backward — scatter gradients using saved indices.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) readonly buffer GradOutput { float grad_out_data[]; };
 layout(binding = 1) readonly buffer Indices    { int   indices_data[]; };
-layout(binding = 2)          buffer GradInput  { uint  grad_in_data[]; };  // as uint for atomics
+layout(binding = 2)          buffer GradInput  { float grad_in_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint total_output;   // N * C * out_d * out_h * out_w
@@ -23,16 +24,7 @@ void main() {
     uint target = base_in + uint(max_idx);
     float grad_val = grad_out_data[idx];
 
-    // Bounded CAS loop to avoid GPU livelock under contention; mirrors BB.7
-    // saturation hard-stop pattern from embedding_backward_f64_atomic.
-    uint expected = grad_in_data[target];
-    uint desired = expected;
-    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
-        desired = floatBitsToUint(uintBitsToFloat(expected) + grad_val);
-        uint actual = atomicCompSwap(grad_in_data[target], expected, desired);
-        if (actual == expected) return;
-        expected = actual;
-    }
-    // Saturation hard-stop — extremely contended slot; force last attempt.
-    grad_in_data[target] = desired;
+    // Native float atomic add (the previous bounded CAS loop fell back to a
+    // non-atomic store that clobbered concurrent gradient contributions).
+    atomicAdd(grad_in_data[target], grad_val);
 }

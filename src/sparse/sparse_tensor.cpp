@@ -56,7 +56,7 @@ inline void sparse_accumulate(T& dst, const T& src) {
 }  // namespace
 
 auto SparseTensor::sparse_coo(const Tensor& indices, const Tensor& values,
-                               std::vector<int64_t> shape) -> SparseTensor {
+                               std::vector<int64_t> shape, bool validate) -> SparseTensor {
     if (indices.ndim() != 2) {
         throw std::runtime_error("sparse_coo: indices must be 2D (sparse_dim, nnz)");
     }
@@ -85,7 +85,7 @@ auto SparseTensor::sparse_coo(const Tensor& indices, const Tensor& values,
     // small relative to the values; stage it to host so a GPU-constructed
     // sparse tensor cannot smuggle an out-of-range row/col index into the
     // on-device scatter/spmm kernels (OOB device read/write).
-    if (nnz > 0) {
+    if (validate && nnz > 0) {
         Tensor idx_host = (indices.device().type == Device::Type::CPU)
             ? indices : indices.to(Device::cpu());
         idx_host = idx_host.contiguous();
@@ -115,7 +115,8 @@ auto SparseTensor::sparse_coo(const Tensor& indices, const Tensor& values,
 }
 
 auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indices,
-                               const Tensor& values, std::vector<int64_t> shape) -> SparseTensor {
+                               const Tensor& values, std::vector<int64_t> shape,
+                               bool validate) -> SparseTensor {
     if (shape.size() != 2) {
         throw std::runtime_error("sparse_csr: only 2D tensors supported");
     }
@@ -153,7 +154,9 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
     // including nnz==0. On GPU the index tensors are staged to host so a
     // GPU-constructed CSR cannot smuggle a malformed crow array or an
     // out-of-range column index into the on-device scatter/spmm kernels.
-    {
+    // Skipped (validate==false) for internal reconstructions whose components
+    // already passed this check at their original construction.
+    if (validate) {
         Tensor crow_host = (crow_indices.device().type == Device::Type::CPU)
             ? crow_indices : crow_indices.to(Device::cpu());
         crow_host = crow_host.contiguous();

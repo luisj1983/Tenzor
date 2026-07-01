@@ -53,6 +53,19 @@ auto flat_max_abs(const Tensor& a) -> double {
     return static_cast<double>(cpu.data<float>()[0]);
 }
 
+// L1 norm (sum of absolute values) of a 1D tensor → scalar double (host).
+auto flat_l1(const Tensor& a) -> double {
+    auto s = sum(abs(a));
+    auto cpu = (s.device() == Device::cpu()) ? s : s.to(Device::cpu());
+    if (cpu.dtype() == DType::Float64) {
+        return static_cast<double>(cpu.data<double>()[0]);
+    }
+    if (cpu.dtype() != DType::Float32) {
+        cpu = cpu.to(DType::Float32);
+    }
+    return static_cast<double>(cpu.data<float>()[0]);
+}
+
 // Scalar tensor on the same device/dtype as a reference.
 auto scalar_like(double value, const Tensor& ref) -> Tensor {
     return full({1}, value, ref.dtype(), ref.device());
@@ -444,13 +457,25 @@ auto LBFGS::step(std::function<Variable()> closure) -> Variable {
         Tensor new_flat_grad = flat_grad;
         double accepted_alpha = 0.0;
 
+        // Initial trial step. On the very first iteration the quasi-Newton
+        // scaling is not yet informative (no (s,y) history), so the reference
+        // L-BFGS (Nocedal-Wright / PyTorch) damps the first step to
+        //   min(1, 1/||g||_1) * lr
+        // to avoid an oversized initial jump when the gradient is large.
+        // Subsequent iterations trust the two-loop scaling and use lr directly.
+        double init_step = lr;
+        if (n_iter_ == 1) {
+            const double g_l1 = flat_l1(flat_grad);
+            init_step = std::min(1.0, 1.0 / std::max(g_l1, 1e-30)) * lr;
+        }
+
         if (line_search_ == LBFGSLineSearch::StrongWolfe) {
             // --- Bracketing (Nocedal-Wright Algorithm 3.5) ---
             double alpha_prev = 0.0;
             double phi_prev = loss_0;
             double gtd_prev = gtd_0;
 
-            double alpha_curr = lr;
+            double alpha_curr = init_step;
             double alpha_max = std::max(lr * 10.0, 10.0);
 
             // Each probe spends one func eval; bail out if budget exhausted.
@@ -645,7 +670,7 @@ auto LBFGS::step(std::function<Variable()> closure) -> Variable {
             }
         } else {
             // --- Armijo backtracking (unchanged semantics) ---
-            double t = lr;
+            double t = init_step;
             auto [p0, g0, fg0, lv0] = eval_at(t);
             new_loss = p0;
             new_flat_grad = fg0;

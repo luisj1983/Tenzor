@@ -363,10 +363,11 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     if (nbatch == 0) return result;
     auto handle = RocSOLVERHandlePool::get(stream);
 
-    // Allocate pivot array on device (via caching allocator)
+    // Allocate pivot array on device via RAII (ScratchBuffer) so a throwing
+    // ROCBLAS_CHECK_LINALG / getrf-arg check unwinds without leaking it.
     size_t ipiv_bytes = nbatch * n * sizeof(rocblas_int);
-    auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
+    ScratchBuffer d_ipiv_buf(ipiv_bytes);
+    auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
     DeviceInfo d_info;
 
     if (A.dtype() == DType::Float32) {
@@ -407,7 +408,7 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
+    // d_ipiv is freed by ScratchBuffer's destructor at scope exit.
     return result;
 }
 
@@ -5137,8 +5138,13 @@ __global__ void householder_ormqr_kernel(
     }
     __syncthreads();
 
+    // LAPACK ormqr reflector application order: ascending (H_1 ... H_k) when
+    // applying Q^T from the left or Q from the right, descending otherwise.
+    // The previous condition reduced to just `!transpose_q` (independent of
+    // `left`), so left-side application — the default — used the wrong order
+    // and produced incorrect results for left/no-transpose and left/transpose.
     int start, end_val, step;
-    if ((left && !transpose_q) || (!left && !transpose_q)) {
+    if ((left && transpose_q) || (!left && !transpose_q)) {
         start = 0; end_val = k_refl; step = 1;
     } else {
         start = k_refl - 1; end_val = -1; step = -1;

@@ -286,6 +286,31 @@ TEST_P(RMSNormTest, ForwardNormalization1D) {
     EXPECT_NEAR(output_data[3], 4.0f / rms_row0, 1e-4);
 }
 
+TEST_P(RMSNormTest, ForwardBFloat16) {
+    // BFloat16 previously fell through to an "unsupported dtype" throw on the
+    // CPU path; it must now normalize like the other half/float dtypes.
+    RMSNorm rn(4, 1e-6);
+    rn.to(device);
+
+    auto input_data = std::vector<float>{
+        1.0f, 2.0f, 3.0f, 4.0f,
+        5.0f, 6.0f, 7.0f, 8.0f
+    };
+    auto input_f32 = from_data(input_data.data(), {2, 4}, device);
+    auto input = Variable(input_f32.to(DType::BFloat16), false);
+
+    Variable output;
+    ASSERT_NO_THROW({ output = rn(input); });
+    EXPECT_EQ(output.tensor().dtype(), DType::BFloat16);
+
+    auto output_cpu = output.tensor().to(DType::Float32).cpu();
+    auto output_data = output_cpu.data<float>();
+    float rms_row0 = std::sqrt((1.0f + 4.0f + 9.0f + 16.0f) / 4.0f);
+    // BFloat16 has ~2-3 decimal digits of precision; use a loose tolerance.
+    EXPECT_NEAR(output_data[0], 1.0f / rms_row0, 5e-2);
+    EXPECT_NEAR(output_data[3], 4.0f / rms_row0, 5e-2);
+}
+
 TEST_P(RMSNormTest, ForwardNormalization2D) {
     // Test with 3D input [batch, seq, features]
     RMSNorm rn(4, 1e-6);

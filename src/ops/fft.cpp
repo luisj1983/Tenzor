@@ -7,6 +7,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/utils/widen_narrow.hpp"
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -333,7 +334,7 @@ auto stft(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_le
     if (n_fft <= 0) {
         throw std::runtime_error("stft: n_fft must be positive");
     }
-    if (hop_length <= 0) hop_length = n_fft / 4;
+    if (hop_length <= 0) hop_length = std::max<int64_t>(1, n_fft / 4);  // n_fft<4 would yield hop=0 -> div-by-zero in kernel
     if (win_length <= 0) win_length = n_fft;
     if (win_length > n_fft) {
         throw std::runtime_error("stft: win_length must be <= n_fft");
@@ -362,7 +363,7 @@ auto istft(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_l
     if (n_fft <= 0) {
         throw std::runtime_error("istft: n_fft must be positive");
     }
-    if (hop_length <= 0) hop_length = n_fft / 4;
+    if (hop_length <= 0) hop_length = std::max<int64_t>(1, n_fft / 4);  // n_fft<4 would yield hop=0 -> div-by-zero in kernel
     if (win_length <= 0) win_length = n_fft;
 
     auto inp = input.contiguous();

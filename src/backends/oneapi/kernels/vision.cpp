@@ -2032,12 +2032,13 @@ class InterpolateBicubicBackwardKernelFloat64;
 class InterpolateTrilinearBackwardKernelFloat32;
 class InterpolateTrilinearBackwardKernelFloat64;
 
-// Catmull-Rom cubic convolution weight (a=-0.5); matches CPU cubic_interp_coeff.
+// Cubic convolution weight (a=-0.75); matches CPU cubic_interp_coeff and
+// PyTorch upsample_bicubic2d.
 template <typename T>
 static inline T tz_cubic_w(T x) {
     T a = sycl::fabs(x);
-    if (a <= T(1)) return T(1.5) * a * a * a - T(2.5) * a * a + T(1);
-    if (a < T(2))  return T(-0.5) * a * a * a + T(2.5) * a * a - T(4) * a + T(2);
+    if (a <= T(1)) return T(1.25) * a * a * a - T(2.25) * a * a + T(1);
+    if (a < T(2))  return T(-0.75) * a * a * a + T(3.75) * a * a - T(6) * a + T(3);
     return T(0);
 }
 

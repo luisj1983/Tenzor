@@ -116,6 +116,25 @@ inline auto diag_embed_var(const Variable& v) -> Variable {
     return v_col * eye_v;
 }
 
+// Hermitian (conjugate) transpose of the trailing two dims. For real dtypes
+// `conj` is the identity, so this collapses to a plain transpose (and avoids
+// the extra copy) — behaviour is byte-for-byte unchanged for real inputs.
+// For complex dtypes this produces the adjoint Xᴴ the linalg gradients need.
+inline auto adjoint(const Tensor& X) -> Tensor {
+    const auto nd = X.ndim();
+    auto Xt = transpose(X, nd - 2, nd - 1);
+    return X.is_complex() ? conj(Xt) : Xt;
+}
+
+// Variable-level conjugate transpose for the higher-order (backward_with_variables)
+// linalg paths. Uses the autograd-aware tenzor::conj (ConjBackward, Wirtinger-correct)
+// so the graph is preserved; for real inputs it is a plain transpose.
+inline auto adjoint_var(const Variable& X) -> Variable {
+    const auto nd = X.tensor().ndim();
+    auto Xt = tenzor::transpose(X, nd - 2, nd - 1);
+    return X.tensor().is_complex() ? tenzor::conj(Xt) : Xt;
+}
+
 } // anonymous namespace
 
 // =========================================================================
@@ -135,8 +154,12 @@ auto DetBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& inv_A = saved_tensors_[1];        // A^{-1}, (..., N, N)
 
     auto ndim = inv_A.ndim();
-    auto inv_At = transpose(inv_A, ndim - 2, ndim - 1);
-    auto grad_det = mul(grad, det_val);
+    // grad_A = grad * conj(det) * A^{-H} (conjugate transpose for complex inputs).
+    // det is conjugated for complex A to match the autograd (PyTorch) convention,
+    // consistent with the A^{-H} adjoint below; for real A conj is a no-op.
+    auto inv_At = adjoint(inv_A);
+    auto det_c = det_val.is_complex() ? conj(det_val) : det_val;
+    auto grad_det = mul(grad, det_c);
 
     // Build a broadcast-compatible shape with two trailing singleton dims,
     // but only if the result carries batch dimensions; for a plain 2-D
@@ -168,10 +191,9 @@ auto InvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& grad = grad_outputs[0];       // dL/dY, (..., N, N)
     const auto& inv_A = saved_tensors_[0];    // Y = A^{-1}, (..., N, N)
 
-    auto ndim = inv_A.ndim();
-    auto inv_At = transpose(inv_A, ndim - 2, ndim - 1);
+    // grad_A = -Y^H @ dL/dY @ Y^H (conjugate transpose for complex inputs)
+    auto inv_At = adjoint(inv_A);
 
-    // -Y^T @ dL/dY @ Y^T
     auto temp = matmul(inv_At, grad);
     auto result = matmul(temp, inv_At);
     auto grad_A = neg(result);
@@ -193,15 +215,12 @@ auto SolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     const auto& A = saved_tensors_[0];     // A, (..., N, N)
     const auto& X = saved_tensors_[1];     // solution X, (..., N, K)
 
-    auto ndim = A.ndim();
-    auto At = transpose(A, ndim - 2, ndim - 1);
-
-    // dL/dB = solve(A^T, dL/dX)
+    // dL/dB = solve(A^H, dL/dX) (conjugate transpose for complex inputs)
+    auto At = adjoint(A);
     auto grad_B = tenzor::linalg::solve(At, grad);
 
-    // dL/dA = -grad_B @ X^T
-    auto x_ndim = X.ndim();
-    auto Xt = transpose(X, x_ndim - 2, x_ndim - 1);
+    // dL/dA = -grad_B @ X^H
+    auto Xt = adjoint(X);
     auto grad_A = neg(matmul(grad_B, Xt));
 
     return {grad_A, grad_B};
@@ -252,10 +271,12 @@ auto CholeskyBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
         return {grad_A};
     }
 
-    auto ndim = L.ndim();
-    auto Lt = transpose(L, ndim - 2, ndim - 1);
+    // Use Hermitian (conjugate) transposes so the formula generalizes to
+    // complex Hermitian-positive-definite A; for real A `adjoint` is a plain
+    // transpose and the result is unchanged.
+    auto Lt = adjoint(L);
 
-    // S = L^T @ grad_L
+    // S = L^H @ grad_L
     auto S = matmul(Lt, grad_L);
 
     // phi(S): tril(S) with diagonal halved
@@ -263,13 +284,13 @@ auto CholeskyBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
     auto S_strict_lower = tril(S, -1);
     auto phi_S = add(S_strict_lower, mul(sub(S_tril, S_strict_lower), 0.5));
 
-    // dL/dA = L^{-T} @ phi_S @ L^{-1}
+    // dL/dA = L^{-H} @ phi_S @ L^{-1}
     auto temp = tenzor::linalg::solve(Lt, phi_S);
-    auto grad_A = tenzor::linalg::solve(Lt, transpose(temp, ndim - 2, ndim - 1));
-    grad_A = transpose(grad_A, ndim - 2, ndim - 1);
+    auto grad_A = tenzor::linalg::solve(Lt, adjoint(temp));
+    grad_A = adjoint(grad_A);
 
-    // Symmetrize: dL/dA = 0.5 * (dL/dA + dL/dA^T)
-    auto grad_At = transpose(grad_A, ndim - 2, ndim - 1);
+    // Hermitian-symmetrize: dL/dA = 0.5 * (dL/dA + dL/dA^H)
+    auto grad_At = adjoint(grad_A);
     grad_A = mul(add(grad_A, grad_At), 0.5);
 
     return {grad_A};
@@ -398,7 +419,9 @@ auto SlogdetBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     const auto& grad_logabsdet = grad_outputs[1];
 
     auto ndim = inv_A.ndim();
-    auto inv_At = transpose(inv_A, ndim - 2, ndim - 1);
+    // grad_A = grad_logabsdet * A^{-H} (conjugate transpose for complex inputs;
+    // logabsdet's gradient picks up the adjoint of A^{-1}).
+    auto inv_At = adjoint(inv_A);
 
     // Reshape grad_logabsdet to broadcast with inv_At
     auto gd_shape = std::vector<int64_t>(grad_logabsdet.shape().begin(), grad_logabsdet.shape().end());
@@ -464,9 +487,11 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // SVD backward (matches the EighBackward / EigvalshBackward fix).
     auto S_diag = linalg::diag_embed(S, 0, -2, -1);  // (..., K, K)
 
-    // U^T and V (= Vh^T)
-    auto Ut = transpose(U, ndim - 2, ndim - 1);
-    auto V = transpose(Vh, Vh.ndim() - 2, Vh.ndim() - 1);
+    // U^H and V (= Vh^H). Conjugate transpose so complex SVD recovers the true
+    // U^H / V (plain transpose(Vh) would yield conj(V)); for real inputs this
+    // is an ordinary transpose.
+    auto Ut = adjoint(U);
+    auto V = adjoint(Vh);
 
     // Construct F matrix: F_{ij} = 1/(s_j^2 - s_i^2) for i != j
     // F is K x K
@@ -541,7 +566,7 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
     // Compute grad_Vh @ V
     auto gVhV = matmul(grad_Vh, V);  // (K, K)
-    auto gVhVt = transpose(gVhV, gVhV.ndim() - 2, gVhV.ndim() - 1);
+    auto gVhVt = adjoint(gVhV);
 
     // Symmetric part: F * (Ut @ grad_U - (grad_Vh @ V)^T) = F * (UtgU - gVhVt)
     auto skew = sub(UtgU, gVhVt);
@@ -564,7 +589,7 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     //   skew_U = U^T grad_U - (U^T grad_U)^T
     //   skew_V = V^T grad_V - (V^T grad_V)^T = (grad_Vh V)^T - (grad_Vh V) = gVhVt - gVhV
     // (Because Vh = V^T, grad_V = grad_Vh^T, so V^T grad_V = (grad_Vh V)^T.)
-    auto UtgU_t = transpose(UtgU, UtgU.ndim() - 2, UtgU.ndim() - 1);
+    auto UtgU_t = adjoint(UtgU);
     auto skew_U = sub(UtgU, UtgU_t);
     auto skew_V = sub(gVhVt, gVhV);
 
@@ -598,7 +623,7 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     if (N > K) {
         // (I - V V^T) is (N, N)
         auto eye_N = eye(N, std::nullopt, U.dtype(), U.device());
-        auto VVt = matmul(V, transpose(V, V.ndim() - 2, V.ndim() - 1));
+        auto VVt = matmul(V, adjoint(V));
         auto proj_N = sub(eye_N, VVt);
         auto extra = matmul(matmul(matmul(U, S_inv_diag), grad_Vh), proj_N);
         grad_A = add(grad_A, extra);
@@ -749,9 +774,11 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto denom = add(mul(diffs, diffs), eps_sq);           // diff^2 + eps^2
     auto F = div(diffs, denom);
 
-    auto Vt = transpose(V, V.ndim() - 2, V.ndim() - 1);
+    // V^H (conjugate transpose: V is unitary for complex Hermitian A; plain
+    // transpose for real symmetric A).
+    auto Vt = adjoint(V);
 
-    // V^T @ dL/dV
+    // V^H @ dL/dV
     auto VtgV = matmul(Vt, grad_V);  // (N, N)
 
     // F * (V^T @ dL/dV) + diag(dL/dW)
@@ -761,11 +788,11 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     // diagonal of a (..., N, N) tensor for any batch shape.
     auto middle = add(mul(F, VtgV), linalg::diag_embed(grad_W, 0, -2, -1));  // (..., N, N)
 
-    // dL/dA = V @ middle @ V^T
+    // dL/dA = V @ middle @ V^H
     auto grad_A = matmul(matmul(V, middle), Vt);
 
-    // Symmetrize the result (since A is symmetric)
-    auto grad_At = transpose(grad_A, grad_A.ndim() - 2, grad_A.ndim() - 1);
+    // Hermitian-symmetrize the result (A is Hermitian / symmetric)
+    auto grad_At = adjoint(grad_A);
     grad_A = mul(add(grad_A, grad_At), 0.5);
 
     return {grad_A};
@@ -860,11 +887,12 @@ auto DetBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         inv_A = Variable(saved_tensors_[1], false);
     }
 
-    auto ndim = inv_A.tensor().ndim();
-    auto inv_At = tenzor::transpose(inv_A, ndim - 2, ndim - 1);
+    auto inv_At = adjoint_var(inv_A);
 
-    // grad * det(A) — expand for broadcasting with matrix shape
-    auto grad_det = grad_outputs[0] * det_val;
+    // grad * conj(det) — conjugate det for complex A (matches the first-order
+    // DetBackward and the A^{-H} adjoint above); expand for broadcasting.
+    auto det_c = det_val.tensor().is_complex() ? tenzor::conj(det_val) : det_val;
+    auto grad_det = grad_outputs[0] * det_c;
     auto gd_shape = std::vector<int64_t>(grad_det.shape().begin(), grad_det.shape().end());
     gd_shape.push_back(1);
     gd_shape.push_back(1);
@@ -885,8 +913,7 @@ auto InvBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         inv_A = Variable(saved_tensors_[0], false);
     }
 
-    auto ndim = inv_A.tensor().ndim();
-    auto inv_At = tenzor::transpose(inv_A, ndim - 2, ndim - 1);
+    auto inv_At = adjoint_var(inv_A);
 
     auto temp = tenzor::matmul(inv_At, grad_outputs[0]);
     auto result = tenzor::matmul(temp, inv_At);
@@ -908,13 +935,11 @@ auto SolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
         X = Variable(saved_tensors_[1], false);
     }
 
-    auto ndim = A.tensor().ndim();
-    auto At = tenzor::transpose(A, ndim - 2, ndim - 1);
+    auto At = adjoint_var(A);
 
     auto grad_B = tenzor::solve(At, grad_outputs[0]);
 
-    auto x_ndim = X.tensor().ndim();
-    auto Xt = tenzor::transpose(X, x_ndim - 2, x_ndim - 1);
+    auto Xt = adjoint_var(X);
     auto grad_A = tenzor::neg(tenzor::matmul(grad_B, Xt));
 
     return {grad_A, grad_B};
@@ -976,7 +1001,7 @@ auto SlogdetBackward::backward_with_variables(std::vector<Variable> grad_outputs
     }
 
     auto ndim = inv_A.tensor().ndim();
-    auto inv_At = tenzor::transpose(inv_A, ndim - 2, ndim - 1);
+    auto inv_At = adjoint_var(inv_A);
 
     auto gd_shape = std::vector<int64_t>(grad_outputs[1].shape().begin(), grad_outputs[1].shape().end());
     while (gd_shape.size() < static_cast<size_t>(ndim)) {

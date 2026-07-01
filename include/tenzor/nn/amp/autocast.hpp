@@ -53,11 +53,19 @@ public:
     /// Check if op is stability-critical
     auto is_stability_critical(const std::string& op_name) const -> bool;
 
+    /// Lock-free fast path: true iff any custom override has been registered.
+    /// Lets the dispatch hot path skip the per-op string construction and the
+    /// two locked set lookups when no policy override exists (the common case).
+    auto has_overrides() const noexcept -> bool {
+        return override_count_.load(std::memory_order_acquire) > 0;
+    }
+
 private:
     AutocastPolicyRegistry();
 
     std::unordered_set<std::string> compute_heavy_ops_;
     std::unordered_set<std::string> stability_critical_ops_;
+    std::atomic<size_t> override_count_{0};
     mutable std::shared_mutex mutex_;
 };
 

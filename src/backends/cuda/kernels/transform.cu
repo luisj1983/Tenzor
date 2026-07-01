@@ -316,11 +316,19 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
     CUDAKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*CUDAKernelAccess::get_impl(input));
 
     if (dim >= 0) {
-        // Squeeze specific dimension
-        auto& r_shape = result.mutable_shape();
-        auto& r_strides = result.mutable_strides();
-        r_shape.erase(r_shape.begin() + dim);
-        r_strides.erase(r_strides.begin() + dim);
+        // Squeeze specific dimension. Validate the range: an out-of-range dim
+        // (e.g. a stale/garbage AttrKey::Dim) would erase past the end of the
+        // shape/stride vectors (UB). PyTorch also treats squeezing a dim whose
+        // size != 1 as a no-op rather than removing it.
+        if (dim >= input.ndim()) {
+            throw std::out_of_range("squeeze: dimension out of range");
+        }
+        if (input.shape()[dim] == 1) {
+            auto& r_shape = result.mutable_shape();
+            auto& r_strides = result.mutable_strides();
+            r_shape.erase(r_shape.begin() + dim);
+            r_strides.erase(r_strides.begin() + dim);
+        }
     } else {
         // Squeeze all dimensions with size 1
         std::vector<int64_t> new_shape;

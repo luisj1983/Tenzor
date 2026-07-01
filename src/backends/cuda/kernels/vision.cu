@@ -885,13 +885,14 @@ __global__ void interpolate_bilinear_backward_kernel(
     }
 }
 
-// Catmull-Rom cubic convolution kernel weight (a = -0.5), matches CPU cubic_interp_coeff.
-// Templated on the compute type so Float64 backward preserves FP64 precision.
+// Cubic convolution kernel weight (a = -0.75), matches CPU cubic_interp_coeff
+// and PyTorch upsample_bicubic2d. Templated on the compute type so Float64
+// backward preserves FP64 precision.
 template <typename Compute>
 __device__ __forceinline__ Compute tz_bicubic_coeff(Compute x) {
     Compute a = x < Compute(0) ? -x : x;
-    if (a <= Compute(1)) return Compute(1.5) * a * a * a - Compute(2.5) * a * a + Compute(1);
-    if (a < Compute(2))  return Compute(-0.5) * a * a * a + Compute(2.5) * a * a - Compute(4) * a + Compute(2);
+    if (a <= Compute(1)) return Compute(1.25) * a * a * a - Compute(2.25) * a * a + Compute(1);
+    if (a < Compute(2))  return Compute(-0.75) * a * a * a + Compute(3.75) * a * a - Compute(6) * a + Compute(3);
     return Compute(0);
 }
 

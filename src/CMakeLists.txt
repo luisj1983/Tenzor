@@ -347,8 +347,23 @@ endif()
 target_link_libraries(tenzor_core PUBLIC
     Threads::Threads
     ${CMAKE_DL_LIBS}
+)
+# spdlog is an implementation detail (used only behind utils/log.cpp), so link
+# it PRIVATE. Linking it PUBLIC leaked spdlog::spdlog into the exported
+# TenzorTargets while the installed TenzorConfig never find_dependency(spdlog)'d
+# it (and the FetchContent'd spdlog isn't installed), so any downstream C++
+# consumer's find_package(Tenzor) failed to configure.
+target_link_libraries(tenzor_core PRIVATE
     spdlog::spdlog  # D.1: structured logging across distributed / io / serving
 )
+# fmt is propagated PUBLIC because the public header utils/logging.hpp inlines
+# ::fmt::format (consumers of the TENZOR_LOG* macros need to link fmt). Guarded:
+# with FetchContent's bundled header-only fmt there is no fmt::fmt target and the
+# inline format needs no link. find_dependency(fmt) is emitted into TenzorConfig
+# (fmt ships a CMake package config, so downstream find_package(Tenzor) resolves).
+if(TARGET fmt::fmt)
+    target_link_libraries(tenzor_core PUBLIC fmt::fmt)
+endif()
 
 # ============================================================================
 # ONNX protobuf bindings
@@ -361,7 +376,14 @@ target_link_libraries(tenzor_core PUBLIC
 # stub so the core library still builds.
 find_package(Protobuf QUIET)
 if(Protobuf_FOUND)
-    find_program(TENZOR_PROTOC protoc REQUIRED)
+    # Prefer the version-matched protobuf::protoc imported target over a
+    # free-floating `protoc` on PATH, which can be a different protobuf version
+    # than the one we link and emit incompatible generated headers.
+    if(TARGET protobuf::protoc)
+        set(TENZOR_PROTOC protobuf::protoc)
+    else()
+        find_program(TENZOR_PROTOC protoc REQUIRED)
+    endif()
 
     set(ONNX_PROTO_SRC_DIR ${PROJECT_SOURCE_DIR}/proto)
     set(ONNX_PROTO_GEN_DIR ${PROJECT_BINARY_DIR}/generated/onnx_proto)
@@ -427,8 +449,13 @@ if(TENZOR_BUILD_SERVING)
     # gRPC (system package)
     find_package(gRPC CONFIG QUIET)
     if(gRPC_FOUND)
-        # Generate protobuf/gRPC stubs from proto file
-        find_program(PROTOC protoc REQUIRED)
+        # Generate protobuf/gRPC stubs from proto file. Prefer the
+        # version-matched protobuf::protoc target (see the ONNX block above).
+        if(TARGET protobuf::protoc)
+            set(PROTOC protobuf::protoc)
+        else()
+            find_program(PROTOC protoc REQUIRED)
+        endif()
         find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
 
         set(PROTO_SRC_DIR ${PROJECT_SOURCE_DIR}/proto)

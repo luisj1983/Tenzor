@@ -2524,6 +2524,10 @@ Returns:
              }, "Return shape as tuple")
         .def("size", [](const tenzor::Tensor& t, int64_t dim) -> int64_t {
              if (dim < 0) dim += t.ndim();
+             if (dim < 0 || dim >= t.ndim()) {
+                 throw py::index_error("Dimension out of range (expected to be in range of [" +
+                     std::to_string(-t.ndim()) + ", " + std::to_string(t.ndim() - 1) + "])");
+             }
              return t.shape()[dim];
              }, py::arg("dim"), "Return size of dimension")
         .def_property_readonly("strides", [](const tenzor::Tensor& t) -> py::tuple {
@@ -6089,8 +6093,17 @@ Returns:
                         else if (start < 0) start += dim_size;
                         if (stop == std::numeric_limits<int64_t>::max()) stop = (step > 0) ? dim_size : -1;
                         else if (stop < 0) stop += dim_size;
-                        start = std::clamp(start, int64_t(0), dim_size);
-                        stop  = std::clamp(stop,  int64_t(0), dim_size);
+                        // Step-aware clamp (mirrors the Tensor path): a negative step
+                        // walks toward index 0, so start/stop clamp to different bounds
+                        // than the positive-step case — the unconditional [0,dim_size]
+                        // clamp dropped the first element of negative-step slices.
+                        if (step > 0) {
+                            start = std::clamp(start, int64_t(0), dim_size);
+                            stop  = std::clamp(stop,  int64_t(0), dim_size);
+                        } else {
+                            start = std::clamp(start, int64_t(0), dim_size - 1);
+                            stop  = std::clamp(stop,  int64_t(-1), dim_size - 1);
+                        }
                         result = ::tenzor::slice(result, static_cast<int64_t>(dim_cursor), start, stop, step);
                         dim_cursor++;
                         remaining_consuming--;  // NN.22

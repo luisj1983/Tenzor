@@ -58,6 +58,13 @@ OffloadEngine::OffloadEngine(const Config& config)
         MemoryManager::Config memory_config;
         memory_config.cpu_memory_limit = config_.cpu_memory_limit;
         memory_config.gpu_memory_limit = config_.gpu_memory_limit;
+        // MemoryManager's auto-offload uses the PER-DEVICE limits, not the
+        // backward-compat gpu_memory_limit; propagate the configured GPU limit to
+        // them so it isn't silently discarded in favor of the 8 GB defaults.
+        memory_config.cuda_memory_limit = config_.gpu_memory_limit;
+        memory_config.rocm_memory_limit = config_.gpu_memory_limit;
+        memory_config.oneapi_memory_limit = config_.gpu_memory_limit;
+        memory_config.vulkan_memory_limit = config_.gpu_memory_limit;
         memory_config.eviction_threshold = config_.memory_fraction;
         memory_config.track_statistics = true;
         memory_manager_ = std::make_unique<MemoryManager>(memory_config);

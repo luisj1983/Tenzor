@@ -84,6 +84,57 @@ private:
     std::vector<int64_t> input_shape_;
 };
 
+// Generic adjoint of `interpolate` for any mode the InterpolateBackward kernel
+// supports (nearest, nearest-exact, bilinear, bicubic, linear, trilinear).
+// Mirrors nn::UpsampleBackward (src/nn/layers/upsample.cpp): the adjoint of
+// interpolation is a scatter-add of each output pixel's gradient back onto its
+// source pixels via OpId::InterpolateBackward — NOT a re-interpolation of the
+// gradient. Attrs match the kernel registry: InputShape (spatial CSV), Mode,
+// AlignCorners.
+class InterpolateBackwardFn : public Function {
+public:
+    InterpolateBackwardFn(std::vector<int64_t> input_spatial_size,
+                          std::string mode, bool align_corners)
+        : input_spatial_size_(std::move(input_spatial_size)),
+          mode_(std::move(mode)), align_corners_(align_corners) {}
+
+    auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
+        throw std::runtime_error("InterpolateBackwardFn::forward should not be called");
+    }
+
+    auto make_backward_attrs() const -> OpAttributes {
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputShape, shape_to_csv(input_spatial_size_));
+        attrs.set(AttrKey::Mode, mode_);
+        attrs.set(AttrKey::AlignCorners, align_corners_);
+        return attrs;
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        OpAttributes attrs = make_backward_attrs();
+        std::vector<Tensor> dispatch_inputs = {grad_outputs[0]};
+        auto results = tenzor::dispatch(OpId::InterpolateBackward, dispatch_inputs, attrs);
+        return {results[0]};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override {
+        OpAttributes attrs = make_backward_attrs();
+        std::vector<Tensor> dispatch_inputs = {grad_outputs[0].tensor()};
+        auto results = tenzor::dispatch(OpId::InterpolateBackward, dispatch_inputs, attrs);
+        return {Variable(results[0], false)};
+    }
+
+    // Interpolation is linear (fixed weights); second derivative is zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
+private:
+    std::vector<int64_t> input_spatial_size_;
+    std::string mode_;
+    bool align_corners_;
+};
+
 inline void wire_pool_grad_fn(Variable& result, const Variable& input,
                               std::shared_ptr<Function> backward_fn) {
     result.set_grad_fn(backward_fn);
@@ -373,6 +424,15 @@ auto conv_transpose2d(const Variable& input, const Variable& weight,
     attrs.set(AttrKey::StrideW, stride.second);
     attrs.set(AttrKey::PaddingH, padding.first);
     attrs.set(AttrKey::PaddingW, padding.second);
+    attrs.set(AttrKey::DilationH, dilation.first);
+    attrs.set(AttrKey::DilationW, dilation.second);
+    // The ConvTranspose2d forward kernel reads output_padding (base + H/W); without
+    // these the forward would use output_padding=0 while the backward below is built
+    // with the requested output_padding, giving a wrong output size and mismatched
+    // gradient geometry.
+    attrs.set(AttrKey::OutputPadding, output_padding.first);
+    attrs.set(AttrKey::OutputPaddingH, output_padding.first);
+    attrs.set(AttrKey::OutputPaddingW, output_padding.second);
     attrs.set(AttrKey::Groups, groups);
 
     auto result = dispatch_to_device(OpId::ConvTranspose2dForward,
@@ -432,6 +492,7 @@ auto conv_transpose3d(const Variable& input, const Variable& weight,
     auto [sd, sh, sw] = stride;
     auto [pd, ph, pw] = padding;
     auto [dd, dh, dw] = dilation;
+    auto [opd, oph, opw] = output_padding;
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::Stride, sd);
@@ -443,6 +504,13 @@ auto conv_transpose3d(const Variable& input, const Variable& weight,
     attrs.set(AttrKey::PaddingW, pw);
     attrs.set(AttrKey::DilationH, dh);
     attrs.set(AttrKey::DilationW, dw);
+    // Forward kernel reads output_padding (base + D/H/W); without these the forward
+    // uses output_padding=0 while the backward is built with the requested value,
+    // yielding a wrong output shape and mismatched gradient geometry.
+    attrs.set(AttrKey::OutputPadding, opd);
+    attrs.set(AttrKey::OutputPaddingD, opd);
+    attrs.set(AttrKey::OutputPaddingH, oph);
+    attrs.set(AttrKey::OutputPaddingW, opw);
     attrs.set(AttrKey::Groups, groups);
 
     auto result = dispatch_to_device(OpId::ConvTranspose3dForward,
@@ -461,7 +529,6 @@ auto conv_transpose3d(const Variable& input, const Variable& weight,
                 "F::conv_transpose3d autograd currently requires isotropic "
                 "stride/padding/dilation (got asymmetric values).");
         }
-        auto [opd, oph, opw] = output_padding;
         std::vector<Tensor> tensors_to_save = {input.tensor(), weight.tensor()};
         if (bias.has_value()) tensors_to_save.push_back(bias->tensor());
         auto grad_fn = internal::make_conv_transpose3d_backward(
@@ -1134,11 +1201,41 @@ auto interpolate(const Variable& input,
         return result_var;
     }
 
-    // Non-bilinear modes (nearest / bicubic / trilinear / area) — no
-    // backward yet. Returning a detached Variable makes the missing-
-    // gradient semantics explicit. Callers that need autograd through a
-    // non-bilinear interpolate should use `nn::Upsample` (bilinear) or
-    // wait for the per-mode backwards to land.
+    // Non-bilinear modes: wire backward through OpId::InterpolateBackward for
+    // every mode the kernel supports (nearest / nearest-exact / bicubic for
+    // this 4D, 2-spatial-dim path; bilinear is handled above by the dedicated
+    // UpsampleBilinearBackward). This mirrors nn::Upsample, whose generic
+    // UpsampleBackward dispatches the same OpId::InterpolateBackward. 'area' has
+    // no backward kernel (its forward has no 'area' path either), so it still
+    // falls through to a detached Variable rather than silently scattering a
+    // mismatched adjoint.
+    const bool mode_has_backward =
+        (mode == "nearest" || mode == "nearest-exact" || mode == "nearest_exact" ||
+         mode == "bicubic");
+    if (input.requires_grad() && is_grad_enabled() && mode_has_backward) {
+        const auto in_shape = input.tensor().shape();
+        if (in_shape.size() != 4) {
+            throw std::runtime_error(
+                "interpolate(" + mode + "): backward requires 4D input (N,C,H,W); "
+                "got " + std::to_string(in_shape.size()) + "D");
+        }
+        std::vector<int64_t> input_spatial_size{in_shape[2], in_shape[3]};
+        auto grad_fn = std::make_shared<InterpolateBackwardFn>(
+            input_spatial_size, mode, align_corners);
+        grad_fn->save_for_backward({input.tensor()});
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(input.grad_fn());
+        grad_fn->set_next_functions(next_funcs);
+        std::vector<Variable> input_vars{input};
+        grad_fn->set_input_variables(input_vars);
+
+        Variable result_var(output, /*requires_grad=*/true);
+        result_var.set_grad_fn(grad_fn);
+        return result_var;
+    }
+
+    // Remaining modes (e.g. 'area') have no backward kernel. Returning a
+    // detached Variable makes the missing-gradient semantics explicit.
     return Variable(output, false);
 }
 
@@ -2061,6 +2158,14 @@ auto multi_head_attention_forward(
         throw std::invalid_argument(
             "F::multi_head_attention_forward: in_proj_bias must be [3*embed_dim]");
     }
+
+    // INFERENCE-ONLY / NON-DIFFERENTIABLE (see functional.hpp). All math below
+    // uses the raw-Tensor op overloads (tenzor::matmul/slice/transpose/...),
+    // and Q/K/V are wrapped as Variable(.., /*requires_grad=*/false) before
+    // SDPA. Because the public signature is Tensor-in/Tensor-out, there is no
+    // grad_fn to propagate and no gradient reaches the projection weights.
+    // Training callers must route through the MultiheadAttention nn module or
+    // the Variable-based scaled_dot_product_attention instead.
 
     // 1. Input projection: project Q, K, V using combined weight
     //    in_proj_weight is [3*E, E], in_proj_bias is [3*E]

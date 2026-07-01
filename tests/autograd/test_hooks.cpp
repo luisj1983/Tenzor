@@ -123,6 +123,36 @@ TEST_P(HooksTest, HookOnNonLeaf) {
     EXPECT_TRUE(hook_called);
 }
 
+TEST_P(HooksTest, NonLeafHookPropagatesDownstream) {
+    // A hook on a non-leaf must transform the gradient that flows THROUGH it to
+    // upstream leaves (PyTorch semantics) — not merely fire. Here c = a * 2, so
+    // d c/d a = 2. A hook on c that scales the incoming gradient by 10 must make
+    // a.grad = 2 * (10 * 1) = 20. The old engine applied the hook only to c's
+    // own (discarded) accumulation and propagated the un-hooked gradient,
+    // leaving a.grad = 2.
+    auto a = Variable(ones({2, 2}, DType::Float32, device), true);
+    auto two = Variable(full({2, 2}, 2.0f, DType::Float32, device), false);
+    auto c = a * two;  // non-leaf intermediate, dc/da = 2
+
+    c.register_hook([&](const Tensor& grad) {
+        auto ten = full({2, 2}, 10.0f, grad.dtype(), grad.device());
+        return mul(grad, ten);
+    });
+
+    // c must be an INPUT to a downstream op so the hook fires on the gradient
+    // flowing through it (dd/dc = 1), which then reaches the leaf a.
+    auto zero = Variable(zeros({2, 2}, DType::Float32, device), false);
+    auto d = c + zero;
+    d.backward(ones({2, 2}, DType::Float32, device));
+
+    ASSERT_TRUE(a.has_grad());
+    auto grad = a.grad().value().to(Device::cpu());
+    auto* gp = grad.data<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(gp[i], 20.0f);
+    }
+}
+
 // ============================================================================
 // Module forward hooks
 // ============================================================================

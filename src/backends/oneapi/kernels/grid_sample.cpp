@@ -576,40 +576,38 @@ auto affine_grid_backward_kernel(const Tensor& grad_grid,
     return gt_c.to(gr_dt);
 }
 
-auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
-                        bool align_corners, sycl::queue& queue) -> Tensor {
-    int N = static_cast<int>(size[0]);
-    int H = static_cast<int>(size[2]);
-    int W = static_cast<int>(size[3]);
+template<typename T> class AffineGridKernelT;
 
-    Tensor theta_f32 = theta.to(DType::Float32);
-    Tensor grid(std::vector<int64_t>{N, H, W, 2}, DType::Float32, theta.device());
-
+template<typename T>
+static Tensor run_affine_grid(const Tensor& theta_typed, int N, int H, int W,
+                              bool align_corners, sycl::queue& queue) {
+    Tensor theta_c = theta_typed.is_contiguous() ? theta_typed : theta_typed.contiguous();
+    Tensor grid(std::vector<int64_t>{N, H, W, 2}, theta_typed.dtype(), theta_typed.device());
     int total = N * H * W;
     if (total == 0) return grid;
 
-    const float* theta_ptr = get_data_ptr<const float>(theta_f32);
-    float* grid_ptr = get_data_ptr<float>(grid);
+    const T* theta_ptr = get_data_ptr<const T>(theta_c);
+    T* grid_ptr = get_data_ptr<T>(grid);
 
-    queue.parallel_for<AffineGridKernel>(sycl::range<1>(total),
+    queue.parallel_for<AffineGridKernelT<T>>(sycl::range<1>(total),
         [=](sycl::id<1> idx_) {
             int idx = static_cast<int>(idx_);
             int w = idx % W;
             int h = (idx / W) % H;
             int n = idx / (H * W);
 
-            float x_norm, y_norm;
+            T x_norm, y_norm;
             if (align_corners) {
-                x_norm = (W > 1) ? (2.0f * static_cast<float>(w) / static_cast<float>(W - 1) - 1.0f) : 0.0f;
-                y_norm = (H > 1) ? (2.0f * static_cast<float>(h) / static_cast<float>(H - 1) - 1.0f) : 0.0f;
+                x_norm = (W > 1) ? (T(2) * static_cast<T>(w) / static_cast<T>(W - 1) - T(1)) : T(0);
+                y_norm = (H > 1) ? (T(2) * static_cast<T>(h) / static_cast<T>(H - 1) - T(1)) : T(0);
             } else {
-                x_norm = (2.0f * static_cast<float>(w) + 1.0f) / static_cast<float>(W) - 1.0f;
-                y_norm = (2.0f * static_cast<float>(h) + 1.0f) / static_cast<float>(H) - 1.0f;
+                x_norm = (T(2) * static_cast<T>(w) + T(1)) / static_cast<T>(W) - T(1);
+                y_norm = (T(2) * static_cast<T>(h) + T(1)) / static_cast<T>(H) - T(1);
             }
 
-            const float* t = theta_ptr + n * 6;
-            float x_out = t[0] * x_norm + t[1] * y_norm + t[2];
-            float y_out = t[3] * x_norm + t[4] * y_norm + t[5];
+            const T* t = theta_ptr + n * 6;
+            T x_out = t[0] * x_norm + t[1] * y_norm + t[2];
+            T y_out = t[3] * x_norm + t[4] * y_norm + t[5];
 
             int out_idx = ((n * H + h) * W + w) * 2;
             grid_ptr[out_idx] = x_out;
@@ -617,6 +615,21 @@ auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
         });
     queue.wait_and_throw();
     return grid;
+}
+
+auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
+                        bool align_corners, sycl::queue& queue) -> Tensor {
+    int N = static_cast<int>(size[0]);
+    int H = static_cast<int>(size[2]);
+    int W = static_cast<int>(size[3]);
+
+    // Compute in double for a Float64 theta so the grid keeps full precision
+    // (matching CPU/CUDA); Float32/Float16/BFloat16 compute in float as before.
+    if (theta.dtype() == DType::Float64) {
+        return run_affine_grid<double>(theta, N, H, W, align_corners, queue);
+    }
+    Tensor theta_f32 = (theta.dtype() == DType::Float32) ? theta : theta.to(DType::Float32);
+    return run_affine_grid<float>(theta_f32, N, H, W, align_corners, queue);
 }
 
 }  // namespace oneapi

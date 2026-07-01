@@ -27,6 +27,13 @@ if(@TENZOR_BUILD_MODEL_HUB@)
     find_dependency(OpenSSL)
 endif()
 
+# fmt is linked PUBLIC when a separate (compiled) fmt package was used, because
+# the public header tenzor/utils/logging.hpp inlines ::fmt::format. (spdlog stays
+# a private implementation detail and is intentionally NOT required here.)
+if(@TENZOR_FMT_PUBLIC@)
+    find_dependency(fmt)
+endif()
+
 # Component checking: allow find_package(Tenzor COMPONENTS CUDA Vulkan ...)
 foreach(_comp ${Tenzor_FIND_COMPONENTS})
     if(NOT Tenzor_${_comp}_FOUND)

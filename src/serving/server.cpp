@@ -103,6 +103,14 @@ auto DynamicBatcher::submit(Tensor input) -> std::future<Tensor> {
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (!running_.load(std::memory_order_acquire)) {
+            // Batcher already stopped (e.g. concurrent model unload): fail the
+            // request now instead of enqueueing it where the exited batch loop
+            // would never process it, leaving future.get() to block forever.
+            req->result.set_exception(std::make_exception_ptr(std::runtime_error(
+                "inference batcher is not running (model unloaded)")));
+            return future;
+        }
         queue_.push(std::move(req));
     }
     queue_cv_.notify_one();
@@ -121,10 +129,26 @@ auto DynamicBatcher::stop() -> void {
     if (batch_thread_.joinable()) {
         batch_thread_.join();
     }
+    // Defensively fail any request still queued: the batch loop has exited and
+    // will never process it, so future.get() on it would block forever.
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    while (!queue_.empty()) {
+        auto req = std::move(queue_.front());
+        queue_.pop();
+        try {
+            req->result.set_exception(std::make_exception_ptr(std::runtime_error(
+                "inference batcher stopped before request was processed")));
+        } catch (...) {
+            // set_exception throws only if the promise was already satisfied.
+        }
+    }
 }
 
 auto DynamicBatcher::batch_loop() -> void {
-    while (running_.load(std::memory_order_acquire)) {
+    // Loop until stopped AND drained (see the inner break): a plain
+    // `while (running_)` exited with requests still queued (> max_batch_size, or
+    // submitted right before stop), permanently hanging their futures.
+    while (true) {
         std::vector<std::shared_ptr<InferRequest>> batch;
 
         {
@@ -459,6 +483,39 @@ auto InferenceServer::start() -> void {
 
 auto InferenceServer::stop() -> void {
     running_.store(false, std::memory_order_release);
+#ifdef TENZOR_HAS_HTTPLIB
+    // Unblock svr.listen() in serve_loop(). Clearing running_ alone is not
+    // enough: httplib::Server::listen() does not poll it, so the serve thread
+    // would block forever and join() below would hang. We must call the
+    // server's own stop().
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lk(server_mutex_);
+            if (http_server_ == nullptr) {
+                // serve_loop() either has not registered the handle yet (it
+                // will observe running_==false under this same mutex and skip
+                // listen()), or has already returned. Nothing to stop.
+                break;
+            }
+            if (http_server_->is_running()) {
+                // listen() has entered its accept loop, so stop() closes the
+                // listening socket and unblocks it. Safe under the mutex: the
+                // local svr in serve_loop() cannot be destroyed until listen()
+                // returns and serve_loop() re-acquires this mutex to clear the
+                // handle, which it cannot do while we hold it here.
+                http_server_->stop();
+                break;
+            }
+        }
+        // Race: the handle is registered but listen() has not yet reached its
+        // accept loop, so stop() would be a no-op and listen() would then block
+        // forever. Release the mutex (so serve_loop() can make progress) and
+        // retry. Bounded: listen() sets is_running() right after we registered
+        // the handle, or returns (e.g. a bind failure) and clears the handle,
+        // which the null check above then catches.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+#endif
     if (server_thread_.joinable()) {
         server_thread_.join();
     }
@@ -536,8 +593,19 @@ auto InferenceServer::serve_loop() -> void {
         int64_t expected = 1;
         for (const auto& d : shape_j) {
             auto v = d.get<int64_t>();
+            // Reject negative dimensions outright: the previous code mapped them
+            // to 0, which let a crafted shape (e.g. [-1]) pass the length check
+            // and then allocate a tensor with a negative dim.
+            if (v < 0) {
+                throw std::runtime_error("shape dimensions must be non-negative");
+            }
             shape.push_back(v);
-            expected *= (v < 0 ? 0 : v);
+            // Guard the element-count product against int64 overflow; a wrapped
+            // (small/negative) product would otherwise pass the length check and
+            // under-allocate, leading to OOM/DoS or an out-of-bounds write.
+            if (__builtin_mul_overflow(expected, v, &expected)) {
+                throw std::runtime_error("shape product overflows int64");
+            }
         }
         if (static_cast<int64_t>(data_j.size()) != expected) {
             throw std::runtime_error("data length does not match shape product");
@@ -683,11 +751,22 @@ auto InferenceServer::serve_loop() -> void {
     };
 
     // ---------- Authentication middleware ----------
-    if (config_.enable_auth && !config_.api_keys.empty()) {
+    // Gate on enable_auth alone and fail CLOSED: if auth is enabled but no API
+    // keys are configured, deny every request rather than serving the whole
+    // server unauthenticated (the previous `&& !api_keys.empty()` condition
+    // silently disabled auth on misconfiguration).
+    if (config_.enable_auth) {
         svr.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) -> httplib::Server::HandlerResponse {
             // Skip auth for health and metrics endpoints
             if (req.path == "/health" || req.path == "/metrics") {
                 return httplib::Server::HandlerResponse::Unhandled;
+            }
+            if (config_.api_keys.empty()) {
+                res.status = 503;
+                res.set_content(
+                    json{{"error", "authentication is enabled but no API keys are configured"}}.dump(),
+                    "application/json");
+                return httplib::Server::HandlerResponse::Handled;
             }
             auto it = req.headers.find(config_.auth_header);
             if (it == req.headers.end()) {
@@ -922,6 +1001,15 @@ auto InferenceServer::serve_loop() -> void {
         }
 
         auto name = req.matches[1].str();
+        // A/B routing: if `name` names a configured experiment, route this
+        // request to the selected variant (model_a / model_b) per the
+        // experiment's traffic split, and count it against the experiment.
+        // select_model() returns "" when no experiment matches, so direct model
+        // requests are unaffected. (Previously experiments were configurable via
+        // /v1/experiments but never consulted on the predict path.)
+        if (std::string routed = traffic_router_.select_model(name); !routed.empty()) {
+            name = std::move(routed);
+        }
         auto model = repository_.get_model(name);
         if (!model || model->state.load() != ModelState::READY) {
             json_error(res, 404, "model not ready");
@@ -1054,7 +1142,25 @@ auto InferenceServer::serve_loop() -> void {
     });
 
     std::cout << "[TenzorServing] HTTP server listening on port " << config_.http_port << std::endl;
+    // Publish the server handle so stop() can unblock listen(). Re-check
+    // running_ under the same mutex stop() uses: if stop() ran before we got
+    // here, running_ is already false and we must NOT enter listen() (nothing
+    // would ever unblock it). Once the handle is registered, any concurrent
+    // stop() observes it and calls svr.stop().
+    {
+        std::lock_guard<std::mutex> lk(server_mutex_);
+        if (!running_.load(std::memory_order_acquire)) {
+            return;
+        }
+        http_server_ = &svr;
+    }
     svr.listen("0.0.0.0", config_.http_port);
+    // listen() returned (stopped or bind failure). Clear the handle before svr
+    // goes out of scope so stop() never dereferences a dangling pointer.
+    {
+        std::lock_guard<std::mutex> lk(server_mutex_);
+        http_server_ = nullptr;
+    }
 #else
     // No HTTP transport compiled in (TENZOR_BUILD_SERVING=OFF). serve_loop runs
     // on the background server_thread_, so throwing here is fatal: an uncaught

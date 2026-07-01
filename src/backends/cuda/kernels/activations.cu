@@ -4498,7 +4498,10 @@ __global__ void nanmean_along_dim_kernel(
                 count++;
             }
         }
-        output[out_idx] = (count > 0) ? T(sum / Acc(count)) : T(Acc(0));
+        // An all-NaN slice (count == 0) yields NaN, matching PyTorch nanmean
+        // (mean of an empty set), not 0.
+        output[out_idx] = (count > 0) ? T(sum / Acc(count))
+                                      : T(static_cast<Acc>(NAN));
     }
 }
 
@@ -4586,27 +4589,30 @@ Tensor nanmean_dispatch(std::span<const Tensor> inputs, const OpAttributes& attr
     return (orig_dtype != input.dtype()) ? result.to(orig_dtype) : result;
 }
 
-// Aminmax: compute min and max in a single pass
-__global__ void aminmax_all_f32(const float* input, float* out_min, float* out_max, int64_t n) {
-    __shared__ float smin[256];
-    __shared__ float smax[256];
-    float local_min = FLT_MAX;
-    float local_max = -FLT_MAX;
+// Aminmax: compute min and max in a single pass. NaN propagates (matching
+// PyTorch amax/amin): once a NaN is seen it sticks, since `v < NaN`/`v > NaN`
+// are false but the explicit isnan() check forces the NaN through.
+template<typename T>
+__global__ void aminmax_all(const T* input, T* out_min, T* out_max, int64_t n) {
+    __shared__ T smin[256];
+    __shared__ T smax[256];
+    T local_min = static_cast<T>(INFINITY);
+    T local_max = static_cast<T>(-INFINITY);
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float v = input[idx];
-        if (v < local_min) local_min = v;
-        if (v > local_max) local_max = v;
+        T v = input[idx];
+        local_min = (isnan(v) || v < local_min) ? v : local_min;
+        local_max = (isnan(v) || v > local_max) ? v : local_max;
     }
     smin[threadIdx.x] = local_min;
     smax[threadIdx.x] = local_max;
     __syncthreads();
-    // Block-level tree reduction
+    // Block-level tree reduction (NaN-propagating).
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (threadIdx.x < stride) {
-            if (smin[threadIdx.x + stride] < smin[threadIdx.x])
-                smin[threadIdx.x] = smin[threadIdx.x + stride];
-            if (smax[threadIdx.x + stride] > smax[threadIdx.x])
-                smax[threadIdx.x] = smax[threadIdx.x + stride];
+            T om = smin[threadIdx.x + stride];
+            T ox = smax[threadIdx.x + stride];
+            if (isnan(om) || om < smin[threadIdx.x]) smin[threadIdx.x] = om;
+            if (isnan(ox) || ox > smax[threadIdx.x]) smax[threadIdx.x] = ox;
         }
         __syncthreads();
     }
@@ -4657,8 +4663,9 @@ __global__ void aminmax_along_dim_kernel(
         T mx = mn;
         for (int64_t i = 1; i < dim_size; i++) {
             T v = input[offset_at(i)];
-            if (v < mn) mn = v;
-            if (v > mx) mx = v;
+            // NaN-propagating min/max (matches PyTorch amax/amin).
+            mn = (isnan(v) || v < mn) ? v : mn;
+            mx = (isnan(v) || v > mx) ? v : mx;
         }
         out_min[out_idx] = mn;
         out_max[out_idx] = mx;
@@ -4694,19 +4701,28 @@ std::vector<Tensor> aminmax_dispatch(std::span<const Tensor> inputs, const OpAtt
     auto stream = get_stream(attrs);
     int64_t dim = attrs.get_int(AttrKey::Dim, -1);
     if (dim < 0) {
-        // Full reduction over the whole tensor -> two {1} scalars.
+        // Full reduction over the whole tensor -> two {1} scalars. Compute in
+        // Float64 for Float64 input (the old code forced Float32 and truncated);
+        // narrower inputs reduce in Float32.
         DType orig_dtype = inputs[0].dtype();
         Tensor input = inputs[0];
-        if (input.dtype() != DType::Float32) {
-            input = input.to(DType::Float32);
+        const DType compute =
+            (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+        if (input.dtype() != compute) {
+            input = input.to(compute);
         }
         int64_t n = input.numel();
-        Tensor min_result({1}, DType::Float32, input.device());
-        Tensor max_result({1}, DType::Float32, input.device());
-        aminmax_all_f32<<<1, 256, 0, stream>>>(
-            input.data<float>(), min_result.data<float>(), max_result.data<float>(), n);
+        Tensor min_result({1}, compute, input.device());
+        Tensor max_result({1}, compute, input.device());
+        if (compute == DType::Float64) {
+            aminmax_all<double><<<1, 256, 0, stream>>>(
+                input.data<double>(), min_result.data<double>(), max_result.data<double>(), n);
+        } else {
+            aminmax_all<float><<<1, 256, 0, stream>>>(
+                input.data<float>(), min_result.data<float>(), max_result.data<float>(), n);
+        }
         CUDA_CHECK(cudaGetLastError());
-        if (orig_dtype != DType::Float32) {
+        if (orig_dtype != compute) {
             min_result = min_result.to(orig_dtype);
             max_result = max_result.to(orig_dtype);
         }

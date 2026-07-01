@@ -2,6 +2,7 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "oneapi_kernel_utils.hpp"
+#include "../sycl_buffer_guard.hpp"  // SyclDeviceBuffer (RAII device scratch)
 #include <sycl/sycl.hpp>
 #include <algorithm>
 #include <cmath>
@@ -403,6 +404,7 @@ struct BroadcastAddFloat16 {};
 struct BroadcastAddBFloat16 {};
 struct BroadcastAddInt8 {};
 struct BroadcastAddUInt8 {};
+struct BroadcastAddBool {};
 struct BroadcastSubFloat32 {};
 struct BroadcastSubFloat64 {};
 struct BroadcastSubInt32 {};
@@ -427,6 +429,10 @@ struct BroadcastDivFloat16 {};
 struct BroadcastDivBFloat16 {};
 struct BroadcastDivInt8 {};
 struct BroadcastDivUInt8 {};
+struct BroadcastDivInt16 {};
+struct BroadcastDivUInt16 {};
+struct BroadcastDivUInt32 {};
+struct BroadcastDivUInt64 {};
 struct BroadcastAddComplex64 {};
 struct BroadcastAddComplex128 {};
 struct BroadcastSubComplex64 {};
@@ -646,6 +652,12 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint8_t, BroadcastAddUInt8>(
                 a_cont, b_cont, output, info, queue,
                 [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x + y); });
+        } else if (a_cont.dtype() == DType::Bool) {
+            // Bool addition acts as logical OR (matches the same-shape path);
+            // it was missing from the broadcast dispatch (dtype-coverage gap).
+            sycl_broadcast_binary<uint8_t, BroadcastAddBool>(
+                a_cont, b_cont, output, info, queue,
+                [](uint8_t x, uint8_t y) -> uint8_t { return (x != 0 || y != 0) ? 1 : 0; });
         } else if (a_cont.dtype() == DType::Complex64) {
             sycl_broadcast_complex_binary<float, BroadcastAddComplex64>(
                 a_cont, b_cont, output, info, queue,
@@ -1249,6 +1261,24 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint8_t, BroadcastDivUInt8>(
                 a_cont, b_cont, output, info, queue,
                 [](uint8_t x, uint8_t y) { return y != 0 ? static_cast<uint8_t>(x / y) : uint8_t(0); });
+        } else if (a_cont.dtype() == DType::Int16) {
+            // Int16/UInt16/UInt32/UInt64 are handled by the same-shape path but
+            // were missing from the broadcast path (dtype-coverage parity gap).
+            sycl_broadcast_binary<int16_t, BroadcastDivInt16>(
+                a_cont, b_cont, output, info, queue,
+                [](int16_t x, int16_t y) { return y != 0 ? static_cast<int16_t>(x / y) : int16_t(0); });
+        } else if (a_cont.dtype() == DType::UInt16) {
+            sycl_broadcast_binary<uint16_t, BroadcastDivUInt16>(
+                a_cont, b_cont, output, info, queue,
+                [](uint16_t x, uint16_t y) { return y != 0 ? static_cast<uint16_t>(x / y) : uint16_t(0); });
+        } else if (a_cont.dtype() == DType::UInt32) {
+            sycl_broadcast_binary<uint32_t, BroadcastDivUInt32>(
+                a_cont, b_cont, output, info, queue,
+                [](uint32_t x, uint32_t y) { return y != 0 ? static_cast<uint32_t>(x / y) : uint32_t(0); });
+        } else if (a_cont.dtype() == DType::UInt64) {
+            sycl_broadcast_binary<uint64_t, BroadcastDivUInt64>(
+                a_cont, b_cont, output, info, queue,
+                [](uint64_t x, uint64_t y) { return y != 0 ? static_cast<uint64_t>(x / y) : uint64_t(0); });
         } else if (a_cont.dtype() == DType::Complex64) {
             sycl_broadcast_complex_binary<float, BroadcastDivComplex64>(
                 a_cont, b_cont, output, info, queue,
@@ -4581,6 +4611,12 @@ auto cumsum_kernel(const Tensor& input_raw, int64_t dim, sycl::queue& queue) -> 
 // CumProd kernel - cumulative product along a dimension
 // ============================================================================
 auto cumprod_kernel(const Tensor& input_raw, int64_t dim, sycl::queue& queue) -> Tensor {
+    // Float16/BFloat16: widen to Float32, scan, narrow back (mirrors cumsum_kernel);
+    // otherwise the dtype dispatch below throws for half inputs.
+    if (input_raw.dtype() == DType::Float16 || input_raw.dtype() == DType::BFloat16) {
+        const DType orig = input_raw.dtype();
+        return cumprod_kernel(input_raw.to(DType::Float32), dim, queue).to(orig);
+    }
     // Offsets assume contiguous row-major layout; contiguize non-contiguous
     // inputs first (mirrors cummax_kernel / CUDA backend).
     Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
@@ -6372,8 +6408,10 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     int64_t output_size = minlength;
     if (numel > 0) {
         const int64_t* in_ptr = get_data_ptr<const int64_t>(input64);
-        // Allocate a single int64_t on device for the max
-        int64_t* d_max = sycl::malloc_device<int64_t>(1, queue);
+        // RAII scratch: a raw malloc_device leaks if any intervening .wait()
+        // throws an async exception (memset/parallel_for/memcpy below).
+        SyclDeviceBuffer<int64_t> d_max_buf(1, queue);
+        int64_t* d_max = d_max_buf.get();
         queue.memset(d_max, 0, sizeof(int64_t)).wait();
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             int64_t val = in_ptr[idx];
@@ -6389,7 +6427,6 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
         }).wait();
         int64_t max_val = 0;
         queue.memcpy(&max_val, d_max, sizeof(int64_t)).wait();
-        sycl::free(d_max, queue);
         output_size = std::max(output_size, max_val + 1);
     }
 

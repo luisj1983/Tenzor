@@ -22,6 +22,7 @@
 #include <string>
 #include <tuple>
 #include <typeinfo>
+#include <list>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -79,7 +80,17 @@ struct SliceIndexKeyHash {
 };
 
 static std::mutex g_slice_index_cache_mutex;
-static std::unordered_map<SliceIndexKey, Tensor, SliceIndexKeyHash>
+// Bounded LRU. Without a cap this process-global cache grows without bound under
+// dynamic-shape workloads (varying sequence lengths, chained slice+cat), since
+// every distinct slice geometry permanently retains an Int64 index tensor of
+// grad_output.numel() elements. Cap the entry count and evict least-recently-used.
+static constexpr std::size_t kSliceIndexCacheMax = 256;
+struct SliceIndexCacheEntry {
+    Tensor index;
+    std::list<SliceIndexKey>::iterator lru_it;  // position in g_slice_index_lru
+};
+static std::list<SliceIndexKey> g_slice_index_lru;  // front = most recently used
+static std::unordered_map<SliceIndexKey, SliceIndexCacheEntry, SliceIndexKeyHash>
     g_slice_index_cache;
 
 static Tensor get_or_build_slice_index(const std::vector<int64_t>& shape,
@@ -91,7 +102,10 @@ static Tensor get_or_build_slice_index(const std::vector<int64_t>& shape,
         std::lock_guard<std::mutex> lock(g_slice_index_cache_mutex);
         auto it = g_slice_index_cache.find(key);
         if (it != g_slice_index_cache.end()) {
-            return it->second;
+            // Promote to most-recently-used.
+            g_slice_index_lru.splice(g_slice_index_lru.begin(), g_slice_index_lru,
+                                     it->second.lru_it);
+            return it->second.index;
         }
     }
 
@@ -115,8 +129,24 @@ static Tensor get_or_build_slice_index(const std::vector<int64_t>& shape,
     }
 
     std::lock_guard<std::mutex> lock(g_slice_index_cache_mutex);
-    auto [it, inserted] = g_slice_index_cache.emplace(key, index);
-    return it->second;
+    // Another thread may have inserted the same key while we were building.
+    auto it = g_slice_index_cache.find(key);
+    if (it != g_slice_index_cache.end()) {
+        g_slice_index_lru.splice(g_slice_index_lru.begin(), g_slice_index_lru,
+                                 it->second.lru_it);
+        return it->second.index;
+    }
+    // Evict least-recently-used entries until we are below the cap.
+    while (g_slice_index_cache.size() >= kSliceIndexCacheMax &&
+           !g_slice_index_lru.empty()) {
+        SliceIndexKey victim = g_slice_index_lru.back();
+        g_slice_index_lru.pop_back();
+        g_slice_index_cache.erase(victim);
+    }
+    g_slice_index_lru.push_front(key);
+    auto [ins, inserted] =
+        g_slice_index_cache.emplace(key, SliceIndexCacheEntry{index, g_slice_index_lru.begin()});
+    return ins->second.index;
 }
 
 } // namespace

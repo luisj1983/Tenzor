@@ -171,7 +171,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
                               VK_SHADER_STAGE_COMPUTE_BIT,
                               0, sizeof(PushConstantsBroadcast), &push_constants);
 
-            uint32_t workgroups = div_wg(out_numel, devices_[device_id].workgroupSize);
+            uint32_t workgroups = div_wg_checked(out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
             vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
             insertComputeOnlyBarrier(cmdBuffer);
@@ -208,7 +208,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsComplex), &push_constants);
 
-        uint32_t workgroups = div_wg(out_numel, devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         insertComputeOnlyBarrier(cmdBuffer);
@@ -317,9 +317,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         uint32_t workgroups;
         if (is_float16 || is_bfloat16) {
             uint32_t num_pairs = (static_cast<uint32_t>(a_op.numel()) + 1) / 2;
-            workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
+            workgroups = div_wg_checked(num_pairs, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
         } else {
-            workgroups = div_wg(a_op.numel(), devices_[device_id].workgroupSize);
+            workgroups = div_wg_checked(a_op.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -465,9 +465,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         uint32_t workgroups;
         if (is_float16 || is_bfloat16_bc) {
             uint32_t num_pairs = (output_numel + 1) / 2;
-            workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
+            workgroups = div_wg_checked(num_pairs, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
         } else {
-            workgroups = div_wg(output_numel, devices_[device_id].workgroupSize);
+            workgroups = div_wg_checked(output_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -610,7 +610,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
         vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-        uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
@@ -801,7 +801,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     bool is_f16_packed = (shader_name == "math_f16" || shader_name == "trigonometric_f16" || shader_name == "hyperbolic_f16" ||
                           shader_name == "math_bf16" || shader_name == "trigonometric_bf16" || shader_name == "hyperbolic_bf16");
     uint32_t num_work_items = is_f16_packed ? static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
-    uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(num_work_items, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], op_name.c_str());
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -2163,9 +2163,10 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
     const void* buffer_b = b.data_ptr();
     const void* buffer_c = output.data_ptr();
 
-    // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
+    // Calculate buffer sizes (round up to 4-byte boundary for half-precision packed
+    // uint32 access — bmm_bf16 also treats buffers as packed uint[], element/2 per word).
     size_t buffer_size_a, buffer_size_b, buffer_size_c;
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {
         buffer_size_a = ((a.numel() + 1) / 2) * 4;
         buffer_size_b = ((b.numel() + 1) / 2) * 4;
         buffer_size_c = ((output.numel() + 1) / 2) * 4;

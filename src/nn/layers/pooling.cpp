@@ -22,9 +22,13 @@ namespace tenzor::nn {
 // MaxPool2d autograd function
 class MaxPool2dBackward : public Function {
 public:
-    MaxPool2dBackward(int64_t kernel_size, int64_t stride, int64_t padding,
+    MaxPool2dBackward(int64_t kernel_h, int64_t kernel_w,
+                     int64_t stride_h, int64_t stride_w,
+                     int64_t padding_h, int64_t padding_w,
                      std::vector<Tensor> tensors_to_save)
-        : kernel_size_(kernel_size), stride_(stride), padding_(padding) {
+        : kernel_h_(kernel_h), kernel_w_(kernel_w),
+          stride_h_(stride_h), stride_w_(stride_w),
+          padding_h_(padding_h), padding_w_(padding_w) {
         save_for_backward(std::move(tensors_to_save));
     }
 
@@ -50,9 +54,19 @@ public:
         // once forward was unified through the registry.
         std::vector<Tensor> inputs = {grad_output, indices, input, output};
         OpAttributes bwd_attrs;
-        bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-        bwd_attrs.set(AttrKey::Stride,     stride_);
-        bwd_attrs.set(AttrKey::Padding,    padding_);
+        // Per-axis attrs (registry reads per-axis first, scalar as fallback) so a
+        // non-square pool (e.g. kernel {2,3}) scatters with the correct W-axis
+        // kernel/stride/padding instead of collapsing to the H-axis values.
+        bwd_attrs.set(AttrKey::KernelSizeH, kernel_h_);
+        bwd_attrs.set(AttrKey::KernelSizeW, kernel_w_);
+        bwd_attrs.set(AttrKey::StrideH,     stride_h_);
+        bwd_attrs.set(AttrKey::StrideW,     stride_w_);
+        bwd_attrs.set(AttrKey::PaddingH,    padding_h_);
+        bwd_attrs.set(AttrKey::PaddingW,    padding_w_);
+        // Scalar fallback uses the H-axis as the canonical value.
+        bwd_attrs.set(AttrKey::KernelSize, kernel_h_);
+        bwd_attrs.set(AttrKey::Stride,     stride_h_);
+        bwd_attrs.set(AttrKey::Padding,    padding_h_);
 
         auto input_shape = input.shape();
         bwd_attrs.set(AttrKey::InputShape,
@@ -84,9 +98,12 @@ public:
     auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
-    int64_t kernel_size_;
-    int64_t stride_;
-    int64_t padding_;
+    int64_t kernel_h_;
+    int64_t kernel_w_;
+    int64_t stride_h_;
+    int64_t stride_w_;
+    int64_t padding_h_;
+    int64_t padding_w_;
 };
 
 MaxPool2d::MaxPool2d(int64_t kernel_size, int64_t stride, int64_t padding,
@@ -199,7 +216,8 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
     if (input.requires_grad()) {
         std::vector<Tensor> tensors_to_save = {contig_input.tensor(), indices, output};
         auto backward_fn = std::make_shared<MaxPool2dBackward>(
-            kernel_size_h_, stride_h_, padding_h_, std::move(tensors_to_save));
+            kernel_size_h_, kernel_size_w_, stride_h_, stride_w_,
+            padding_h_, padding_w_, std::move(tensors_to_save));
         result.set_grad_fn(backward_fn);
         std::vector<Variable> input_vars;
         input_vars.push_back(input);
@@ -458,9 +476,12 @@ public:
                     for (int64_t h_out = 0; h_out < H_out_; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out_; ++w_out) {
                             int64_t h_start = (h_out * H_in_) / H_out_;
-                            int64_t h_end = ((h_out + 1) * H_in_) / H_out_;
+                            // Window end uses ceil to match PyTorch/GPU adaptive
+                            // pooling (overlapping windows for non-divisible sizes),
+                            // not floor (which gives non-overlapping windows).
+                            int64_t h_end = ((h_out + 1) * H_in_ + H_out_ - 1) / H_out_;
                             int64_t w_start = (w_out * W_in_) / W_out_;
-                            int64_t w_end = ((w_out + 1) * W_in_) / W_out_;
+                            int64_t w_end = ((w_out + 1) * W_in_ + W_out_ - 1) / W_out_;
                             // Guarantee a non-empty window (count>=1) when the output is larger than the
                             // input; otherwise count==0 -> division by zero (inf/NaN). Only the degenerate
                             // out>in cells are touched; normal pooling (out<=in) is unchanged.
@@ -490,9 +511,12 @@ public:
                     for (int64_t h_out = 0; h_out < H_out_; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out_; ++w_out) {
                             int64_t h_start = (h_out * H_in_) / H_out_;
-                            int64_t h_end = ((h_out + 1) * H_in_) / H_out_;
+                            // Window end uses ceil to match PyTorch/GPU adaptive
+                            // pooling (overlapping windows for non-divisible sizes),
+                            // not floor (which gives non-overlapping windows).
+                            int64_t h_end = ((h_out + 1) * H_in_ + H_out_ - 1) / H_out_;
                             int64_t w_start = (w_out * W_in_) / W_out_;
-                            int64_t w_end = ((w_out + 1) * W_in_) / W_out_;
+                            int64_t w_end = ((w_out + 1) * W_in_ + W_out_ - 1) / W_out_;
                             // Guarantee a non-empty window (count>=1) when the output is larger than the
                             // input; otherwise count==0 -> division by zero (inf/NaN). Only the degenerate
                             // out>in cells are touched; normal pooling (out<=in) is unchanged.
@@ -528,9 +552,12 @@ public:
                     for (int64_t h_out = 0; h_out < H_out_; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out_; ++w_out) {
                             int64_t h_start = (h_out * H_in_) / H_out_;
-                            int64_t h_end = ((h_out + 1) * H_in_) / H_out_;
+                            // Window end uses ceil to match PyTorch/GPU adaptive
+                            // pooling (overlapping windows for non-divisible sizes),
+                            // not floor (which gives non-overlapping windows).
+                            int64_t h_end = ((h_out + 1) * H_in_ + H_out_ - 1) / H_out_;
                             int64_t w_start = (w_out * W_in_) / W_out_;
-                            int64_t w_end = ((w_out + 1) * W_in_) / W_out_;
+                            int64_t w_end = ((w_out + 1) * W_in_ + W_out_ - 1) / W_out_;
                             // Guarantee a non-empty window (count>=1) when the output is larger than the
                             // input; otherwise count==0 -> division by zero (inf/NaN). Only the degenerate
                             // out>in cells are touched; normal pooling (out<=in) is unchanged.
@@ -632,9 +659,16 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
                     for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out; ++w_out) {
                             int64_t h_start = (h_out * H_in) / H_out;
-                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            // Window end uses ceil to match PyTorch/GPU adaptive
+                            // pooling (overlapping windows for non-divisible sizes),
+                            // not floor (which gives non-overlapping windows).
+                            int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
                             int64_t w_start = (w_out * W_in) / W_out;
-                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
+                            // Guarantee a non-empty window (count>=1) when the output is larger than the
+                            // input, matching the backward pass; otherwise count==0 -> division by zero (NaN).
+                            if (h_end <= h_start) h_end = std::min(h_start + 1, H_in);
+                            if (w_end <= w_start) w_end = std::min(w_start + 1, W_in);
 
                             float sum = 0.0f;
                             int64_t count = 0;
@@ -662,9 +696,16 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
                     for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out; ++w_out) {
                             int64_t h_start = (h_out * H_in) / H_out;
-                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            // Window end uses ceil to match PyTorch/GPU adaptive
+                            // pooling (overlapping windows for non-divisible sizes),
+                            // not floor (which gives non-overlapping windows).
+                            int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
                             int64_t w_start = (w_out * W_in) / W_out;
-                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
+                            // Guarantee a non-empty window (count>=1) when the output is larger than the
+                            // input, matching the backward pass; otherwise count==0 -> division by zero (NaN).
+                            if (h_end <= h_start) h_end = std::min(h_start + 1, H_in);
+                            if (w_end <= w_start) w_end = std::min(w_start + 1, W_in);
 
                             double sum = 0.0;
                             int64_t count = 0;
@@ -695,9 +736,16 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
                     for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out; ++w_out) {
                             int64_t h_start = (h_out * H_in) / H_out;
-                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            // Window end uses ceil to match PyTorch/GPU adaptive
+                            // pooling (overlapping windows for non-divisible sizes),
+                            // not floor (which gives non-overlapping windows).
+                            int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
                             int64_t w_start = (w_out * W_in) / W_out;
-                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
+                            // Guarantee a non-empty window (count>=1) when the output is larger than the
+                            // input, matching the backward pass; otherwise count==0 -> division by zero (NaN).
+                            if (h_end <= h_start) h_end = std::min(h_start + 1, H_in);
+                            if (w_end <= w_start) w_end = std::min(w_start + 1, W_in);
 
                             float sum = 0.0f;
                             int64_t count = 0;
@@ -730,9 +778,16 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
                     for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out; ++w_out) {
                             int64_t h_start = (h_out * H_in) / H_out;
-                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            // Window end uses ceil to match PyTorch/GPU adaptive
+                            // pooling (overlapping windows for non-divisible sizes),
+                            // not floor (which gives non-overlapping windows).
+                            int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
                             int64_t w_start = (w_out * W_in) / W_out;
-                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
+                            // Guarantee a non-empty window (count>=1) when the output is larger than the
+                            // input, matching the backward pass; otherwise count==0 -> division by zero (NaN).
+                            if (h_end <= h_start) h_end = std::min(h_start + 1, H_in);
+                            if (w_end <= w_start) w_end = std::min(w_start + 1, W_in);
 
                             float sum = 0.0f;
                             int64_t count = 0;
@@ -1463,8 +1518,14 @@ auto LPPool1d::forward_impl(const Variable& input) -> Variable {
     AvgPool1d avg_pool(kernel_size_, stride_, /*padding=*/0);
     auto pooled = avg_pool.forward(x_pow);
 
+    // PyTorch defines LPPool as (sum(|x|^p))^(1/p) and implements it as
+    // avg_pool(|x|^p).mul(k).pow(1/p): the avg-pool divides by the window
+    // element count k, so multiply back by k to recover the sum before the
+    // 1/p power. Omitting this makes every output too small by k^(1/p).
+    auto summed = pooled * static_cast<double>(kernel_size_);
+
     double inv_p = 1.0 / static_cast<double>(norm_type_);
-    return ::tenzor::pow(pooled, inv_p);
+    return ::tenzor::pow(summed, inv_p);
 }
 
 // ============================================================================
@@ -1498,8 +1559,13 @@ auto LPPool2d::forward_impl(const Variable& input) -> Variable {
         std::array<int64_t, 2>{0, 0});
     auto pooled = avg_pool.forward(x_pow);
 
+    // See LPPool1d: recover the windowed sum from the average by multiplying by
+    // the window element count (kh*kw) before the 1/p power, matching PyTorch's
+    // avg_pool2d(|x|^p).mul(kh*kw).pow(1/p).
+    auto summed = pooled * static_cast<double>(kernel_size_.first * kernel_size_.second);
+
     double inv_p = 1.0 / static_cast<double>(norm_type_);
-    return ::tenzor::pow(pooled, inv_p);
+    return ::tenzor::pow(summed, inv_p);
 }
 
 } // namespace tenzor::nn

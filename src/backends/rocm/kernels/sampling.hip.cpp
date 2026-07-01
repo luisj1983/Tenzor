@@ -9,6 +9,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"  // tenzor::get_global_seed (manual_seed reproducibility)
+#include "../hip_buffer.hpp"  // HipBuffer (RAII device scratch)
 #include <hip/hip_runtime.h>
 #include <hipcub/hipcub.hpp>
 #include <chrono>
@@ -1199,9 +1200,10 @@ auto histogramdd_kernel(const Tensor& input,
         h_params[sd * 4 + 2] = static_cast<double>(bins[sd]);
         h_params[sd * 4 + 3] = static_cast<double>(out_strides[sd]);
     }
-    double* d_params;
     size_t params_bytes = h_params.size() * sizeof(double);
-    HIP_CHECK(hipMalloc(&d_params, params_bytes));
+    // RAII device scratch so an intervening throwing HIP_CHECK does not leak it.
+    HipBuffer d_params_buf(params_bytes);
+    double* d_params = static_cast<double*>(d_params_buf.ptr);
     HIP_CHECK(hipMemcpyAsync(d_params, h_params.data(), params_bytes,
                               hipMemcpyHostToDevice, stream));
 
@@ -1222,7 +1224,7 @@ auto histogramdd_kernel(const Tensor& input,
     }
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_params));
+    // d_params is freed by HipBuffer's destructor at scope exit.
 
     // Density normalisation
     Tensor result = counts;

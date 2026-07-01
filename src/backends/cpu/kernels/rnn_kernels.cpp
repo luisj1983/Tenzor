@@ -278,6 +278,20 @@ auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tenso
                                const Tensor& weight_ih, const Tensor& weight_hh,
                                const Tensor& bias_ih, const Tensor& bias_hh)
     -> std::vector<Tensor> {
+    // Contiguity guard (mirrors the full-sequence lstm_forward_kernel ~:852).
+    // The typed body below indexes input/hx/cx/weights with shape-derived
+    // strides (in_data[b*input_size+i], w_ih_data[g*input_size+i], ...), which
+    // assumes contiguous storage; a strided view silently produces wrong cells.
+    if (!input.is_contiguous() || !hx.is_contiguous() || !cx.is_contiguous() ||
+        !weight_ih.is_contiguous() || !weight_hh.is_contiguous() ||
+        (bias_ih.numel() > 0 && !bias_ih.is_contiguous()) ||
+        (bias_hh.numel() > 0 && !bias_hh.is_contiguous())) {
+        return lstm_cell_forward_kernel(
+            input.contiguous(), hx.contiguous(), cx.contiguous(),
+            weight_ih.contiguous(), weight_hh.contiguous(),
+            bias_ih.numel() > 0 ? bias_ih.contiguous() : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.contiguous() : bias_hh);
+    }
     // S12: Float32 native, Float64 native (avoids Float32 round-trip that
     // corrupted Float64 gradcheck by an ε(F32)·signal margin). Float16/
     // BFloat16 stay on the widen-narrow path — half-precision compute is
@@ -370,6 +384,23 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
                                 const Tensor& weight_ih, const Tensor& weight_hh,
                                 const Tensor& bias_ih, const Tensor& bias_hh)
     -> std::vector<Tensor> {
+    // Contiguity guard (mirrors the full-sequence kernels). The typed body
+    // indexes every input with shape-derived strides, which assumes contiguous
+    // storage; a strided view silently produces wrong gradients.
+    if (!grad_hy.is_contiguous() || !grad_cy.is_contiguous() ||
+        !input.is_contiguous() || !hx.is_contiguous() || !cx.is_contiguous() ||
+        !hy.is_contiguous() || !cy.is_contiguous() ||
+        !weight_ih.is_contiguous() || !weight_hh.is_contiguous() ||
+        (bias_ih.numel() > 0 && !bias_ih.is_contiguous()) ||
+        (bias_hh.numel() > 0 && !bias_hh.is_contiguous())) {
+        return lstm_cell_backward_kernel(
+            grad_hy.contiguous(), grad_cy.contiguous(),
+            input.contiguous(), hx.contiguous(), cx.contiguous(),
+            hy.contiguous(), cy.contiguous(),
+            weight_ih.contiguous(), weight_hh.contiguous(),
+            bias_ih.numel() > 0 ? bias_ih.contiguous() : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.contiguous() : bias_hh);
+    }
     // S12: native Float32 / Float64. See lstm_cell_forward_kernel comment.
     auto run = [&]<typename T>() -> std::vector<Tensor> {
         auto shape = grad_hy.shape();
@@ -526,6 +557,19 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
 auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
                               const Tensor& weight_ih, const Tensor& weight_hh,
                               const Tensor& bias_ih, const Tensor& bias_hh) -> Tensor {
+    // Contiguity guard (mirrors the full-sequence gru_forward_kernel ~:1200).
+    // The typed body indexes input/hx/weights with shape-derived strides, which
+    // assumes contiguous storage; a strided view silently produces wrong cells.
+    if (!input.is_contiguous() || !hx.is_contiguous() ||
+        !weight_ih.is_contiguous() || !weight_hh.is_contiguous() ||
+        (bias_ih.numel() > 0 && !bias_ih.is_contiguous()) ||
+        (bias_hh.numel() > 0 && !bias_hh.is_contiguous())) {
+        return gru_cell_forward_kernel(
+            input.contiguous(), hx.contiguous(),
+            weight_ih.contiguous(), weight_hh.contiguous(),
+            bias_ih.numel() > 0 ? bias_ih.contiguous() : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.contiguous() : bias_hh);
+    }
     // S12: native Float32 / Float64.
     auto run = [&]<typename T>() -> Tensor {
         auto in_shape = input.shape();
@@ -605,6 +649,20 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                                const Tensor& weight_ih, const Tensor& weight_hh,
                                const Tensor& bias_ih, const Tensor& bias_hh)
     -> std::vector<Tensor> {
+    // Contiguity guard (mirrors the full-sequence kernels). The typed body
+    // indexes every input with shape-derived strides, which assumes contiguous
+    // storage; a strided view silently produces wrong gradients.
+    if (!grad_hy.is_contiguous() || !input.is_contiguous() ||
+        !hx.is_contiguous() || !weight_ih.is_contiguous() ||
+        !weight_hh.is_contiguous() ||
+        (bias_ih.numel() > 0 && !bias_ih.is_contiguous()) ||
+        (bias_hh.numel() > 0 && !bias_hh.is_contiguous())) {
+        return gru_cell_backward_kernel(
+            grad_hy.contiguous(), input.contiguous(), hx.contiguous(),
+            weight_ih.contiguous(), weight_hh.contiguous(),
+            bias_ih.numel() > 0 ? bias_ih.contiguous() : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.contiguous() : bias_hh);
+    }
     // S12: native Float32 / Float64.
     auto run = [&]<typename T>() -> std::vector<Tensor> {
         auto shape = grad_hy.shape();

@@ -189,8 +189,12 @@ auto numerical_gradient(
     }
 
     // Cast the Float64 shadow back to the input's native dtype/device so the
-    // result aligns with the analytical gradient in the comparison.
-    Tensor result = is_f64 ? grad_f64 : grad_f64.to(input_dtype);
+    // result aligns with the analytical gradient in the comparison — EXCEPT for
+    // half dtypes (Float16/BFloat16), where narrowing the Float64 FD reference
+    // would truncate ~3 mantissa bits and corrupt the numerical reference.
+    // compare_gradients widens both sides to Float64 whenever they are not both
+    // Float32, so a Float64 numerical vs half analytical still compares cleanly.
+    Tensor result = (is_f64 || is_f16 || is_bf16) ? grad_f64 : grad_f64.to(input_dtype);
     if (original_device != Device::cpu()) result = result.to(original_device);
     return result;
 }
@@ -606,6 +610,14 @@ auto gradgradcheck_detailed(
             return result;
         }
 
+        // Dtype-appropriate eps floors (mirroring numerical_gradient /
+        // gradcheck_detailed): a too-small step makes the second-order central
+        // difference's eps² denominator catastrophically cancellation-prone for
+        // reduced-precision inputs. Float32 ≈ sqrt(eps_machine) ≈ 5e-4; half
+        // precision needs ≈ 1e-2.
+        const DType gg_dtype = input.tensor().dtype();
+        if (gg_dtype == DType::Float32 && eps < 5e-4) eps = 5e-4;
+        if ((gg_dtype == DType::Float16 || gg_dtype == DType::BFloat16) && eps < 1e-2) eps = 1e-2;
         if (eps <= 0.0) eps = 1e-4;
 
         // The FD reference is evaluated in Float64 (perturb a Float64 copy of
@@ -620,9 +632,16 @@ auto gradgradcheck_detailed(
         if (input_f64.device() != Device::cpu()) input_f64 = input_f64.to(Device::cpu());
         if (!input_f64.is_contiguous()) input_f64 = input_f64.contiguous();
 
+        // The probe handed to `func` must be at the input's NATIVE dtype: `func`
+        // may capture other operands at that dtype (and reject a widened Float64
+        // probe), and some ops fix their internal working precision. The
+        // perturbation is still STAGED in Float64; only the value seen by `func`
+        // is cast back to native dtype. Mirrors numerical_gradient's make_probe.
         auto eval_f64 = [&](const Tensor& probe_cpu) -> double {
-            Variable v(orig_device != Device::cpu() ? probe_cpu.to(orig_device)
-                                                    : probe_cpu, false);
+            Tensor probe = (probe_cpu.dtype() != gg_dtype)
+                               ? probe_cpu.to(gg_dtype) : probe_cpu;
+            Variable v(orig_device != Device::cpu() ? probe.to(orig_device)
+                                                    : probe, false);
             Variable fv = scalar_func(v);
             Tensor t = fv.tensor();
             if (t.device() != Device::cpu()) t = t.to(Device::cpu());

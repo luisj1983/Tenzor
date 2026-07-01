@@ -198,6 +198,19 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         ? target.to(DType::Float32)
         : target;
 
+    // An integer class-index target shaped [N,1] is class indices, not a
+    // one-hot/soft target. Squeeze the trailing singleton to [N] before the
+    // routing probe so it takes the class-index OneHot branch with the correct
+    // shape (otherwise OneHot would add an extra trailing dim -> [N,1,C]).
+    {
+        const bool target_is_int =
+            (target_c.dtype() != DType::Float32 && target_c.dtype() != DType::Float64 &&
+             target_c.dtype() != DType::Float16 && target_c.dtype() != DType::BFloat16);
+        if (target_is_int && target_c.ndim() == 2 && target_c.shape()[1] == 1) {
+            target_c = target_c.reshape({target_c.shape()[0]});
+        }
+    }
+
     // Cross entropy with logits: -log_softmax(input)[target_class]
     // Use the log_softmax function from activations
     auto log_probs = nn::log_softmax(input_c, 1);  // Compute log_softmax along dim=1
@@ -321,6 +334,21 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         case Reduction::Sum:
             return finalize(sum(neg_selected));
         case Reduction::BatchMean: {
+            if (keep_mask.has_value()) {
+                // Ignored samples are zeroed above, so dividing by the full
+                // batch size understates the loss. Divide by the count of
+                // non-ignored samples (clamped to >=1), matching the Mean branch.
+                const DType out_dtype = neg_selected.tensor().dtype();
+                Tensor mask_f32 = keep_mask->dtype() == DType::Float32
+                                     ? *keep_mask
+                                     : keep_mask->to(DType::Float32);
+                Tensor denom_f32 = tenzor::clamp_min(tenzor::sum(mask_f32), 1.0);
+                Tensor denom = (denom_f32.dtype() == out_dtype)
+                                   ? denom_f32
+                                   : denom_f32.to(out_dtype);
+                Variable denom_var(denom, /*requires_grad=*/false);
+                return finalize(sum(neg_selected) / denom_var);
+            }
             const auto& shp = neg_selected.tensor().shape();
             int64_t bs = (!shp.empty()) ? shp[0] : 0;
             if (bs > 0) {
@@ -371,6 +399,19 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
                        target.dtype() == DType::BFloat16)
         ? target.to(DType::Float32)
         : target;
+
+    // An integer class-index target shaped [N,1] is class indices, not a
+    // one-hot/soft target. Squeeze the trailing singleton to [N] before the
+    // routing probe so it takes the class-index OneHot branch with the correct
+    // shape (otherwise OneHot would add an extra trailing dim -> [N,1,C]).
+    {
+        const bool target_is_int =
+            (target_c.dtype() != DType::Float32 && target_c.dtype() != DType::Float64 &&
+             target_c.dtype() != DType::Float16 && target_c.dtype() != DType::BFloat16);
+        if (target_is_int && target_c.ndim() == 2 && target_c.shape()[1] == 1) {
+            target_c = target_c.reshape({target_c.shape()[0]});
+        }
+    }
 
     auto num_classes = input_c.tensor().shape()[1];
 
@@ -457,6 +498,21 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
         case Reduction::Sum:
             return finalize(sum(neg_loss));
         case Reduction::BatchMean: {
+            if (keep_mask.has_value()) {
+                // Ignored samples are zeroed above, so dividing by the full
+                // batch size understates the loss. Divide by the count of
+                // non-ignored samples (clamped to >=1), matching the Mean branch.
+                const DType out_dtype = neg_loss.tensor().dtype();
+                Tensor mask_f32 = keep_mask->dtype() == DType::Float32
+                                     ? *keep_mask
+                                     : keep_mask->to(DType::Float32);
+                Tensor denom_f32 = tenzor::clamp_min(tenzor::sum(mask_f32), 1.0);
+                Tensor denom = (denom_f32.dtype() == out_dtype)
+                                   ? denom_f32
+                                   : denom_f32.to(out_dtype);
+                Variable denom_var(denom, /*requires_grad=*/false);
+                return finalize(sum(neg_loss) / denom_var);
+            }
             // Guard against a scalar/empty batch: shape()[0] would be OOB on a
             // 0-d tensor and div-by-zero on an empty batch. Mirror the sibling
             // losses' guarded BatchMean pattern (e.g. line ~99 above).

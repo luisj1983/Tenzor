@@ -339,7 +339,6 @@ public:
         const int64_t* q_off = q_off_cpu.data<int64_t>();
         const int64_t* kv_off = kv_off_cpu.data<int64_t>();
         int64_t B = q_off_cpu.numel() - 1;
-        int64_t hd = Q.shape().back();
 
         int64_t total_q = Q.shape()[0];
         int64_t total_kv = K.shape()[0];

@@ -224,7 +224,7 @@ public:
         const MixedPrecisionConfig& config = MixedPrecisionConfig::fp16_cuda()
     ) : model_(std::move(model)),
         optimizer_(std::move(optimizer)),
-        loss_fn_(loss_fn),
+        loss_fn_(std::forward<LossFn>(loss_fn)),
         config_(config),
         scaler_(config.init_scale, config.growth_factor,
                 config.backoff_factor, config.growth_interval),

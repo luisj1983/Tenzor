@@ -1151,7 +1151,12 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     auto result_c = result.contiguous();
 
     int64_t n = result_c.numel();
-    if (n != dense_c.numel()) {
+    // Compare full shapes, not just element counts: two tensors with equal
+    // numel but different shapes (e.g. [2,6] vs [3,4]) would otherwise add
+    // element-by-element and silently produce a wrong, mis-shaped result.
+    auto rs = result_c.shape();
+    auto ds = dense_c.shape();
+    if (rs.size() != ds.size() || !std::equal(rs.begin(), rs.end(), ds.begin())) {
         throw std::runtime_error("sparse::add: shape mismatch");
     }
 
@@ -1588,9 +1593,12 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
     if (b.dtype() == DType::Float16 || b.dtype() == DType::BFloat16) {
         const DType orig = b.dtype();
         auto L_sh = std::vector<int64_t>(L.shape().begin(), L.shape().end());
+        // Materialize the CSR form once; calling L.to_csr() three times re-ran
+        // the (potentially O(nnz)) conversion for each component.
+        SparseTensor L_csr = L.to_csr();
         SparseTensor L_w = SparseTensor::sparse_csr(
-            L.to_csr().crow_indices(), L.to_csr().col_indices(),
-            L.to_csr().values().to(DType::Float32), L_sh);
+            L_csr.crow_indices(), L_csr.col_indices(),
+            L_csr.values().to(DType::Float32), L_sh);
         Tensor b_w = b.to(DType::Float32);
         return sparse_triangular_solve(L_w, b_w, upper).to(orig);
     }

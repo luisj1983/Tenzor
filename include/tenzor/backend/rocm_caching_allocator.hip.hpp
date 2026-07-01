@@ -6,12 +6,15 @@
 #include <mutex>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // Forward declare HIP types to avoid requiring hip_runtime.h
 #ifndef __HIP_PLATFORM_AMD__
 struct ihipStream_t;
 typedef struct ihipStream_t* hipStream_t;
+struct ihipEvent_t;
+typedef struct ihipEvent_t* hipEvent_t;
 #else
 #include <hip/hip_runtime.h>
 #endif
@@ -31,6 +34,15 @@ struct Block {
     hipStream_t stream;     // Associated stream (for async operations)
     size_t alignment;       // Block alignment for HBM optimization
     void* original_ptr;     // Original hipMalloc pointer (for merge tracking)
+
+    // Stream-ordered reuse bookkeeping. When this block is freed while the
+    // allocator is operating in multi-stream mode, a completion event is
+    // recorded on the block's last-use stream and parked here. Before the block
+    // (or a merged super-block carrying several of these) is handed back out on
+    // a DIFFERENT stream, the requesting stream must wait on each event whose
+    // recording stream differs, preventing cross-stream use-after-free. Each
+    // entry pairs the recording stream with its event.
+    std::vector<std::pair<hipStream_t, hipEvent_t>> pending_events;
 
     Block(void* p, size_t s, int dev, hipStream_t str = nullptr, size_t align = 256)
         : ptr(p), size(s), allocated(false), device(dev), stream(str),
@@ -382,6 +394,17 @@ private:
 
         // Per-stream blocks for better locality
         std::unordered_map<hipStream_t, std::vector<Block*>> stream_blocks;
+
+        // Cross-stream reuse tracking. The allocator stays on a zero-overhead
+        // single-stream fast path until a SECOND distinct stream is observed on
+        // this device; only then are completion events recorded at free() and
+        // waited on at cross-stream reuse. Once true this stays true.
+        bool multi_stream = false;
+        hipStream_t first_stream = nullptr;
+        bool first_stream_set = false;
+
+        // Recycled hipEvent_t handles (avoid create/destroy churn per free).
+        std::vector<hipEvent_t> event_pool;
 
         DeviceAllocator() = default;
     };

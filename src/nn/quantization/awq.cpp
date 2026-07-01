@@ -118,7 +118,12 @@ auto AWQQuantizer::find_optimal_scales(const Tensor& weight, const Tensor& act_s
 
             for (int64_t j = group_start; j < group_end; ++j) {
                 float act_val = act_ptr[j];
-                float s = std::pow(std::max(act_val, 1e-8f), alpha);
+                // Use the SAME dead-channel scale (s = 1) as the quantize pass
+                // below. Using pow(1e-8, alpha) here instead would collapse a
+                // dead channel's scaled weight to a denormal, mis-estimating
+                // w_min/w_max and hence the per-group quant scale — so the grid
+                // search would score every alpha against the wrong scale.
+                float s = (act_val > 0.0f) ? std::pow(act_val, alpha) : 1.0f;
                 float w_scaled = w_ptr[row * in_features + j] * s;
                 w_min = std::min(w_min, w_scaled);
                 w_max = std::max(w_max, w_scaled);
@@ -344,8 +349,15 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
         // Asymmetric codes are already unsigned [0,15]; pack as-is.
         packed = pack_int4(Q);
     } else {
-        // 8-bit: store as Int8 directly
-        packed = Q.to(DType::Int8);
+        // 8-bit: choose storage dtype by signedness so codes are not corrupted.
+        // Symmetric quantization produces codes in [-128, 127] (signed) → Int8.
+        // Asymmetric quantization produces codes in [0, 255] (unsigned) via
+        // quant_range()/quantize_value(); casting a code >= 128 into a signed
+        // Int8 (range [-128, 127]) wraps it negative and corrupts the weight.
+        // Store those as UInt8 instead — exactly like GPTQ (gptq.cpp). The
+        // 4-bit path above is unaffected: pack_int4 masks to a nibble and the
+        // sign-extending unpacker round-trips both signed and unsigned codes.
+        packed = config_.sym ? Q.to(DType::Int8) : Q.to(DType::UInt8);
     }
 
     // Move results back to the original input device so downstream callers

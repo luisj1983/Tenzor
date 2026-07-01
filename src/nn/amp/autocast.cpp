@@ -38,18 +38,24 @@ auto AutocastPolicyRegistry::register_compute_heavy(const std::string& op_name) 
     std::unique_lock lock(mutex_);
     stability_critical_ops_.erase(op_name);
     compute_heavy_ops_.insert(op_name);
+    override_count_.store(compute_heavy_ops_.size() + stability_critical_ops_.size(),
+                          std::memory_order_release);
 }
 
 auto AutocastPolicyRegistry::register_stability_critical(const std::string& op_name) -> void {
     std::unique_lock lock(mutex_);
     compute_heavy_ops_.erase(op_name);
     stability_critical_ops_.insert(op_name);
+    override_count_.store(compute_heavy_ops_.size() + stability_critical_ops_.size(),
+                          std::memory_order_release);
 }
 
 auto AutocastPolicyRegistry::unregister(const std::string& op_name) -> void {
     std::unique_lock lock(mutex_);
     compute_heavy_ops_.erase(op_name);
     stability_critical_ops_.erase(op_name);
+    override_count_.store(compute_heavy_ops_.size() + stability_critical_ops_.size(),
+                          std::memory_order_release);
 }
 
 auto AutocastPolicyRegistry::is_compute_heavy(const std::string& op_name) const -> bool {

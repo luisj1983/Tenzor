@@ -1267,23 +1267,25 @@ public:
         if (rate_cpu.dtype() == DType::Float16 || rate_cpu.dtype() == DType::BFloat16) {
             rate_cpu = rate_cpu.to(DType::Float32);
         }
+        // Broadcast rate to the output shape (numpy right-aligned rules) rather
+        // than modulo-indexing, which silently mispairs elements for any
+        // non-trailing-contiguous shape relationship. broadcast_to throws a clear
+        // error for genuinely incompatible shapes.
+        auto rate_b = ::tenzor::broadcast_to(rate_cpu, shape).contiguous();
         auto out = zeros(shape, DType::Int64, Device::cpu());
         int64_t n = out.numel();
-        const int64_t rate_n = rate_cpu.numel();
         int64_t* op = out.data<int64_t>();
         auto& rng = detail::rng_for(generator_);
 
-        if (rate_cpu.dtype() == DType::Float32) {
-            const float* rp = rate_cpu.data<float>();
+        if (rate_b.dtype() == DType::Float32) {
+            const float* rp = rate_b.data<float>();
             for (int64_t i = 0; i < n; ++i) {
-                double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-                op[i] = detail::sample_poisson_scalar(lam, rng);
+                op[i] = detail::sample_poisson_scalar(rp[i], rng);
             }
-        } else if (rate_cpu.dtype() == DType::Float64) {
-            const double* rp = rate_cpu.data<double>();
+        } else if (rate_b.dtype() == DType::Float64) {
+            const double* rp = rate_b.data<double>();
             for (int64_t i = 0; i < n; ++i) {
-                double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-                op[i] = detail::sample_poisson_scalar(lam, rng);
+                op[i] = detail::sample_poisson_scalar(rp[i], rng);
             }
         } else {
             throw std::runtime_error("Poisson: rate must be Float32 or Float64");
@@ -2139,13 +2141,16 @@ public:
     }
 
     auto entropy() -> Tensor override {
-        // H = log(scale) + 1 + euler_gamma (euler_gamma ~ 0.5772156649)
-        return tenzor::log(scale_) + 1.5772156649f;
+        // H = log(scale) + 1 + euler_gamma. Use a double constant so Float64
+        // Gumbel retains full precision (a float literal caps it at ~1e-7).
+        constexpr double euler_gamma = 0.57721566490153286060;
+        return tenzor::log(scale_) + (1.0 + euler_gamma);
     }
 
     auto mean() -> Tensor override {
-        // E[X] = loc + scale * euler_gamma
-        return loc_ + scale_ * 0.5772156649f;
+        // E[X] = loc + scale * euler_gamma (double constant for Float64 precision).
+        constexpr double euler_gamma = 0.57721566490153286060;
+        return loc_ + scale_ * euler_gamma;
     }
 
     auto variance() -> Tensor override {
@@ -2654,31 +2659,29 @@ public:
             loc_cpu = loc_cpu.to(DType::Float32);
         }
         auto out_dtype = widen_for_f16 ? DType::Float32 : orig_dtype;
+        // Broadcast kappa/mu to the output shape rather than modulo-indexing, which
+        // silently mispairs parameters for any non-trailing-contiguous shape.
+        auto kappa_b = ::tenzor::broadcast_to(kappa_cpu, shape).contiguous();
+        auto loc_b = ::tenzor::broadcast_to(loc_cpu, shape).contiguous();
         auto out = zeros(shape, out_dtype, Device::cpu());
         int64_t n = out.numel();
-        const int64_t kappa_n = kappa_cpu.numel();
-        const int64_t loc_n = loc_cpu.numel();
 
         auto& rng = detail::rng_for(generator_);
         std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
         if (out.dtype() == DType::Float32) {
             float* op = out.data<float>();
-            const float* kp = kappa_cpu.data<float>();
-            const float* lp = loc_cpu.data<float>();
+            const float* kp = kappa_b.data<float>();
+            const float* lp = loc_b.data<float>();
             for (int64_t i = 0; i < n; ++i) {
-                double kappa = (kappa_n == 1) ? kp[0] : kp[i % kappa_n];
-                double mu = (loc_n == 1) ? lp[0] : lp[i % loc_n];
-                op[i] = static_cast<float>(sample_vonmises_scalar(kappa, mu, rng, uniform));
+                op[i] = static_cast<float>(sample_vonmises_scalar(kp[i], lp[i], rng, uniform));
             }
         } else if (out.dtype() == DType::Float64) {
             double* op = out.data<double>();
-            const double* kp = kappa_cpu.data<double>();
-            const double* lp = loc_cpu.data<double>();
+            const double* kp = kappa_b.data<double>();
+            const double* lp = loc_b.data<double>();
             for (int64_t i = 0; i < n; ++i) {
-                double kappa = (kappa_n == 1) ? kp[0] : kp[i % kappa_n];
-                double mu = (loc_n == 1) ? lp[0] : lp[i % loc_n];
-                op[i] = sample_vonmises_scalar(kappa, mu, rng, uniform);
+                op[i] = sample_vonmises_scalar(kp[i], lp[i], rng, uniform);
             }
         } else {
             throw std::runtime_error("VonMises: only Float32 and Float64 supported");
@@ -3152,10 +3155,13 @@ public:
         auto K_val = static_cast<float>(logits_.shape().back());
         auto scaled_logits = logits_ / temperature_;
         auto score = scaled_logits - tenzor::log(x);
-        auto lse = logsumexp(score, -1, /*keepdim=*/true);
+        // Reduce the event dim without keepdim so log_prob returns the batch shape
+        // (...), matching Categorical/OneHotCategorical/MixtureSameFamily; a stray
+        // trailing singleton dim corrupts detail::mc_entropy stacking.
+        auto lse = logsumexp(score, -1, /*keepdim=*/false);
         auto lgamma_K = static_cast<float>(std::lgamma(static_cast<double>(K_val)));
         return lgamma_K + (K_val - 1.0f) * tenzor::log(temperature_)
-             + tenzor::sum(score, -1, /*keepdim=*/true) - K_val * lse;
+             + tenzor::sum(score, -1, /*keepdim=*/false) - K_val * lse;
     }
 
 

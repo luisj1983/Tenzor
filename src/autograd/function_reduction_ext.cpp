@@ -54,13 +54,18 @@ Tensor compute_min_value_match_global_mask(const Tensor& input,
         case DType::BFloat16: eps_val = 1e-3;  break;
         default:              eps_val = 1e-7;  break;
     }
-    const bool is_half =
-        (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    // Do the mask arithmetic in the input's natural floating precision: Float64
+    // inputs must stay in Float64 (building epsilon/ones in Float32 silently
+    // capped the comparison at single precision), while half precision widens
+    // to Float32. Mirrors compute_value_match_global_mask in function_reduction.cpp.
+    const DType work_dtype =
+        (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
     auto abs_diff = abs(sub(input, output_expanded));
-    auto abs_diff_f32 = is_half ? abs_diff.to(DType::Float32) : abs_diff;
-    auto epsilon = full(input_shape_vec, eps_val, DType::Float32, input.device());
-    auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
-    auto clamped = clamp(div(abs_diff_f32, epsilon), 0.0f, 1.0f);
+    auto abs_diff_w =
+        (abs_diff.dtype() != work_dtype) ? abs_diff.to(work_dtype) : abs_diff;
+    auto epsilon = full(input_shape_vec, eps_val, work_dtype, input.device());
+    auto ones_tensor = ones(input_shape_vec, work_dtype, input.device());
+    auto clamped = clamp(div(abs_diff_w, epsilon), 0.0, 1.0);
     auto mask = sub(ones_tensor, clamped);
 
     auto tie_count = sum(mask);
@@ -68,7 +73,8 @@ Tensor compute_min_value_match_global_mask(const Tensor& input,
         std::vector<int64_t>(input_shape_vec.size(), 1)), input_shape_vec);
     auto safe_tie = maximum(tie_count_exp, ones_tensor);
     auto normalized = div(mask, safe_tie);
-    return is_half ? normalized.to(input.dtype()) : normalized;
+    return (normalized.dtype() != input.dtype()) ? normalized.to(input.dtype())
+                                                 : normalized;
 }
 }  // namespace
 

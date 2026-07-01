@@ -92,12 +92,8 @@ auto Dropout::forward_impl(const Variable& input) -> Variable {
     auto shape_span = input.tensor().shape();
     std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
 
-    // Special case: p=1.0 means drop everything, return zeros
-    if (p_ == 1.0) {
-        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
-        return Variable(output_tensor, input.requires_grad());
-    }
-
+    // Note: the element-wise Dropout constructor rejects p >= 1.0, so p_ is
+    // always in [0, 1) here (no p_ == 1.0 special case is reachable).
     Tensor mask_data;
     if (p_ == 0.0) {
         // No dropout - mask is all ones
@@ -427,13 +423,22 @@ auto AlphaDropout::forward_impl(const Variable& input) -> Variable {
     const double scale = 1.0507009873554804934193349852946;
     const double alpha_p = -alpha * scale;  // approximately -1.7581
 
-    // Affine transformation parameters to maintain mean=0, var=1.
-    // At p == 1.0 every unit is dropped: a = sqrt(0) = 0 and the b expression
-    // would divide by (1 - p) == 0. Guard it so the degenerate all-dropped
-    // output is the finite constant a*alpha_p + b = 0 (zeros) instead of NaN.
+    // Affine transformation parameters to keep mean=0, var=1 (PyTorch parity):
+    //   a = (keep * (1 + p * alpha_p^2))^(-1/2),   b = -a * alpha_p * p
+    // The scale is the INVERSE square root — the previous code used sqrt(...)
+    // (and an extra /keep in b), giving output variance ~1.62 instead of 1 and
+    // defeating the self-normalising property AlphaDropout exists to preserve.
+    // At p == 1 (keep == 0) the formula divides by zero; emit the finite
+    // degenerate all-dropped output (zeros) instead of inf/NaN.
     const double keep = 1.0 - p_;
-    const double a = std::sqrt(keep * (1.0 + p_ * alpha_p * alpha_p));
-    const double b = (keep > 0.0) ? (-a * alpha_p * p_ / keep) : 0.0;
+    double a, b;
+    if (keep > 0.0) {
+        a = 1.0 / std::sqrt(keep * (1.0 + p_ * alpha_p * alpha_p));
+        b = -a * alpha_p * p_;
+    } else {
+        a = 0.0;
+        b = 0.0;
+    }
 
     // Generate random mask directly on target device
     auto shape_span = input.tensor().shape();

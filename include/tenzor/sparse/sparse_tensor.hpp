@@ -51,8 +51,11 @@ public:
      * @param shape Full dense shape of the sparse tensor
      * @return COO sparse tensor
      */
+    /// @param validate When true (default), index bounds are checked on the
+    /// host (a D2H copy for GPU tensors). Internal reconstructions from an
+    /// already-validated SparseTensor pass false to skip the redundant scan.
     static auto sparse_coo(const Tensor& indices, const Tensor& values,
-                           std::vector<int64_t> shape) -> SparseTensor;
+                           std::vector<int64_t> shape, bool validate = true) -> SparseTensor;
 
     /**
      * @brief Create a CSR sparse tensor (2D only).
@@ -64,7 +67,8 @@ public:
      * @return CSR sparse tensor
      */
     static auto sparse_csr(const Tensor& crow_indices, const Tensor& col_indices,
-                           const Tensor& values, std::vector<int64_t> shape) -> SparseTensor;
+                           const Tensor& values, std::vector<int64_t> shape,
+                           bool validate = true) -> SparseTensor;
 
     /**
      * @brief Create a CSC sparse tensor (2D only).

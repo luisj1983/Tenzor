@@ -267,7 +267,13 @@ auto VulkanBackend::dispatchNestedLogSoftmax(const Tensor& values, const Tensor&
 }
 
 auto VulkanBackend::dispatchNestedSoftmax(const Tensor& values, const Tensor& offsets,
-                                           int64_t /*dim*/) -> Tensor {
+                                           int64_t dim) -> Tensor {
+    if (values.dtype() != DType::Float32) {
+        // nested shaders are Float32-only; non-Float32 inputs were reinterpreted
+        // as Float32 (garbage). Widen, compute, narrow back.
+        const DType orig = values.dtype();
+        return dispatchNestedSoftmax(values.to(DType::Float32), offsets, dim).to(orig);
+    }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
     uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
@@ -311,6 +317,10 @@ auto VulkanBackend::dispatchNestedSoftmax(const Tensor& values, const Tensor& of
 }
 
 auto VulkanBackend::dispatchNestedSum(const Tensor& values, const Tensor& offsets) -> Tensor {
+    if (values.dtype() != DType::Float32) {
+        const DType orig = values.dtype();
+        return dispatchNestedSum(values.to(DType::Float32), offsets).to(orig);
+    }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
     uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
@@ -355,6 +365,10 @@ auto VulkanBackend::dispatchNestedSum(const Tensor& values, const Tensor& offset
 }
 
 auto VulkanBackend::dispatchNestedMean(const Tensor& values, const Tensor& offsets) -> Tensor {
+    if (values.dtype() != DType::Float32) {
+        const DType orig = values.dtype();
+        return dispatchNestedMean(values.to(DType::Float32), offsets).to(orig);
+    }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
     uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
@@ -399,6 +413,10 @@ auto VulkanBackend::dispatchNestedMean(const Tensor& values, const Tensor& offse
 
 auto VulkanBackend::dispatchNestedToPadded(const Tensor& values, const Tensor& offsets,
                                             int64_t max_len, float padding_value) -> Tensor {
+    if (values.dtype() != DType::Float32) {
+        const DType orig = values.dtype();
+        return dispatchNestedToPadded(values.to(DType::Float32), offsets, max_len, padding_value).to(orig);
+    }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
     uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;

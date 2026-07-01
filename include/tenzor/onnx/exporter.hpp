@@ -1150,6 +1150,37 @@ private:
     auto add_initializer_tensor(const Tensor& tensor, const std::string& name) -> void;
 
     /**
+     * @brief Emit a module parameter/buffer as a named initializer.
+     *
+     * Unlike add_initializer_tensor, this registers the *original* tensor's
+     * logical identity (storage + offset + shape + strides) under @p name,
+     * rather than the identity of the CPU-contiguous copy that is serialized.
+     * That lets convert_jit_graph_to_onnx recognize the same weight when it
+     * reappears as a captured graph constant and reference this initializer
+     * instead of serializing the weight a second time.
+     *
+     * @param tensor Original parameter/buffer tensor (may live on any device)
+     * @param name   ONNX initializer name
+     */
+    auto add_parameter_initializer(const Tensor& tensor, const std::string& name) -> void;
+
+    /**
+     * @brief Return the initializer name for @p tensor, creating one if absent.
+     *
+     * If @p tensor was already emitted as an initializer (e.g. a module weight
+     * registered up-front), its existing name is returned and no second copy is
+     * serialized. Otherwise a fresh name is generated from @p prefix and the
+     * tensor is added as a new initializer. This keeps op-builder helpers
+     * (export_linear/export_conv2d) from duplicating weights that the module
+     * export already serialized.
+     *
+     * @param tensor Weight/bias tensor to reference
+     * @param prefix Name prefix used when a new initializer must be created
+     * @return ONNX initializer name to reference from a node input
+     */
+    auto get_or_add_initializer(const Tensor& tensor, const std::string& prefix) -> std::string;
+
+    /**
      * @brief Map a JIT OpType to an ONNX operator type string.
      *
      * @param op_type JIT operation type

@@ -135,6 +135,7 @@ private:
     auto convert_slice(const ONNXImportNode& node) -> void;
     auto convert_pad(const ONNXImportNode& node) -> void;
     auto convert_gather(const ONNXImportNode& node) -> void;
+    auto convert_gather_elements(const ONNXImportNode& node) -> void;
     auto convert_clip(const ONNXImportNode& node) -> void;
     auto convert_cast(const ONNXImportNode& node) -> void;
     auto convert_dropout(const ONNXImportNode& node) -> void;

@@ -468,7 +468,12 @@ auto median(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> 
         return Variable(values, false);
     }
 
-    auto grad_fn = std::make_shared<MedianBackward>(dim, keepdim);
+    // Pass the RESOLVED dim `d` (nullopt -> -1) so the backward scatters along
+    // the same axis the forward reduced over. Passing the raw `dim` (nullopt)
+    // would send the backward down its global/flatten path while the forward
+    // reduced over the last axis — an inconsistent gradient. Mirrors how max/min
+    // keep forward and backward on the same axis.
+    auto grad_fn = std::make_shared<MedianBackward>(d, keepdim);
 
     auto [result_tensor, result_indices] = ::tenzor::median(input.tensor(), d, keepdim);
 
@@ -499,7 +504,9 @@ auto mode(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Va
         return Variable(values, false);
     }
 
-    auto grad_fn = std::make_shared<ModeBackward>(dim, keepdim);
+    // Pass the RESOLVED dim `d` (nullopt -> -1) so the backward scatters along
+    // the same axis the forward reduced over (see median() above).
+    auto grad_fn = std::make_shared<ModeBackward>(d, keepdim);
 
     auto [result_tensor, result_indices] = ::tenzor::mode(input.tensor(), d, keepdim);
 
@@ -3116,7 +3123,17 @@ auto ldl_factor(const Variable& input) -> std::tuple<Variable, Variable> {
 }
 
 auto ldl_solve(const Variable& LD, const Tensor& pivots, const Variable& B) -> Variable {
-    if ((!LD.requires_grad() && !B.requires_grad()) || !is_grad_enabled()) {
+    // The backward only implements the gradient w.r.t. B; a gradient w.r.t. the
+    // LD factor needs structured Bunch-Kaufman backprop that is not implemented.
+    // If the caller requests a gradient through LD alone, fail loudly instead of
+    // marking the output requires_grad and then silently producing a zero grad.
+    if (LD.requires_grad() && !B.requires_grad()) {
+        throw std::runtime_error(
+            "ldl_solve: gradient with respect to the LD factor is not supported; "
+            "only the gradient with respect to B is implemented");
+    }
+
+    if (!B.requires_grad() || !is_grad_enabled()) {
         return Variable(tenzor::linalg::ldl_solve(LD.tensor(), pivots, B.tensor()), false);
     }
 
@@ -3125,13 +3142,11 @@ auto ldl_solve(const Variable& LD, const Tensor& pivots, const Variable& B) -> V
     auto grad_fn = std::make_shared<LinalgLDLSolveBackward>();
     grad_fn->save_for_backward({LD.tensor(), pivots});
 
-    // Only B gradient is computed (LD gradient would require complex structured backprop)
+    // Gradient flows only through B (B.grad_fn() is null for a leaf; the engine
+    // then accumulates into B via the saved input variable).
     std::vector<std::shared_ptr<Function>> next_funcs = {B.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
-
-    std::vector<Variable> input_vars;
-    if (B.requires_grad()) input_vars.push_back(B);
-    grad_fn->set_input_variables(input_vars);
+    grad_fn->set_input_variables({B});
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -3562,9 +3577,9 @@ auto hypot(const Variable& x, const Variable& y) -> Variable {
     return output;
 }
 
-// copysign(magnitude, sign_src) — saves only sign_src (we need its sign);
-// the magnitude's gradient is sign(sign_src) which is purely derived from
-// the saved tensor.
+// copysign(magnitude, sign_src) — saves both magnitude and sign_src; the
+// magnitude's gradient is sign(magnitude) * sign(sign_src), so we need the
+// magnitude's sign as well as the sign source's.
 auto copysign(const Variable& magnitude, const Variable& sign_src) -> Variable {
     bool needs_grad = (magnitude.requires_grad() || sign_src.requires_grad())
                       && is_grad_enabled();
@@ -3577,7 +3592,7 @@ auto copysign(const Variable& magnitude, const Variable& sign_src) -> Variable {
         std::vector<int64_t>(magnitude.shape().begin(), magnitude.shape().end());
     grad_fn->input_shape_sign_ =
         std::vector<int64_t>(sign_src.shape().begin(), sign_src.shape().end());
-    grad_fn->save_for_backward({sign_src.tensor()});
+    grad_fn->save_for_backward({magnitude.tensor(), sign_src.tensor()});
     grad_fn->set_next_functions({magnitude.grad_fn(), sign_src.grad_fn()});
     grad_fn->set_input_variables({magnitude, sign_src});
     auto result = tenzor::copysign(magnitude.tensor(), sign_src.tensor());

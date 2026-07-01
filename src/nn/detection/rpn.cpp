@@ -164,6 +164,35 @@ auto RegionProposalNetwork::assign_anchors_to_gt(
         // else: keep as -1 (ignore)
     }
 
+    // Force-match each GT to its highest-IoU anchor(s) (allow_low_quality_matches),
+    // mirroring torchvision Matcher.set_low_quality_matches_. Without this, a GT
+    // whose best anchor IoU falls in the [bg_iou_thresh_, fg_iou_thresh_) band gets
+    // no positive anchor at all. For every GT we take its max IoU over all anchors,
+    // then force each anchor achieving that max to foreground (overriding any
+    // background/ignore label). matched_gt_idx already holds each anchor's argmax GT
+    // (== torchvision's all_matches), so it needs no adjustment here.
+    {
+        auto iou_cpu = iou_matrix.to(Device::cpu()).to(DType::Float32);
+        const float* iou_mat = iou_cpu.data<float>();  // row-major (num_anchors, num_gt)
+        std::vector<float> best_iou_per_gt(num_gt, -1.0f);
+        for (int64_t a = 0; a < num_anchors; ++a) {
+            for (int64_t g = 0; g < num_gt; ++g) {
+                float v = iou_mat[a * num_gt + g];
+                if (v > best_iou_per_gt[g]) best_iou_per_gt[g] = v;
+            }
+        }
+        for (int64_t a = 0; a < num_anchors; ++a) {
+            for (int64_t g = 0; g < num_gt; ++g) {
+                // Exact-equality match against the per-GT max, as in torchvision's
+                // (match_quality_matrix == highest_quality_foreach_gt) comparison.
+                if (best_iou_per_gt[g] > 0.0f &&
+                    iou_mat[a * num_gt + g] == best_iou_per_gt[g]) {
+                    label_data[a] = 1;  // foreground
+                }
+            }
+        }
+    }
+
     // Create labels tensor and copy data to avoid dangling pointer
     // (label_data vector would be destroyed, leaving tensor pointing to freed memory)
     auto labels = zeros({num_anchors}, DType::Int64, Device::cpu());
@@ -268,6 +297,27 @@ auto RegionProposalNetwork::generate_proposals(
 
     proposals = ops::index_select(proposals, 0, keep);
     auto scores = ops::index_select(objectness, 0, keep);
+
+    // Apply the objectness score threshold (mirrors torchvision RPN.filter_proposals,
+    // which sigmoids the objectness logits and drops boxes scoring below score_thresh
+    // before NMS). `objectness` here are raw logits; since sigmoid is monotonic,
+    // sigmoid(s) >= score_thresh_ is equivalent to s >= logit(score_thresh_), so we
+    // threshold the logits directly and avoid an extra sigmoid pass.
+    if (score_thresh_ > 0.0) {
+        if (score_thresh_ >= 1.0) {
+            // No score can reach a probability of 1; nothing survives.
+            return ops::zeros({0, 4}, proposals.dtype(), proposals.device());
+        }
+        const double logit_thresh = std::log(score_thresh_ / (1.0 - score_thresh_));
+        auto thresh = full(std::vector<int64_t>(scores.shape().begin(), scores.shape().end()),
+                           static_cast<float>(logit_thresh), scores.dtype(), scores.device());
+        auto score_keep = ops::nonzero(ge(scores, thresh)).squeeze(-1);
+        if (score_keep.numel() == 0) {
+            return ops::zeros({0, 4}, proposals.dtype(), proposals.device());
+        }
+        proposals = ops::index_select(proposals, 0, score_keep);
+        scores = ops::index_select(scores, 0, score_keep);
+    }
 
     // Sort by score and keep top pre_nms_top_n
     auto sorted_indices = ops::argsort(scores, 0, true);  // descending

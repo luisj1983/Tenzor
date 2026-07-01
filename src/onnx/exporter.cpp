@@ -687,7 +687,7 @@ void ONNXExporter::export_model(nn::Module& model,
             if (param_var && param_var->is_initialized() && param_var->tensor().numel() > 0) {
                 std::string safe_name = param_name;
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-                exporter.add_initializer_tensor(param_var->tensor().cpu().contiguous(), safe_name);
+                exporter.add_parameter_initializer(param_var->tensor(), safe_name);
             }
         }
 
@@ -697,7 +697,7 @@ void ONNXExporter::export_model(nn::Module& model,
             if (buffer_var && buffer_var->is_initialized() && buffer_var->tensor().numel() > 0) {
                 std::string safe_name = buffer_name;
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-                exporter.add_initializer_tensor(buffer_var->tensor().cpu().contiguous(), safe_name);
+                exporter.add_parameter_initializer(buffer_var->tensor(), safe_name);
             }
         }
 
@@ -1288,16 +1288,15 @@ auto ONNXExporter::export_linear(const Tensor& input, const Tensor& weight,
 
     std::string input_name = get_tensor_name(input, "linear_input");
 
-    // Add weight as initializer (transposed)
-    std::string weight_name = context_.generate_name("linear_weight");
-    add_initializer_tensor(weight, weight_name);
+    // Add weight as initializer (transposed via transB attr; reuse the
+    // module-export initializer if this weight was already serialized).
+    std::string weight_name = get_or_add_initializer(weight, "linear_weight");
 
     gemm_node.add_input(input_name);
     gemm_node.add_input(weight_name);
 
     if (bias.has_value()) {
-        std::string bias_name = context_.generate_name("linear_bias");
-        add_initializer_tensor(bias.value(), bias_name);
+        std::string bias_name = get_or_add_initializer(bias.value(), "linear_bias");
         gemm_node.add_input(bias_name);
     }
 
@@ -1325,15 +1324,13 @@ auto ONNXExporter::export_conv2d(const Tensor& input, const Tensor& weight,
 
     std::string input_name = get_tensor_name(input, "conv_input");
 
-    std::string weight_name = context_.generate_name("conv_weight");
-    add_initializer_tensor(weight, weight_name);
+    std::string weight_name = get_or_add_initializer(weight, "conv_weight");
 
     node.add_input(input_name);
     node.add_input(weight_name);
 
     if (bias.has_value()) {
-        std::string bias_name = context_.generate_name("conv_bias");
-        add_initializer_tensor(bias.value(), bias_name);
+        std::string bias_name = get_or_add_initializer(bias.value(), "conv_bias");
         node.add_input(bias_name);
     }
 
@@ -3362,6 +3359,26 @@ auto ONNXExporter::add_initializer_tensor(const Tensor& tensor, const std::strin
     context_.register_tensor(tensor, name);
 }
 
+auto ONNXExporter::add_parameter_initializer(const Tensor& tensor, const std::string& name) -> void {
+    // Register the ORIGINAL tensor's identity so the JIT-captured constant
+    // (a shallow copy sharing the same storage) resolves to this initializer
+    // in convert_jit_graph_to_onnx, avoiding a duplicate serialization of the
+    // same weight (which would double the .onnx file size).
+    context_.register_tensor(tensor, name);
+    ONNXTensor onnx_tensor(tensor.cpu().contiguous(), name);
+    graph_.add_initializer(onnx_tensor);
+}
+
+auto ONNXExporter::get_or_add_initializer(const Tensor& tensor, const std::string& prefix)
+    -> std::string {
+    if (auto existing = context_.get_tensor_name(tensor)) {
+        return *existing;
+    }
+    std::string name = context_.generate_name(prefix);
+    add_initializer_tensor(tensor.cpu().contiguous(), name);
+    return name;
+}
+
 // ============================================================================
 // JIT OpType -> ONNX Operator Mapping
 // ============================================================================
@@ -3676,17 +3693,31 @@ auto ONNXExporter::convert_jit_node_to_onnx(
             break;
         }
         case jit::OpType::Clamp: {
-            // ONNX Clip has no attributes in opset 11+; min/max are inputs.
-            // For simplicity we add them as float attrs if present. Emit each
-            // bound based on whether it is actually SET (has_float_attr), not a
-            // `!= 0.0` sentinel: clamp(x, min=0[, max=0]) is a real clamp, and
-            // the sentinel both dropped it and emitted an unset bound when only
-            // the other was present.
-            if (node->has_float_attr("min")) {
-                onnx_node.set_attr("min", node->get_attr("min"));
+            // Opset-11+ Clip carries min/max as INPUTS (scalar tensors), not
+            // attributes; emitting them as float attributes produced a Clip that
+            // standards-compliant readers (and our own importer) ignore, so the
+            // bounds were lost on round-trip. Emit each bound that is actually
+            // SET (has_float_attr) as a scalar initializer. Clip's inputs are
+            // positional [data, min, max]: if only `max` is set, ONNX requires an
+            // empty-string placeholder for the skipped `min` so `max` stays at
+            // index 2. (data input was already added in the input-mapping loop.)
+            bool has_min = node->has_float_attr("min");
+            bool has_max = node->has_float_attr("max");
+            if (has_min) {
+                std::string min_name = graph_.get_unique_name(node_name + "_min");
+                Tensor min_tensor({1}, DType::Float32, Device::cpu());
+                *min_tensor.data<float>() = node->get_attr("min");
+                add_initializer_tensor(min_tensor, min_name);
+                onnx_node.add_input(min_name);
+            } else if (has_max) {
+                onnx_node.add_input("");  // skip optional min, keep max at index 2
             }
-            if (node->has_float_attr("max")) {
-                onnx_node.set_attr("max", node->get_attr("max"));
+            if (has_max) {
+                std::string max_name = graph_.get_unique_name(node_name + "_max");
+                Tensor max_tensor({1}, DType::Float32, Device::cpu());
+                *max_tensor.data<float>() = node->get_attr("max");
+                add_initializer_tensor(max_tensor, max_name);
+                onnx_node.add_input(max_name);
             }
             break;
         }
@@ -4654,6 +4685,13 @@ auto ONNXExporter::convert_jit_graph_to_onnx(const jit::Graph& graph) -> void {
         if (value_name_map.count(value_id) || tensor.numel() == 0) {
             continue;
         }
+        // If this constant is a module parameter/buffer that was already
+        // emitted as a named initializer up-front, reference that initializer
+        // rather than serializing the same weight a second time.
+        if (auto existing = context_.get_tensor_name(tensor)) {
+            value_name_map[value_id] = *existing;
+            continue;
+        }
         std::string init_name = graph_.get_unique_name("const");
         add_initializer_tensor(tensor.cpu().contiguous(), init_name);
         value_name_map[value_id] = init_name;
@@ -4731,7 +4769,7 @@ auto ONNXExporter::export_module(nn::Module& module, const Tensor& dummy_input,
             if (param_var && param_var->is_initialized() && param_var->tensor().numel() > 0) {
                 std::string safe_name = param_name;
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-                add_initializer_tensor(param_var->tensor().cpu().contiguous(), safe_name);
+                add_parameter_initializer(param_var->tensor(), safe_name);
             }
         }
 
@@ -4741,7 +4779,7 @@ auto ONNXExporter::export_module(nn::Module& module, const Tensor& dummy_input,
             if (buffer_var && buffer_var->is_initialized() && buffer_var->tensor().numel() > 0) {
                 std::string safe_name = buffer_name;
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-                add_initializer_tensor(buffer_var->tensor().cpu().contiguous(), safe_name);
+                add_parameter_initializer(buffer_var->tensor(), safe_name);
             }
         }
 
@@ -4832,7 +4870,7 @@ auto export_to_onnx(std::shared_ptr<nn::Module> module,
             if (param_var && param_var->is_initialized() && param_var->tensor().numel() > 0) {
                 std::string safe_name = param_name;
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-                exporter.add_initializer_tensor(param_var->tensor().cpu().contiguous(), safe_name);
+                exporter.add_parameter_initializer(param_var->tensor(), safe_name);
             }
         }
         auto named_buffs = module->named_buffers();
@@ -4840,7 +4878,7 @@ auto export_to_onnx(std::shared_ptr<nn::Module> module,
             if (buffer_var && buffer_var->is_initialized() && buffer_var->tensor().numel() > 0) {
                 std::string safe_name = buffer_name;
                 std::replace(safe_name.begin(), safe_name.end(), '.', '_');
-                exporter.add_initializer_tensor(buffer_var->tensor().cpu().contiguous(), safe_name);
+                exporter.add_parameter_initializer(buffer_var->tensor(), safe_name);
             }
         }
 

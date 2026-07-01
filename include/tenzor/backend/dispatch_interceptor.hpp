@@ -21,7 +21,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
+#include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -72,6 +75,41 @@ public:
     }
 
     /**
+     * @brief Install an interceptor into the process-global registry.
+     *
+     * Unlike push()/pop() (which affect only the calling thread's stack),
+     * a globally-installed interceptor is consulted by run()/run_single()
+     * on EVERY thread. This is required for cross-thread profiling/tracing:
+     * a guard created on the main thread must observe dispatches issued by
+     * DataLoader / autograd-engine worker threads too.
+     *
+     * Global interceptors run OUTSIDE the calling thread's thread-local
+     * interceptors (i.e. they wrap them), so the existing per-thread chain
+     * order is preserved. Thread-safe: writers take a unique lock, readers
+     * (every dispatch) take a shared lock only when at least one global
+     * interceptor is installed (atomic fast-path otherwise).
+     */
+    static void push_global(DispatchInterceptor interceptor) {
+        std::unique_lock lock(global_mutex_());
+        auto& g = global_();
+        g.push_back(std::move(interceptor));
+        global_count_().store(g.size(), std::memory_order_release);
+    }
+
+    /// Remove the most recently installed global interceptor (LIFO).
+    static void pop_global() {
+        std::unique_lock lock(global_mutex_());
+        auto& g = global_();
+        if (!g.empty()) g.pop_back();
+        global_count_().store(g.size(), std::memory_order_release);
+    }
+
+    /// Number of process-global interceptors currently installed.
+    static size_t global_depth() noexcept {
+        return global_count_().load(std::memory_order_acquire);
+    }
+
+    /**
      * @brief Execute the interceptor chain, ending with terminal.
      *
      * Fast path: if no interceptors, calls terminal directly.
@@ -82,11 +120,20 @@ public:
         const OpAttributes& attrs,
         DispatchNext terminal)
     {
-        auto& s = stack_();
-        if (s.empty()) [[likely]] {
+        // Fast path: nothing installed on this thread AND no global
+        // interceptor — single atomic load + empty() check, ~1ns.
+        if (stack_().empty() &&
+            global_count_().load(std::memory_order_acquire) == 0) [[likely]] {
             return terminal(op, inputs, attrs);
         }
-        return run_chain_(s, 0, op, inputs, attrs, std::move(terminal));
+        // Combine global (outer) + thread-local (inner) interceptors. The
+        // combined vector outlives the fully-synchronous run_chain_ recursion.
+        auto combined = active_interceptors_();
+        if (combined.empty()) [[unlikely]] {
+            // Race: the only global interceptor was removed after the check.
+            return terminal(op, inputs, attrs);
+        }
+        return run_chain_(combined, 0, op, inputs, attrs, std::move(terminal));
     }
 
     /**
@@ -98,8 +145,14 @@ public:
         const OpAttributes& attrs,
         DispatchNextSingle terminal)
     {
-        auto& s = stack_();
-        if (s.empty()) [[likely]] {
+        // Fast path: nothing installed on this thread AND no global interceptor.
+        if (stack_().empty() &&
+            global_count_().load(std::memory_order_acquire) == 0) [[likely]] {
+            return terminal(op, inputs, attrs);
+        }
+        auto combined = active_interceptors_();
+        if (combined.empty()) [[unlikely]] {
+            // Race: the only global interceptor was removed after the check.
             return terminal(op, inputs, attrs);
         }
         // Wrap terminal as multi-output, run chain, extract element 0
@@ -107,7 +160,7 @@ public:
             OpId o, std::span<const Tensor> i, const OpAttributes& a) {
             return std::vector<Tensor>{t(o, i, a)};
         };
-        auto result = run_chain_(s, 0, op, inputs, attrs, std::move(wrapped));
+        auto result = run_chain_(combined, 0, op, inputs, attrs, std::move(wrapped));
         // An interceptor short-circuiting with no output is a programming
         // error. Throw a clear message rather than returning a null-storage
         // Tensor that surfaces as a confusing downstream failure — mirroring
@@ -128,6 +181,31 @@ private:
     /// which silently dropped dispatch interceptors — e.g. the JIT tracer
     /// recorded ops dispatched from some TUs but not others.
     static std::vector<DispatchInterceptor>& stack_();
+
+    /// Process-global interceptor registry, consulted by every thread's
+    /// dispatch. Like stack_(), these are defined out-of-line in a single
+    /// translation unit (dispatch.cpp) so there is exactly ONE instance of
+    /// each process-wide. global_mutex_ guards writes to global_(); readers
+    /// take a shared lock (only when global_count_ > 0). global_count_ is an
+    /// atomic mirror of global_().size() enabling a lock-free fast-path check.
+    static std::shared_mutex& global_mutex_();
+    static std::vector<DispatchInterceptor>& global_();
+    static std::atomic<std::size_t>& global_count_();
+
+    /// Snapshot of the active interceptor chain for this dispatch: a copy of
+    /// the global interceptors (outer) followed by this thread's thread-local
+    /// interceptors (inner). Copying isolates the chain from concurrent
+    /// install/uninstall and keeps it valid for the whole run_chain_ recursion.
+    static std::vector<DispatchInterceptor> active_interceptors_() {
+        std::vector<DispatchInterceptor> combined;
+        {
+            std::shared_lock lock(global_mutex_());
+            combined = global_();  // copy global interceptors (outermost)
+        }
+        auto& s = stack_();
+        combined.insert(combined.end(), s.begin(), s.end());  // thread-local (inner)
+        return combined;
+    }
 
     /// Recursively build the chain: interceptor[idx] calls run_chain_(idx+1).
     static std::vector<Tensor> run_chain_(
@@ -177,6 +255,30 @@ public:
     // Non-copyable, non-movable
     InterceptorGuard(const InterceptorGuard&) = delete;
     InterceptorGuard& operator=(const InterceptorGuard&) = delete;
+};
+
+/**
+ * @brief RAII guard that installs an interceptor into the process-global
+ *        registry, so it fires on dispatches from ALL threads for its lifetime.
+ *
+ * Use this (instead of InterceptorGuard) when the interceptor must observe
+ * work scheduled onto worker threads — e.g. profiling/tracing a forward pass
+ * that fans out across DataLoader or autograd-engine workers. Installs are
+ * LIFO, matching the per-thread guard's stack discipline.
+ */
+class GlobalInterceptorGuard {
+public:
+    explicit GlobalInterceptorGuard(DispatchInterceptor interceptor) {
+        DispatchInterceptorStack::push_global(std::move(interceptor));
+    }
+
+    ~GlobalInterceptorGuard() {
+        DispatchInterceptorStack::pop_global();
+    }
+
+    // Non-copyable, non-movable
+    GlobalInterceptorGuard(const GlobalInterceptorGuard&) = delete;
+    GlobalInterceptorGuard& operator=(const GlobalInterceptorGuard&) = delete;
 };
 
 } // namespace tenzor

@@ -214,7 +214,7 @@ public:
 private:
     bool use_residual_;  ///< Whether to use skip connection
     std::shared_ptr<nn::Sequential> conv_;  ///< Main convolution sequence
-};;
+};
 
 /**
  * @brief MobileNetV2 model.

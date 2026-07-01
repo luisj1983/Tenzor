@@ -52,7 +52,7 @@ void sycl_bitonic_sort(T* data, int64_t n, sycl::queue& queue) {
     if (padded == n) {
         for (int64_t k = 2; k <= padded; k <<= 1) {
             for (int64_t j = k >> 1; j > 0; j >>= 1) {
-                queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
+                queue.parallel_for(sycl::range<1>(padded)  /* full width: low elements span [0,padded); guard below dedups pairs */, [=](sycl::id<1> idx) {
                     int64_t i = static_cast<int64_t>(idx[0]);
                     int64_t ixj = i ^ j;
                     // Only process pairs where i < ixj (avoid double-swap)
@@ -92,7 +92,7 @@ void sycl_bitonic_sort(T* data, int64_t n, sycl::queue& queue) {
 
     for (int64_t k = 2; k <= padded; k <<= 1) {
         for (int64_t j = k >> 1; j > 0; j >>= 1) {
-            queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
+            queue.parallel_for(sycl::range<1>(padded)  /* full width: low elements span [0,padded); guard below dedups pairs */, [=](sycl::id<1> idx) {
                 int64_t i = static_cast<int64_t>(idx[0]);
                 int64_t ixj = i ^ j;
                 if (ixj <= i) return;
@@ -147,7 +147,7 @@ void sycl_bitonic_sort_by_key(T* data, int64_t* indices, int64_t n, sycl::queue&
     if (padded == n) {
         for (int64_t k = 2; k <= padded; k <<= 1) {
             for (int64_t j = k >> 1; j > 0; j >>= 1) {
-                queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
+                queue.parallel_for(sycl::range<1>(padded)  /* full width: low elements span [0,padded); guard below dedups pairs */, [=](sycl::id<1> idx) {
                     int64_t i = static_cast<int64_t>(idx[0]);
                     int64_t ixj = i ^ j;
                     if (ixj <= i) return;
@@ -196,7 +196,7 @@ void sycl_bitonic_sort_by_key(T* data, int64_t* indices, int64_t n, sycl::queue&
 
     for (int64_t k = 2; k <= padded; k <<= 1) {
         for (int64_t j = k >> 1; j > 0; j >>= 1) {
-            queue.parallel_for(sycl::range<1>(padded / 2), [=](sycl::id<1> idx) {
+            queue.parallel_for(sycl::range<1>(padded)  /* full width: low elements span [0,padded); guard below dedups pairs */, [=](sycl::id<1> idx) {
                 int64_t i = static_cast<int64_t>(idx[0]);
                 int64_t ixj = i ^ j;
                 if (ixj <= i) return;

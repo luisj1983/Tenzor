@@ -28,7 +28,15 @@ void main() {
         return;
     }
 
-    uint target_row = uint(indices_data[index_pos]);
+    // Normalize negative indices (forward wraps row -1 -> num_embeddings-1);
+    // converting a negative index straight to uint produced a huge value that
+    // failed the bounds check below, silently dropping that row's gradient.
+    int signed_row = indices_data[index_pos];
+    if (signed_row < 0) signed_row += int(params.num_embeddings);
+    if (signed_row < 0 || signed_row >= int(params.num_embeddings)) {
+        return;
+    }
+    uint target_row = uint(signed_row);
 
     // Bounds check on target row
     if (target_row >= params.num_embeddings) {

@@ -1410,56 +1410,18 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
     const Tensor grad_output_c = dispatchContiguous(grad_output);
     indices = dispatchContiguous(indices);
 
-    // BFloat16: use native shader
+    // BFloat16: the f32 "embedding_backward" shader indexes its grad_output and
+    // grad_weight buffers as 4-byte floats. Binding 2-byte bfloat16 buffers to
+    // it (as the old dedicated bf16 shader path did) makes the shader read/write
+    // past the end of the device buffers -> out-of-bounds writes and garbage
+    // grads. Stage through Float32 instead, exactly like the Float16 branch
+    // above and the EmbeddingBag backward path: promote grad_output to Float32,
+    // run the plain f32 path (which allocates a Float32 grad_weight), then narrow
+    // the result back to BFloat16.
     if (grad_output.dtype() == DType::BFloat16) {
-        std::string shader_name = "embedding_backward_bf16";
-        auto* pipeline = getPipeline(shader_name, device_id);
-
-        Tensor grad_weight = dispatchZeros({num_embeddings, embedding_dim}, DType::BFloat16, grad_output.device());
-
-        const void* buf_grad_out = grad_output_c.data_ptr();
-        const void* buf_indices = indices.data_ptr();
-        const void* buf_grad_weight = grad_weight.data_ptr();
-
-        size_t grad_out_pairs = (grad_output.numel() + 1) / 2;
-        size_t grad_weight_pairs = (grad_weight.numel() + 1) / 2;
-        size_t grad_out_size = grad_out_pairs * 4;
-        size_t indices_size = num_indices * sizeof(int32_t);
-        size_t grad_weight_size = grad_weight_pairs * 4;
-
-        std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, buf_grad_out}, {1, buf_indices}, {2, buf_grad_weight},
-        };
-        std::vector<size_t> sizes = {grad_out_size, indices_size, grad_weight_size};
-
-        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
-            device_id, pipeline, bindings, sizes);
-
-        struct PushConstants {
-            uint32_t num_indices;
-            uint32_t embedding_dim;
-            uint32_t num_embeddings;
-        } push_constants;
-
-        push_constants.num_indices = static_cast<uint32_t>(num_indices);
-        push_constants.embedding_dim = static_cast<uint32_t>(embedding_dim);
-        push_constants.num_embeddings = static_cast<uint32_t>(num_embeddings);
-
-        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                          0, sizeof(push_constants), &push_constants);
-
-        uint32_t total_elements = static_cast<uint32_t>(num_indices * embedding_dim);
-        uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
-        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
-
-        insertComputeOnlyBarrier(cmdBuffer);
-        endSingleTimeCommands(cmdBuffer, device_id);
-
-        return grad_weight;
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = dispatchEmbeddingBackward(go_f32, indices, num_embeddings, embedding_dim);
+        return result_f32.to(DType::BFloat16);
     }
 
     // For Float64 with atomic int64 support, use CAS-based GPU shader
@@ -1606,9 +1568,16 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
     size_t elem_size = input.dtype_size();
     size_t rrms_elem_size = rrms.dtype_size();
 
-    // Materialize read operands to packed offset-0 buffers before binding.
+    // Materialize read operands to packed offset-0 buffers before binding. The
+    // shader reads `weight` with the SAME element layout as `input` (the shader
+    // variant is chosen by input dtype), so the weight must share the input
+    // dtype. A learnable RMSNorm weight is often kept in Float32 even for a
+    // BFloat16/Float16 input; binding that Float32 buffer to the bf16 shader
+    // makes it unpack each 4-byte float as two bf16 halves (e.g. 1.0f ->
+    // {0.0, 1.0}), zeroing every even-indexed weight and the output with it.
     const Tensor input_c = dispatchContiguous(input);
-    const Tensor weight_c = dispatchContiguous(weight);
+    const Tensor weight_c = dispatchContiguous(
+        weight.dtype() == input.dtype() ? weight : weight.to(input.dtype()));
 
     const void* buf_input = input_c.data_ptr();
     const void* buf_output = output.data_ptr();

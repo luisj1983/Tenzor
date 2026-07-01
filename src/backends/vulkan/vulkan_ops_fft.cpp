@@ -273,7 +273,23 @@ auto VulkanBackend::dispatchTake(const Tensor& input_in, const Tensor& indices) 
     }
 
     int32_t device_id = input.device().index;
-    bool is_float64 = (input.dtype() == DType::Float64);
+
+    // Integer dtypes have no dedicated take shader and would be routed to the
+    // 4-byte Float32 shader, reinterpreting integer storage as floats (garbage).
+    // take only gathers elements by index (no arithmetic), so widen to a float
+    // type and narrow back exactly: Int64/UInt64 -> Float64, others -> Float32.
+    const DType orig_dtype = input.dtype();
+    const bool is_integer_dtype =
+        !(orig_dtype == DType::Float32 || orig_dtype == DType::Float64 ||
+          orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor work = input;
+    if (is_integer_dtype) {
+        const DType widen = (orig_dtype == DType::Int64 || orig_dtype == DType::UInt64)
+                                ? DType::Float64 : DType::Float32;
+        work = input.to(widen);
+    }
+
+    bool is_float64 = (work.dtype() == DType::Float64);
 
     if (is_float64) {
         vulkan::ensure_fp64_supported(device_id, "Take");
@@ -282,20 +298,20 @@ auto VulkanBackend::dispatchTake(const Tensor& input_in, const Tensor& indices) 
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape(indices.shape().begin(), indices.shape().end());
-    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor output(out_shape, work.dtype(), work.device());
 
     struct {
         uint32_t numel;
         uint32_t num_indices;
     } pushConstants;
-    pushConstants.numel = static_cast<uint32_t>(input.numel());
+    pushConstants.numel = static_cast<uint32_t>(work.numel());
     pushConstants.num_indices = static_cast<uint32_t>(idx.numel());
 
-    const void* buffer_in = input.data_ptr();
+    const void* buffer_in = work.data_ptr();
     const void* buffer_idx = idx.data_ptr();
     const void* buffer_out = output.data_ptr();
 
-    size_t in_size = input.numel() * input.dtype_size();
+    size_t in_size = work.numel() * work.dtype_size();
     size_t idx_size = idx.numel() * idx.dtype_size();
     size_t out_size = output.numel() * output.dtype_size();
 
@@ -322,6 +338,9 @@ auto VulkanBackend::dispatchTake(const Tensor& input_in, const Tensor& indices) 
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    if (is_integer_dtype) {
+        output = output.to(orig_dtype);
+    }
     return output;
 }
 

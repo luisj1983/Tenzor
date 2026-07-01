@@ -351,6 +351,26 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index_in,
     const int64_t idx_dim_stride = index_strides[dim];
     const int64_t ndim = static_cast<int64_t>(ndims);
 
+    // Shape contract (mirrors CUDA/CPU): index and src must share shape, and
+    // index.size(d) <= input.size(d) on every non-scatter axis. Without these the
+    // flat src read (src_ptr[flat]) or the output write (out_offset) below goes
+    // out of bounds when index is larger than src / self.
+    {
+        auto src_shape_span = src.shape();
+        bool same = static_cast<size_t>(src_shape_span.size()) == index_shape.size();
+        for (size_t d = 0; same && d < index_shape.size(); ++d)
+            same = (src_shape_span[d] == index_shape[d]);
+        if (!same) throw std::invalid_argument("scatter: index and src must have the same shape");
+        for (int64_t d = 0; d < ndim; ++d) {
+            if (d == dim) continue;
+            if (index_shape[d] > input_shape[d]) {
+                throw std::out_of_range("scatter: index.size(" + std::to_string(d) + ")=" +
+                    std::to_string(index_shape[d]) + " exceeds self.size(" + std::to_string(d) +
+                    ")=" + std::to_string(input_shape[d]) + " on a non-scatter dim");
+            }
+        }
+    }
+
     const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
 
     // Validate index values host-side (normalize negatives, throw on out-of-range
@@ -1305,6 +1325,44 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
     std::vector<int64_t> idx_strides(ndim);
     { int64_t s = 1; for (int64_t i = ndim - 1; i >= 0; --i) { idx_strides[i] = s; s *= idx_shape_vec[i]; } }
 
+    // Shape contract (mirrors CUDA/CPU): index and src must share shape, and
+    // index.size(d) <= self.size(d) on every non-scatter axis — otherwise the
+    // flat src read / output write below goes out of bounds.
+    {
+        auto src_shape_span = src_c.shape();
+        bool same = static_cast<size_t>(src_shape_span.size()) == idx_shape_vec.size();
+        for (size_t d = 0; same && d < idx_shape_vec.size(); ++d)
+            same = (src_shape_span[d] == idx_shape_vec[d]);
+        if (!same) throw std::invalid_argument("scatter_add: index and src must have the same shape");
+        for (int64_t d = 0; d < ndim; ++d) {
+            if (d == dim) continue;
+            if (idx_shape_vec[d] > shape[d]) {
+                throw std::out_of_range("scatter_add: index.size(" + std::to_string(d) + ")=" +
+                    std::to_string(idx_shape_vec[d]) + " exceeds self.size(" + std::to_string(d) +
+                    ")=" + std::to_string(shape[d]) + " on a non-scatter dim");
+            }
+        }
+    }
+
+    // Validate index values host-side (normalize negatives, throw on out-of-range
+    // against self.size(dim)) before they are used unguarded as output write
+    // offsets — an OOB index would corrupt device memory. Mirrors scatter/gather.
+    {
+        const int64_t input_dim_size = shape[dim];
+        const int64_t* idx_check = get_data_ptr<const int64_t>(index_c);
+        std::vector<int64_t> host_idx(static_cast<size_t>(idx_numel));
+        queue.memcpy(host_idx.data(), idx_check,
+                     static_cast<size_t>(idx_numel) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < idx_numel; ++i) {
+            int64_t di = host_idx[i];
+            if (di < 0) di += input_dim_size;
+            if (di < 0 || di >= input_dim_size) {
+                throw std::out_of_range("scatter_add: index " + std::to_string(host_idx[i]) +
+                    " out of range [0, " + std::to_string(input_dim_size) + ")");
+            }
+        }
+    }
+
     if (self_c.dtype() == DType::Float32) {
         float* out_ptr = get_data_ptr<float>(output);
         const float* src_ptr = get_data_ptr<const float>(src_c);
@@ -1591,6 +1649,23 @@ auto put_kernel(
     int64_t total_size = input.numel();
 
     if (num_indices == 0) return output;
+
+    // Validate indices host-side (normalize negatives, throw on out-of-range),
+    // matching the CPU reference / PyTorch. The kernel below silently SKIPPED
+    // out-of-range indices, producing a wrong result instead of raising.
+    {
+        Tensor idx_c = indices.is_contiguous() ? indices : indices.contiguous();
+        std::vector<int64_t> host_idx(static_cast<size_t>(num_indices));
+        queue.memcpy(host_idx.data(), idx_c.data<int64_t>(),
+                     static_cast<size_t>(num_indices) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t t = host_idx[i];
+            if (t < 0) t += total_size;
+            if (t < 0 || t >= total_size) {
+                throw std::out_of_range("put: index out of range for flattened tensor");
+            }
+        }
+    }
 
     if (accumulate) {
         // Accumulate mode: use device-side parallel_for with atomic operations
@@ -2041,6 +2116,24 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
     // re-derived inline in each kernel (SYCL lambdas cannot capture lambdas
     // cleanly across kernels, so the body is duplicated per reduce mode).
 
+    // Validate index values host-side (normalize negatives, throw on out-of-range
+    // against self.size(dim)) before they are used unguarded as destination write
+    // offsets — an OOB index would corrupt device memory. Mirrors scatter/gather.
+    {
+        const int64_t input_dim_size = shape[dim];
+        std::vector<int64_t> host_idx(static_cast<size_t>(total));
+        queue.memcpy(host_idx.data(), idx_ptr,
+                     static_cast<size_t>(total) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < total; ++i) {
+            int64_t di = host_idx[i];
+            if (di < 0) di += input_dim_size;
+            if (di < 0 || di >= input_dim_size) {
+                throw std::out_of_range("scatter_reduce: index " + std::to_string(host_idx[i]) +
+                    " out of range [0, " + std::to_string(input_dim_size) + ")");
+            }
+        }
+    }
+
     // If !include_self, initialize touched positions to identity.
     if (!include_self) {
         float identity;
@@ -2210,6 +2303,12 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
                   input.dtype(), input.device());
     int64_t numel = indices.numel();
     if (numel == 0) return output;
+    // Force contiguity: the per-dim decode below derives strides from shape and
+    // assumes contiguous storage; a non-contiguous input/index view (PyTorch
+    // broadcasts index against input) would otherwise be read with the wrong
+    // layout. data<T>() applies the offset but not strides.
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor indices_c = indices.is_contiguous() ? indices : indices.contiguous();
 
     int64_t in_dim_size = in_shape[dim];
 
@@ -2229,7 +2328,7 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
         for (int64_t d = 0; d < ndim; ++d) idx_shape_arr[d] = idx_shape[d];
     }
 
-    const int64_t* idx_ptr = indices.data<int64_t>();
+    const int64_t* idx_ptr = indices_c.data<int64_t>();
 
     // Validate indices host-side (normalize negatives, throw on out-of-range),
     // matching the CPU reference (throwing inside a SYCL kernel is not possible).
@@ -2271,28 +2370,28 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     };
 
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = input.data<float>();
+        const float* in_ptr = input_c.data<float>();
         float* out_ptr = output.data<float>();
         queue.parallel_for<TakeAlongDimKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
             out_ptr[i] = in_ptr[in_offset_of(i)];
         }).wait();
     } else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = input.data<double>();
+        const double* in_ptr = input_c.data<double>();
         double* out_ptr = output.data<double>();
         queue.parallel_for<TakeAlongDimKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
             out_ptr[i] = in_ptr[in_offset_of(i)];
         }).wait();
     } else if (input.dtype() == DType::Int32) {
-        const int32_t* in_ptr = input.data<int32_t>();
+        const int32_t* in_ptr = input_c.data<int32_t>();
         int32_t* out_ptr = output.data<int32_t>();
         queue.parallel_for<TakeAlongDimKernelI32>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
             out_ptr[i] = in_ptr[in_offset_of(i)];
         }).wait();
     } else if (input.dtype() == DType::Int64) {
-        const int64_t* in_ptr = input.data<int64_t>();
+        const int64_t* in_ptr = input_c.data<int64_t>();
         int64_t* out_ptr = output.data<int64_t>();
         queue.parallel_for<TakeAlongDimKernelI64>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);

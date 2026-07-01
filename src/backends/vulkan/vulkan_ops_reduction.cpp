@@ -854,15 +854,32 @@ auto VulkanBackend::dispatchTriuTril(const std::string& op_name,
     }
 
     int32_t device_id = input.device().index;
-    bool is_float64 = (input.dtype() == DType::Float64);
-    bool is_float16 = (input.dtype() == DType::Float16);
-    bool is_bfloat16 = (input.dtype() == DType::BFloat16);
+
+    // Integer dtypes have no dedicated triu/tril shader and would otherwise be
+    // routed to the 4-byte Float32 shader, reinterpreting the integer storage
+    // as floats (garbage). triu/tril only masks elements by position (no
+    // arithmetic), so widening to a float type and narrowing back is exact:
+    // Int64/UInt64 -> Float64 (exact to 2^53), all other integers -> Float32.
+    const DType orig_dtype = input.dtype();
+    const bool is_integer_dtype =
+        !(orig_dtype == DType::Float32 || orig_dtype == DType::Float64 ||
+          orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor work = input;
+    if (is_integer_dtype) {
+        const DType widen = (orig_dtype == DType::Int64 || orig_dtype == DType::UInt64)
+                                ? DType::Float64 : DType::Float32;
+        work = input.to(widen);
+    }
+
+    bool is_float64 = (work.dtype() == DType::Float64);
+    bool is_float16 = (work.dtype() == DType::Float16);
+    bool is_bfloat16 = (work.dtype() == DType::BFloat16);
 
     std::string shader_name = is_float64 ? "triu_tril_f64" : is_float16 ? "triu_tril_f16" : is_bfloat16 ? "triu_tril_bf16" : "triu_tril";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
-    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor output(out_shape, work.dtype(), work.device());
 
     uint32_t rows = static_cast<uint32_t>(input_shape[input_shape.size() - 2]);
     uint32_t cols = static_cast<uint32_t>(input_shape[input_shape.size() - 1]);
@@ -875,23 +892,23 @@ auto VulkanBackend::dispatchTriuTril(const std::string& op_name,
         int32_t diagonal;
         uint32_t op;
     } pushConstants;
-    pushConstants.n = static_cast<uint32_t>(input.numel());
+    pushConstants.n = static_cast<uint32_t>(work.numel());
     pushConstants.rows = rows;
     pushConstants.cols = cols;
     pushConstants.diagonal = static_cast<int32_t>(diagonal);
     pushConstants.op = op_code;
 
-    const void* buffer_in = input.data_ptr();
+    const void* buffer_in = work.data_ptr();
     const void* buffer_out = output.data_ptr();
 
-    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_in = work.numel() * work.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
     if (is_float16 || is_bfloat16) {
         // The f16 AND bf16 variants both bind packed 32-bit words (2 halves
         // each) and read/CAS whole words; round both ranges up to ((numel+1)/2)*4
         // so odd-numel tail words stay in-bounds. (BFloat16 previously used
         // numel*2, overrunning the final word by 2 bytes on odd sizes.)
-        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t in_pairs = (work.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
         buffer_size_out = out_pairs * 4;
@@ -917,15 +934,19 @@ auto VulkanBackend::dispatchTriuTril(const std::string& op_name,
 
     uint32_t workgroups;
     if (is_float16) {
-        workgroups = div_wg((input.numel() + 1) / 2, devices_[device_id].workgroupSize);
+        workgroups = div_wg((work.numel() + 1) / 2, devices_[device_id].workgroupSize);
     } else {
-        workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
+        workgroups = div_wg(work.numel(), devices_[device_id].workgroupSize);
     }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    // Narrow back to the original integer dtype if we widened above.
+    if (is_integer_dtype) {
+        output = output.to(orig_dtype);
+    }
     return output;
 }
 

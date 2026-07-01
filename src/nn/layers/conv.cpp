@@ -424,8 +424,13 @@ auto Conv2d::reset_parameters() -> void {
 
     auto bias_it = parameters_.find("bias");
     if (bias_it != parameters_.end()) {
+        // Match the constructor (and every sibling conv layer): bias ~
+        // U(-1/sqrt(fan_in), 1/sqrt(fan_in)). Zero-init contradicted the
+        // constructor and broke symmetry-breaking parity after a re-init.
         std::vector<int64_t> bias_shape = {out_channels_};
-        bias_it->second = std::make_shared<Variable>(zeros(bias_shape), true);
+        float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
+        auto bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
+        bias_it->second = std::make_shared<Variable>(bias_tensor, true);
     }
 }
 

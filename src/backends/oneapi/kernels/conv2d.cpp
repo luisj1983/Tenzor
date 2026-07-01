@@ -88,6 +88,18 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                                      groups, queue);
     }
 
+    // oneDNN memory below is described as packed nchw/oihw/x; a non-contiguous
+    // (channels-last / sliced / permuted) input would be misread. Materialize
+    // contiguous copies before wrapping, mirroring the im2col fallback.
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor weight_cont = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_cont;
+    const Tensor* bias_use = bias;
+    if (bias != nullptr && !bias->is_contiguous()) {
+        bias_cont = bias->contiguous();
+        bias_use = &bias_cont;
+    }
+
     const int64_t N = input_shape[0];   // Batch
     const int64_t C_in = input_shape[1]; // Input channels
     const int64_t H_in = input_shape[2]; // Input height
@@ -145,11 +157,11 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     // Wrap tensors as oneDNN memory
     auto src_mem = sycl_interop::make_memory(conv_pd.src_desc(), dnnl_engine,
                                               sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(input.data_ptr()));
+                                              const_cast<void*>(input_cont.data_ptr()));
 
     auto weights_mem = sycl_interop::make_memory(conv_pd.weights_desc(), dnnl_engine,
                                                   sycl_interop::memory_kind::usm,
-                                                  const_cast<void*>(weight.data_ptr()));
+                                                  const_cast<void*>(weight_cont.data_ptr()));
 
     auto dst_mem = sycl_interop::make_memory(conv_pd.dst_desc(), dnnl_engine,
                                               sycl_interop::memory_kind::usm,
@@ -164,7 +176,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                 memory::desc({C_out}, dt, memory::format_tag::x),
                 dnnl_engine,
                 sycl_interop::memory_kind::usm,
-                const_cast<void*>(bias->data_ptr())
+                const_cast<void*>(bias_use->data_ptr())
             );
 
             conv_prim.execute(dnnl_stream, {
@@ -212,6 +224,13 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
     auto grad_output_shape = grad_output.shape();
+
+    // oneDNN memory below is described as packed nchw/oihw; non-contiguous
+    // (channels-last / sliced / permuted) inputs would be misread. Materialize
+    // contiguous copies of the read operands before wrapping.
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor weight_cont = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor grad_output_cont = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
 
     const int64_t N = input_shape[0];
     const int64_t C_in = input_shape[1];
@@ -269,11 +288,11 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
         auto weights_mem = sycl_interop::make_memory(conv_bwd_data_pd.weights_desc(), dnnl_engine,
                                                       sycl_interop::memory_kind::usm,
-                                                      const_cast<void*>(weight.data_ptr()));
+                                                      const_cast<void*>(weight_cont.data_ptr()));
 
         auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_dst_desc(), dnnl_engine,
                                                        sycl_interop::memory_kind::usm,
-                                                       const_cast<void*>(grad_output.data_ptr()));
+                                                       const_cast<void*>(grad_output_cont.data_ptr()));
 
         auto conv_bwd_data_prim = convolution_backward_data(conv_bwd_data_pd);
         try {
@@ -309,7 +328,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
         auto src_mem = sycl_interop::make_memory(conv_bwd_weights_pd.src_desc(), dnnl_engine,
                                                   sycl_interop::memory_kind::usm,
-                                                  const_cast<void*>(input.data_ptr()));
+                                                  const_cast<void*>(input_cont.data_ptr()));
 
         auto diff_weights_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_weights_desc(), dnnl_engine,
                                                            sycl_interop::memory_kind::usm,
@@ -317,7 +336,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
         auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_dst_desc(), dnnl_engine,
                                                        sycl_interop::memory_kind::usm,
-                                                       const_cast<void*>(grad_output.data_ptr()));
+                                                       const_cast<void*>(grad_output_cont.data_ptr()));
 
         auto conv_bwd_weights_prim = convolution_backward_weights(conv_bwd_weights_pd);
 
@@ -393,6 +412,11 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
     auto weight_shape = weight.shape();
     auto grad_shape = grad_output.shape();
 
+    // oneDNN memory is described as packed nchw/oihw; non-contiguous read
+    // operands would be misread. Materialize contiguous copies before wrapping.
+    Tensor weight_cont = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor grad_output_cont = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
     const int64_t N = input_shape[0];
     const int64_t C_in = input_shape[1];
     const int64_t H_in = input_shape[2];
@@ -437,10 +461,10 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                                                       const_cast<void*>(grad_input.data_ptr()));
         auto weights_mem = sycl_interop::make_memory(conv_bwd_data_pd.weights_desc(), dnnl_engine,
                                                      sycl_interop::memory_kind::usm,
-                                                     const_cast<void*>(weight.data_ptr()));
+                                                     const_cast<void*>(weight_cont.data_ptr()));
         auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_dst_desc(), dnnl_engine,
                                                       sycl_interop::memory_kind::usm,
-                                                      const_cast<void*>(grad_output.data_ptr()));
+                                                      const_cast<void*>(grad_output_cont.data_ptr()));
 
         auto conv_bwd_data_prim = convolution_backward_data(conv_bwd_data_pd);
         conv_bwd_data_prim.execute(dnnl_stream, {
@@ -475,6 +499,11 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
 
     auto input_shape = input.shape();
     auto grad_shape = grad_output.shape();
+
+    // oneDNN memory is described as packed nchw/oihw; non-contiguous read
+    // operands would be misread. Materialize contiguous copies before wrapping.
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor grad_output_cont = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
 
     const int64_t N = input_shape[0];
     const int64_t C_in = input_shape[1];
@@ -517,13 +546,13 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
 
         auto src_mem = sycl_interop::make_memory(conv_bwd_weights_pd.src_desc(), dnnl_engine,
                                                  sycl_interop::memory_kind::usm,
-                                                 const_cast<void*>(input.data_ptr()));
+                                                 const_cast<void*>(input_cont.data_ptr()));
         auto diff_weights_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_weights_desc(), dnnl_engine,
                                                           sycl_interop::memory_kind::usm,
                                                           const_cast<void*>(grad_weight.data_ptr()));
         auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_dst_desc(), dnnl_engine,
                                                       sycl_interop::memory_kind::usm,
-                                                      const_cast<void*>(grad_output.data_ptr()));
+                                                      const_cast<void*>(grad_output_cont.data_ptr()));
 
         auto conv_bwd_weights_prim = convolution_backward_weights(conv_bwd_weights_pd);
         conv_bwd_weights_prim.execute(dnnl_stream, {
@@ -2146,8 +2175,26 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
                               int64_t sH, int64_t sW, int64_t pH, int64_t pW,
                               int64_t dH, int64_t dW,
                               sycl::queue& queue) -> Tensor {
-    auto in_shape = input.shape();
-    auto w_shape = weight.shape();
+    // Float16/BFloat16: widen to Float32, compute, narrow back (matching the
+    // conv1d/3d depthwise and regular conv2d kernels). Previously these threw.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        std::optional<Tensor> b32;
+        if (bias != nullptr && bias->numel() > 0) b32 = bias->to(DType::Float32);
+        Tensor out = depthwise_conv2d_kernel(
+            input.to(DType::Float32), weight.to(DType::Float32),
+            b32 ? &*b32 : nullptr, sH, sW, pH, pW, dH, dW, queue);
+        return out.to(orig);
+    }
+
+    // The kernel indexes input/weight via flat shape-derived offsets, so they
+    // must be contiguous; a non-contiguous (strided/permuted) view would be
+    // read with the wrong layout.
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor weight_cont = weight.is_contiguous() ? weight : weight.contiguous();
+
+    auto in_shape = input_cont.shape();
+    auto w_shape = weight_cont.shape();
 
     int64_t N = in_shape[0];
     int64_t C = in_shape[1];
@@ -2163,8 +2210,8 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
     int64_t total = N * C * H_out * W_out;
 
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = static_cast<const float*>(input.data_ptr());
-        const float* w_ptr = static_cast<const float*>(weight.data_ptr());
+        const float* in_ptr = static_cast<const float*>(input_cont.data_ptr());
+        const float* w_ptr = static_cast<const float*>(weight_cont.data_ptr());
         float* out_ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
         bool has_bias = (bias != nullptr && bias->numel() > 0);
         const float* b_ptr = has_bias ? static_cast<const float*>(bias->data_ptr()) : nullptr;
@@ -2191,8 +2238,8 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
             out_ptr[idx] = sum;
         });
     } else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = static_cast<const double*>(input.data_ptr());
-        const double* w_ptr = static_cast<const double*>(weight.data_ptr());
+        const double* in_ptr = static_cast<const double*>(input_cont.data_ptr());
+        const double* w_ptr = static_cast<const double*>(weight_cont.data_ptr());
         double* out_ptr = static_cast<double*>(const_cast<void*>(output.data_ptr()));
         bool has_bias = (bias != nullptr && bias->numel() > 0);
         const double* b_ptr = has_bias ? static_cast<const double*>(bias->data_ptr()) : nullptr;

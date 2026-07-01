@@ -601,6 +601,10 @@ bool OneAPICachingAllocator::try_merge_blocks(OneAPIBlock* block) {
 }
 
 size_t OneAPICachingAllocator::round_size(size_t size) const {
+    // Guard the round-up against size_t overflow (see CachingAllocator::round_size).
+    if (size > SIZE_MAX - (alignment_ - 1)) {
+        throw std::bad_alloc();
+    }
     return ((size + alignment_ - 1) / alignment_) * alignment_;
 }
 

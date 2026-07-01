@@ -1,7 +1,7 @@
 #version 450
 
 // Bicubic Interpolation Forward Pass (4D)
-// Resizes input tensor to target size using bicubic (Catmull-Rom, a = -0.5)
+// Resizes input tensor to target size using bicubic (a = -0.75, PyTorch upsample_bicubic2d)
 // interpolation. Coordinate mapping and cubic weights mirror
 // interpolate_bicubic_backward.comp exactly so that forward and backward use
 // matching kernels (consistent autograd) and match the CPU/CUDA/ROCm/OneAPI
@@ -27,8 +27,8 @@ layout(push_constant) uniform PushConstants {
 
 float cubic_w(float x) {
     float a = abs(x);
-    if (a <= 1.0) return 1.5 * a * a * a - 2.5 * a * a + 1.0;
-    if (a < 2.0)  return -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0;
+    if (a <= 1.0) return 1.25 * a * a * a - 2.25 * a * a + 1.0;
+    if (a < 2.0)  return -0.75 * a * a * a + 3.75 * a * a - 6.0 * a + 3.0;
     return 0.0;
 }
 

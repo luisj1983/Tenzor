@@ -21,7 +21,11 @@ void index_to_coords(uint linear_idx, uint ndims, out int coords[8]) {
     // We need the output shape which is shape permuted
     int out_shape[8];
     for (uint i = 0; i < ndims && i < 8u; i++) {
-        out_shape[i] = max(shape[perm[i]], 1);  // Prevent division by zero
+        // Guard the perm[] index (malformed permutation -> OOB shape[] read);
+        // the f32 kernel has this guard, the variants were missing it.
+        int pi = perm[i];
+        out_shape[i] = (pi >= 0 && uint(pi) < ndims && uint(pi) < 8u)
+                           ? max(shape[pi], 1) : 1;  // also prevents div-by-zero
     }
 
     for (int i = int(ndims) - 1; i >= 0; i--) {
@@ -59,7 +63,13 @@ void main() {
     // Permute coordinates to get input coordinates
     int in_coords[8];
     for (uint i = 0; i < params.ndim; i++) {
-        in_coords[perm[i]] = out_coords[i];
+        // Guard the perm[] index: an out-of-range value would be an OOB write
+        // into in_coords[8]. The f32 kernel has this guard (variants lacked it).
+        uint p = uint(perm[i]);
+        if (perm[i] < 0 || p >= params.ndim || p >= 8u) {
+            return;
+        }
+        in_coords[p] = out_coords[i];
     }
 
     // Convert input coordinates to linear index

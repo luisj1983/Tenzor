@@ -14,6 +14,25 @@ auto DispatchInterceptorStack::stack_() -> std::vector<DispatchInterceptor>& {
     return s;
 }
 
+// Process-global interceptor registry (NOT thread_local): one instance shared
+// by every thread so a globally-installed interceptor (e.g. cross-thread
+// profiling) is consulted on all worker-thread dispatches. Defined here in a
+// single TU to guarantee exactly one instance of each, mirroring stack_().
+auto DispatchInterceptorStack::global_mutex_() -> std::shared_mutex& {
+    static std::shared_mutex m;
+    return m;
+}
+
+auto DispatchInterceptorStack::global_() -> std::vector<DispatchInterceptor>& {
+    static std::vector<DispatchInterceptor> g;
+    return g;
+}
+
+auto DispatchInterceptorStack::global_count_() -> std::atomic<std::size_t>& {
+    static std::atomic<std::size_t> c{0};
+    return c;
+}
+
 auto Dispatcher::get_backend(std::span<const Tensor> tensors) -> Backend* {
     if (tensors.empty()) {
         return nullptr;

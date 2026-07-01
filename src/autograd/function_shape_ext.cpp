@@ -351,7 +351,11 @@ auto IndexSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
     if (dim < 0) dim += static_cast<int64_t>(grad_shape.size());
     auto full_index = zeros(grad_shape, DType::Int64, Device::cpu());
     auto* idx_ptr = full_index.data<int64_t>();
-    auto* src_idx_ptr = index.to(Device::cpu()).data<int64_t>();
+    // Bind the CPU copy to a named local: index.to(cpu()) returns a prvalue whose
+    // storage is freed at the end of the full-expression, so reading through a raw
+    // pointer into it would dangle when the saved index is GPU-resident.
+    auto index_cpu = index.to(Device::cpu());
+    auto* src_idx_ptr = index_cpu.data<int64_t>();
 
     int64_t total = grad.numel();
     int64_t dim_size = grad_shape[dim];
@@ -399,7 +403,10 @@ auto IndexSelectBackward::backward_with_variables(std::vector<Variable> grad_out
     if (dim < 0) dim += static_cast<int64_t>(grad_shape.size());
     auto full_index = zeros(grad_shape, DType::Int64, Device::cpu());
     auto* idx_ptr = full_index.data<int64_t>();
-    auto* src_idx_ptr = index.to(Device::cpu()).data<int64_t>();
+    // Bind the CPU copy to a named local (see backward()): the prvalue from
+    // index.to(cpu()) would otherwise be freed before the loop reads through it.
+    auto index_cpu = index.to(Device::cpu());
+    auto* src_idx_ptr = index_cpu.data<int64_t>();
 
     int64_t total = grad_var.tensor().numel();
     int64_t dim_size = grad_shape[dim];

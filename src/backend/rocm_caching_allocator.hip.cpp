@@ -28,6 +28,12 @@ inline const char* hipGetErrorString(hipError_t) { return "HIP not available"; }
 inline hipError_t hipMemGetInfo(size_t* free, size_t* total) { *free = 0; *total = 0; return hipSuccess; }
 inline hipError_t hipStreamSynchronize(hipStream_t) { return hipSuccess; }
 inline hipError_t hipDeviceSynchronize() { return hipSuccess; }
+constexpr unsigned int hipEventDisableTiming = 0x2;
+inline hipError_t hipEventCreateWithFlags(hipEvent_t* e, unsigned int) { *e = nullptr; return hipSuccess; }
+inline hipError_t hipEventRecord(hipEvent_t, hipStream_t) { return hipSuccess; }
+inline hipError_t hipEventQuery(hipEvent_t) { return hipSuccess; }
+inline hipError_t hipStreamWaitEvent(hipStream_t, hipEvent_t, unsigned int) { return hipSuccess; }
+inline hipError_t hipEventDestroy(hipEvent_t) { return hipSuccess; }
 inline hipError_t hipGetDeviceProperties(hipDeviceProp_t*, int) { return hipSuccess; }
 inline hipError_t hipPointerGetAttributes(hipPointerAttribute_t* attr, const void*) {
     attr->device = 0;
@@ -50,6 +56,32 @@ namespace rocm {
 constexpr size_t DEFAULT_ALIGNMENT = 256;        // HBM optimal alignment
 constexpr size_t DEFAULT_MIN_SPLIT_SIZE = 512;   // Minimum split size
 constexpr size_t DEFAULT_LARGE_ALLOC = 2ULL * 1024 * 1024 * 1024;  // 2GB
+
+namespace {
+
+// Acquire a recyclable, timing-disabled completion event from the pool, or
+// create a fresh one. Returns nullptr only if event creation fails (in which
+// case callers fall back to conservative behavior).
+inline hipEvent_t acquire_event(std::vector<hipEvent_t>& pool) {
+    if (!pool.empty()) {
+        hipEvent_t e = pool.back();
+        pool.pop_back();
+        return e;
+    }
+    hipEvent_t e = nullptr;
+    if (hipEventCreateWithFlags(&e, hipEventDisableTiming) != hipSuccess) {
+        return nullptr;
+    }
+    return e;
+}
+
+// Return an event to the pool for re-recording (its prior recorded state is
+// overwritten on the next hipEventRecord, so no reset is required).
+inline void recycle_event(std::vector<hipEvent_t>& pool, hipEvent_t e) {
+    if (e) pool.push_back(e);
+}
+
+}  // namespace
 
 RocmCachingAllocator::RocmCachingAllocator()
     : alignment_(DEFAULT_ALIGNMENT),
@@ -85,6 +117,15 @@ void* RocmCachingAllocator::allocate(size_t size, int device, hipStream_t stream
     // Initialize device properties if not already done
     if (device_alloc.properties.total_memory == 0) {
         initialize_device_properties(device);
+    }
+
+    // Detect the first time a SECOND distinct stream is used on this device.
+    // Until then we stay on the zero-overhead single-stream path (no events).
+    if (!device_alloc.first_stream_set) {
+        device_alloc.first_stream = stream;
+        device_alloc.first_stream_set = true;
+    } else if (stream != device_alloc.first_stream) {
+        device_alloc.multi_stream = true;
     }
 
     device_alloc.stats.num_allocations++;
@@ -200,7 +241,24 @@ void RocmCachingAllocator::free(void* ptr, int device) {
     stream_blocks.erase(std::remove(stream_blocks.begin(), stream_blocks.end(), block),
                        stream_blocks.end());
 
-    // Try to merge with adjacent blocks
+    // In multi-stream mode, record a completion event on the stream that last
+    // used this memory so a later cross-stream reuse can gate on it. The event
+    // is parked on the block and (after any merge) inherited by the surviving
+    // super-block. Single-stream mode skips this entirely (no overhead).
+    if (device_alloc.multi_stream) {
+        // Ensure the event is created/recorded on the block's device.
+        hipSetDevice(device);
+        hipEvent_t ev = acquire_event(device_alloc.event_pool);
+        if (ev != nullptr) {
+            if (hipEventRecord(ev, block->stream) == hipSuccess) {
+                block->pending_events.emplace_back(block->stream, ev);
+            } else {
+                recycle_event(device_alloc.event_pool, ev);
+            }
+        }
+    }
+
+    // Try to merge with adjacent blocks (carries pending events across the merge)
     if (merge_enabled_) {
         try_merge_blocks(block);
     }
@@ -220,33 +278,68 @@ void RocmCachingAllocator::free(void* ptr, int device) {
 void RocmCachingAllocator::empty_cache(int device) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Free every original hipMalloc allocation whose sub-blocks are ALL free.
+    // release_block() can only free a block that solely owns its original_ptr;
+    // a region split into several free sub-blocks (which may not have re-merged)
+    // would otherwise be stranded. Here we group every tracked block by its
+    // original allocation and, when none of that allocation's sub-blocks is in
+    // use, hipFree the whole region once and untrack all its sub-blocks together
+    // (mirrors release_block's per-block stats/event/index cleanup).
+    auto release_all_free = [this](DeviceAllocator& da) {
+        std::unordered_map<void*, std::vector<Block*>> by_orig;
+        for (auto& kv : da.all_blocks) {
+            by_orig[kv.second->original_ptr].push_back(kv.second.get());
+        }
+        for (auto& group : by_orig) {
+            bool in_use = false;
+            for (Block* b : group.second) {
+                if (b->allocated) { in_use = true; break; }
+            }
+            if (in_use) {
+                continue;  // region still has live sub-blocks; keep it cached
+            }
+            // Snapshot ptr/size before erasing (all_blocks.erase deletes Block).
+            struct Rec { void* ptr; size_t size; };
+            std::vector<Rec> recs;
+            recs.reserve(group.second.size());
+            for (Block* b : group.second) {
+                recs.push_back({b->ptr, b->size});
+                da.free_blocks.erase(b);
+                for (auto& pe : b->pending_events) {
+                    recycle_event(da.event_pool, pe.second);
+                }
+                b->pending_events.clear();
+            }
+            // One hipFree for the whole underlying allocation.
+            hipError_t err = hipFree(group.first);
+            if (err != hipSuccess) {
+                log_message("Warning: hipFree failed in empty_cache: " +
+                            std::string(hipGetErrorString(err)));
+            }
+            for (const auto& r : recs) {
+                if (da.stats.reserved_bytes >= r.size) {
+                    da.stats.reserved_bytes -= r.size;
+                }
+                if (da.stats.cached_bytes >= r.size) {
+                    da.stats.cached_bytes -= r.size;
+                }
+                da.blocks_by_addr.erase(r.ptr);
+                da.all_blocks.erase(r.ptr);
+            }
+        }
+        // Destroy recycled completion events (handles, not memory).
+        for (hipEvent_t ev : da.event_pool) {
+            if (ev) hipEventDestroy(ev);
+        }
+        da.event_pool.clear();
+    };
+
     if (device == -1) {
-        // Empty all devices
         for (auto& pair : device_allocators_) {
-            auto& device_alloc = pair.second;
-
-            // Release all free blocks
-            std::vector<Block*> blocks_to_release;
-            for (Block* block : device_alloc.free_blocks) {
-                blocks_to_release.push_back(block);
-            }
-
-            for (Block* block : blocks_to_release) {
-                release_block(block);
-            }
+            release_all_free(pair.second);
         }
     } else {
-        // Empty specific device
-        auto& device_alloc = device_allocators_[device];
-
-        std::vector<Block*> blocks_to_release;
-        for (Block* block : device_alloc.free_blocks) {
-            blocks_to_release.push_back(block);
-        }
-
-        for (Block* block : blocks_to_release) {
-            release_block(block);
-        }
+        release_all_free(device_allocators_[device]);
     }
 
     log_message("Emptied cache for device " + std::to_string(device));
@@ -421,6 +514,11 @@ void RocmCachingAllocator::reset_stats() {
         stats.num_splits = 0;
         stats.num_merges = 0;
         stats.num_oom_errors = 0;
+        // Reset peak watermarks to the current live levels (matches
+        // reset_peak_memory_stats semantics): a stale peak from earlier activity
+        // must not leak past a reset.
+        stats.peak_allocated = stats.allocated_bytes;
+        stats.peak_reserved = stats.reserved_bytes;
     }
 }
 
@@ -497,6 +595,26 @@ Block* RocmCachingAllocator::try_allocate_from_cache(size_t size, int device, hi
         } else {
             device_alloc.stats.cached_bytes = 0;
         }
+
+        // Stream-ordered reuse. This cached block (or a merged super-block) may
+        // carry completion events recorded when its constituent regions were
+        // freed. Before the requesting stream may touch the memory it must wait
+        // on every event recorded on a DIFFERENT stream — otherwise the new
+        // stream could overwrite data the old stream's kernels are still
+        // reading/writing (cross-stream use-after-free). Same-stream events need
+        // no wait: in-stream ordering already serializes the reuse, so the
+        // single-stream fast path inserts zero synchronization. Consumed events
+        // are recycled for re-recording.
+        for (auto& pe : block->pending_events) {
+            if (pe.first != stream && pe.second != nullptr) {
+                hipStreamWaitEvent(stream, pe.second, 0);
+            }
+            recycle_event(device_alloc.event_pool, pe.second);
+        }
+        block->pending_events.clear();
+        // The block now belongs to the requesting stream (keeps stream_blocks
+        // tracking and future free()-event recording consistent).
+        block->stream = stream;
 
         // Try to split if block is too large
         if (block->size >= size + min_split_size_) {
@@ -606,19 +724,25 @@ bool RocmCachingAllocator::try_merge_blocks(Block* block) {
             // Merge with next block
             device_alloc.free_blocks.erase(next_block);
 
-            // When merging, next_block's size is already counted in cached_bytes
-            // (added by free()). Only subtract it here; do NOT re-add the grown
-            // block->size, or this block's pre-merge bytes get double-counted.
-            // Guard the subtraction against size_t underflow (cached_bytes can
-            // legitimately be < next_block->size after upstream clamping), and
-            // mirror the backward merge below + the CUDA reference allocator
-            // (caching_allocator.cpp:468-469).
-            if (device_alloc.stats.cached_bytes >= next_block->size) {
-                device_alloc.stats.cached_bytes -= next_block->size;
-            }
+            // cached_bytes is an exact running total of all free bytes. Both
+            // `block` (credited in free()) and `next_block` (credited when it
+            // was itself freed) are ALREADY counted; the merged super-block
+            // represents exactly those same free bytes, so cached_bytes must NOT
+            // change here. The old code subtracted next_block->size, which
+            // under-counted cached_bytes on every merge and broke the invariant
+            // cached_bytes == sum(free block sizes) (mirrors the CUDA reference
+            // allocator fix in caching_allocator.cpp).
 
             // Expand current block
             block->size += next_block->size;
+
+            // Inherit the absorbed block's pending completion events: the merged
+            // super-block spans its memory, so a future cross-stream reuse must
+            // also wait on those events before touching that region.
+            for (auto& pe : next_block->pending_events) {
+                block->pending_events.push_back(pe);
+            }
+            next_block->pending_events.clear();
 
             // Remove next block (and its address-index entry)
             device_alloc.blocks_by_addr.erase(next_ptr);
@@ -649,12 +773,19 @@ bool RocmCachingAllocator::try_merge_blocks(Block* block) {
                 void* new_ptr = prev_block->ptr;
                 size_t prev_size = prev_block->size;
 
-                // prev_block is currently a free block; mirror the forward-merge
-                // accounting (subtract the absorbed block's cached bytes).
+                // prev_block is currently a free block whose bytes are already
+                // in cached_bytes; `block`'s bytes were credited in free(). The
+                // merged super-block represents exactly those same free bytes, so
+                // cached_bytes must NOT change here (mirrors the forward merge;
+                // the old subtraction under-counted cached_bytes every merge).
                 device_alloc.free_blocks.erase(prev_block);
-                if (device_alloc.stats.cached_bytes >= prev_size) {
-                    device_alloc.stats.cached_bytes -= prev_size;
+
+                // Inherit the predecessor's pending completion events (the
+                // surviving `block` now spans the predecessor's memory too).
+                for (auto& pe : prev_block->pending_events) {
+                    block->pending_events.push_back(pe);
                 }
+                prev_block->pending_events.clear();
 
                 // Grow `block` downward to cover the predecessor's range.
                 block->ptr = new_ptr;
@@ -681,6 +812,12 @@ bool RocmCachingAllocator::try_merge_blocks(Block* block) {
 }
 
 size_t RocmCachingAllocator::round_size(size_t size) const {
+    // Guard the round-up against size_t overflow (see CachingAllocator::round_size):
+    // (size + alignment_ - 1) wraps for size near SIZE_MAX, under-allocating and
+    // letting later writes overrun the buffer. The size may come from untrusted metadata.
+    if (size > SIZE_MAX - (alignment_ - 1)) {
+        throw std::bad_alloc();
+    }
     return ((size + alignment_ - 1) / alignment_) * alignment_;
 }
 
@@ -731,6 +868,22 @@ bool RocmCachingAllocator::release_block(Block* block) {
         return false;
     }
 
+    // Even the lower split block keeps ptr == original_ptr (split_block only
+    // shrinks its size and creates a remainder at original_ptr + size that
+    // inherits the same original_ptr). hipFree(original_ptr) frees the ENTIRE
+    // underlying allocation, so device-freeing the lower block while a remainder
+    // sibling is still tracked would leave that sibling dangling (use-after-free
+    // if handed back out). try_merge_blocks normally reassembles the full block
+    // first, but with merging disabled (set_merge_enabled(false)) the lower block
+    // is still selectable by enforce_cache_limit/empty_cache. Refuse to free
+    // unless this block is the SOLE block for its original allocation. (Ported
+    // from the CUDA allocator, which already had this guard.)
+    for (const auto& [addr, other] : device_alloc.all_blocks) {
+        if (other.get() != block && other->original_ptr == block->original_ptr) {
+            return false;
+        }
+    }
+
     // Remove from free blocks if present
     device_alloc.free_blocks.erase(block);
 
@@ -752,6 +905,13 @@ bool RocmCachingAllocator::release_block(Block* block) {
     if (device_alloc.stats.cached_bytes >= block->size) {
         device_alloc.stats.cached_bytes -= block->size;
     }
+
+    // The underlying allocation is gone; its pending completion events are no
+    // longer meaningful. Recycle the handles so they are not leaked.
+    for (auto& pe : block->pending_events) {
+        recycle_event(device_alloc.event_pool, pe.second);
+    }
+    block->pending_events.clear();
 
     // Remove from all_blocks (and the address-ordered index)
     device_alloc.blocks_by_addr.erase(block->ptr);
@@ -833,21 +993,23 @@ void RocmCachingAllocator::log_message(const std::string& message) {
 bool RocmCachingAllocator::handle_allocation_failure(size_t size, int device) {
     log_message("Allocation failure, attempting garbage collection");
 
-    // First try normal garbage collection.
     // NOTE: called from allocate() with mutex_ already held, so we must use the
     // lock-free variant to avoid self-deadlock on the non-recursive mutex_.
-    garbage_collect_locked(device, false);
-
-    // Check if we freed enough memory
     auto& device_alloc = device_allocators_[device];
-    if (device_alloc.stats.cached_bytes > 0) {
-        return true;
-    }
+    const size_t reserved_before = device_alloc.stats.reserved_bytes;
 
-    // Try aggressive garbage collection
+    // Normal GC first, then aggressive GC UNCONDITIONALLY. A residual
+    // cached_bytes > 0 after the normal pass does NOT mean the pending request
+    // can be satisfied — those cached blocks may be sub-threshold or fragmented
+    // and unusable for this size. The previous early `return true` on residual
+    // cache skipped the aggressive pass entirely, so the retry hipMalloc still
+    // failed and the allocator threw OOM while reclaimable memory sat in cache.
+    garbage_collect_locked(device, false);
     garbage_collect_locked(device, true);
 
-    return device_alloc.stats.cached_bytes > 0;
+    // Recovery is only meaningful if memory was actually returned to the device
+    // (reserved bytes dropped), giving the subsequent hipMalloc retry a chance.
+    return device_alloc.stats.reserved_bytes < reserved_before;
 }
 
 } // namespace rocm

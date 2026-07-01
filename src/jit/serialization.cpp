@@ -596,7 +596,18 @@ auto GraphReader::read_string() -> std::string {
 
 auto GraphReader::read_tensor() -> Tensor {
     std::vector<int64_t> shape = read_int64_vector();
-    DType dtype = static_cast<DType>(read_uint32());
+    // Validate the raw dtype integer against the known enumerators BEFORE it
+    // flows into dtype_size()/the buffer math below. An unrecognized DType makes
+    // dtype_size() return 0, so an empty-shape (or crafted) tensor would slip
+    // past the byte-count guard and later drive an out-of-bounds read on a
+    // corrupt .graph. Mirrors the sibling check in src/export/export.cpp. The
+    // DType enum is uint8-backed and dense [0, FP8_E5M2FNUZ] (last enumerator).
+    uint32_t raw_dtype = read_uint32();
+    if (raw_dtype > static_cast<uint32_t>(DType::FP8_E5M2FNUZ)) {
+        throw std::runtime_error("GraphReader::read_tensor: unknown dtype value " +
+                                 std::to_string(raw_dtype));
+    }
+    DType dtype = static_cast<DType>(raw_dtype);
     auto dev_type = static_cast<Device::Type>(read_uint32());
     int64_t dev_index = read_int64();
     Device original_device(dev_type, dev_index);

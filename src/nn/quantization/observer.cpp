@@ -446,7 +446,10 @@ auto PerChannelHistogramObserver::observe(const Tensor& tensor) -> void {
     }
 
     auto shape = tensor_f32.shape();
-    const int64_t ax = axis_ < 0 ? axis_ + tensor_f32.ndim() : axis_;
+    // Persist the normalized axis (like MinMaxObserver) so calculate_qparams later
+    // reports a non-negative axis consistent with the channels observed here.
+    axis_ = axis_ < 0 ? axis_ + tensor_f32.ndim() : axis_;
+    const int64_t ax = axis_;
     int64_t num_channels = shape[ax];
 
     // Initialize observers if needed

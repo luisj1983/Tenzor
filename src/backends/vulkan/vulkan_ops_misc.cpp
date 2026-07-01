@@ -977,7 +977,12 @@ auto VulkanBackend::dispatchRepeat(const Tensor& input, const std::vector<int64_
 /**
  * @brief Dispatch masked_select operation using GPU prefix-sum and gather shaders.
  */
-auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor {
+auto VulkanBackend::dispatchMaskedSelect(const Tensor& input_raw, const Tensor& mask_raw) -> Tensor {
+    // The count/prefix-sum/gather shaders index input and mask in flat element
+    // order (which defines the output order), so both must be packed at offset 0.
+    // Materialize contiguous first (matches dispatchBincount/dispatchWhere/dispatchArgSort).
+    Tensor input = dispatchContiguous(input_raw);
+    Tensor mask = dispatchContiguous(mask_raw);
     // Validate shapes match
     auto input_shape = input.shape();
     auto mask_shape = mask.shape();
@@ -1223,17 +1228,32 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     // would drop the imaginary part AND truncate the real part to single
     // precision, so it must use its own 16-byte mover.
     bool is_c128 = (target_dtype == DType::Complex128);
+    // Wide integers (Int32/UInt32/Int64/UInt64) routed through the Float32 path
+    // lose every bit above 2^24, silently corrupting large index/id values that
+    // `where` should select verbatim. Route them through the exact Float64
+    // (8-byte) mover instead; the function narrows back to target_dtype on
+    // return (exact for |v| <= 2^53). Narrow ints (<= 2^16) stay on Float32.
+    bool is_wide_int = (target_dtype == DType::Int32 || target_dtype == DType::UInt32 ||
+                        target_dtype == DType::Int64 || target_dtype == DType::UInt64);
+    // Int64/UInt64 can hold values > 2^53 that a numeric ->Float64 conversion would
+    // corrupt; bind their raw 8-byte storage to the byte-mover instead (like the
+    // Complex paths). Int32/UInt32 (|v| <= 2^31 < 2^53) stay exact through Float64.
+    bool is_i64 = (target_dtype == DType::Int64 || target_dtype == DType::UInt64);
 
     // R.13: gate FP64 dispatch on shaderFloat64 device support (the 8/16-byte
     // movers use float64-typed buffers to move elements).
-    if (is_f64 || is_c64 || is_c128) {
+    if (is_f64 || is_c64 || is_c128 || is_wide_int) {
         vulkan::ensure_fp64_supported(x.device().index, "Where");
     }
 
     Tensor cond_u8 = (condition.dtype() == DType::Bool) ? condition : condition.to(DType::Bool);
 
     Tensor x_work, y_work;
-    if (is_f64) {
+    if (is_i64) {
+        // Keep raw Int64/UInt64 storage; the 8-byte byte-mover preserves the bits.
+        x_work = (x.dtype() == target_dtype) ? x : x.to(target_dtype);
+        y_work = (y.dtype() == target_dtype) ? y : y.to(target_dtype);
+    } else if (is_f64 || is_wide_int) {
         x_work = (x.dtype() == DType::Float64) ? x : x.to(DType::Float64);
         y_work = (y.dtype() == DType::Float64) ? y : y.to(DType::Float64);
     } else if (is_c64) {
@@ -1254,11 +1274,12 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     if (!y_work.is_contiguous())  y_work  = y_work.contiguous();
 
     int32_t device_id = x.device().index;
-    auto* pipeline = getPipeline(is_c128 ? "where_c128" : ((is_f64 || is_c64) ? "where_f64" : "where"), device_id);
+    auto* pipeline = getPipeline(is_c128 ? "where_c128" : ((is_f64 || is_c64 || is_wide_int) ? "where_f64" : "where"), device_id);
 
     std::vector<int64_t> out_shape(cond_shape.begin(), cond_shape.end());
     Tensor out_work(out_shape,
-                    is_f64 ? DType::Float64 : (is_c64 ? DType::Complex64 : (is_c128 ? DType::Complex128 : DType::Float32)),
+                    is_i64 ? target_dtype
+                           : ((is_f64 || is_wide_int) ? DType::Float64 : (is_c64 ? DType::Complex64 : (is_c128 ? DType::Complex128 : DType::Float32))),
                     x.device());
 
     uint32_t n = static_cast<uint32_t>(out_work.numel());
@@ -1266,7 +1287,7 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     pc.num_elements = n;
 
     // Complex64 is bound as 8-byte elements; Complex128 as 16-byte elements.
-    size_t elem_size = is_c128 ? 16 : ((is_f64 || is_c64) ? 8 : sizeof(float));
+    size_t elem_size = is_c128 ? 16 : ((is_f64 || is_c64 || is_wide_int) ? 8 : sizeof(float));
     size_t data_size = static_cast<size_t>(n) * elem_size;
     size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
 
@@ -6127,22 +6148,52 @@ auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_
 
 auto VulkanBackend::dispatchMaskedScatterWithPrefix(const Tensor& input, const Tensor& mask,
                                                      const Tensor& source, const Tensor& prefix_sum) -> Tensor {
+    int32_t device_id = input.device().index;
+    Tensor mask_u8 = mask.to(DType::Bool);
+    uint32_t n = static_cast<uint32_t>(input.numel());
+
+    struct { uint32_t num_elements; uint32_t source_len; } pc;
+    pc.num_elements = n;
+    pc.source_len = static_cast<uint32_t>(source.numel());
+    size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
+    size_t i32_size = static_cast<size_t>(n) * sizeof(int32_t);
+
+    // 8-byte dtypes (Float64/Int64/UInt64) go through masked_scatter_f64, which
+    // moves 8-byte elements verbatim (no value conversion), so Float64 precision
+    // and Int64 values > 2^24 survive. The Float32 path below converts values.
+    const DType orig = input.dtype();
+    if (orig == DType::Float64 || orig == DType::Int64 || orig == DType::UInt64) {
+        vulkan::ensure_fp64_supported(device_id, "MaskedScatter");
+        auto* pipeline64 = getPipeline("masked_scatter_f64", device_id);
+        Tensor in_c = input.contiguous();
+        Tensor src_c = source.contiguous();
+        Tensor out64 = in_c.clone();
+        size_t w_size = static_cast<size_t>(n) * 8;
+        size_t src_size = static_cast<size_t>(source.numel()) * 8;
+        std::vector<std::pair<uint32_t, const void*>> b64 = {
+            {0, out64.data_ptr()}, {1, mask_u8.data_ptr()}, {2, src_c.data_ptr()},
+            {3, prefix_sum.data_ptr()}, {4, out64.data_ptr()}
+        };
+        std::vector<size_t> s64 = {w_size, bool_size, src_size, i32_size, w_size};
+        VkDescriptorSet ds64 = allocateAndWriteDescriptorSet(device_id, pipeline64, b64, s64);
+        VkCommandBuffer cmd64 = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd64, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline64->pipeline());
+        vkCmdBindDescriptorSets(cmd64, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline64->layout(), 0, 1, &ds64, 0, nullptr);
+        vkCmdPushConstants(cmd64, pipeline64->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd64, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd64);
+        endSingleTimeCommands(cmd64, device_id);
+        return out64;
+    }
+
     Tensor in_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
     Tensor src_f32 = (source.dtype() != DType::Float32) ? source.to(DType::Float32) : source;
-    Tensor mask_u8 = mask.to(DType::Bool);
-
-    int32_t device_id = input.device().index;
     auto* pipeline = getPipeline("masked_scatter", device_id);
 
     Tensor output = in_f32.clone();
-    uint32_t n = static_cast<uint32_t>(input.numel());
-
-    struct { uint32_t num_elements; } pc;
-    pc.num_elements = n;
 
     size_t f32_size = static_cast<size_t>(n) * sizeof(float);
-    size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
-    size_t i32_size = static_cast<size_t>(n) * sizeof(int32_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, output.data_ptr()},       // input (will be overwritten at mask positions)
@@ -7604,6 +7655,10 @@ auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                        VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(pc), &pc);
+    // Guard N against the device's maxComputeWorkGroupCount[0] (the Vulkan spec
+    // guarantees only 65535) so an oversized batch throws a clear error instead of
+    // silently dropping samples (mirrors the Softmax/InstanceNorm guards).
+    checkSparseRowDispatch(device_id, "CTCLoss", static_cast<int64_t>(N));
     // One workgroup per batch element.
     vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(N), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);

@@ -66,10 +66,30 @@ auto ComputationGraph::remove_node(std::shared_ptr<GraphNode> node) -> bool {
     auto it = nodes_.find(node->function.get());
     if (it == nodes_.end()) return false;
 
-    // Count edges being removed
-    edge_count_ -= node->next_nodes.size();
+    // Outgoing edges: each edge bumped its target's ref_count at add_edge time,
+    // so drop that reference and remove the edge from the running total. Leaving
+    // the targets' ref_counts stale (the previous behaviour) made them
+    // un-collectable and skewed every later edge accounting.
+    for (const auto& next_weak : node->next_nodes) {
+        if (auto next = next_weak.lock()) {
+            if (next->ref_count > 0) next->ref_count--;
+            // Only drop this edge from the running total when the target is
+            // still alive. If the target was already removed, its own
+            // remove_node() already subtracted this in-edge via its ref_count
+            // (the incoming-edge loop below), so decrementing again here would
+            // double-count and corrupt edge_count_.
+            if (edge_count_ > 0) edge_count_--;
+        }
+    }
 
-    // Remove from map
+    // Incoming edges: other nodes still list this node in their next_nodes
+    // (now-dangling weak_ptrs that simply expire). Each such edge bumped THIS
+    // node's ref_count at add_edge time, so subtract that many edges too —
+    // otherwise edge_count_ permanently over-counts the removed in-edges.
+    for (int k = 0; k < node->ref_count && edge_count_ > 0; ++k) {
+        edge_count_--;
+    }
+
     nodes_.erase(it);
     return true;
 }

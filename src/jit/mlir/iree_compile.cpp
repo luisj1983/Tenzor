@@ -287,9 +287,19 @@ auto run_iree_compile_subprocess(const std::string& binary,
     int in_pipe[2];   // parent -> child stdin
     int out_pipe[2];  // child stdout -> parent
     int err_pipe[2];  // child stderr -> parent
-    if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
-        throw JitCompileError(
-            std::string("pipe() failed: ") + std::strerror(errno), {});
+    // Open each pipe separately and close any previously-opened ones before
+    // throwing, so a later pipe() failure does not leak the earlier fds.
+    if (pipe(in_pipe) != 0) {
+        throw JitCompileError(std::string("pipe() failed: ") + std::strerror(errno), {});
+    }
+    if (pipe(out_pipe) != 0) {
+        close(in_pipe[0]); close(in_pipe[1]);
+        throw JitCompileError(std::string("pipe() failed: ") + std::strerror(errno), {});
+    }
+    if (pipe(err_pipe) != 0) {
+        close(in_pipe[0]); close(in_pipe[1]);
+        close(out_pipe[0]); close(out_pipe[1]);
+        throw JitCompileError(std::string("pipe() failed: ") + std::strerror(errno), {});
     }
 
     pid_t pid = fork();

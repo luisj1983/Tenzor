@@ -764,9 +764,9 @@ __global__ void add_bias_kernel_nhwc_half(
 
 // rocBLAS-based implementation using im2col + GEMM (per-axis stride/pad/dilation).
 auto conv2d_forward_kernel(
-    const Tensor& input,         // (batch, in_channels, height, width)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
-    const Tensor* bias,          // (out_channels) or nullptr
+    const Tensor& input_in,      // (batch, in_channels, height, width)
+    const Tensor& weight_in,     // (out_channels, in_channels, kernel_h, kernel_w)
+    const Tensor* bias_in,       // (out_channels) or nullptr
     int64_t stride_h,
     int64_t stride_w,
     int64_t pad_h,
@@ -784,6 +784,19 @@ auto conv2d_forward_kernel(
     int64_t padding = pad_h;        // unused in asymmetric paths
     int64_t dilation = dil_h;       // unused in asymmetric paths
     (void)padding; (void)dilation;  // silence unused warnings when asymmetric paths take over
+
+    // The im2col/GEMM offset arithmetic below reads input/weight/bias with dense
+    // NCHW strides, so a non-contiguous view would be read at the wrong offsets.
+    // Materialize contiguous copies (mirrors the backward path); the rest of the
+    // function uses these same-named locals.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor weight = weight_in.is_contiguous() ? weight_in : weight_in.contiguous();
+    Tensor bias_c;
+    const Tensor* bias = bias_in;
+    if (bias_in && !bias_in->is_contiguous()) {
+        bias_c = bias_in->contiguous();
+        bias = &bias_c;
+    }
 
     // Float16: upcast to Float32, compute, convert back
     if (input.dtype() == DType::Float16) {
@@ -2235,6 +2248,21 @@ auto depthwise_conv2d_kernel(
                                                stride_h, stride_w, padding_h, padding_w,
                                                dilation_h, dilation_w, stream);
         return result.to(DType::BFloat16);
+    } else if (input.dtype() == DType::Float16) {
+        // Widen to Float32, compute, narrow back — matching the BFloat16 path and
+        // every sibling conv kernel (which all support Float16).
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = depthwise_conv2d_kernel(input_f32, weight_f32, bias_f32_ptr,
+                                               stride_h, stride_w, padding_h, padding_w,
+                                               dilation_h, dilation_w, stream);
+        return result.to(DType::Float16);
     } else {
         throw std::runtime_error("depthwise_conv2d: unsupported dtype");
     }

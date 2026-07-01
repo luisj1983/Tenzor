@@ -936,9 +936,13 @@ __global__ void take_kernel(
             index += input_size;
         }
 
-        // Bounds checking
+        // Bounds checking. For an out-of-range index, write a defined value
+        // rather than leaving output[idx] uninitialized — that leaked stale
+        // device memory into the result for hostile/buggy indices.
         if (index >= 0 && index < input_size) {
             output[idx] = input[index];
+        } else {
+            output[idx] = T(0);
         }
     }
 }

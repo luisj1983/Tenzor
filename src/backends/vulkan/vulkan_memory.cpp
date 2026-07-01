@@ -354,6 +354,13 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             auto& pool = stagingPools_[device_id];
             auto& staging = pool.buffers[staging_idx];
 
+            // Flush any pending (batched) compute work first: the source buffer
+            // may have just been written by a compute shader still queued in the
+            // batch command buffer. Without this, the immediate transfer below
+            // could read src before that compute completes (no compute->transfer
+            // dependency existed across the separate command buffers).
+            ensurePendingWorkComplete(device_id);
+
             // Copy from device to staging - MUST use immediate execution, not batching
             // because we need the data available right after this call
             auto [src_buffer, src_offset] = getVulkanBufferAndOffset(src);

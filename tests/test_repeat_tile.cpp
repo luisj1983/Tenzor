@@ -35,8 +35,9 @@ class RepeatTileTest : public ::tenzor::testing::BackendTest {};
 class RepeatInterleaveTest : public ::tenzor::testing::BackendTest {};
 
 TEST_P(RepeatTileTest, Repeat1D) {
-    // Test repeat on 1D tensor: [1, 2, 3] with repeats={2}
-    // Expected: [1, 1, 2, 2, 3, 3]
+    // repeat() is torch.Tensor.repeat (tiling), so [1, 2, 3].repeat(2) tiles the
+    // whole vector -> [1, 2, 3, 1, 2, 3] (element-wise repetition is
+    // repeat_interleave). For 1D this coincides with tile({2}).
     auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
     auto output = repeat(input, {2});
 
@@ -49,10 +50,10 @@ TEST_P(RepeatTileTest, Repeat1D) {
 
     const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
-    EXPECT_FLOAT_EQ(data[1], 1.0f);
-    EXPECT_FLOAT_EQ(data[2], 2.0f);
-    EXPECT_FLOAT_EQ(data[3], 2.0f);
-    EXPECT_FLOAT_EQ(data[4], 3.0f);
+    EXPECT_FLOAT_EQ(data[1], 2.0f);
+    EXPECT_FLOAT_EQ(data[2], 3.0f);
+    EXPECT_FLOAT_EQ(data[3], 1.0f);
+    EXPECT_FLOAT_EQ(data[4], 2.0f);
     EXPECT_FLOAT_EQ(data[5], 3.0f);
 }
 
@@ -79,8 +80,10 @@ TEST_P(RepeatTileTest, Tile1D) {
 }
 
 TEST_P(RepeatTileTest, Repeat2D) {
-    // Test repeat on 2D tensor: [[1, 2], [3, 4]] with repeats={2, 3}
-    // Each element repeated 2 times in dim 0, 3 times in dim 1
+    // repeat() implements torch.Tensor.repeat(*sizes): it TILES the whole tensor
+    // along each dim (element-wise repetition is repeat_interleave instead). For
+    // [[1, 2], [3, 4]] with repeats={2, 3} the (2x3)-tiled result's first row is
+    // the row [1, 2] tiled 3 times -> [1, 2, 1, 2, 1, 2].
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
     auto input = from_data<float>(data_vec.data(), {2, 2}, device);
     auto output = repeat(input, {2, 3});
@@ -94,12 +97,12 @@ TEST_P(RepeatTileTest, Repeat2D) {
     ASSERT_EQ(output.shape()[1], 6);  // 2 * 3
 
     const float* out_data = output_cpu.data<float>();
-    // First row repeated: [1, 1, 1, 2, 2, 2]
+    // First row: row [1, 2] tiled 3 times -> [1, 2, 1, 2, 1, 2]
     EXPECT_FLOAT_EQ(out_data[0], 1.0f);
-    EXPECT_FLOAT_EQ(out_data[1], 1.0f);
+    EXPECT_FLOAT_EQ(out_data[1], 2.0f);
     EXPECT_FLOAT_EQ(out_data[2], 1.0f);
     EXPECT_FLOAT_EQ(out_data[3], 2.0f);
-    EXPECT_FLOAT_EQ(out_data[4], 2.0f);
+    EXPECT_FLOAT_EQ(out_data[4], 1.0f);
     EXPECT_FLOAT_EQ(out_data[5], 2.0f);
 }
 

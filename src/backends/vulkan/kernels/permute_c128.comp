@@ -21,7 +21,12 @@ void index_to_coords(uint linear_idx, uint ndims, out int coords[8]) {
     uint remaining = linear_idx;
     int out_shape[8];
     for (uint i = 0; i < ndims && i < 8u; i++) {
-        out_shape[i] = max(shape[perm[i]], 1);
+        // Guard the perm[] index: a malformed permutation (perm[i] out of
+        // [0, ndims)) would read shape[] out of bounds. The f32 permute.comp
+        // has this guard; the f16/bf16/f64/c128 variants were missing it.
+        int pi = perm[i];
+        out_shape[i] = (pi >= 0 && uint(pi) < ndims && uint(pi) < 8u)
+                           ? max(shape[pi], 1) : 1;
     }
     for (int i = int(ndims) - 1; i >= 0; i--) {
         int s = out_shape[i];
@@ -48,7 +53,13 @@ void main() {
 
     int in_coords[8];
     for (uint i = 0; i < params.ndim; i++) {
-        in_coords[perm[i]] = out_coords[i];
+        // Guard the perm[] index: an out-of-range value would be an OOB write
+        // into in_coords[8]. The f32 kernel has this guard (variants lacked it).
+        uint p = uint(perm[i]);
+        if (perm[i] < 0 || p >= params.ndim || p >= 8u) {
+            return;
+        }
+        in_coords[p] = out_coords[i];
     }
 
     int in_strides[8];

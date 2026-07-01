@@ -256,9 +256,12 @@ private:
     /**
      * @brief Get relative position bias for current window.
      *
-     * @return Bias tensor of shape (num_heads, N, N) where N = window_size²
+     * Gathered through autograd (index_select on the registered bias table)
+     * so gradients flow back into relative_position_bias_table_ and it trains.
+     *
+     * @return Bias Variable of shape (num_heads, N, N) where N = window_size²
      */
-    auto get_relative_position_bias() const -> Tensor;
+    auto get_relative_position_bias() const -> Variable;
 };
 
 /**

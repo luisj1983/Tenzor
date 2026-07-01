@@ -11,7 +11,9 @@
 #include "tenzor/utils/log.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/math.hpp"   // round() for integer ReduceOp::AVG rounding
 #include <stdexcept>
+#include <utility>  // std::pair for staged gather copy-back
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
@@ -184,11 +186,26 @@ auto NCCLBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 
     // If AVG operation, divide by world size
     if (op == ReduceOp::AVG) {
-        // In-place, dtype/device-matched divide so the result keeps the
-        // tensor's dtype (a scalar-float rebind would not).
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   work.dtype(), work.device());
-        work /= scalar;
+        // NCCL has no native AVG (ReduceOp::AVG maps to ncclSum), so divide by
+        // world_size here. Integer dtypes are widened to Float64 and ROUND-to-
+        // nearest before narrowing back — a same-dtype integer divide truncates
+        // toward zero and disagrees with MPI/Gloo/process_group AVG.
+        if (is_integer_type(work.dtype())) {
+            const DType orig = work.dtype();
+            Tensor widened = work.to(DType::Float64);
+            auto divisor = tenzor::full({1}, static_cast<double>(world_size_),
+                                        DType::Float64, widened.device());
+            widened /= divisor;
+            Tensor rounded = tenzor::round(widened).to(orig);
+            work.zero_();
+            work += rounded.to(work.device());
+        } else {
+            // In-place, dtype/device-matched divide so the result keeps the
+            // tensor's dtype (a scalar-float rebind would not).
+            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                       work.dtype(), work.device());
+            work /= scalar;
+        }
     }
 
     if (staged) {
@@ -207,6 +224,14 @@ auto NCCLBackend::all_reduce_async(Tensor& tensor, ReduceOp op,
                                     void* stream) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     validate_gpu_tensor(tensor);
+
+    // The async path passes tensor.data_ptr() straight to NCCL and cannot stage a
+    // contiguous copy back before returning, so a non-contiguous tensor would be
+    // read/written with the wrong layout. Require contiguity up front.
+    if (!tensor.is_contiguous()) {
+        throw std::invalid_argument(
+            "all_reduce_async requires a contiguous tensor; call .contiguous() before the async call");
+    }
 
     // ReduceOp::AVG is implemented as ncclSum followed by an in-place divide by
     // world_size. The async path cannot safely perform that divide on the
@@ -262,10 +287,16 @@ auto NCCLBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
     ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
     ncclRedOp_t nccl_op = to_nccl_reduce_op(op);
 
+    // NCCL treats data_ptr() as a flat contiguous buffer; a non-contiguous
+    // input would be read/written as if contiguous and corrupt the result.
+    // Stage a contiguous copy and propagate the reduced values back on root.
+    const bool staged = !tensor.is_contiguous();
+    Tensor work = staged ? tensor.contiguous() : tensor;
+
     NCCL_CHECK(ncclReduce(
-        tensor.data_ptr(),
-        tensor.data_ptr(),
-        tensor.numel(),
+        work.data_ptr(),
+        work.data_ptr(),
+        work.numel(),
         nccl_dtype,
         nccl_op,
         dst_rank,
@@ -277,11 +308,33 @@ auto NCCLBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
 
     // NCCL has no native AVG op (ReduceOp::AVG maps to ncclSum); only the
     // destination rank holds the reduced result, so divide there to get the
-    // mean. Non-root ranks keep their unchanged local tensor.
+    // mean. Non-root ranks keep their unchanged local tensor. Integer dtypes
+    // widen to Float64 and round-to-nearest (matching MPI/Gloo/process_group);
+    // a same-dtype integer divide truncates toward zero.
     if (op == ReduceOp::AVG && rank_ == dst_rank) {
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   tensor.dtype(), tensor.device());
-        tensor /= scalar;
+        if (is_integer_type(work.dtype())) {
+            const DType orig = work.dtype();
+            Tensor widened = work.to(DType::Float64);
+            auto divisor = tenzor::full({1}, static_cast<double>(world_size_),
+                                        DType::Float64, widened.device());
+            widened /= divisor;
+            Tensor rounded = tenzor::round(widened).to(orig);
+            work.zero_();
+            work += rounded.to(work.device());
+        } else {
+            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                       work.dtype(), work.device());
+            work /= scalar;
+        }
+    }
+
+    if (staged && rank_ == dst_rank) {
+        // Only the destination rank holds a meaningful reduced result; write it
+        // back THROUGH the caller's storage (zero_() += ) rather than rebinding
+        // `tensor = work`, preserving aliased Variables/views (H6). Non-root
+        // ranks leave the caller's tensor untouched.
+        tensor.zero_();
+        tensor += work;
     }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
@@ -348,7 +401,17 @@ auto NCCLBackend::gather(const Tensor& tensor, std::vector<Tensor>& output, int 
     ncclComm_t comm = get_communicator(device_id);
 
     // NCCL doesn't have native gather, so we implement it using send/recv
-    // within a group to enable communication/computation overlap
+    // within a group to enable communication/computation overlap.
+    //
+    // NCCL treats every buffer as a flat contiguous block, so non-contiguous
+    // inputs/outputs must be staged. Staging tensors are hoisted to this scope
+    // so they stay alive until after ncclGroupEnd() + cudaDeviceSynchronize();
+    // the NCCL ops may not run until ncclGroupEnd() and read/write these
+    // buffers asynchronously until the sync.
+    std::vector<Tensor> keepalive;
+    // (output index, contiguous staging buffer) pairs to copy back into a
+    // non-contiguous caller output after the sync.
+    std::vector<std::pair<int, Tensor>> copy_back;
 
     NCCL_CHECK(ncclGroupStart());
 
@@ -370,31 +433,50 @@ auto NCCLBackend::gather(const Tensor& tensor, std::vector<Tensor>& output, int 
                 // self ncclRecv has NO matching self ncclSend (this rank never
                 // sends to itself), so posting it inside the group deadlocks
                 // the whole collective. Mirrors all_to_all_single's self path.
+                // Stage a contiguous source/dest so a strided view copies the
+                // correct flat elements.
+                Tensor self_src = tensor.is_contiguous() ? tensor : tensor.contiguous();
+                keepalive.push_back(self_src);
+                Tensor self_dst = output[src].is_contiguous()
+                                      ? output[src] : output[src].contiguous();
                 GPU_CHECK(cudaMemcpyAsync(
-                    output[src].data_ptr(),
-                    tensor.data_ptr(),
+                    self_dst.data_ptr(),
+                    self_src.data_ptr(),
                     static_cast<size_t>(tensor.numel()) * tensor.dtype_size(),
                     cudaMemcpyDeviceToDevice,
                     nullptr  // Use default stream
                 ));
+                if (!output[src].is_contiguous()) {
+                    keepalive.push_back(self_dst);
+                    copy_back.emplace_back(src, self_dst);
+                }
             } else {
                 // Receive from other ranks
                 validate_gpu_tensor(output[src]);
+                Tensor recv_buf = output[src].is_contiguous()
+                                      ? output[src] : output[src].contiguous();
+                keepalive.push_back(recv_buf);
                 NCCL_CHECK(ncclRecv(
-                    output[src].data_ptr(),
+                    recv_buf.data_ptr(),
                     tensor.numel(),
                     to_nccl_datatype(tensor.dtype()),
                     src,
                     comm,
                     nullptr
                 ));
+                if (!output[src].is_contiguous()) {
+                    copy_back.emplace_back(src, recv_buf);
+                }
             }
         }
     } else {
-        // Non-destination ranks: send to destination
+        // Non-destination ranks: send to destination. Stage a contiguous source
+        // so a strided input transmits the correct flat element sequence.
+        Tensor in = tensor.is_contiguous() ? tensor : tensor.contiguous();
+        keepalive.push_back(in);
         NCCL_CHECK(ncclSend(
-            tensor.data_ptr(),
-            tensor.numel(),
+            in.data_ptr(),
+            in.numel(),
             to_nccl_datatype(tensor.dtype()),
             dst_rank,
             comm,
@@ -406,6 +488,13 @@ auto NCCLBackend::gather(const Tensor& tensor, std::vector<Tensor>& output, int 
 
     // Synchronize to ensure gather completes
     GPU_CHECK(cudaDeviceSynchronize());
+
+    // Copy staged receives back into the caller's non-contiguous outputs,
+    // writing THROUGH their storage (zero_() += ) to preserve aliases/strides.
+    for (auto& [idx, buf] : copy_back) {
+        output[idx].zero_();
+        output[idx] += buf;
+    }
 #else
     (void)tensor;
     (void)output;
@@ -426,7 +515,12 @@ auto NCCLBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output, in
     ncclComm_t comm = get_communicator(device_id);
 
     // NCCL doesn't have native scatter, so we implement it using send/recv
-    // within a group to enable communication/computation overlap
+    // within a group to enable communication/computation overlap.
+    //
+    // NCCL treats every buffer as a flat contiguous block, so non-contiguous
+    // inputs/output must be staged. Staging buffers are hoisted to this scope so
+    // they remain valid until after ncclGroupEnd() + cudaDeviceSynchronize().
+    std::vector<Tensor> keepalive;
 
     NCCL_CHECK(ncclGroupStart());
 
@@ -446,32 +540,31 @@ auto NCCLBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output, in
                     tensors[dst].dtype() != output.dtype()) {
                     throw std::invalid_argument("scatter: tensor mismatch");
                 }
-                NCCL_CHECK(ncclSend(
-                    tensors[dst].data_ptr(),
-                    tensors[dst].numel(),
-                    to_nccl_datatype(tensors[dst].dtype()),
-                    rank_,  // Send to self
-                    comm,
-                    nullptr
-                ));
-            } else {
-                // Send to other ranks
-                NCCL_CHECK(ncclSend(
-                    tensors[dst].data_ptr(),
-                    tensors[dst].numel(),
-                    to_nccl_datatype(tensors[dst].dtype()),
-                    dst,
-                    comm,
-                    nullptr
-                ));
             }
+            // Stage a contiguous source so a strided input transmits the correct
+            // flat element sequence. The self-send (dst == rank_) is matched by
+            // this rank's own ncclRecv below.
+            Tensor send_in = tensors[dst].is_contiguous()
+                                 ? tensors[dst] : tensors[dst].contiguous();
+            keepalive.push_back(send_in);
+            NCCL_CHECK(ncclSend(
+                send_in.data_ptr(),
+                send_in.numel(),
+                to_nccl_datatype(tensors[dst].dtype()),
+                dst,
+                comm,
+                nullptr
+            ));
         }
     }
 
-    // All ranks receive their portion
+    // All ranks receive their portion into a contiguous staging buffer.
+    const bool out_staged = !output.is_contiguous();
+    Tensor recv_buf = out_staged ? output.contiguous() : output;
+    keepalive.push_back(recv_buf);
     NCCL_CHECK(ncclRecv(
-        output.data_ptr(),
-        output.numel(),
+        recv_buf.data_ptr(),
+        recv_buf.numel(),
         to_nccl_datatype(output.dtype()),
         src_rank,
         comm,
@@ -482,6 +575,13 @@ auto NCCLBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output, in
 
     // Synchronize to ensure scatter completes
     GPU_CHECK(cudaDeviceSynchronize());
+
+    if (out_staged) {
+        // Write the received data back THROUGH the caller's storage to preserve
+        // aliases / strides (rather than rebinding output = recv_buf).
+        output.zero_();
+        output += recv_buf;
+    }
 #else
     (void)tensors;
     (void)output;
@@ -543,11 +643,24 @@ auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
     GPU_CHECK(cudaDeviceSynchronize());
 
     // NCCL has no native AVG reduce op (ReduceOp::AVG maps to ncclSum); divide by
-    // world size afterwards, mirroring NCCLBackend::all_reduce.
+    // world size afterwards, mirroring NCCLBackend::all_reduce. Integer dtypes
+    // widen to Float64 and round-to-nearest (matching MPI/Gloo/process_group);
+    // a same-dtype integer divide truncates toward zero.
     if (op == ReduceOp::AVG) {
-        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
-                                   output.dtype(), output.device());
-        output /= scalar;
+        if (is_integer_type(output.dtype())) {
+            const DType orig = output.dtype();
+            Tensor widened = output.to(DType::Float64);
+            auto divisor = tenzor::full({1}, static_cast<double>(world_size_),
+                                        DType::Float64, widened.device());
+            widened /= divisor;
+            Tensor rounded = tenzor::round(widened).to(orig);
+            output.zero_();
+            output += rounded.to(output.device());
+        } else {
+            auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                       output.dtype(), output.device());
+            output /= scalar;
+        }
     }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
@@ -601,6 +714,13 @@ auto NCCLBackend::all_gather_async(const Tensor& tensor, std::vector<Tensor>& ou
                                     void* stream) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     validate_gpu_tensor(tensor);
+
+    // Async path reads tensor.data_ptr() directly with no contiguity staging; a
+    // non-contiguous source would be sent with the wrong layout.
+    if (!tensor.is_contiguous()) {
+        throw std::invalid_argument(
+            "all_gather_async requires a contiguous source tensor; call .contiguous() before the async call");
+    }
 
     if (output.size() != static_cast<size_t>(world_size_)) {
         throw std::invalid_argument(
@@ -700,9 +820,16 @@ auto NCCLBackend::recv(Tensor& tensor, int src_rank) -> void {
 
     ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
 
+    // NCCL writes numel elements as a flat contiguous block; a non-contiguous
+    // receive buffer would be filled as if contiguous and corrupt the view.
+    // Receive into a contiguous staging buffer, then copy the values back
+    // THROUGH the caller's storage (zero_() += preserves aliases / strides).
+    const bool staged = !tensor.is_contiguous();
+    Tensor work = staged ? tensor.contiguous() : tensor;
+
     NCCL_CHECK(ncclRecv(
-        tensor.data_ptr(),
-        tensor.numel(),
+        work.data_ptr(),
+        work.numel(),
         nccl_dtype,
         src_rank,
         comm,
@@ -710,6 +837,11 @@ auto NCCLBackend::recv(Tensor& tensor, int src_rank) -> void {
     ));
 
     GPU_CHECK(cudaDeviceSynchronize());
+
+    if (staged) {
+        tensor.zero_();
+        tensor += work;
+    }
 #else
     (void)tensor;
     (void)src_rank;
@@ -727,6 +859,13 @@ auto NCCLBackend::all_to_all_single(Tensor& output, const Tensor& input) -> void
     // NCCL group call so the runtime can fuse them.
     validate_gpu_tensor(input);
     validate_gpu_tensor(output);
+
+    // The Send/Recv pairs do raw pointer arithmetic on input/output storage, so a
+    // non-contiguous buffer would transfer the wrong bytes.
+    if (!input.is_contiguous() || !output.is_contiguous()) {
+        throw std::invalid_argument(
+            "all_to_all_single requires contiguous input and output tensors");
+    }
 
     auto input_shape = input.shape();
     if (input_shape.empty()) {

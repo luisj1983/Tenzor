@@ -18,15 +18,19 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
-    // Decompose flat index into multi-dim coordinates, compute strided offset
-    uint physical_offset = 0;
+    // Decompose flat index into multi-dim coordinates, compute strided offset.
+    // Strides are SIGNED (negative for flip/slice-with-step<0 views): the value
+    // is passed bit-for-bit through a uint field, so reinterpret it with int().
+    // Using uint arithmetic wrapped negative strides into huge positive offsets
+    // and wrote out of bounds. Mirrors strided_copy.comp's signed handling.
+    int physical_offset = 0;
     uint rem = idx;
     for (int d = int(params.ndim) - 1; d >= 0; d--) {
         uint dim_size = params.shape_stride[2 * d];
-        uint dim_stride = params.shape_stride[2 * d + 1];
+        int dim_stride = int(params.shape_stride[2 * d + 1]);
         uint coord = rem % dim_size;
         rem /= dim_size;
-        physical_offset += coord * dim_stride;
+        physical_offset += int(coord) * dim_stride;
     }
 
     data[physical_offset] = params.fill_value;

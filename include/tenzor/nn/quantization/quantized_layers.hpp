@@ -185,9 +185,13 @@ public:
     );
 
     auto forward_impl(const Variable& input) -> Variable override;
-    auto forward_quantized(const QuantizedTensor& input) -> Tensor;
-    auto forward_quantized_output(const QuantizedTensor& input,
-                                  const QuantizationParams& output_qparams)
+    // Virtual so the inherited forward_impl() dispatches to a subclass override
+    // (e.g. the fused ReLU variant). Without virtual the unqualified
+    // forward_quantized() call inside forward_impl bound statically to this base
+    // version and silently dropped the subclass's fused activation.
+    virtual auto forward_quantized(const QuantizedTensor& input) -> Tensor;
+    virtual auto forward_quantized_output(const QuantizedTensor& input,
+                                          const QuantizationParams& output_qparams)
         -> QuantizedTensor;
 
     auto set_weight(const QuantizedTensor& weights) -> void;
@@ -341,10 +345,10 @@ class QuantizedConv2dReLU : public QuantizedConv2d {
 public:
     using QuantizedConv2d::QuantizedConv2d;
 
-    auto forward_quantized(const QuantizedTensor& input) -> Tensor;
+    auto forward_quantized(const QuantizedTensor& input) -> Tensor override;
     auto forward_quantized_output(const QuantizedTensor& input,
                                   const QuantizationParams& output_qparams)
-        -> QuantizedTensor;
+        -> QuantizedTensor override;
 
     static auto from_float(const Conv2d& fp_conv, const QConfig& qconfig)
         -> std::shared_ptr<QuantizedConv2dReLU>;
@@ -858,9 +862,13 @@ public:
     );
 
     auto forward_impl(const Variable& input) -> Variable override;
-    auto forward_quantized(const QuantizedTensor& input) -> Tensor;
-    auto forward_quantized_output(const QuantizedTensor& input,
-                                  const QuantizationParams& output_qparams)
+    // Virtual so the inherited forward_impl() dispatches to a subclass override
+    // (e.g. the fused ReLU variant). Without virtual the unqualified
+    // forward_quantized() call inside forward_impl bound statically to this base
+    // version and silently dropped the subclass's fused activation.
+    virtual auto forward_quantized(const QuantizedTensor& input) -> Tensor;
+    virtual auto forward_quantized_output(const QuantizedTensor& input,
+                                          const QuantizationParams& output_qparams)
         -> QuantizedTensor;
 
     auto set_weight(const QuantizedTensor& weights) -> void;

@@ -48,6 +48,35 @@ static void validate_broadcast_shapes(const char* op_name,
     }
 }
 
+// Validate that `other` broadcasts INTO `self` for an in-place op: the result
+// is written back into self, so self's shape is fixed and other must not be
+// larger in rank or in any dimension. The symmetric broadcast check above
+// wrongly accepts other being bigger than self (which would require expanding
+// self), producing a silently truncated or out-of-bounds in-place write.
+static void validate_inplace_broadcast(const char* op_name,
+                                        std::span<const int64_t> self_shape,
+                                        std::span<const int64_t> other_shape) {
+    if (other_shape.size() > self_shape.size()) {
+        throw std::runtime_error(
+            std::string(op_name) +
+            ": in-place operand has more dimensions than the destination");
+    }
+    auto s_it = self_shape.rbegin();
+    auto o_it = other_shape.rbegin();
+    for (; o_it != other_shape.rend(); ++s_it, ++o_it) {
+        // other dim must be 1 (broadcastable) or exactly equal to self's dim;
+        // a larger other dim — or self dim == 1 while other dim > 1 — would
+        // require growing self and is illegal in place.
+        if (*o_it != 1 && *o_it != *s_it) {
+            throw std::runtime_error(
+                std::string(op_name) +
+                ": in-place operand is not broadcastable into the destination "
+                "(dimension " + std::to_string(*o_it) + " vs " +
+                std::to_string(*s_it) + ")");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper templates to eliminate repeated promote→validate→contiguous→dispatch
 // ---------------------------------------------------------------------------
@@ -219,64 +248,80 @@ auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
     TENZOR_PROFILE_RANGE("matmul");
     // Auto-promote dtypes if mismatched
     auto [ap, bp] = promote_inputs(a, b);
-    // Handle batched matrix multiplication (3D+ tensors)
+    // Handle batched matrix multiplication (any operand 3D+). This branch
+    // implements the full PyTorch torch.matmul batch-broadcasting contract:
+    // 1D operands are temporarily promoted to 2D, the leading "batch" dims of
+    // both operands are broadcast against each other (so a 2D matrix is shared
+    // across ALL batch dims of an ND operand, and mismatched-but-broadcastable
+    // batch shapes like (B,1,M,K) x (1,C,K,N) work), and the inserted 1D dims
+    // are removed from the result afterwards.
     if (ap.shape().size() >= 3 || bp.shape().size() >= 3) {
-        // Broadcast 2D input to 3D for mixed 2D/3D case
         auto ac = ap.is_contiguous() ? ap : ap.contiguous();
         auto bc = bp.is_contiguous() ? bp : bp.contiguous();
-        if (ac.shape().size() == 2 && bc.shape().size() >= 3) {
-            ac = expand(ac.unsqueeze(0), {bc.shape()[0], ac.shape()[0], ac.shape()[1]});
-            auto result = bmm(ac, bc);
-            return result;
+
+        // Promote 1D operands: prepend a row to a 1D LHS, append a column to a
+        // 1D RHS. Track so we can drop the inserted dim from the output.
+        bool a_was_1d = (ac.shape().size() == 1);
+        bool b_was_1d = (bc.shape().size() == 1);
+        if (a_was_1d) ac = ac.unsqueeze(0);  // (K,) -> (1, K)
+        if (b_was_1d) bc = bc.unsqueeze(1);  // (K,) -> (K, 1)
+
+        auto a_shape = std::vector<int64_t>(ac.shape().begin(), ac.shape().end());
+        auto b_shape = std::vector<int64_t>(bc.shape().begin(), bc.shape().end());
+        const int64_t a_ndim = static_cast<int64_t>(a_shape.size());
+        const int64_t b_ndim = static_cast<int64_t>(b_shape.size());
+
+        const int64_t M = a_shape[a_ndim - 2];
+        const int64_t K = a_shape[a_ndim - 1];
+        const int64_t Kb = b_shape[b_ndim - 2];
+        const int64_t N = b_shape[b_ndim - 1];
+        if (K != Kb) {
+            throw std::runtime_error(
+                "matmul: inner dimensions don't match (" + std::to_string(M) + "x" +
+                std::to_string(K) + " @ " + std::to_string(Kb) + "x" +
+                std::to_string(N) + ")");
         }
-        if (bc.shape().size() == 2 && ac.shape().size() >= 3) {
-            bc = expand(bc.unsqueeze(0), {ac.shape()[0], bc.shape()[0], bc.shape()[1]});
-            auto result = bmm(ac, bc);
-            return result;
-        }
-        // 4D+ inputs: collapse leading batch dims into a single batch
-        // dimension, bmm, then restore the original leading shape. Requires
-        // both operands to share the same leading dims (standard PyTorch
-        // torch.matmul contract — no broadcasting across batch dims here).
-        if (ac.shape().size() > 3 || bc.shape().size() > 3) {
-            const auto& a_shape = ac.shape();
-            const auto& b_shape = bc.shape();
-            if (a_shape.size() != b_shape.size()) {
-                throw std::runtime_error(
-                    "matmul: 4D+ operands must have the same number of "
-                    "dimensions (got " + std::to_string(a_shape.size()) +
-                    "D and " + std::to_string(b_shape.size()) + "D)");
-            }
-            const int64_t ndim = static_cast<int64_t>(a_shape.size());
-            int64_t batch = 1;
-            for (int64_t i = 0; i < ndim - 2; ++i) {
-                if (a_shape[i] != b_shape[i]) {
-                    throw std::runtime_error(
-                        "matmul: batch dimensions must match, got " +
-                        std::to_string(a_shape[i]) + " vs " +
-                        std::to_string(b_shape[i]) + " at dim " +
-                        std::to_string(i));
-                }
-                batch *= a_shape[i];
-            }
-            const int64_t M = a_shape[ndim - 2];
-            const int64_t K = a_shape[ndim - 1];
-            const int64_t N = b_shape[ndim - 1];
-            auto ar = ac.reshape({batch, M, K});
-            auto br = bc.reshape({batch, K, N});
-            auto cr = bmm(ar, br);
-            // Rebuild the output shape: leading batch dims + (M, N).
-            std::vector<int64_t> out_shape(a_shape.begin(),
-                                           a_shape.begin() + (ndim - 2));
-            out_shape.push_back(M);
-            out_shape.push_back(N);
-            return cr.reshape(out_shape);
-        }
-        return bmm(ac, bc);
+
+        // Broadcast the batch dims (everything but the trailing two).
+        std::vector<int64_t> a_batch(a_shape.begin(), a_shape.end() - 2);
+        std::vector<int64_t> b_batch(b_shape.begin(), b_shape.end() - 2);
+        std::vector<int64_t> batch = broadcast_shapes(a_batch, b_batch);
+
+        int64_t batch_numel = 1;
+        for (auto d : batch) batch_numel *= d;
+
+        // Expand each operand to (broadcast_batch..., matrix dims), then collapse
+        // the batch dims so bmm sees a uniform (B, M, K) / (B, K, N).
+        std::vector<int64_t> a_full = batch;
+        a_full.push_back(M);
+        a_full.push_back(K);
+        std::vector<int64_t> b_full = batch;
+        b_full.push_back(Kb);
+        b_full.push_back(N);
+
+        auto a_exp = expand(ac, a_full);
+        auto b_exp = expand(bc, b_full);
+
+        auto ar = a_exp.reshape({batch_numel, M, K});
+        auto br = b_exp.reshape({batch_numel, Kb, N});
+        auto cr = bmm(ar, br);  // (batch_numel, M, N)
+
+        // Rebuild the broadcast batch shape + (M, N).
+        std::vector<int64_t> out_shape = batch;
+        out_shape.push_back(M);
+        out_shape.push_back(N);
+        auto result = cr.reshape(out_shape);
+
+        // Drop the dims inserted for 1D operands (highest index first so the
+        // lower index stays valid). b's appended N=1 is the last dim; a's
+        // prepended M=1 is the second-to-last.
+        if (b_was_1d) result = result.squeeze(static_cast<int64_t>(out_shape.size()) - 1);
+        if (a_was_1d) result = result.squeeze(static_cast<int64_t>(out_shape.size()) - 2);
+        return result;
     }
     // 2D @ 2D: validate the contracted dimension at the op layer so a mismatch
     // is a uniform error rather than a backend-specific failure (bmm and the
-    // 4D+ path above already validate; this keeps the contract consistent).
+    // batched path above already validate; this keeps the contract consistent).
     if (ap.ndim() == 2 && bp.ndim() == 2 && ap.shape()[1] != bp.shape()[0]) {
         throw std::runtime_error(
             "matmul: inner dimensions don't match (" +
@@ -330,9 +375,13 @@ auto dot(const Tensor& a, const Tensor& b) -> Tensor {
 auto addmm(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
            double beta, double alpha) -> Tensor {
     TENZOR_PROFILE_RANGE("addmm");
-    // Promote mat1/mat2 dtypes, then promote input to match
-    auto [m1p, m2p] = promote_inputs(mat1, mat2);
-    Tensor inp = (input.dtype() != m1p.dtype()) ? input.to(m1p.dtype()) : input;
+    // Promote across all three operands so a wider bias (e.g. Float64 input
+    // with Float32 mats) lifts the computation instead of being downcast.
+    auto [m1pp, m2pp] = promote_inputs(mat1, mat2);
+    DType common = promote_types(m1pp.dtype(), input.dtype());
+    Tensor m1p = (m1pp.dtype() != common) ? m1pp.to(common) : m1pp;
+    Tensor m2p = (m2pp.dtype() != common) ? m2pp.to(common) : m2pp;
+    Tensor inp = (input.dtype() != common) ? input.to(common) : input;
 
     // Validate dimensions
     if (m1p.ndim() != 2 || m2p.ndim() != 2) {
@@ -378,8 +427,11 @@ auto addmm(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
 auto addmv(const Tensor& input, const Tensor& mat, const Tensor& vec,
            double beta, double alpha) -> Tensor {
     TENZOR_PROFILE_RANGE("addmv");
-    auto [mp, vp] = promote_inputs(mat, vec);
-    Tensor inp = (input.dtype() != mp.dtype()) ? input.to(mp.dtype()) : input;
+    auto [mpp, vpp] = promote_inputs(mat, vec);
+    DType common = promote_types(mpp.dtype(), input.dtype());
+    Tensor mp = (mpp.dtype() != common) ? mpp.to(common) : mpp;
+    Tensor vp = (vpp.dtype() != common) ? vpp.to(common) : vpp;
+    Tensor inp = (input.dtype() != common) ? input.to(common) : input;
 
     if (mp.ndim() != 2) {
         throw std::runtime_error("addmv: mat must be a 2D tensor");
@@ -409,8 +461,11 @@ auto addmv(const Tensor& input, const Tensor& mat, const Tensor& vec,
 auto baddbmm(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
              double beta, double alpha) -> Tensor {
     TENZOR_PROFILE_RANGE("baddbmm");
-    auto [b1p, b2p] = promote_inputs(batch1, batch2);
-    Tensor inp = (input.dtype() != b1p.dtype()) ? input.to(b1p.dtype()) : input;
+    auto [b1pp, b2pp] = promote_inputs(batch1, batch2);
+    DType common = promote_types(b1pp.dtype(), input.dtype());
+    Tensor b1p = (b1pp.dtype() != common) ? b1pp.to(common) : b1pp;
+    Tensor b2p = (b2pp.dtype() != common) ? b2pp.to(common) : b2pp;
+    Tensor inp = (input.dtype() != common) ? input.to(common) : input;
 
     if (b1p.ndim() != 3 || b2p.ndim() != 3) {
         throw std::runtime_error("baddbmm: batch1 and batch2 must be 3D tensors");
@@ -518,7 +573,7 @@ static void check_inplace_autograd(const Tensor& self) {
 // In-place operations — convert other to self's dtype (in-place can't change self's type)
 auto add_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
-    validate_broadcast_shapes("add_", self.shape(), other.shape());
+    validate_inplace_broadcast("add_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place add requires contiguous tensor");
     }
@@ -531,7 +586,7 @@ auto add_(Tensor& self, const Tensor& other) -> Tensor& {
 
 auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
-    validate_broadcast_shapes("mul_", self.shape(), other.shape());
+    validate_inplace_broadcast("mul_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place mul requires contiguous tensor");
     }
@@ -544,7 +599,7 @@ auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
 
 auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
-    validate_broadcast_shapes("sub_", self.shape(), other.shape());
+    validate_inplace_broadcast("sub_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place sub requires contiguous tensor");
     }
@@ -565,7 +620,7 @@ auto div_(Tensor& self, const Tensor& other) -> Tensor& {
             "div_: in-place true division is not supported for Bool tensors "
             "(result type cannot be cast back to Bool)");
     }
-    validate_broadcast_shapes("div_", self.shape(), other.shape());
+    validate_inplace_broadcast("div_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place div requires contiguous tensor");
     }
@@ -721,13 +776,16 @@ auto searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool righ
     }
 
     // The kernel keys its dtype branch off sorted_sequence.dtype() and reads
-    // the values buffer with that same element type. A mismatched values dtype
-    // would be reinterpreted as the wrong type (and, when values is wider,
-    // read out of bounds). Cast values to the sequence dtype before dispatch.
-    Tensor values_cast = (values.dtype() != sorted_sequence.dtype())
-                             ? values.to(sorted_sequence.dtype())
-                             : values;
-    std::array<Tensor, 2> inputs = {sorted_sequence, values_cast};
+    // the values buffer with that same element type. Casting values DOWN to a
+    // narrower sequence dtype truncates the search keys (e.g. Float64 values in
+    // a Float32 sequence). Promote both operands to a common dtype so the
+    // comparison happens at full precision and neither buffer is reinterpreted.
+    DType common = promote_types(sorted_sequence.dtype(), values.dtype());
+    Tensor seq_cast = (sorted_sequence.dtype() != common)
+                          ? sorted_sequence.to(common)
+                          : sorted_sequence;
+    Tensor values_cast = (values.dtype() != common) ? values.to(common) : values;
+    std::array<Tensor, 2> inputs = {seq_cast, values_cast};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Right, right);
     return dispatch<OpId::SearchSorted>(inputs, attrs)[0];
@@ -1020,13 +1078,22 @@ auto lcm(const Tensor& a, const Tensor& b) -> Tensor {
 
 auto addcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
              double value) -> Tensor {
-    // Broadcast all three operands to their common shape; the backend kernels
-    // index elementwise and would read out of bounds on unequal shapes.
-    auto bshape = broadcast_shapes(input.shape(), tensor1.shape());
-    bshape = broadcast_shapes(bshape, tensor2.shape());
-    std::array<Tensor, 3> inputs = {broadcast_to(input, bshape).contiguous(),
-                                    broadcast_to(tensor1, bshape).contiguous(),
-                                    broadcast_to(tensor2, bshape).contiguous()};
+    // The kernel keys its dtype branch off input.dtype() and reads tensor1/
+    // tensor2 with that same element type, so all three operands must share a
+    // single promoted dtype; otherwise a narrower operand's buffer is
+    // reinterpreted as a wider type (out-of-bounds read). Promote first, then
+    // broadcast all operands to their common shape (the kernels index
+    // elementwise and would read out of bounds on unequal shapes).
+    DType common = promote_types(promote_types(input.dtype(), tensor1.dtype()),
+                                 tensor2.dtype());
+    Tensor ip = (input.dtype() != common) ? input.to(common) : input;
+    Tensor t1 = (tensor1.dtype() != common) ? tensor1.to(common) : tensor1;
+    Tensor t2 = (tensor2.dtype() != common) ? tensor2.to(common) : tensor2;
+    auto bshape = broadcast_shapes(ip.shape(), t1.shape());
+    bshape = broadcast_shapes(bshape, t2.shape());
+    std::array<Tensor, 3> inputs = {broadcast_to(ip, bshape).contiguous(),
+                                    broadcast_to(t1, bshape).contiguous(),
+                                    broadcast_to(t2, bshape).contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Alpha, value);
     return dispatch<OpId::Addcmul>(inputs, attrs)[0];
@@ -1034,12 +1101,18 @@ auto addcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
 
 auto addcdiv(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
              double value) -> Tensor {
-    // Broadcast all three operands to their common shape (see addcmul).
-    auto bshape = broadcast_shapes(input.shape(), tensor1.shape());
-    bshape = broadcast_shapes(bshape, tensor2.shape());
-    std::array<Tensor, 3> inputs = {broadcast_to(input, bshape).contiguous(),
-                                    broadcast_to(tensor1, bshape).contiguous(),
-                                    broadcast_to(tensor2, bshape).contiguous()};
+    // Promote all three operands to a common dtype before broadcasting (see
+    // addcmul): the kernel reads every operand at input.dtype()'s element size.
+    DType common = promote_types(promote_types(input.dtype(), tensor1.dtype()),
+                                 tensor2.dtype());
+    Tensor ip = (input.dtype() != common) ? input.to(common) : input;
+    Tensor t1 = (tensor1.dtype() != common) ? tensor1.to(common) : tensor1;
+    Tensor t2 = (tensor2.dtype() != common) ? tensor2.to(common) : tensor2;
+    auto bshape = broadcast_shapes(ip.shape(), t1.shape());
+    bshape = broadcast_shapes(bshape, t2.shape());
+    std::array<Tensor, 3> inputs = {broadcast_to(ip, bshape).contiguous(),
+                                    broadcast_to(t1, bshape).contiguous(),
+                                    broadcast_to(t2, bshape).contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Alpha, value);
     return dispatch<OpId::Addcdiv>(inputs, attrs)[0];
@@ -1068,14 +1141,15 @@ auto gammaincc(const Tensor& a, const Tensor& x) -> Tensor {
 // =========================================================================
 
 auto deg2rad(const Tensor& input) -> Tensor {
-    // x * pi / 180
-    Tensor scale = full_like(input, 3.14159265358979323846f / 180.0f);
+    // x * pi / 180. Keep the scale in double precision; a float literal here
+    // rounds pi/180 to float and silently drops precision for Float64 inputs.
+    Tensor scale = full_like(input, 3.14159265358979323846 / 180.0);
     return input * scale;
 }
 
 auto rad2deg(const Tensor& input) -> Tensor {
-    // x * 180 / pi
-    Tensor scale = full_like(input, 180.0f / 3.14159265358979323846f);
+    // x * 180 / pi. Keep the scale in double precision (see deg2rad).
+    Tensor scale = full_like(input, 180.0 / 3.14159265358979323846);
     return input * scale;
 }
 

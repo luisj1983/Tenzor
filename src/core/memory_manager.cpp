@@ -445,7 +445,12 @@ auto MemoryManager::get_device_memory(Device::Type device) -> DeviceMemory& {
         case Device::Type::Vulkan:
             return vulkan_memory_;
         default:
-            return cpu_memory_;  // Fallback to CPU
+            // Do NOT fold unlisted device types (e.g. MPS) into the CPU pool —
+            // that misattributes their memory. There is no bucket for them, so
+            // reject explicitly rather than silently corrupting cpu_memory_ stats.
+            throw std::invalid_argument(
+                "MemoryManager::get_device_memory: no memory pool for device type " +
+                std::to_string(static_cast<int>(device)));
     }
 }
 
@@ -462,7 +467,12 @@ auto MemoryManager::get_device_memory(Device::Type device) const -> const Device
         case Device::Type::Vulkan:
             return vulkan_memory_;
         default:
-            return cpu_memory_;  // Fallback to CPU
+            // Do NOT fold unlisted device types (e.g. MPS) into the CPU pool —
+            // that misattributes their memory. There is no bucket for them, so
+            // reject explicitly rather than silently corrupting cpu_memory_ stats.
+            throw std::invalid_argument(
+                "MemoryManager::get_device_memory: no memory pool for device type " +
+                std::to_string(static_cast<int>(device)));
     }
 }
 

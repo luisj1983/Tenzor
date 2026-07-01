@@ -135,6 +135,26 @@ auto launch_advanced_index_gather(
         if (prep.meta.is_indexed[i]) {
             idx_contig[i] = index_tensors[i]->contiguous();
             host_ptrs[i] = get_data_ptr<const int64_t>(idx_contig[i]);
+
+            // Validate indices host-side and RAISE on out-of-range (matching the
+            // CPU reference / PyTorch). The gather kernel below clamped OOB
+            // indices into range, silently producing a wrong result instead of
+            // an IndexError.
+            const int64_t dim_size = prep.meta.src_shape[i];
+            const int64_t n = idx_contig[i].numel();
+            if (n > 0) {
+                std::vector<int64_t> host_idx(static_cast<size_t>(n));
+                queue.memcpy(host_idx.data(), host_ptrs[i],
+                             static_cast<size_t>(n) * sizeof(int64_t)).wait();
+                for (int64_t k = 0; k < n; ++k) {
+                    int64_t v = host_idx[k];
+                    if (v < 0) v += dim_size;
+                    if (v < 0 || v >= dim_size) {
+                        throw std::out_of_range(
+                            "advanced indexing: index out of range for dimension");
+                    }
+                }
+            }
         }
     }
 
@@ -207,6 +227,25 @@ auto launch_advanced_index_put(
         if (prep.meta.is_indexed[i]) {
             idx_contig[i] = index_tensors[i]->contiguous();
             host_ptrs[i] = get_data_ptr<const int64_t>(idx_contig[i]);
+
+            // Validate indices host-side and RAISE on out-of-range (matching the
+            // CPU reference / PyTorch). The put kernel below clamped OOB indices,
+            // silently scattering to the wrong position instead of raising.
+            const int64_t dim_size = prep.meta.src_shape[i];
+            const int64_t n = idx_contig[i].numel();
+            if (n > 0) {
+                std::vector<int64_t> host_idx(static_cast<size_t>(n));
+                queue.memcpy(host_idx.data(), host_ptrs[i],
+                             static_cast<size_t>(n) * sizeof(int64_t)).wait();
+                for (int64_t k = 0; k < n; ++k) {
+                    int64_t v = host_idx[k];
+                    if (v < 0) v += dim_size;
+                    if (v < 0 || v >= dim_size) {
+                        throw std::out_of_range(
+                            "advanced indexing (put): index out of range for dimension");
+                    }
+                }
+            }
         }
     }
 

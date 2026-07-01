@@ -1069,7 +1069,24 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
                                float scale, bool causal,
                                float dropout_p,
                                uint64_t philox_seed,
-                               uint64_t /*philox_offset*/) -> std::vector<Tensor> {
+                               uint64_t philox_offset) -> std::vector<Tensor> {
+    // Contiguity guard (mirrors flash_attention_forward ~:298-304). The typed
+    // and half backward kernels below use raw pointer arithmetic with
+    // contiguous [B,H,L,D] offsets (q_offset = ((b*H + h)*N)*D). Callers
+    // commonly pass dO/Q/K/V/O as `permute({0,2,1,3})` strided views of a
+    // [B,Sq,H,head_dim] projection, so a non-contiguous input silently
+    // produces wrong dQ/dK/dV on the standard attention layout. Materialise
+    // contiguous copies up front, exactly as the forward does.
+    if (!dO.is_contiguous() || !Q.is_contiguous() || !K.is_contiguous() ||
+        !V.is_contiguous() || !O.is_contiguous()) {
+        return flash_attention_backward(
+            dO.is_contiguous() ? dO : dO.contiguous(),
+            Q.is_contiguous()  ? Q  : Q.contiguous(),
+            K.is_contiguous()  ? K  : K.contiguous(),
+            V.is_contiguous()  ? V  : V.contiguous(),
+            O.is_contiguous()  ? O  : O.contiguous(),
+            scale, causal, dropout_p, philox_seed, philox_offset);
+    }
     // E.4: dtype dispatch.
     // - Float32 → native float kernel.
     // - Float64 → native double kernel (cblas_dgemm + double SIMD helpers).

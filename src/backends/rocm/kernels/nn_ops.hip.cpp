@@ -150,7 +150,8 @@ __global__ void embedding_kernel_hip(
     T* __restrict__ output,
     int64_t num_indices,
     int64_t embedding_dim,
-    int64_t num_embeddings) {
+    int64_t num_embeddings,
+    int* error_flag) {
 
     int64_t total_elements = num_indices * embedding_dim;
     for (int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -158,10 +159,12 @@ __global__ void embedding_kernel_hip(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
-        // Bounds check: out-of-range (e.g. negative padding) indices write 0
-        // instead of reading out of the weight buffer.
+        // Bounds check: an out-of-range index writes 0 (memory-safe) and flags
+        // the error; the host throws std::out_of_range after sync, matching the
+        // CPU reference and the CUDA backend.
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             output[tid] = T(0);
+            atomicOr(error_flag, 1);
             continue;
         }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
@@ -199,7 +202,8 @@ __global__ void embedding_kernel_hip_fp16(
     __half* __restrict__ output,
     int64_t num_indices,
     int64_t embedding_dim,
-    int64_t num_embeddings) {
+    int64_t num_embeddings,
+    int* error_flag) {
 
     int64_t total_elements = num_indices * embedding_dim;
     for (int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -209,6 +213,7 @@ __global__ void embedding_kernel_hip_fp16(
         int64_t embedding_idx = indices[idx];
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             output[tid] = __float2half(0.0f);
+            atomicOr(error_flag, 1);
             continue;
         }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
@@ -269,6 +274,14 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
     int64_t total_elements = num_indices * embedding_dim;
     int num_blocks = get_num_blocks(total_elements);
 
+    // Device flag for out-of-range indices; the kernels write a zero row and set
+    // this flag, and the host throws std::out_of_range after sync (matching the
+    // CPU reference and the CUDA backend). The BFloat16 path recurses through the
+    // Float32 branch, so it inherits the same check.
+    Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, weight.device());
+    HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
+    int* err_ptr = err_tensor.data<int32_t>();
+
     if (weight.dtype() == DType::Float32) {
         hipLaunchKernelGGL(embedding_kernel_hip<float>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
@@ -277,7 +290,8 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             output.data<float>(),
             num_indices,
             embedding_dim,
-            num_embeddings);
+            num_embeddings,
+            err_ptr);
     } else if (weight.dtype() == DType::Float64) {
         hipLaunchKernelGGL(embedding_kernel_hip<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
@@ -286,7 +300,8 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             output.data<double>(),
             num_indices,
             embedding_dim,
-            num_embeddings);
+            num_embeddings,
+            err_ptr);
     } else if (weight.dtype() == DType::Float16) {
         hipLaunchKernelGGL(embedding_kernel_hip_fp16,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
@@ -295,7 +310,8 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             reinterpret_cast<__half*>(output.data<Float16>()),
             num_indices,
             embedding_dim,
-            num_embeddings);
+            num_embeddings,
+            err_ptr);
     } else if (weight.dtype() == DType::BFloat16) {
         auto weight_f32 = weight.to(DType::Float32);
         auto result_f32 = embedding_kernel(weight_f32, indices, stream);
@@ -305,6 +321,10 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
     }
 
     HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
+        throw std::out_of_range("Embedding ROCm: index out of range");
+    }
     return output;
 }
 

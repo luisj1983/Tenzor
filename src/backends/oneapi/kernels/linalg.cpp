@@ -1664,100 +1664,68 @@ auto linalg_det_kernel(const Tensor& A, sycl::queue& queue) -> Tensor {
 // Matrix Inverse
 // ============================================================================
 
-auto linalg_inv_kernel(const Tensor& A, sycl::queue& queue) -> Tensor {
-    validate_linalg_dtype(A, "inv");
-    if (A.dtype() == DType::Float16)
-        return linalg_inv_kernel(A.to(DType::Float32), queue);
-    if (A.dtype() == DType::BFloat16)
-        return linalg_inv_kernel(A.to(DType::Float32), queue);
+auto linalg_inv_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // Float16 / BFloat16: widen to Float32, compute, narrow back (oneMKL getrf
+    // is not overloaded for half precision). Mirrors linalg_det_kernel.
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input_in.dtype();
+        return linalg_inv_kernel(input_in.to(DType::Float32), queue).to(orig_dtype);
+    }
 
-    auto work = A.contiguous().clone();
-    auto [n, ndim] = check_square(work);
-    int64_t nbatch = batch_size(work);
+    // oneMKL repacks input into a col-major device buffer via get_data_ptr(),
+    // which assumes a contiguous source; a non-contiguous input would be read
+    // with the wrong layout. Materialize a contiguous copy first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    auto shape = input.shape();
+    int64_t n = shape[shape.size() - 1];
+    // Support leading batch dims: invert each n x n block independently and
+    // return a tensor of the full input shape (previously only the first matrix
+    // was inverted and a rank-2 {n,n} tensor returned).
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    int64_t nbatch = (n > 0) ? input.numel() / (n * n) : 0;
+    Tensor output(out_shape, input.dtype(), input.device());
 
-    auto result = zeros(to_vec(work.shape()), A.dtype(), A.device());
+    if (input.dtype() == DType::Float32) {
+        const float* in_base = get_data_ptr<const float>(input);
+        float* out_base = get_data_ptr<float>(output);
+        SyclDeviceBuffer<float> d_a(n * n, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
+        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
+        SyclDeviceBuffer<float> scratch_rf(sp_rf, queue);
+        auto sp_ri = ::oneapi::mkl::lapack::getri_scratchpad_size<float>(queue, n, n);
+        SyclDeviceBuffer<float> scratch_ri(sp_ri, queue);
 
-    SyclDeviceBuffer<int> d_pivots(nbatch * n, queue);
-    SyclDeviceBuffer<int> d_info(nbatch, queue);
-    queue.memset(d_info.ptr, 0, nbatch * sizeof(int)).wait();
+        for (int64_t bb = 0; bb < nbatch; ++bb) {
+            row_to_col_major<float, SyclTransposeInvF32>(
+                d_a.get(), in_base + bb * n * n, n, n, queue);
+            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
+            ::oneapi::mkl::lapack::getri(queue, n, d_a.get(), n, d_ipiv.get(), scratch_ri.get(), sp_ri).wait();
+            col_to_row_major<float, SyclTransposeInvBackF32>(
+                out_base + bb * n * n, d_a.get(), n, n, queue);
+        }
+        return output;
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_base = get_data_ptr<const double>(input);
+        double* out_base = get_data_ptr<double>(output);
+        SyclDeviceBuffer<double> d_a(n * n, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
+        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
+        SyclDeviceBuffer<double> scratch_rf(sp_rf, queue);
+        auto sp_ri = ::oneapi::mkl::lapack::getri_scratchpad_size<double>(queue, n, n);
+        SyclDeviceBuffer<double> scratch_ri(sp_ri, queue);
 
-    auto launch_inv = [&](auto* work_ptr, auto* res_ptr) {
-        using T = std::remove_pointer_t<decltype(work_ptr)>;
-        // Global-memory LU with partial pivoting (one work-item per batch) —
-        // operates directly on the global buffer, so arbitrary N is supported.
-        queue.submit([&](sycl::handler& h) {
-            auto* data = work_ptr;
-            auto* pivots = d_pivots.ptr;
-            int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
-                int b = static_cast<int>(id[0]);
-                T* A = data + b * n_ * n_;
-                int* piv = pivots + b * n_;
-                for (int k = 0; k < n_; k++) {
-                    T max_val = sycl::fabs(A[k * n_ + k]);
-                    int max_row = k;
-                    for (int i = k + 1; i < n_; i++) {
-                        T v = sycl::fabs(A[i * n_ + k]);
-                        if (v > max_val) { max_val = v; max_row = i; }
-                    }
-                    piv[k] = max_row + 1;
-                    if (max_row != k)
-                        for (int j = 0; j < n_; j++) {
-                            T t = A[k * n_ + j]; A[k * n_ + j] = A[max_row * n_ + j]; A[max_row * n_ + j] = t;
-                        }
-                    T diag = A[k * n_ + k];
-                    if (diag != T(0))
-                        for (int i = k + 1; i < n_; i++) {
-                            A[i * n_ + k] /= diag;
-                            T m = A[i * n_ + k];
-                            for (int j = k + 1; j < n_; j++) A[i * n_ + j] -= m * A[k * n_ + j];
-                        }
-                }
-            });
-        }).wait();
-
-        // Invert via LU solve against identity, in global memory (per batch).
-        // The identity columns are built directly into the output buffer X.
-        queue.submit([&](sycl::handler& h) {
-            auto* lu_data = work_ptr;
-            auto* pivots = d_pivots.ptr;
-            auto* inv_out = res_ptr;
-            int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
-                int b = static_cast<int>(id[0]);
-                const T* LU = lu_data + b * n_ * n_;
-                const int* piv = pivots + b * n_;
-                T* X = inv_out + b * n_ * n_;
-                for (int i = 0; i < n_ * n_; i++) X[i] = T(0);
-                for (int i = 0; i < n_; i++) X[i * n_ + i] = T(1);
-                for (int i = 0; i < n_; i++) {
-                    int pr = piv[i] - 1;
-                    if (pr != i)
-                        for (int j = 0; j < n_; j++) { T t = X[i * n_ + j]; X[i * n_ + j] = X[pr * n_ + j]; X[pr * n_ + j] = t; }
-                }
-                for (int k = 0; k < n_; k++)
-                    for (int i = k + 1; i < n_; i++) {
-                        T m = LU[i * n_ + k];
-                        for (int j = 0; j < n_; j++) X[i * n_ + j] -= m * X[k * n_ + j];
-                    }
-                for (int k = n_ - 1; k >= 0; k--) {
-                    T diag = LU[k * n_ + k];
-                    for (int j = 0; j < n_; j++) X[k * n_ + j] /= diag;
-                    for (int i = 0; i < k; i++) {
-                        T m = LU[i * n_ + k];
-                        for (int j = 0; j < n_; j++) X[i * n_ + j] -= m * X[k * n_ + j];
-                    }
-                }
-            });
-        }).wait();
-    };
-
-    if (A.dtype() == DType::Float32)
-        launch_inv(work.data<float>(), result.data<float>());
-    else
-        launch_inv(work.data<double>(), result.data<double>());
-
-    return result;
+        for (int64_t bb = 0; bb < nbatch; ++bb) {
+            row_to_col_major<double, SyclTransposeInvF64>(
+                d_a.get(), in_base + bb * n * n, n, n, queue);
+            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
+            ::oneapi::mkl::lapack::getri(queue, n, d_a.get(), n, d_ipiv.get(), scratch_ri.get(), sp_ri).wait();
+            col_to_row_major<double, SyclTransposeInvBackF64>(
+                out_base + bb * n * n, d_a.get(), n, n, queue);
+        }
+        return output;
+    } else {
+        throw std::runtime_error("linalg_inv: only Float32 and Float64 supported");
+    }
 }
 
 // ============================================================================
@@ -1765,99 +1733,82 @@ auto linalg_inv_kernel(const Tensor& A, sycl::queue& queue) -> Tensor {
 // ============================================================================
 
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -> Tensor {
-    validate_linalg_dtype(A, "solve");
-    if (A.dtype() == DType::Float16)
-        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), queue);
-    if (A.dtype() == DType::BFloat16)
-        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), queue);
+    // Float16 / BFloat16: widen both operands to Float32, solve, narrow back.
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        const DType orig_dtype = A.dtype();
+        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), queue).to(orig_dtype);
+    }
+    // row_to_col_major reads via raw pointer and ignores strides, so views
+    // (e.g. A.transpose(-1,-2)) produce wrong results unless forced contiguous.
+    auto A_cont = A.contiguous();
+    auto B_cont = B.contiguous();
+    auto a_shape = A_cont.shape();
+    int64_t n = a_shape[a_shape.size() - 1];
+    auto b_shape = B_cont.shape();
+    int64_t nrhs = (b_shape.size() > 1) ? b_shape[b_shape.size() - 1] : 1;
 
-    auto work_a = A.contiguous().clone();
-    auto work_b = B.contiguous().clone();
-    auto [n, ndim_a] = check_square(work_a);
-    int64_t nbatch = batch_size(work_a);
+    // Support leading batch dims: solve each (n x n, n x nrhs) system independently
+    // (previously only the first system was solved, leaving the rest of the output
+    // uninitialised). A and B must share the same batch count.
+    int64_t nbatch = (n > 0) ? A_cont.numel() / (n * n) : 0;
+    int64_t nbatch_b = (n > 0 && nrhs > 0) ? B_cont.numel() / (n * nrhs) : 0;
+    if (nbatch_b != nbatch) {
+        throw std::invalid_argument(
+            "linalg_solve: batch count of A (" + std::to_string(nbatch) +
+            ") does not match batch count of B (" + std::to_string(nbatch_b) + ")");
+    }
+    std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
+    Tensor output(out_shape, A_cont.dtype(), A_cont.device());
 
-    auto b_shape = B.shape();
-    auto b_ndim = static_cast<int64_t>(b_shape.size());
-    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    if (A_cont.dtype() == DType::Float32) {
+        const float* a_base = get_data_ptr<const float>(A_cont);
+        const float* b_base = get_data_ptr<const float>(B_cont);
+        float* out_base = get_data_ptr<float>(output);
+        SyclDeviceBuffer<float> d_a(n * n, queue);
+        SyclDeviceBuffer<float> d_b(n * nrhs, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
+        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
+        SyclDeviceBuffer<float> scratch_rf(sp_rf, queue);
+        auto sp_rs = ::oneapi::mkl::lapack::getrs_scratchpad_size<float>(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, n, n);
+        SyclDeviceBuffer<float> scratch_rs(sp_rs, queue);
 
-    SyclDeviceBuffer<int> d_pivots(nbatch * n, queue);
-    SyclDeviceBuffer<int> d_info(nbatch, queue);
-    queue.memset(d_info.ptr, 0, nbatch * sizeof(int)).wait();
+        for (int64_t bb = 0; bb < nbatch; ++bb) {
+            row_to_col_major<float, SyclTransposeSolveAF32>(
+                d_a.get(), a_base + bb * n * n, n, n, queue);
+            row_to_col_major<float, SyclTransposeSolveBF32>(
+                d_b.get(), b_base + bb * n * nrhs, n, nrhs, queue);
+            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
+            ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
+            col_to_row_major<float, SyclTransposeSolveBackF32>(
+                out_base + bb * n * nrhs, d_b.get(), n, nrhs, queue);
+        }
+        return output;
+    } else if (A_cont.dtype() == DType::Float64) {
+        const double* a_base = get_data_ptr<const double>(A_cont);
+        const double* b_base = get_data_ptr<const double>(B_cont);
+        double* out_base = get_data_ptr<double>(output);
+        SyclDeviceBuffer<double> d_a(n * n, queue);
+        SyclDeviceBuffer<double> d_b(n * nrhs, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
+        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
+        SyclDeviceBuffer<double> scratch_rf(sp_rf, queue);
+        auto sp_rs = ::oneapi::mkl::lapack::getrs_scratchpad_size<double>(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, n, n);
+        SyclDeviceBuffer<double> scratch_rs(sp_rs, queue);
 
-    auto launch_solve = [&](auto* a_ptr, auto* b_ptr) {
-        using T = std::remove_pointer_t<decltype(a_ptr)>;
-        // Global-memory LU + forward/back substitution (one work-item per
-        // batch). No local memory -> arbitrary N. LU is done in-place in the
-        // global `a` buffer; the substitution reads it and writes the RHS in
-        // place in the global `b` buffer.
-        queue.submit([&](sycl::handler& h) {
-            auto* data = a_ptr;
-            auto* pivots = d_pivots.ptr;
-            int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
-                int b = static_cast<int>(id[0]);
-                T* A = data + b * n_ * n_;
-                int* piv = pivots + b * n_;
-                for (int k = 0; k < n_; k++) {
-                    T max_val = sycl::fabs(A[k * n_ + k]);
-                    int max_row = k;
-                    for (int i = k + 1; i < n_; i++) {
-                        T v = sycl::fabs(A[i * n_ + k]);
-                        if (v > max_val) { max_val = v; max_row = i; }
-                    }
-                    piv[k] = max_row + 1;
-                    if (max_row != k)
-                        for (int j = 0; j < n_; j++) { T t = A[k * n_ + j]; A[k * n_ + j] = A[max_row * n_ + j]; A[max_row * n_ + j] = t; }
-                    T diag = A[k * n_ + k];
-                    if (diag != T(0))
-                        for (int i = k + 1; i < n_; i++) {
-                            A[i * n_ + k] /= diag;
-                            T m = A[i * n_ + k];
-                            for (int j = k + 1; j < n_; j++) A[i * n_ + j] -= m * A[k * n_ + j];
-                        }
-                }
-            });
-        }).wait();
-
-        queue.submit([&](sycl::handler& h) {
-            auto* lu_data = a_ptr;
-            auto* pivots = d_pivots.ptr;
-            auto* b_data = b_ptr;
-            int n_ = static_cast<int>(n);
-            int nrhs_ = static_cast<int>(nrhs);
-            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
-                int b = static_cast<int>(id[0]);
-                const T* LU = lu_data + b * n_ * n_;
-                const int* piv = pivots + b * n_;
-                T* B = b_data + b * n_ * nrhs_;
-                for (int i = 0; i < n_; i++) {
-                    int pr = piv[i] - 1;
-                    if (pr != i)
-                        for (int j = 0; j < nrhs_; j++) { T t = B[i * nrhs_ + j]; B[i * nrhs_ + j] = B[pr * nrhs_ + j]; B[pr * nrhs_ + j] = t; }
-                }
-                for (int k = 0; k < n_; k++)
-                    for (int i = k + 1; i < n_; i++) {
-                        T m = LU[i * n_ + k];
-                        for (int j = 0; j < nrhs_; j++) B[i * nrhs_ + j] -= m * B[k * nrhs_ + j];
-                    }
-                for (int k = n_ - 1; k >= 0; k--) {
-                    T diag = LU[k * n_ + k];
-                    for (int j = 0; j < nrhs_; j++) B[k * nrhs_ + j] /= diag;
-                    for (int i = 0; i < k; i++) {
-                        T m = LU[i * n_ + k];
-                        for (int j = 0; j < nrhs_; j++) B[i * nrhs_ + j] -= m * B[k * nrhs_ + j];
-                    }
-                }
-            });
-        }).wait();
-    };
-
-    if (A.dtype() == DType::Float32)
-        launch_solve(work_a.data<float>(), work_b.data<float>());
-    else
-        launch_solve(work_a.data<double>(), work_b.data<double>());
-
-    return work_b;
+        for (int64_t bb = 0; bb < nbatch; ++bb) {
+            row_to_col_major<double, SyclTransposeSolveAF64>(
+                d_a.get(), a_base + bb * n * n, n, n, queue);
+            row_to_col_major<double, SyclTransposeSolveBF64>(
+                d_b.get(), b_base + bb * n * nrhs, n, nrhs, queue);
+            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
+            ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
+            col_to_row_major<double, SyclTransposeSolveBackF64>(
+                out_base + bb * n * nrhs, d_b.get(), n, nrhs, queue);
+        }
+        return output;
+    } else {
+        throw std::runtime_error("linalg_solve: only Float32 and Float64 supported");
+    }
 }
 
 // ============================================================================

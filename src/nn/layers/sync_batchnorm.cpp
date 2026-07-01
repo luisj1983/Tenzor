@@ -500,21 +500,49 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
             throw std::runtime_error(
                 "SyncBatchNorm: cannot use eval mode without track_running_stats");
         }
-        batch_mean = running_mean_.tensor();
-        batch_var = running_var_.tensor();
+        // audit-2026-06 Fix #5: read the running stats from the buffer map
+        // (buffers_["running_mean"] / ["running_var"]) — the exact entries that
+        // the training write-through, checkpoint/state_dict load, and .to()
+        // update — instead of the stale running_mean_ / running_var_ member
+        // Variables, which can alias an initial TensorImpl that never tracked a
+        // device or dtype move. Mirrors BatchNorm2d (batchnorm.cpp:687) and
+        // BatchNorm1d (batchnorm.cpp:1205) eval.
+        auto& rm_buf = buffers_["running_mean"];
+        auto& rv_buf = buffers_["running_var"];
+        batch_mean = rm_buf ? rm_buf->tensor() : running_mean_.tensor();
+        batch_var  = rv_buf ? rv_buf->tensor() : running_var_.tensor();
         global_count = N * H * W;  // not used for backward in eval, but set for completeness
     }
 
-    // Normalize: y = (x - mean) / sqrt(var + eps) * weight + bias
+    // Normalize: y = (x - mean) / sqrt(var + eps) * weight + bias.
+    //
+    // audit-2026-06 Fix #5: run the normalization in a single, consistent
+    // compute dtype on the input's device. Statistics use Float64 for Float64
+    // input and Float32 otherwise (matching the training `compute_dtype`),
+    // while the affine weight/bias and the running stats are stored Float32.
+    // Without reconciling: a Float64 input multiplied the Float32 affine params
+    // (dtype mismatch at the affine step), and in eval the running stats could
+    // be on the wrong device/dtype relative to the input. Mirrors the
+    // .to(device)/.to(dtype) reconciliation BatchNorm2d/BatchNorm1d eval do.
+    DType norm_dtype = (x.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    auto to_norm = [&](Tensor t) {
+        if (t.device() != x.device()) t = t.to(x.device());
+        if (t.dtype() != norm_dtype) t = t.to(norm_dtype);
+        return t;
+    };
+    auto x_norm = to_norm(x);
+    batch_mean = to_norm(batch_mean);
+    batch_var  = to_norm(batch_var);
+
     auto mean_4d = batch_mean.reshape({1, C, 1, 1});
     auto var_4d = batch_var.reshape({1, C, 1, 1});
 
     auto inv_std_4d = reciprocal(sqrt(var_4d + static_cast<float>(eps_)));
-    auto normalized = (x - mean_4d) * inv_std_4d;
+    auto normalized = (x_norm - mean_4d) * inv_std_4d;
 
     if (affine_) {
-        auto w = weight_.tensor().reshape({1, C, 1, 1});
-        auto b = bias_.tensor().reshape({1, C, 1, 1});
+        auto w = to_norm(weight_.tensor()).reshape({1, C, 1, 1});
+        auto b = to_norm(bias_.tensor()).reshape({1, C, 1, 1});
         normalized = normalized * w + b;
     }
 

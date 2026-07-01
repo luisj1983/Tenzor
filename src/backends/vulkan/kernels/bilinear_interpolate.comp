@@ -39,14 +39,23 @@ void main() {
 
     // Compute source coordinates
     float h_real, w_real;
-    if (params.align_corners != 0 && params.out_height > 1) {
-        h_real = float(h_out) * float(params.in_height - 1) / float(params.out_height - 1);
+    if (params.align_corners != 0) {
+        // align_corners maps output i -> i*(in-1)/(out-1); with out==1 that is
+        // 0/0, so the first/only output samples source coordinate 0 (matching
+        // PyTorch). The previous code fell through to the non-aligned formula
+        // for out==1, sampling the wrong coordinate.
+        h_real = (params.out_height > 1)
+            ? float(h_out) * float(params.in_height - 1) / float(params.out_height - 1)
+            : 0.0;
     } else {
         h_real = (float(h_out) + 0.5) * float(params.in_height) / float(params.out_height) - 0.5;
     }
 
-    if (params.align_corners != 0 && params.out_width > 1) {
-        w_real = float(w_out) * float(params.in_width - 1) / float(params.out_width - 1);
+    if (params.align_corners != 0) {
+        // See h_real: out==1 with align_corners samples coordinate 0.
+        w_real = (params.out_width > 1)
+            ? float(w_out) * float(params.in_width - 1) / float(params.out_width - 1)
+            : 0.0;
     } else {
         w_real = (float(w_out) + 0.5) * float(params.in_width) / float(params.out_width) - 0.5;
     }

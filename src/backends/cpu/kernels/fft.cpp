@@ -703,8 +703,19 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
     DType out_dtype = to_complex_dtype(input.dtype());
     auto precision = dfti_precision(input.dtype());
 
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(out_dtype) : input;
+    // E.5: mirror fft_kernel's half-precision handling. Float16/BFloat16
+    // storage is 2 bytes/element; reading it as std::complex<float> (8 bytes)
+    // is an out-of-bounds reinterpret. Pack each half element into the
+    // Complex64 destination via build_complex64_from_half first.
+    Tensor inp;
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        inp = build_complex64_from_half(input);
+    } else if (input.dtype() == DType::Float32 ||
+               input.dtype() == DType::Float64) {
+        inp = input.to(out_dtype);
+    } else {
+        inp = input;  // already complex
+    }
     auto cont = inp.contiguous();
     auto shape = cont.shape();
     int64_t N_in = shape[dim];

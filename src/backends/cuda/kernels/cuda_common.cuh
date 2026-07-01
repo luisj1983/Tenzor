@@ -243,7 +243,7 @@ __device__ T block_reduce_sum(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / 32) ? shared[threadIdx.x] : T(0);
+    val = (threadIdx.x < (blockDim.x + 31) / 32) ? shared[threadIdx.x] : T(0);
     if (wid == 0) {
         val = warp_reduce_sum(val);
     }
@@ -270,7 +270,7 @@ __device__ T block_reduce_max(T val, T* shared, T init) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / 32) ? shared[threadIdx.x] : init;
+    val = (threadIdx.x < (blockDim.x + 31) / 32) ? shared[threadIdx.x] : init;
     if (wid == 0) {
         val = warp_reduce_max(val);
     }

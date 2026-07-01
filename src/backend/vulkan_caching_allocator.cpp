@@ -902,11 +902,39 @@ size_t VulkanCachingAllocator::try_merge_free_blocks(int device) {
                 continue;
             }
 
-            // Merge hi into lo: extend lo's size, destroy hi's VkBuffer
-            device_alloc.free_blocks.erase(lo);
-            device_alloc.free_blocks.erase(hi);
+            // lo->buffer only spans lo's ORIGINAL size; recreate it to cover the
+            // full merged range at lo->memory_offset BEFORE mutating any state, so a
+            // whole-block allocation of the merged size cannot overrun lo->buffer
+            // (which previously caused OOB when the split branch was skipped).
+            {
+                VkBufferCreateInfo merged_info{};
+                merged_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                merged_info.size = lo->size + hi->size;
+                merged_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                merged_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                VkBuffer merged_buffer = VK_NULL_HANDLE;
+                if (vkCreateBuffer(device_alloc.device, &merged_info, nullptr, &merged_buffer) != VK_SUCCESS ||
+                    vkBindBufferMemory(device_alloc.device, merged_buffer, lo->memory, lo->memory_offset) != VK_SUCCESS) {
+                    // Cannot back the merged range with one buffer; skip this coalesce
+                    // (both blocks keep their original, still-valid buffers).
+                    if (merged_buffer != VK_NULL_HANDLE) {
+                        vkDestroyBuffer(device_alloc.device, merged_buffer, nullptr);
+                    }
+                    ++i;
+                    continue;
+                }
 
-            lo->size += hi->size;
+                // Merge hi into lo: extend lo's size, swap in the merged buffer.
+                device_alloc.free_blocks.erase(lo);
+                device_alloc.free_blocks.erase(hi);
+                lo->size += hi->size;
+                if (lo->buffer != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(device_alloc.device, lo->buffer, nullptr);
+                }
+                lo->buffer = merged_buffer;
+            }
 
             // Destroy hi's VkBuffer
             if (hi->buffer != VK_NULL_HANDLE) {
@@ -944,6 +972,10 @@ size_t VulkanCachingAllocator::try_merge_free_blocks(int device) {
 size_t VulkanCachingAllocator::round_size(size_t size) const {
     // Just apply base alignment (256 bytes) - no aggressive bucketing.
     // Bucketing was causing too much memory overhead for large models.
+    // Guard the round-up against size_t overflow (see CachingAllocator::round_size).
+    if (size > SIZE_MAX - (alignment_ - 1)) {
+        throw std::bad_alloc();
+    }
     return ((size + alignment_ - 1) / alignment_) * alignment_;
 }
 

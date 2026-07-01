@@ -15,6 +15,7 @@ layout(binding = 4) writeonly buffer Output   { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint num_elements;
+    uint source_len;
 } params;
 
 void main() {
@@ -22,8 +23,15 @@ void main() {
     if (idx >= params.num_elements) return;
 
     if (mask_data[idx] != uint8_t(0)) {
-        uint src_idx = prefix_data[idx] - 1;
-        output_data[idx] = source_data[src_idx];
+        uint prefix = prefix_data[idx];
+        // Bounds-check the scatter index against the source length: prefix must
+        // be >= 1 (mask set) and prefix-1 within source. A corrupt/short source
+        // or zero prefix would otherwise read source_data[0xFFFFFFFF] (OOB).
+        if (prefix >= 1u && (prefix - 1u) < params.source_len) {
+            output_data[idx] = source_data[prefix - 1u];
+        } else {
+            output_data[idx] = input_data[idx];
+        }
     } else {
         output_data[idx] = input_data[idx];
     }

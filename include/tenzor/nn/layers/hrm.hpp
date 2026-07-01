@@ -302,7 +302,10 @@ private:
     std::shared_ptr<RMSNorm> norm2_;
     std::shared_ptr<RMSNorm> norm3_;  ///< For cross-attention
     std::shared_ptr<Dropout> dropout_;
-    std::shared_ptr<RotaryPositionEmbedding> rope_;
+    // NOTE: no rope_ member — see HRMBlock ctor. RoPE cannot be correctly
+    // applied through MultiheadAttention (which projects/reshapes q/k/v
+    // internally), so the previously-registered-but-never-applied RoPE submodule
+    // was removed. It carried no trainable parameters.
 };
 
 /**

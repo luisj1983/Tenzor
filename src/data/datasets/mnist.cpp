@@ -137,6 +137,13 @@ MNIST::MNIST(const std::string& root_dir, bool train, bool normalize) {
     labels_ = zeros({static_cast<int64_t>(num_samples_)}, DType::Int64, Device::cpu());
     auto* lbl_dst = labels_.data<int64_t>();
     for (size_t i = 0; i < num_samples_; ++i) {
+        // MNIST labels are digits 0-9; reject anything out of range (mirroring
+        // the CIFAR loader) so a corrupted/hostile label file cannot inject
+        // out-of-range class indices that later index embeddings/one-hot OOB.
+        if (lbl_data[i] > 9) {
+            throw std::runtime_error(
+                "MNIST: label out of range [0,9]: " + std::to_string(lbl_data[i]));
+        }
         lbl_dst[i] = static_cast<int64_t>(lbl_data[i]);
     }
 }

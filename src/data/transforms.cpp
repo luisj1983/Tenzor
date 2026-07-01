@@ -747,11 +747,13 @@ auto RandomResizedCrop::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    // Clamp to valid region
-    crop_h = std::min(crop_h, H);
-    crop_w = std::min(crop_w, W);
-    top = std::min(top, H - crop_h);
-    left = std::min(left, W - crop_w);
+    // Clamp to valid region. Use a strictly positive lower bound on the crop
+    // size: if the 10-attempt crop search failed, crop_h/crop_w may be <= 0,
+    // which would drive an out-of-bounds read.
+    crop_h = std::clamp(crop_h, int64_t{1}, H);
+    crop_w = std::clamp(crop_w, int64_t{1}, W);
+    top = std::clamp(top, int64_t{0}, H - crop_h);
+    left = std::clamp(left, int64_t{0}, W - crop_w);
 
     // Extract crop and resize
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
@@ -1427,8 +1429,14 @@ auto MixUp::operator()(const Tensor& input1, const Tensor& target1,
         tdst[i] = lambda * tsrc1[i] + (1.0f - lambda) * tsrc2[i];
     }
 
+    // The mixed target is a SOFT label (convex combination of two labels).
+    // Casting it back to an integer label dtype would truncate it to a hard
+    // label, destroying the mix — keep Float32 for integer originals (only the
+    // device is restored). Float targets are returned in their own dtype.
+    TransformDomain tgt_out = tgt_orig;
+    if (is_integer_type(tgt_orig.dtype)) tgt_out.dtype = DType::Float32;
     return {leave_host_float32(std::move(mixed_input), in_orig),
-            leave_host_float32(std::move(mixed_target), tgt_orig)};
+            leave_host_float32(std::move(mixed_target), tgt_out)};
 }
 
 // ============================================================================
@@ -1541,8 +1549,14 @@ auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
         tdst[i] = actual_lambda * tsrc1[i] + (1.0f - actual_lambda) * tsrc2[i];
     }
 
+    // The mixed target is a SOFT label (convex combination of two labels).
+    // Casting it back to an integer label dtype would truncate it to a hard
+    // label, destroying the mix — keep Float32 for integer originals (only the
+    // device is restored). Float targets are returned in their own dtype.
+    TransformDomain tgt_out = tgt_orig;
+    if (is_integer_type(tgt_orig.dtype)) tgt_out.dtype = DType::Float32;
     return {leave_host_float32(std::move(mixed_input), in_orig),
-            leave_host_float32(std::move(mixed_target), tgt_orig)};
+            leave_host_float32(std::move(mixed_target), tgt_out)};
 }
 
 // ============================================================================

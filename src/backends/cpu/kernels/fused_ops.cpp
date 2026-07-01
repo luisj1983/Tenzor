@@ -240,6 +240,15 @@ auto fused_batchnorm_relu_kernel(
     const Tensor& bias,
     float eps
 ) -> Tensor {
+    // Contiguity guard: the kernel below indexes `input.data<T>()` with
+    // shape-derived offsets (n*C*S + c*S + s), which assumes a contiguous
+    // [N,C,...] layout. A non-contiguous input silently produces wrong output
+    // (see fused_attention_kernel / fused_layer_norm_backward_kernel).
+    if (!input.is_contiguous()) {
+        return fused_batchnorm_relu_kernel(input.contiguous(), running_mean,
+                                           running_var, weight, bias, eps);
+    }
+
     int64_t num_features = input.shape()[1];
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor output = zeros(shape_vec, input.dtype(), input.device());
@@ -656,6 +665,13 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
  * GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
  */
 auto fused_gelu_kernel(const Tensor& input) -> Tensor {
+    // Contiguity guard: the kernel iterates `in_data[i]` linearly over numel,
+    // which assumes contiguous storage; a strided view would read the wrong
+    // elements (see fused_attention_kernel / fused_layer_norm_backward_kernel).
+    if (!input.is_contiguous()) {
+        return fused_gelu_kernel(input.contiguous());
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor result = zeros(shape_vec, input.dtype(), input.device());
 
@@ -769,6 +785,14 @@ auto fused_layer_norm_kernel(
     const Tensor& bias,
     float eps
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Contiguity guard: the kernel indexes `input.data<T>()` with row-major
+    // batch*norm_size offsets, which assumes contiguous storage; a strided
+    // view silently produces wrong output (see fused_layer_norm_backward_kernel).
+    if (!input.is_contiguous()) {
+        return fused_layer_norm_kernel(input.contiguous(), normalized_shape,
+                                       weight, bias, eps);
+    }
+
     // Calculate batch size and normalization size
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
@@ -962,6 +986,13 @@ auto fused_layer_norm_kernel(
 
 auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
     -> std::tuple<Tensor, Tensor> {
+    // Contiguity guard: the kernel indexes `input.data<T>()` with row-major
+    // batch*norm_size offsets, which assumes contiguous storage; a strided
+    // view silently produces wrong output (see fused_layer_norm_backward_kernel).
+    if (!input.is_contiguous()) {
+        return fused_rms_norm_kernel(input.contiguous(), weight, eps);
+    }
+
     // RMSNorm: output = input * weight / sqrt(mean(input^2) + eps)
     const auto& shape = input.shape();
 
@@ -971,8 +1002,11 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
                   input.dtype(), input.device());
-    // rrms stores reciprocal RMS for each batch element
-    Tensor rrms({batch_size}, input.dtype(), input.device());
+    // rrms stores reciprocal RMS for each batch element. Store it at Float32 for
+    // half inputs (and Float64 for Float64) so the backward reconstructs the
+    // gradient from the full-precision statistic rather than a half-rounded one.
+    DType rrms_dtype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor rrms({batch_size}, rrms_dtype, input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -1043,7 +1077,9 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
         Tensor w_f32 = weight.to(DType::Float32);
         auto [out_f32, rrms_f32] = fused_rms_norm_kernel(in_f32, w_f32, eps);
         output = out_f32.to(orig);
-        rrms = rrms_f32.to(orig);
+        // Keep rrms at Float32 (do not narrow to the half input dtype) so the
+        // backward consumes the full-precision reciprocal-RMS statistic.
+        rrms = rrms_f32;
     } else {
         throw std::runtime_error("fused_rms_norm: unsupported dtype");
     }

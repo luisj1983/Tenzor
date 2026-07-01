@@ -308,11 +308,11 @@ void foreach_lerp_(std::vector<Tensor>& self,
 auto foreach_norm(const std::vector<Tensor>& a, double p) -> std::vector<Tensor> {
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    const auto p_f = static_cast<float>(p);
     #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
-        // norm() with no dim gives global scalar norm
-        out[i] = tenzor::norm(a[i], p_f, std::nullopt, false);
+        // norm() with no dim gives global scalar norm. norm() takes a double
+        // order; pass p through without narrowing to float.
+        out[i] = tenzor::norm(a[i], p, std::nullopt, false);
     }
     return out;
 }

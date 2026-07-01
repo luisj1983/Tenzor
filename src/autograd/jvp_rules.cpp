@@ -397,12 +397,16 @@ auto jvp_selu(const DualTensor& x) -> DualTensor {
 
 auto jvp_softplus(const DualTensor& x, double beta) -> DualTensor {
     // V.6: double end-to-end.
-    // softplus(x) = (1/beta) * log(1 + exp(beta*x))
-    // d(softplus)/dx = sigmoid(beta*x)
+    // softplus(x) = (1/beta) * log(1 + exp(beta*x)); derivative = sigmoid(beta*x).
+    // Compute the primal in the numerically stable form
+    //   (1/beta) * (max(bx, 0) + log1p(exp(-|bx|)))
+    // so that large beta*x does not overflow exp() to +inf (the naive
+    // log(1+exp(bx)) does). This matches the backend Softplus kernel and the
+    // max-shifted jvp_softmax/jvp_logsumexp in this file.
     auto bx = tenzor::mul(x.primal(), beta);
-    auto exp_bx = tenzor::exp(bx);
-    auto one = tenzor::ones_like(x.primal());
-    auto primal = tenzor::mul(tenzor::log(tenzor::add(one, exp_bx)), 1.0 / beta);
+    auto pos = tenzor::maximum(bx, tenzor::zeros_like(bx));
+    auto stable = tenzor::add(pos, tenzor::log1p(tenzor::exp(tenzor::neg(tenzor::abs(bx)))));
+    auto primal = tenzor::mul(stable, 1.0 / beta);
     auto deriv = tenzor::sigmoid(bx);
     auto tangent = tenzor::mul(x.tangent(), deriv);
     return DualTensor(std::move(primal), std::move(tangent));
@@ -472,7 +476,8 @@ auto jvp_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
 
 auto jvp_log_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
     // log_softmax(x) = x - log(sum(exp(x), dim))
-    // d(log_softmax) = dt - softmax(x) * sum(dt, dim)
+    // d(log_softmax)_i = dt_i - d(logsumexp) = dt_i - sum_j(softmax(x)_j * dt_j)
+    // (the subtracted term is a per-row scalar, broadcast along dim)
     auto p = x.primal();
     auto max_val = tenzor::max(p, dim, /*keepdim=*/true);
     auto shifted = tenzor::sub(p, max_val);
@@ -482,8 +487,9 @@ auto jvp_log_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
     auto primal = tenzor::sub(p, log_sum_exp);
     auto s = tenzor::div(exp_shifted, sum_exp);  // softmax
 
-    auto sum_dt = tenzor::sum(x.tangent(), dim, /*keepdim=*/true);
-    auto tangent = tenzor::sub(x.tangent(), tenzor::mul(s, sum_dt));
+    auto s_dt = tenzor::mul(s, x.tangent());
+    auto sum_s_dt = tenzor::sum(s_dt, dim, /*keepdim=*/true);
+    auto tangent = tenzor::sub(x.tangent(), sum_s_dt);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
@@ -7271,7 +7277,7 @@ JvpResult jvp_adapter_sparse_softmax_s15(std::span<const Tensor> primals,
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 
-// SparseLogSoftmax: dy = dv - P * rowsum(dv), where P = exp(log-softmax).
+// SparseLogSoftmax: dy = dv - rowsum(P * dv), where P = exp(log-softmax).
 JvpResult jvp_adapter_sparse_log_softmax_s15(std::span<const Tensor> primals,
                                              std::span<const Tensor> tangents,
                                              const OpAttributes& attrs) {
@@ -7282,10 +7288,10 @@ JvpResult jvp_adapter_sparse_log_softmax_s15(std::span<const Tensor> primals,
     auto primal = tenzor::dispatch(OpId::SparseLogSoftmax,
         std::vector<Tensor>{primals[0], primals[1], primals[2]}, attrs)[0];
     auto dvalues = tangent_or_zeros(primals[2], tangents[2]);
-    // P = exp(log-softmax). dy = dv - P * rowsum(dv).
+    // P = exp(log-softmax). dy_i = dv_i - sum_k(P_k * dv_k) over the row.
     auto P = tenzor::exp(primal);
-    auto rowsum = csr_row_broadcast_sum(primals[0], dvalues);
-    auto tangent = tenzor::sub(dvalues, tenzor::mul(P, rowsum));
+    auto rowsum = csr_row_broadcast_sum(primals[0], tenzor::mul(P, dvalues));
+    auto tangent = tenzor::sub(dvalues, rowsum);
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 

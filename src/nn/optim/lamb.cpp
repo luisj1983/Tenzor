@@ -126,11 +126,17 @@ auto LAMB::step_impl() -> void {
         // QQ.12: clamp trust_ratio to [trust_min, trust_max].  Without this,
         // a near-zero update_norm produces trust_ratio -> +Inf and the
         // parameter step explodes.  PyTorch NVlamb defaults to [0, 10].
+        //
+        // The clamp applies ONLY to a genuinely computed trust ratio. When
+        // param_norm or update_norm is zero the reference LAMB uses a trust
+        // ratio of exactly 1.0 (no layer-wise scaling) and leaves it untouched;
+        // clamping that fallback would let a trust_min > 1 (or trust_max < 1)
+        // silently override the legitimate identity ratio.
         double trust_ratio = 1.0;
         if (param_norm > 0.0 && update_norm > 0.0) {
             trust_ratio = param_norm / update_norm;
+            trust_ratio = std::clamp(trust_ratio, hp.trust_min, hp.trust_max);
         }
-        trust_ratio = std::clamp(trust_ratio, hp.trust_min, hp.trust_max);
 
         // Apply update with trust ratio
         Tensor updated = param_hi - update * scalar(hp.lr * trust_ratio);

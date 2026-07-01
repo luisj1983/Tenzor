@@ -1199,6 +1199,12 @@ auto scatter_add_kernel(const Tensor& input_orig, int64_t dim, const Tensor& ind
             CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), result.data_ptr(),
                                         output.numel() * dtype_size(input.dtype()),
                                         cudaMemcpyDeviceToDevice, stream));
+        } else {
+            // Without this the chain silently returns the unmodified input copy for
+            // Complex64/Complex128/Bool, dropping the scatter — the non-deterministic
+            // path below throws for these dtypes, so match that behavior here.
+            throw std::runtime_error("scatter_add (deterministic): unsupported dtype " +
+                                     std::string(dtype_name(input.dtype())));
         }
 
         CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -2166,6 +2172,12 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         return Tensor({0, ndim}, DType::Int64, input.device());
     }
 
+    // The flag kernel reads input as a flat physical buffer and the coordinate
+    // kernel decodes flat indices with logical shape strides, so a non-contiguous
+    // input would be flagged/decoded at the wrong positions. Materialize contiguous
+    // first (matches the gather/take kernels).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+
     // Allocate flags array
     backend::CachedMemoryGuard d_flags_guard(n * sizeof(int64_t));
     auto* d_flags = static_cast<int64_t*>(d_flags_guard.get());
@@ -2175,7 +2187,7 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     // Launch flag kernel based on dtype
     #define LAUNCH_NONZERO_FLAG(T) \
         nonzero_flag_kernel<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            input.data<T>(), d_flags, n); \
+            in_c.data<T>(), d_flags, n); \
         CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {

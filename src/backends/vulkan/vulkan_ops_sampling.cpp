@@ -176,8 +176,14 @@ auto VulkanBackend::dispatchBucketize(const Tensor& input, const Tensor& boundar
 
 auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
     DType orig_dtype = x1.dtype();
-    Tensor a = (orig_dtype == DType::Float32) ? x1.contiguous() : dispatchCast(x1.contiguous(), DType::Float32);
-    Tensor b = (x2.dtype() == DType::Float32) ? x2.contiguous() : dispatchCast(x2.contiguous(), DType::Float32);
+    // Compute in Float64 for Float64 inputs (dedicated cdist_f64 shader); the
+    // previous code downcast f64 to Float32, losing precision. Narrower inputs
+    // compute in Float32.
+    const bool use_f64 = (orig_dtype == DType::Float64);
+    const DType compute = use_f64 ? DType::Float64 : DType::Float32;
+    if (use_f64) vulkan::ensure_fp64_supported(x1.device().index, "CDist");
+    Tensor a = (x1.dtype() == compute) ? x1.contiguous() : dispatchCast(x1.contiguous(), compute);
+    Tensor b = (x2.dtype() == compute) ? x2.contiguous() : dispatchCast(x2.contiguous(), compute);
 
     int64_t B, P, M, R;
     if (a.ndim() == 2 && b.ndim() == 2) {
@@ -190,13 +196,14 @@ auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) 
     }
     std::vector<int64_t> result_shape = (a.ndim() == 2) ? std::vector<int64_t>{P, R}
                                                          : std::vector<int64_t>{B, P, R};
-    Tensor result_f32(result_shape, DType::Float32, x1.device());
+    Tensor result_f32(result_shape, compute, x1.device());
+    const size_t cdist_esz = (compute == DType::Float64) ? sizeof(double) : sizeof(float);
 
     int64_t total = B * P * R;
     if (total == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
 
     int32_t device_id = x1.device().index;
-    auto* pipeline = getPipeline("cdist", device_id);
+    auto* pipeline = getPipeline(use_f64 ? "cdist_f64" : "cdist", device_id);
 
     CDistPC pc{static_cast<uint32_t>(B), static_cast<uint32_t>(P),
                static_cast<uint32_t>(R), static_cast<uint32_t>(M),
@@ -208,9 +215,9 @@ auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) 
         {2, result_f32.data_ptr()},
     };
     std::vector<size_t> sizes = {
-        static_cast<size_t>(a.numel()) * sizeof(float),
-        static_cast<size_t>(b.numel()) * sizeof(float),
-        static_cast<size_t>(result_f32.numel()) * sizeof(float),
+        static_cast<size_t>(a.numel()) * cdist_esz,
+        static_cast<size_t>(b.numel()) * cdist_esz,
+        static_cast<size_t>(result_f32.numel()) * cdist_esz,
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -226,7 +233,7 @@ auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) 
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
 
-    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+    return (orig_dtype == compute) ? result_f32 : dispatchCast(result_f32, orig_dtype);
 }
 
 auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,

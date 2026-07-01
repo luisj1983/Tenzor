@@ -813,6 +813,15 @@ auto max_unpool3d(const Variable& input, const Tensor& indices,
  * computation: input projection, split heads, scaled dot-product attention,
  * merge heads, and output projection.
  *
+ * @warning INFERENCE-ONLY / NON-DIFFERENTIABLE. This overload takes raw
+ * `Tensor` inputs and returns raw `Tensor` outputs. Tensors do not carry a
+ * `grad_fn`, so no gradient flows to `query/key/value` or to the
+ * `in_proj_weight/bias` and `out_proj_weight/bias` parameters — the internal
+ * math intentionally runs on the non-autograd `Tensor` ops. For training (so
+ * the projection weights receive gradients) use the autograd-correct
+ * `MultiheadAttention` nn module or `nn::functional::scaled_dot_product_attention`
+ * with `Variable` inputs, which build the backward graph.
+ *
  * @param query  Query tensor [batch, seq_q, embed_dim]
  * @param key    Key tensor [batch, seq_k, embed_dim]  (or kdim if using separate projections)
  * @param value  Value tensor [batch, seq_k, embed_dim] (or vdim if using separate projections)

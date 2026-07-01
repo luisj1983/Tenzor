@@ -290,9 +290,28 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
         }
     }
 
-    auto build_subgraph = [&](int64_t start, int64_t end,
-                              const std::vector<std::string>& carried_ids,
-                              const std::vector<std::string>& output_ids)
+    // Build the loop-body output list for a Loop op: the executor convention is
+    // `body outputs = [cond, carried...]`, so the loop condition (if recorded)
+    // is surfaced as the FIRST body output. Shared between the outermost Loop
+    // attach below and the recursive nested-Loop attach inside build_subgraph.
+    auto loop_body_output_ids = [](const TracedOp& op) -> std::vector<std::string> {
+        std::vector<std::string> ids;
+        if (!op.loop_cond_output.empty()) ids.push_back(op.loop_cond_output);
+        ids.insert(ids.end(), op.outputs.begin(), op.outputs.end());
+        return ids;
+    };
+
+    // Recursive: a nested If/Loop inside a branch/body slice must itself be
+    // built as a nested sub-graph (its inner branch/body ops attached via
+    // set_then_branch/set_else_branch/set_body), NOT flattened inline into the
+    // enclosing sub-graph. std::function so the lambda can call itself.
+    std::function<std::shared_ptr<Graph>(int64_t, int64_t,
+                                         const std::vector<std::string>&,
+                                         const std::vector<std::string>&)>
+        build_subgraph;
+    build_subgraph = [&](int64_t start, int64_t end,
+                         const std::vector<std::string>& carried_ids,
+                         const std::vector<std::string>& output_ids)
             -> std::shared_ptr<Graph> {
         auto sub = std::make_shared<Graph>();
         std::unordered_map<std::string, std::shared_ptr<Value>> sub_values;
@@ -307,8 +326,37 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
         }
         sub->set_inputs(sub_inputs);
 
+        // A nested If/Loop records its own branch/body ops INLINE in the global
+        // op stream just before the control-flow op itself. Those inner ops must
+        // not be replayed flat into THIS sub-graph — they belong to the nested
+        // node's own sub-graph(s) and are attached recursively below. Mark their
+        // index ranges so the replay loop skips them. (Only the directly-nested
+        // ranges need marking; deeper nesting is handled by the recursion.)
+        std::vector<bool> inline_skip(ops_.size(), false);
+        for (int64_t k = start; k < end && k >= 0 && (size_t)k < ops_.size(); ++k) {
+            const auto& nop = ops_[k];
+            if (nop.type == OpType::If) {
+                auto a = nop.int_attrs.find("then_ops_start");
+                auto c = nop.int_attrs.find("else_ops_end");
+                if (a != nop.int_attrs.end() && c != nop.int_attrs.end()) {
+                    for (int64_t j = a->second; j < c->second && j >= 0 &&
+                                                (size_t)j < ops_.size(); ++j)
+                        inline_skip[j] = true;
+                }
+            } else if (nop.type == OpType::Loop) {
+                auto a = nop.int_attrs.find("body_ops_start");
+                auto b = nop.int_attrs.find("body_ops_end");
+                if (a != nop.int_attrs.end() && b != nop.int_attrs.end()) {
+                    for (int64_t j = a->second; j < b->second && j >= 0 &&
+                                                (size_t)j < ops_.size(); ++j)
+                        inline_skip[j] = true;
+                }
+            }
+        }
+
         // Replay the ops slice inside the sub-graph.
         for (int64_t k = start; k < end && k >= 0 && (size_t)k < ops_.size(); ++k) {
+            if (inline_skip[k]) continue;
             const auto& op = ops_[k];
             auto node = sub->create_node(op.type);
             for (const auto& iid : op.inputs) {
@@ -338,6 +386,35 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
             for (const auto& [n, val] : op.vec_attrs)   node->set_vec_attr(n, val);
             for (const auto& [n, val] : op.bool_attrs)  node->set_bool_attr(n, val);
             for (const auto& [n, val] : op.tensor_attrs) node->set_tensor_attr(n, val);
+
+            // Recursively nest inner control-flow subgraphs instead of
+            // flattening them (mirrors the outermost attach in end_trace).
+            if (op.type == OpType::If) {
+                auto ts = op.int_attrs.find("then_ops_start");
+                auto te = op.int_attrs.find("then_ops_end");
+                auto es = op.int_attrs.find("else_ops_start");
+                auto ee = op.int_attrs.find("else_ops_end");
+                if (ts != op.int_attrs.end() && te != op.int_attrs.end() &&
+                    es != op.int_attrs.end() && ee != op.int_attrs.end()) {
+                    // op.inputs[0] is the condition, inputs[1..] are carried.
+                    std::vector<std::string> inner_carried(op.inputs.begin() + 1,
+                                                           op.inputs.end());
+                    node->set_then_branch(build_subgraph(
+                        ts->second, te->second, inner_carried, op.outputs));
+                    const auto& inner_else_ids = op.else_outputs.empty()
+                                                     ? op.outputs
+                                                     : op.else_outputs;
+                    node->set_else_branch(build_subgraph(
+                        es->second, ee->second, inner_carried, inner_else_ids));
+                }
+            } else if (op.type == OpType::Loop) {
+                auto bs = op.int_attrs.find("body_ops_start");
+                auto be = op.int_attrs.find("body_ops_end");
+                if (bs != op.int_attrs.end() && be != op.int_attrs.end()) {
+                    node->set_body(build_subgraph(
+                        bs->second, be->second, op.inputs, loop_body_output_ids(op)));
+                }
+            }
             sub->add_node(node);
         }
 
@@ -422,7 +499,7 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
             auto be = op.int_attrs.find("body_ops_end");
             if (bs != op.int_attrs.end() && be != op.int_attrs.end()) {
                 node->set_body(build_subgraph(
-                    bs->second, be->second, op.inputs, op.outputs));
+                    bs->second, be->second, op.inputs, loop_body_output_ids(op)));
             }
         }
 
@@ -716,7 +793,7 @@ auto Tracer::trace_if(const Tensor& condition,
 // ============================================================================
 
 auto Tracer::trace_loop(int64_t max_iter,
-                        [[maybe_unused]] std::function<Tensor(const std::vector<Variable>&)> cond_fn,
+                        std::function<Tensor(const std::vector<Variable>&)> cond_fn,
                         std::function<std::vector<Variable>(const std::vector<Variable>&)> body_fn,
                         const std::vector<Variable>& carried) -> std::vector<Variable> {
 
@@ -732,6 +809,17 @@ auto Tracer::trace_loop(int64_t max_iter,
     // Trace one iteration of the body
     auto body_outputs = body_fn(carried);
 
+    // Trace the loop's exit condition on the post-body (next-iteration) state,
+    // mirroring the eager path (control_flow.cpp while_loop: the loop runs while
+    // cond_fn(state) is non-zero). Recording these ops INSIDE the body op range
+    // [body_ops_start, body_ops_end) makes them part of the body subgraph, and
+    // surfacing the result as the body's first output lets the executor
+    // (graph.cpp Loop case: `body outputs = [cond, carried...]`) terminate the
+    // loop early instead of always running to max_iter. Without this the traced
+    // condition was dropped and a compiled loop over-iterated.
+    Tensor cond_tensor = cond_fn(body_outputs);
+    std::string cond_id = register_tensor(cond_tensor);
+
     auto body_ops_end = ops_.size();
 
     // Register output IDs
@@ -742,6 +830,7 @@ auto Tracer::trace_loop(int64_t max_iter,
 
     // Create Loop operation
     TracedOp loop_op(OpType::Loop, carried_ids, output_ids);
+    loop_op.loop_cond_output = cond_id;
     loop_op.int_attrs["max_iter"] = max_iter;
     loop_op.int_attrs["body_ops_start"] = static_cast<int64_t>(body_ops_start);
     loop_op.int_attrs["body_ops_end"] = static_cast<int64_t>(body_ops_end);

@@ -83,8 +83,34 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         return tensors[0];
     }
 
+    // All inputs must reside on the same device. Concatenating tensors from
+    // different devices would reinterpret foreign (possibly GPU) memory as host
+    // bytes — a host-deref segfault for a GPU input, silent corruption otherwise.
+    Device device = tensors[0].device();
+    for (const auto& t : tensors) {
+        if (!(t.device() == device)) {
+            throw std::runtime_error(
+                "cat: all input tensors must be on the same device, got " +
+                device.to_string() + " and " + t.device().to_string());
+        }
+    }
+
+    // Promote to a common dtype (PyTorch semantics) and cast each input to it,
+    // so a mixed-dtype list (e.g. Float32 + Float64) is value-preserving rather
+    // than byte-reinterpreted into corruption.
+    DType common_dtype = tensors[0].dtype();
+    for (const auto& t : tensors) {
+        common_dtype = promote_types(common_dtype, t.dtype());
+    }
+    std::vector<Tensor> promoted;
+    promoted.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        promoted.push_back(t.dtype() == common_dtype ? t : t.to(common_dtype));
+    }
+    std::span<const Tensor> inputs(promoted);
+
     // Validate all tensors have compatible shapes
-    auto first_shape = tensors[0].shape();
+    auto first_shape = inputs[0].shape();
     int64_t ndim = first_shape.size();
 
     // Normalize dim
@@ -97,7 +123,7 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 
     // Check all tensors have same ndim and same shape except at dim
     int64_t total_size_at_dim = 0;
-    for (const auto& t : tensors) {
+    for (const auto& t : inputs) {
         auto shape = t.shape();
         if (shape.size() != static_cast<size_t>(ndim)) {
             throw std::runtime_error("All tensors must have the same number of dimensions");
@@ -115,18 +141,18 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     out_shape[dim] = total_size_at_dim;
 
     // For non-CPU devices, use dispatcher to route to backend-specific implementation
-    if (tensors[0].device().type != Device::Type::CPU) {
+    if (inputs[0].device().type != Device::Type::CPU) {
         NewOpAttributes attrs;
         attrs.set(AttrKey::Dim, dim);
 
         // Convert span to vector for dispatch
-        std::vector<Tensor> tensor_vec(tensors.begin(), tensors.end());
+        std::vector<Tensor> tensor_vec(inputs.begin(), inputs.end());
         return dispatch(OpId::Cat, std::span<const Tensor>(tensor_vec), attrs)[0];
     }
 
     // Optimized CPU concatenation using memcpy + OpenMP
-    auto output = zeros(out_shape, tensors[0].dtype(), Device::cpu());
-    auto dtype = tensors[0].dtype();
+    auto output = zeros(out_shape, common_dtype, Device::cpu());
+    auto dtype = common_dtype;
     size_t elem_size = dtype_size(dtype);
 
     // Calculate dimensions for chunk-based copying:
@@ -152,7 +178,7 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 
     // Process each input tensor
     int64_t offset_at_dim = 0;
-    for (const auto& t : tensors) {
+    for (const auto& t : inputs) {
         auto t_cont = t.is_contiguous() ? t : t.contiguous();
         const char* in_base = reinterpret_cast<const char*>(t_cont.data<uint8_t>());
         auto in_shape = t_cont.shape();
@@ -195,6 +221,16 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         throw std::runtime_error("Cannot stack empty tensor list");
     }
 
+    // All inputs must reside on the same device (see cat() for rationale).
+    Device device = tensors[0].device();
+    for (const auto& t : tensors) {
+        if (!(t.device() == device)) {
+            throw std::runtime_error(
+                "stack: all input tensors must be on the same device, got " +
+                device.to_string() + " and " + t.device().to_string());
+        }
+    }
+
     // All tensors must have the same shape
     auto first_shape = tensors[0].shape();
     for (size_t i = 1; i < tensors.size(); ++i) {
@@ -209,6 +245,18 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         }
     }
 
+    // Promote to a common dtype and cast each input to it, so a mixed-dtype
+    // list is value-preserving rather than byte-reinterpreted (PyTorch semantics).
+    DType common_dtype = tensors[0].dtype();
+    for (const auto& t : tensors) {
+        common_dtype = promote_types(common_dtype, t.dtype());
+    }
+    std::vector<Tensor> tensor_vec;
+    tensor_vec.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        tensor_vec.push_back(t.dtype() == common_dtype ? t : t.to(common_dtype));
+    }
+
     // Normalize dim
     int64_t ndim = first_shape.size();
     if (dim < 0) {
@@ -221,7 +269,6 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     // Dispatch to registered stack kernel for single-pass implementation
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> tensor_vec(tensors.begin(), tensors.end());
     return dispatch(OpId::Stack, std::span<const Tensor>(tensor_vec), attrs)[0];
 }
 
@@ -571,6 +618,26 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
     // Validate expansion is possible
     if (shape.size() < input_shape.size()) {
         throw std::runtime_error("Expanded shape must have at least as many dimensions as input");
+    }
+
+    // Resolve -1 entries ("keep this dim") against the input's corresponding
+    // dimension BEFORE any allocation or GPU dispatch, so the backend Expand
+    // kernel never sees a -1. PyTorch right-aligns the target shape with the
+    // input shape; -1 is only valid for dimensions that already exist in the
+    // input (it cannot size a new leading dimension).
+    {
+        int dim_offset = static_cast<int>(shape.size()) - static_cast<int>(input_shape.size());
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (shape[i] == -1) {
+                int input_dim = static_cast<int>(i) - dim_offset;
+                if (input_dim < 0) {
+                    throw std::runtime_error(
+                        "expand: the expanded size of the tensor (-1) isn't allowed in a "
+                        "leading (new) dimension");
+                }
+                shape[i] = input_shape[input_dim];
+            }
+        }
     }
 
     // Check if already the right shape
@@ -1408,6 +1475,7 @@ auto pixel_unshuffle(const Tensor& input, int64_t downscale_factor) -> Tensor {
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     int64_t r = downscale_factor;
+    if (r <= 0) throw std::runtime_error("pixel_unshuffle: downscale_factor must be positive, got " + std::to_string(r));
     int64_t C = shape[ndim - 3];
     int64_t Hr = shape[ndim - 2];
     int64_t Wr = shape[ndim - 1];
@@ -1458,6 +1526,7 @@ auto channel_shuffle(const Tensor& input, int64_t groups) -> Tensor {
     auto shape = input.shape();
     int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
 
+    if (groups <= 0) throw std::invalid_argument("channel_shuffle: groups must be positive, got " + std::to_string(groups));
     if (C % groups != 0) {
         throw std::invalid_argument("channel_shuffle: channels (" + std::to_string(C) +
             ") must be divisible by groups (" + std::to_string(groups) + ")");

@@ -627,6 +627,11 @@ auto calibrate_quantization_params(
         throw std::runtime_error("Cannot calibrate with empty sample set");
     }
 
+    // Normalize a negative axis against the sample rank so a per-channel scheme
+    // requested with axis=-1 (the last-dim convention used elsewhere) is not
+    // silently downgraded to per-tensor by the axis>=0 branch below.
+    if (axis < 0) axis += static_cast<int64_t>(samples[0].ndim());
+
     // Check if per-channel quantization
     bool is_per_channel = (scheme == QuantizationScheme::PerChannelSymmetric ||
                           scheme == QuantizationScheme::PerChannelAsymmetric);

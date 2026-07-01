@@ -69,7 +69,13 @@ namespace tenzor::jit {
 
 auto FusionGroup::compute_signature() -> std::string {
     std::ostringstream ss;
-    ss << "fusion_" << num_inputs << "_" << static_cast<int>(dtype);
+    // Key on the full device (type AND ordinal). A compiled module/function is
+    // bound to one device's context and compute arch, so a kernel built for
+    // cuda:0 must not be served for a cuda:1 input under an otherwise-identical
+    // key (illegal handle / wrong-arch). Mirrors compile.cpp / compiled_module.cpp
+    // which encode device().to_string() into their keys.
+    ss << "fusion_" << device.to_string() << "_" << num_inputs << "_"
+       << static_cast<int>(dtype);
     for (const auto& step : steps) {
         ss << "_" << static_cast<int>(step.op)
            << "i" << step.input_idx
@@ -390,8 +396,9 @@ auto KernelCache::get_or_compile(const FusionGroup& group) -> std::shared_ptr<Co
     std::string kernel_name = "fused_elementwise_" +
         std::to_string(group.steps.size()) + "_ops";
 
-    // Compile
-    auto kernel = compile(source, kernel_name);
+    // Compile for the group's target GPU (its context + compute arch), not a
+    // hardcoded device 0.
+    auto kernel = compile(source, kernel_name, group.device.index);
     kernel->source = source;
     kernel->num_inputs = group.num_inputs;
     cache_[group.signature] = kernel;
@@ -421,35 +428,42 @@ auto KernelCache::get_or_compile_source(const std::string& signature,
     return kernel;
 }
 
-auto KernelCache::compile(const std::string& source, const std::string& kernel_name)
+auto KernelCache::compile(const std::string& source, const std::string& kernel_name,
+                          int device_index)
     -> std::shared_ptr<CompiledKernel> {
 #if CODEGEN_AVAILABLE
     auto kernel = std::make_shared<CompiledKernel>();
     kernel->name = kernel_name;
 
 #if defined(TENZOR_USE_CUDA)
-    // Initialize CUDA driver API and ensure a context is active
+    // Initialize CUDA driver API and ensure a context is active. Bind to the
+    // caller's target device (multi-GPU): a module compiled/loaded under device
+    // 0's context yields a CUfunction that is illegal to launch on cuda:1.
     cuInit(0);
-    int device_id = 0;
+    int device_id = device_index;
     CUdevice cu_device;
     CU_CHECK(cuDeviceGet(&cu_device, device_id));
 
+    // Ensure the CURRENT context targets cu_device before we load the module:
+    // the resulting CUfunction is bound to whatever device's context is active,
+    // so on multi-GPU we must not rely on (or inherit) a context for a different
+    // device. Retain each device's primary context EXACTLY ONCE per process
+    // (reference-counted, process-lived) keyed by ordinal — a single global
+    // once-retain would pin every device to whichever GPU compiled first.
     CUcontext cu_context = nullptr;
-    cuCtxGetCurrent(&cu_context);
-    if (!cu_context) {
-        // Retain the device primary context EXACTLY ONCE for the process. The
-        // primary context is reference-counted and process-lived; the old code
-        // retained on every context-less compile, accumulating unbalanced
-        // references. A single process-wide retain matches the intended pattern
-        // (and how the CUDA runtime itself holds the primary context).
-        static std::once_flag ctx_once;
-        static CUcontext primary_ctx = nullptr;
-        std::call_once(ctx_once, [&]() {
-            CU_CHECK(cuDevicePrimaryCtxRetain(&primary_ctx, cu_device));
-        });
-        cu_context = primary_ctx;
-        CU_CHECK(cuCtxSetCurrent(cu_context));
+    {
+        static std::mutex ctx_mutex;
+        static std::unordered_map<int, CUcontext> primary_ctxs;
+        std::lock_guard<std::mutex> ctx_lock(ctx_mutex);
+        auto it = primary_ctxs.find(device_id);
+        if (it != primary_ctxs.end()) {
+            cu_context = it->second;
+        } else {
+            CU_CHECK(cuDevicePrimaryCtxRetain(&cu_context, cu_device));
+            primary_ctxs.emplace(device_id, cu_context);
+        }
     }
+    CU_CHECK(cuCtxSetCurrent(cu_context));
 
     // Detect GPU compute capability via driver API
     int major = 7, minor = 0;
@@ -613,8 +627,15 @@ auto execute_fused(const FusionGroup& group,
         }
     }
 
-    // Get or compile the kernel
-    auto kernel = KernelCache::instance().get_or_compile(group);
+    // Get or compile the kernel for the ACTUAL target GPU. The fusion group was
+    // built without knowing which device it would run on; pin it to the resident
+    // device now so both the cache key (compute_signature) and the driver-side
+    // compile (which selects the device context + compute arch) target this GPU
+    // rather than always device 0.
+    FusionGroup device_group = group;
+    device_group.device = gpu_device;
+    device_group.compute_signature();
+    auto kernel = KernelCache::instance().get_or_compile(device_group);
 
     // Allocate output on GPU
     std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());

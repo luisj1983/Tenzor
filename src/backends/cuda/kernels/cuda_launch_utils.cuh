@@ -160,8 +160,14 @@ inline int compute_grid_size(int64_t num_elements, int block_size = 256) {
  */
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     constexpr int kBlockSize = 256;
-    int num_blocks = static_cast<int>((n + kBlockSize - 1) / kBlockSize);
+    // Compute the block count in int64 and clamp to the CUDA gridDim.x limit
+    // (2^31-1) before narrowing. For n > ~2^31*256 the previous int cast
+    // overflowed to a negative/garbage grid size; kernels here use grid-stride
+    // loops, so a clamped grid still covers all n correctly.
+    int64_t num_blocks = (n + kBlockSize - 1) / kBlockSize;
     if (num_blocks < 1) num_blocks = 1;
+    constexpr int64_t kMaxGridX = 2147483647;  // CUDA gridDim.x maximum
+    if (num_blocks > kMaxGridX) num_blocks = kMaxGridX;
     block = dim3(static_cast<unsigned int>(kBlockSize), 1, 1);
     grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }

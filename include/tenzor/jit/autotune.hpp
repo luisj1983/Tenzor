@@ -152,11 +152,18 @@ public:
      *
      * @param op_name Operation name (e.g., "MatMul", "Conv2d")
      * @param dtype Data type string (e.g., "Float32")
+     * @param device Target device/arch identifier (e.g., "cuda:0"). REQUIRED:
+     *        the cache is persisted to disk and reloaded across machines/GPUs,
+     *        so an autotuned algorithm choice for one architecture must not be
+     *        served for another (different SM/CU count, shared-mem size, tensor
+     *        cores, etc. select a different optimal config). Mirrors the
+     *        device-keying in codegen.cpp / compile.cpp (device().to_string()).
      * @param shapes Tensor shapes
      * @return Formatted key string
      */
     static auto make_key(const std::string& op_name,
                          const std::string& dtype,
+                         const std::string& device,
                          const std::vector<std::vector<int64_t>>& shapes) -> std::string;
 
 private:

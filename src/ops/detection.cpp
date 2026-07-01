@@ -249,9 +249,16 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
     // Sort indices by score (descending)
     std::vector<int64_t> indices(N);
     std::iota(indices.begin(), indices.end(), 0);
+    // Descending by score, with a deterministic ascending-index tie-break so
+    // equal-score boxes keep a stable, lowest-index-first order. This matches
+    // the GPU NMS kernels (which sort with a stable radix sort), making the
+    // surviving keep set identical across backends for tied scores.
     std::sort(indices.begin(), indices.end(),
               [scores_data](int64_t i, int64_t j) {
-                  return scores_data[i] > scores_data[j];
+                  if (scores_data[i] != scores_data[j]) {
+                      return scores_data[i] > scores_data[j];
+                  }
+                  return i < j;
               });
 
     // Initialize suppression mask (using uint8_t for SIMD compatibility)
