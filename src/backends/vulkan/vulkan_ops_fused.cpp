@@ -132,7 +132,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
 
     // F16 shader processes pairs (1 thread per word), F32 processes 1 element per thread
     int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
-    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -252,7 +252,7 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
 
     // Half precision packs two elements per uint word; F32/F64 are per-element.
     int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;
-    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -362,7 +362,7 @@ auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
     pc.padding1 = 0;
 
     int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
-    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,

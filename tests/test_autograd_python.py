@@ -5,7 +5,11 @@ Tests gradient computation, chain rule, and no_grad context.
 """
 
 import sys
+import os
 import math
+
+# tenzor_core.so lives under build/python/tenzor
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build', 'python', 'tenzor'))
 
 # Import tenzor
 try:
@@ -31,7 +35,7 @@ def test_simple_scalar_backward():
     y = x * two
     y.backward()
 
-    grad_val = x.grad.data.item()
+    grad_val = x.grad.item()
     print(f"  x = 3.0, y = x * 2, dy/dx = {grad_val}")
     assert approx_equal(grad_val, 2.0), f"Expected grad 2.0, got {grad_val}"
     print("  PASSED")
@@ -46,7 +50,7 @@ def test_chain_rule():
     y = x * x
     y.backward()
 
-    grad_val = x.grad.data.item()
+    grad_val = x.grad.item()
     print(f"  x = 3.0, y = x^2, dy/dx = {grad_val}")
     assert approx_equal(grad_val, 6.0), f"Expected grad 6.0, got {grad_val}"
     print("  PASSED")
@@ -61,8 +65,8 @@ def test_addition_backward():
     z = x + y
     z.backward()
 
-    grad_x = x.grad.data.item()
-    grad_y = y.grad.data.item()
+    grad_x = x.grad.item()
+    grad_y = y.grad.item()
     print(f"  z = x + y, dz/dx = {grad_x}, dz/dy = {grad_y}")
     assert approx_equal(grad_x, 1.0), f"Expected dz/dx = 1.0, got {grad_x}"
     assert approx_equal(grad_y, 1.0), f"Expected dz/dy = 1.0, got {grad_y}"
@@ -78,8 +82,8 @@ def test_multi_variable_backward():
     z = x * y
     z.backward()
 
-    grad_x = x.grad.data.item()
-    grad_y = y.grad.data.item()
+    grad_x = x.grad.item()
+    grad_y = y.grad.item()
     print(f"  x = 4.0, y = 5.0, z = x * y")
     print(f"  dz/dx = {grad_x} (expected {5.0})")
     print(f"  dz/dy = {grad_y} (expected {4.0})")
@@ -106,7 +110,7 @@ def test_mse_loss_backward():
 
     loss.backward()
 
-    grad_val = pred.grad.data.item()
+    grad_val = pred.grad.item()
     print(f"  dloss/dpred = {grad_val}")
     assert approx_equal(grad_val, 2.0), f"Expected grad 2.0, got {grad_val}"
     print("  PASSED")
@@ -121,7 +125,7 @@ def test_retain_graph():
 
     # First backward with retain_graph
     y.backward(retain_graph=True)
-    grad1 = x.grad.data.item()
+    grad1 = x.grad.item()
     print(f"  First backward: grad = {grad1}")
     assert approx_equal(grad1, 6.0), f"Expected 6.0, got {grad1}"
 
@@ -179,8 +183,8 @@ def test_linear_backward():
     has_grad = x.grad is not None
     print(f"  Input has gradient: {has_grad}")
     if has_grad:
-        print(f"  Input gradient shape: {list(x.grad.data.shape)}")
-        assert list(x.grad.data.shape) == [1, 4], "Input grad shape mismatch"
+        print(f"  Input gradient shape: {list(x.grad.shape)}")
+        assert list(x.grad.shape) == [1, 4], "Input grad shape mismatch"
 
     print("  PASSED")
 

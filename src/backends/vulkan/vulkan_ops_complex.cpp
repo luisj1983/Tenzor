@@ -61,7 +61,7 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    uint32_t workgroups = div_wg(num_elements, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(num_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -123,7 +123,7 @@ auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
                                 pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg_checked(num_complex, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
         return output;
@@ -188,7 +188,7 @@ auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
                                 pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg_checked(num_complex, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
         return output;
@@ -264,7 +264,7 @@ auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
                                 pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg_checked(num_complex, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
         return output;
@@ -326,7 +326,7 @@ auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Ten
                                 pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg_checked(num_complex, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
         return output;
@@ -417,7 +417,7 @@ auto VulkanBackend::dispatchComplexTensor(const Tensor& real, const Tensor& imag
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    uint32_t workgroups = div_wg(num_elements, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(num_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);

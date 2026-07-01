@@ -14,6 +14,11 @@ sys.path.insert(0, python_dir)
 import tenzor_core as tz
 import numpy as np
 
+# Load the backend dispatch tables — without this every op raises
+# "Backend not available for device: cpu" (this standalone script never
+# initialized the runtime).
+tz.initialize()
+
 
 def test_scalar_assignment():
     """Test basic scalar value assignment."""

@@ -430,8 +430,9 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     auto handle = RocSOLVERHandlePool::get(stream);
 
     size_t ipiv_bytes = n * sizeof(rocblas_int);
-    auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
+    // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
+    ScratchBuffer d_ipiv_buf(ipiv_bytes);
+    auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
     DeviceInfo d_info;
 
     // Create identity matrix on device for getrs-based inversion
@@ -486,7 +487,7 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
+    // d_ipiv freed by ScratchBuffer destructor at scope exit.
     return identity;
 }
 
@@ -522,8 +523,9 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
     auto handle = RocSOLVERHandlePool::get(stream);
 
     size_t ipiv_bytes = n * sizeof(rocblas_int);
-    auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
+    // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
+    ScratchBuffer d_ipiv_buf(ipiv_bytes);
+    auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
     DeviceInfo d_info;
 
     if (A.dtype() == DType::Float32) {
@@ -557,7 +559,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
+    // d_ipiv freed by ScratchBuffer destructor at scope exit.
     return tenzor::transpose(work_b, -1, -2).contiguous();
 }
 
@@ -595,8 +597,9 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
 
     auto handle = RocSOLVERHandlePool::get(stream);
     size_t ipiv_bytes = nbatch * n * sizeof(rocblas_int);
-    auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
+    // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
+    ScratchBuffer d_ipiv_buf(ipiv_bytes);
+    auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
     DeviceInfo d_info;
 
     if (original_dtype == DType::Float32) {
@@ -650,7 +653,7 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
         nbatch * n * sizeof(int32_t), hipMemcpyDeviceToDevice, stream));
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
+    // d_ipiv freed by ScratchBuffer destructor at scope exit.
     return {L, U, pivots_out};
 }
 
@@ -719,8 +722,9 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
     static_assert(sizeof(rocblas_int) == sizeof(int32_t),
                   "rocblas_int must match int32_t width");
     size_t piv_bytes = nbatch * n * sizeof(rocblas_int);
-    auto* d_ipiv_base = static_cast<rocblas_int*>(
-        backend::rocm::RocmCachingAllocator::get().allocate(piv_bytes));
+    // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
+    ScratchBuffer d_ipiv_base_buf(piv_bytes);
+    auto* d_ipiv_base = static_cast<rocblas_int*>(d_ipiv_base_buf.ptr);
     HIP_CHECK_LINALG(hipMemcpyAsync(d_ipiv_base,
         reinterpret_cast<const rocblas_int*>(piv_dev.data<int32_t>()),
         piv_bytes, hipMemcpyDeviceToDevice, stream));
@@ -750,7 +754,7 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    backend::rocm::RocmCachingAllocator::get().free(d_ipiv_base);
+    // d_ipiv_base freed by ScratchBuffer destructor at scope exit.
     // b_cm has shape (..., nrhs, n) row-major; transpose back to (..., n, nrhs).
     auto result = tenzor::transpose(b_cm, -2, -1).contiguous();
     // Restore the original 1D shape for a 1D RHS (matches the fallback path).
@@ -943,8 +947,9 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         float* r_data = R.data<float>();
 
         size_t tau_bytes = k * sizeof(float);
-        auto* d_tau = static_cast<float*>(
-            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
+        // RAII scratch so a throwing rocSOLVER call frees the tau buffer.
+        ScratchBuffer d_tau_buf(tau_bytes);
+        auto* d_tau = static_cast<float*>(d_tau_buf.ptr);
 
         for (int64_t b = 0; b < nbatch; b++) {
             float* a_mat = a_data + b * m * n_cols;
@@ -967,15 +972,16 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
                 a_mat, q_data + b * m * k, m, n_cols, k, 1);
         }
 
-        backend::rocm::RocmCachingAllocator::get().free(d_tau);
+        // d_tau freed by ScratchBuffer destructor at scope exit.
     } else {
         double* a_data = work.data<double>();
         double* q_data = Q.data<double>();
         double* r_data = R.data<double>();
 
         size_t tau_bytes = k * sizeof(double);
-        auto* d_tau = static_cast<double*>(
-            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
+        // RAII scratch so a throwing rocSOLVER call frees the tau buffer.
+        ScratchBuffer d_tau_buf(tau_bytes);
+        auto* d_tau = static_cast<double*>(d_tau_buf.ptr);
 
         for (int64_t b = 0; b < nbatch; b++) {
             double* a_mat = a_data + b * m * n_cols;
@@ -998,7 +1004,7 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
                 a_mat, q_data + b * m * k, m, n_cols, k, 1);
         }
 
-        backend::rocm::RocmCachingAllocator::get().free(d_tau);
+        // d_tau freed by ScratchBuffer destructor at scope exit.
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
@@ -2100,8 +2106,9 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
         float* tau_data = tau_result.data<float>();
 
         size_t tau_bytes = k * sizeof(float);
-        auto* d_tau = static_cast<float*>(
-            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
+        // RAII scratch so a throwing rocSOLVER call frees the tau buffer.
+        ScratchBuffer d_tau_buf(tau_bytes);
+        auto* d_tau = static_cast<float*>(d_tau_buf.ptr);
 
         for (int64_t b = 0; b < nbatch; b++) {
             float* a_mat = a_data + b * m * n_cols;
@@ -2114,14 +2121,15 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
                 hipMemcpyDeviceToDevice, stream ? stream : nullptr));
         }
 
-        backend::rocm::RocmCachingAllocator::get().free(d_tau);
+        // d_tau freed by ScratchBuffer destructor at scope exit.
     } else {
         double* a_data = A_col.data<double>();
         double* tau_data = tau_result.data<double>();
 
         size_t tau_bytes = k * sizeof(double);
-        auto* d_tau = static_cast<double*>(
-            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
+        // RAII scratch so a throwing rocSOLVER call frees the tau buffer.
+        ScratchBuffer d_tau_buf(tau_bytes);
+        auto* d_tau = static_cast<double*>(d_tau_buf.ptr);
 
         for (int64_t b = 0; b < nbatch; b++) {
             double* a_mat = a_data + b * m * n_cols;
@@ -2134,7 +2142,7 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
                 hipMemcpyDeviceToDevice, stream ? stream : nullptr));
         }
 
-        backend::rocm::RocmCachingAllocator::get().free(d_tau);
+        // d_tau freed by ScratchBuffer destructor at scope exit.
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
@@ -2192,8 +2200,9 @@ auto linalg_ldl_factor_kernel(const Tensor& A, hipStream_t stream)
 
     // Allocate pivots on device
     size_t piv_bytes = nbatch * n * sizeof(rocblas_int);
-    auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::rocm::RocmCachingAllocator::get().allocate(piv_bytes));
+    // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
+    ScratchBuffer d_ipiv_buf(piv_bytes);
+    auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
     DeviceInfo d_info;
 
     if (original_dtype == DType::Float32) {
@@ -2226,7 +2235,7 @@ auto linalg_ldl_factor_kernel(const Tensor& A, hipStream_t stream)
     // rocblas_int may differ from int32_t in size; copy element-wise if needed
     HIP_CHECK_LINALG(hipMemcpy(pivots_out.data<int32_t>(), d_ipiv,
         nbatch * n * sizeof(rocblas_int), hipMemcpyDeviceToDevice));
-    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
+    // d_ipiv freed by ScratchBuffer destructor at scope exit.
 
     return {LD, pivots_out};
 }

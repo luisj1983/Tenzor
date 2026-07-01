@@ -144,6 +144,25 @@ auto load_external_tensor_bytes(const tenzor_onnx::TensorProto& t,
             "' begins with a root separator (rejected).");
     }
     fs::path full = fs::path(base_dir) / loc_path;
+    // Canonical containment re-check: the lexical rejections above do NOT stop a
+    // SYMLINK inside the model directory (the sidecar itself, or an intermediate
+    // path component) from resolving OUTSIDE base_dir (e.g. weights.bin ->
+    // /etc/passwd). Resolve symlinks with weakly_canonical, then verify the
+    // result is still under the canonical base directory using a real
+    // path-component boundary (lexically_relative begins with ".." exactly when
+    // `full` escapes base_dir). Mirrors ModelHub::get_cache_path /
+    // sanitize_repository_path.
+    {
+        fs::path canon_base = fs::weakly_canonical(fs::path(base_dir));
+        fs::path canon_full = fs::weakly_canonical(full);
+        const fs::path rel = canon_full.lexically_relative(canon_base);
+        if (rel.empty() || *rel.begin() == "..") {
+            throw std::runtime_error(
+                "ONNXImporter: external_data location '" + location +
+                "' resolves outside the model directory (symlink/traversal "
+                "attempt rejected).");
+        }
+    }
     std::ifstream sidecar(full, std::ios::binary);
     if (!sidecar.is_open()) {
         throw std::runtime_error(

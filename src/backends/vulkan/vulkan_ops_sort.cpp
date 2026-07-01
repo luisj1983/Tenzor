@@ -36,7 +36,7 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
 
     // Number of workgroups for histogram/scatter
     uint32_t wg_size = devices_[device_id].workgroupSize;
-    uint32_t n_wgs = div_wg(static_cast<uint32_t>(n), wg_size);
+    uint32_t n_wgs = div_wg_checked(static_cast<uint32_t>(n), wg_size, devices_[device_id].maxComputeWorkGroupCount[0], "vk_sort");
     if (n_wgs > 256) n_wgs = 256;  // cap workgroups to keep histogram matrix manageable
 
     size_t key_size = dtype_size(dtype);
@@ -330,7 +330,7 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
     size_t indices_bytes = padded_n * sizeof(int32_t);
 
     auto* pipeline = getPipeline(sort_shader, device_id);
-    uint32_t workgroups = div_wg(padded_n / 2, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(padded_n / 2, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
 
     std::vector<int32_t> init_indices(padded_n);
     for (uint32_t i = 0; i < padded_n; ++i) {
@@ -468,7 +468,7 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
                                        cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
                 vkCmdPushConstants(cast_cmd, cast_pipeline->layout(),
                                   VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cast_pc), &cast_pc);
-                vkCmdDispatch(cast_cmd, div_wg(sort_size, devices_[device_id].workgroupSize), 1, 1);
+                vkCmdDispatch(cast_cmd, div_wg_checked(sort_size, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
                 insertComputeBarrier(cast_cmd);
                 endSingleTimeCommands(cast_cmd, device_id);
                 synchronize(device_id);
@@ -712,7 +712,7 @@ auto VulkanBackend::dispatchMode(const Tensor& input, int64_t dim, bool keepdim)
         pc.slice_size = static_cast<uint32_t>(slice_size);
         pc.num_slices = static_cast<uint32_t>(num_slices);
 
-        uint32_t wg = static_cast<uint32_t>(div_wg(num_slices, devices_[device_id].workgroupSize));
+        uint32_t wg = static_cast<uint32_t>(div_wg_checked(num_slices, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -855,7 +855,7 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
         struct { uint32_t numel; } pc;
         pc.numel = static_cast<uint32_t>(numel);
-        uint32_t wg = static_cast<uint32_t>(div_wg(numel, devices_[device_id].workgroupSize));
+        uint32_t wg = static_cast<uint32_t>(div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -891,7 +891,7 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
         struct { uint32_t numel; } pc;
         pc.numel = static_cast<uint32_t>(numel);
-        uint32_t wg = static_cast<uint32_t>(div_wg(numel, devices_[device_id].workgroupSize));
+        uint32_t wg = static_cast<uint32_t>(div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -922,7 +922,7 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         VkDescriptorSet inv_ds = allocateAndWriteDescriptorSet(device_id, inv_pipeline, inv_bindings, inv_sizes);
         struct { uint32_t numel; } inv_pc;
         inv_pc.numel = static_cast<uint32_t>(numel);
-        uint32_t inv_wg = static_cast<uint32_t>(div_wg(numel, devices_[device_id].workgroupSize));
+        uint32_t inv_wg = static_cast<uint32_t>(div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         VkCommandBuffer inv_cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(inv_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, inv_pipeline->pipeline());
         vkCmdBindDescriptorSets(inv_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -954,7 +954,7 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
             struct { uint32_t numel; uint32_t n_unique; } cnt_pc;
             cnt_pc.numel = static_cast<uint32_t>(numel);
             cnt_pc.n_unique = static_cast<uint32_t>(n_unique);
-            uint32_t cnt_wg = static_cast<uint32_t>(div_wg(numel, devices_[device_id].workgroupSize));
+            uint32_t cnt_wg = static_cast<uint32_t>(div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
             VkCommandBuffer cnt_cmd = beginSingleTimeCommands(device_id);
             vkCmdBindPipeline(cnt_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cnt_pipeline->pipeline());
             vkCmdBindDescriptorSets(cnt_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,

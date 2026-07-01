@@ -334,6 +334,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     auto saved_accumulators_var = std::move(grad_accumulators_var_);
     grad_accumulators_var_.clear();
 
+    // Install the restore guards IMMEDIATELY after moving the maps out, before
+    // any code that can throw (topological_sort throws on a detected cycle). If
+    // they were installed later, a throw in between would destroy the moved-out
+    // maps unrestored, permanently wiping an OUTER backward's accumulators
+    // (matches the fix already applied in execute_multi()).
+    ScopeGuard accum_guard{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
+    ScopeGuard accum_guard_var{[&]{ grad_accumulators_var_ = std::move(saved_accumulators_var); }};
+
     // Topological sort from root
     // Use a local variable (not the instance cache) to be re-entrant safe.
     // Nested backward calls (e.g. from gradient checkpointing) invoke
@@ -371,9 +379,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         }
     };
 
-    // RAII guards for exception-safe cleanup
-    ScopeGuard accum_guard{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
-    ScopeGuard accum_guard_var{[&]{ grad_accumulators_var_ = std::move(saved_accumulators_var); }};
+    // RAII guard for exception-safe graph cleanup (accumulator-restore guards
+    // are installed earlier, right after the maps are moved out).
     ScopeGuard cleanup_guard{[&]{ clear_gradients(); cleanup_graph(); }};
 
     // HH.4: track leaves that actually received an accumulation during this

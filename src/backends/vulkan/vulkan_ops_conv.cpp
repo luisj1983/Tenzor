@@ -190,7 +190,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -324,7 +324,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
                                filter_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, filter_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fpc), &fpc);
-        uint32_t wg = static_cast<uint32_t>(div_wg(total_filters, devices_[device_id].workgroupSize));
+        uint32_t wg = static_cast<uint32_t>(div_wg_checked(total_filters, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         vkCmdDispatch(cmd, wg, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -363,7 +363,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
                                input_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, input_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ipc), &ipc);
-        uint32_t wg = static_cast<uint32_t>(div_wg(total_tiles, devices_[device_id].workgroupSize));
+        uint32_t wg = static_cast<uint32_t>(div_wg_checked(total_tiles, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         vkCmdDispatch(cmd, wg, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -433,8 +433,8 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
                                bm_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, bm_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(bm_pc), &bm_pc);
-        uint32_t wg = static_cast<uint32_t>(div_wg(static_cast<uint64_t>(m_total),
-                                                     devices_[device_id].workgroupSize));
+        uint32_t wg = static_cast<uint32_t>(div_wg_checked(static_cast<uint64_t>(m_total),
+                                                     devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         vkCmdDispatch(cmd, wg, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -495,7 +495,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
                                output_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, output_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(opc), &opc);
-        uint32_t wg = static_cast<uint32_t>(div_wg(total_out_tiles, devices_[device_id].workgroupSize));
+        uint32_t wg = static_cast<uint32_t>(div_wg_checked(total_out_tiles, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
         vkCmdDispatch(cmd, wg, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -672,7 +672,7 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -879,7 +879,7 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1034,7 +1034,7 @@ auto VulkanBackend::dispatchConv3dBackwardInput(
 
     // Dispatch workgroups
     int64_t total_elements = batch * channels_in * depth_in * height_in * width_in;
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(total_elements, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(total_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1202,7 +1202,7 @@ auto VulkanBackend::dispatchConv3dBackwardWeight(
     // Dispatch workgroups
     int64_t in_channels_per_group = channels_in / groups;
     int64_t total_weight_elements = channels_out * in_channels_per_group * kernel_d * kernel_h * kernel_w;
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(total_weight_elements, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(total_weight_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1300,7 +1300,7 @@ auto VulkanBackend::dispatchConv3dBackwardBias(const Tensor& grad_output) -> Ten
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (one thread per output channel)
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(channels_out, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(channels_out, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1546,7 +1546,7 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -1697,7 +1697,7 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardInput(
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(n_elements, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(n_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -1824,7 +1824,7 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardWeight(
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(n_weight_elements, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(n_weight_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);

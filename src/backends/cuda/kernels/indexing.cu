@@ -1324,6 +1324,11 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
         return Tensor({0}, input.dtype(), input.device());
     }
 
+    // CUB DeviceSelect::Flagged reads the input as a flat contiguous array, so a
+    // non-contiguous input (e.g. a transposed view) would be selected in the
+    // wrong physical order. Contiguify first (the mask is already contiguified).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+
     // Convert mask to bool if needed. CUB DeviceSelect::Flagged reads one byte
     // per flag, so a multi-byte mask dtype (e.g. Int32) reinterpreted as bool*
     // would read flags at the wrong stride and select garbage. Actually cast.
@@ -1345,7 +1350,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
     // Use CUB DeviceSelect::Flagged — single optimized pass replaces
     // count_true_kernel + compute_positions_kernel + masked_select_kernel_impl
     #define RUN_FLAGGED_SELECT(T) do { \
-        const T* d_in = reinterpret_cast<const T*>(input.data_ptr()); \
+        const T* d_in = reinterpret_cast<const T*>(in_c.data_ptr()); \
         T* d_output = static_cast<T*>(d_out_guard.get()); \
         void* d_temp = nullptr; \
         size_t temp_bytes = 0; \
@@ -1425,6 +1430,11 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
 
     if (n == 0) return output;
 
+    // The kernel reads the input as a flat array, so a non-contiguous input
+    // (e.g. a transposed view) would copy the unmasked positions from the wrong
+    // physical elements. Contiguify first.
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+
     // F2: broadcast mask to input shape before kernel launch. Previously the
     // kernel read `mask.data<bool>()` as a flat sequence of length `n` —
     // when the mask had fewer dims or smaller dims (the common case is a
@@ -1455,7 +1465,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
         auto [grid_size, block_size] = optimal_launch_config( \
             masked_fill_kernel_impl<T>, n); \
         masked_fill_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
-            input.data<T>(), mask_ptr, static_cast<T>(cast_val), output.data<T>(), n); \
+            in_c.data<T>(), mask_ptr, static_cast<T>(cast_val), output.data<T>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
@@ -1471,7 +1481,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
             auto [grid_size, block_size] = optimal_launch_config(
                 masked_fill_kernel_impl<__half>, n);
             masked_fill_kernel_impl<__half><<<grid_size, block_size, 0, stream>>>(
-                reinterpret_cast<const __half*>(input.data_ptr()),
+                reinterpret_cast<const __half*>(in_c.data_ptr()),
                 mask_ptr, fill_val,
                 reinterpret_cast<__half*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
@@ -1482,7 +1492,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
             auto [grid_size, block_size] = optimal_launch_config(
                 masked_fill_kernel_impl<__nv_bfloat16>, n);
             masked_fill_kernel_impl<__nv_bfloat16><<<grid_size, block_size, 0, stream>>>(
-                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(in_c.data_ptr()),
                 mask_ptr, fill_val,
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
@@ -1492,7 +1502,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
             float2 fill_val = make_float2(static_cast<float>(value), 0.0f);
             auto [grid_size, block_size] = optimal_launch_config(masked_fill_kernel_impl<float2>, n);
             masked_fill_kernel_impl<float2><<<grid_size, block_size, 0, stream>>>(
-                reinterpret_cast<const float2*>(input.data_ptr()), mask_ptr, fill_val,
+                reinterpret_cast<const float2*>(in_c.data_ptr()), mask_ptr, fill_val,
                 reinterpret_cast<float2*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -1501,7 +1511,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
             double2 fill_val = make_double2(value, 0.0);
             auto [grid_size, block_size] = optimal_launch_config(masked_fill_kernel_impl<double2>, n);
             masked_fill_kernel_impl<double2><<<grid_size, block_size, 0, stream>>>(
-                reinterpret_cast<const double2*>(input.data_ptr()), mask_ptr, fill_val,
+                reinterpret_cast<const double2*>(in_c.data_ptr()), mask_ptr, fill_val,
                 reinterpret_cast<double2*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -1544,16 +1554,21 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
     if (n == 0) return output;
 
     // CPU semantics allow a non-bool condition (any nonzero is true). Reinterpreting
-    // a non-bool buffer as bool* reads garbage, so cast to Bool first.
+    // a non-bool buffer as bool* reads garbage, so cast to Bool first. The kernel
+    // reads condition/x/y as flat arrays, so all three must be contiguous — a
+    // Bool-but-non-contiguous condition (or a transposed x/y) would otherwise be
+    // gated/copied from the wrong physical elements.
     Tensor cond_bool = (condition.dtype() == DType::Bool)
-        ? condition : condition.to(DType::Bool).contiguous();
+        ? condition.contiguous() : condition.to(DType::Bool).contiguous();
     const bool* cond_ptr = reinterpret_cast<const bool*>(cond_bool.data_ptr());
+    Tensor x_c = x.is_contiguous() ? x : x.contiguous();
+    Tensor y_c = y.is_contiguous() ? y : y.contiguous();
 
     #define LAUNCH_WHERE(T) do { \
         auto [grid_size, block_size] = optimal_launch_config( \
             where_kernel_impl<T>, n); \
         where_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
-            cond_ptr, x.data<T>(), y.data<T>(), output.data<T>(), n); \
+            cond_ptr, x_c.data<T>(), y_c.data<T>(), output.data<T>(), n); \
         CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
@@ -1569,8 +1584,8 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
                 where_kernel_impl<__half>, n);
             where_kernel_impl<__half><<<grid_size, block_size, 0, stream>>>(
                 cond_ptr,
-                reinterpret_cast<const __half*>(x.data_ptr()),
-                reinterpret_cast<const __half*>(y.data_ptr()),
+                reinterpret_cast<const __half*>(x_c.data_ptr()),
+                reinterpret_cast<const __half*>(y_c.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -1580,8 +1595,8 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
                 where_kernel_impl<__nv_bfloat16>, n);
             where_kernel_impl<__nv_bfloat16><<<grid_size, block_size, 0, stream>>>(
                 cond_ptr,
-                reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),
-                reinterpret_cast<const __nv_bfloat16*>(y.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(x_c.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(y_c.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -1594,8 +1609,8 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
             auto [grid_size, block_size] = optimal_launch_config(where_kernel_impl<float2>, n);
             where_kernel_impl<float2><<<grid_size, block_size, 0, stream>>>(
                 cond_ptr,
-                reinterpret_cast<const float2*>(x.data_ptr()),
-                reinterpret_cast<const float2*>(y.data_ptr()),
+                reinterpret_cast<const float2*>(x_c.data_ptr()),
+                reinterpret_cast<const float2*>(y_c.data_ptr()),
                 reinterpret_cast<float2*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -1604,8 +1619,8 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
             auto [grid_size, block_size] = optimal_launch_config(where_kernel_impl<double2>, n);
             where_kernel_impl<double2><<<grid_size, block_size, 0, stream>>>(
                 cond_ptr,
-                reinterpret_cast<const double2*>(x.data_ptr()),
-                reinterpret_cast<const double2*>(y.data_ptr()),
+                reinterpret_cast<const double2*>(x_c.data_ptr()),
+                reinterpret_cast<const double2*>(y_c.data_ptr()),
                 reinterpret_cast<double2*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -2200,12 +2215,12 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         case DType::Bool:    LAUNCH_NONZERO_FLAG(bool); break;
         case DType::Float16:
             nonzero_flag_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
+                reinterpret_cast<const __half*>(in_c.data_ptr()), d_flags, n);
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
             nonzero_flag_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()), d_flags, n);
+                reinterpret_cast<const __nv_bfloat16*>(in_c.data_ptr()), d_flags, n);
             CUDA_CHECK(cudaGetLastError());
             break;
         default:
@@ -3552,6 +3567,13 @@ __global__ void triu_indices_kernel_impl(
 
 auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset,
                          cudaStream_t stream) -> Tensor {
+    // Allocate the output on the ACTIVE CUDA device (the dispatcher has made it
+    // current and the launch stream belongs to it), not a hardcoded device 0 —
+    // otherwise a multi-GPU run with a non-zero active device produces the
+    // result on the wrong device / triggers illegal cross-device access.
+    int cur_dev = 0;
+    CUDA_CHECK(cudaGetDevice(&cur_dev));
+    Device out_dev = Device::cuda(cur_dev);
     // Compute total element count on host (O(1) closed-form)
     int64_t first = std::max(static_cast<int64_t>(0), -offset);
     int64_t n = 0;
@@ -3574,9 +3596,9 @@ auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset,
         }
     }
 
-    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::cuda(0));
+    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, out_dev);
 
-    Tensor output({2, n}, DType::Int64, Device::cuda(0));
+    Tensor output({2, n}, DType::Int64, out_dev);
     int64_t* ptr = output.data<int64_t>();
     int blocks = get_num_blocks(n);
     tril_indices_kernel_impl<<<blocks, BLOCK_SIZE, 0, stream>>>(
@@ -3587,6 +3609,10 @@ auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset,
 
 auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset,
                          cudaStream_t stream) -> Tensor {
+    // Allocate on the ACTIVE CUDA device (see tril_indices_kernel).
+    int cur_dev = 0;
+    CUDA_CHECK(cudaGetDevice(&cur_dev));
+    Device out_dev = Device::cuda(cur_dev);
     // Compute total element count on host (O(1) closed-form)
     int64_t n = 0;
     int64_t last_full = std::min(row - 1, -offset);
@@ -3602,9 +3628,9 @@ auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset,
         n += count * (first_val + last_val) / 2;
     }
 
-    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::cuda(0));
+    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, out_dev);
 
-    Tensor output({2, n}, DType::Int64, Device::cuda(0));
+    Tensor output({2, n}, DType::Int64, out_dev);
     int64_t* ptr = output.data<int64_t>();
     int blocks = get_num_blocks(n);
     triu_indices_kernel_impl<<<blocks, BLOCK_SIZE, 0, stream>>>(

@@ -21,14 +21,14 @@ def test_non_contiguous_assignment():
     print("Testing non-contiguous tensor assignment...")
 
     # Create a tensor and transpose it (makes it non-contiguous)
-    t1 = tenzor.Tensor([2, 3], tenzor.DType.Float32)
+    t1 = tenzor.Tensor([2, 3], tenzor.dtype.float32)
     t1.fill_(1.0)
 
     # Transpose creates a non-contiguous view
     t2 = t1.transpose(0, 1)
 
     # Create source tensor
-    src = tenzor.Tensor([3, 2], tenzor.DType.Float32)
+    src = tenzor.Tensor([3, 2], tenzor.dtype.float32)
     src.fill_(5.0)
 
     print(f"  Source contiguous: {src.is_contiguous()}")
@@ -59,15 +59,15 @@ def test_broadcasting_assignment():
     print("\nTesting broadcasting assignment...")
 
     # Create destination tensor [3, 4]
-    dst = tenzor.Tensor([3, 4], tenzor.DType.Float32)
+    dst = tenzor.Tensor([3, 4], tenzor.dtype.float32)
     dst.fill_(0.0)
 
     # Create source tensor [1, 4] that should broadcast to [3, 4]
-    src = tenzor.Tensor([1, 4], tenzor.DType.Float32)
+    src = tenzor.Tensor([1, 4], tenzor.dtype.float32)
     src.fill_(7.0)
 
-    print(f"  Destination shape: {dst.shape()}")
-    print(f"  Source shape: {src.shape()}")
+    print(f"  Destination shape: {dst.shape}")
+    print(f"  Source shape: {src.shape}")
 
     # This should now work (previously threw "Broadcasting assignment not yet fully implemented")
     try:
@@ -97,18 +97,18 @@ def test_broadcasting_different_dims():
     print("\nTesting broadcasting with different dimensions...")
 
     # Create destination tensor [2, 3, 4]
-    dst = tenzor.Tensor([2, 3, 4], tenzor.DType.Float32)
+    dst = tenzor.Tensor([2, 3, 4], tenzor.dtype.float32)
     dst.fill_(0.0)
 
     # Create source tensor [3, 1] that should broadcast to [2, 3, 4]
-    src = tenzor.Tensor([3, 1], tenzor.DType.Float32)
+    src = tenzor.Tensor([3, 1], tenzor.dtype.float32)
     for i in range(3):
-        idx = tenzor.Tensor([i], tenzor.DType.Int64)
+        idx = tenzor.Tensor([i], tenzor.dtype.int64)
         # Fill each row with different value
         src[i] = float(i + 1)
 
-    print(f"  Destination shape: {dst.shape()}")
-    print(f"  Source shape: {src.shape()}")
+    print(f"  Destination shape: {dst.shape}")
+    print(f"  Source shape: {src.shape}")
 
     try:
         dst[:] = src
@@ -142,15 +142,15 @@ def test_scalar_broadcasting():
     print("\nTesting scalar broadcasting...")
 
     # Create destination tensor [2, 3]
-    dst = tenzor.Tensor([2, 3], tenzor.DType.Float32)
+    dst = tenzor.Tensor([2, 3], tenzor.dtype.float32)
     dst.fill_(0.0)
 
     # Create scalar tensor
-    src = tenzor.Tensor([], tenzor.DType.Float32)
+    src = tenzor.Tensor([], tenzor.dtype.float32)
     src.fill_(9.0)
 
-    print(f"  Destination shape: {dst.shape()}")
-    print(f"  Source shape (scalar): {src.shape()}")
+    print(f"  Destination shape: {dst.shape}")
+    print(f"  Source shape (scalar): {src.shape}")
 
     try:
         dst[:] = src

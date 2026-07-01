@@ -495,14 +495,16 @@ namespace cuda {
         const std::vector<int64_t>& normalized_shape,
         const Tensor& weight,
         const Tensor& bias,
-        float eps
+        float eps,
+        cudaStream_t stream = 0
     ) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // Fused RMSNorm operation
     auto fused_rms_norm_cuda(
         const Tensor& input,
         const Tensor& weight,
-        float eps
+        float eps,
+        cudaStream_t stream = 0
     ) -> std::tuple<Tensor, Tensor>;
 
     // Fused Attention operation (returns {output, logsumexp}).
@@ -773,10 +775,10 @@ namespace cuda {
     auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean_saved, const Tensor& inv_std_saved, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // RMSNorm backward
-    auto fused_rms_norm_backward_cuda(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& rrms) -> std::tuple<Tensor, Tensor>;
+    auto fused_rms_norm_backward_cuda(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& rrms, cudaStream_t stream = 0) -> std::tuple<Tensor, Tensor>;
 
     // Fused LayerNorm backward
-    auto fused_layer_norm_backward_cuda(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean, const Tensor& inv_std, const std::vector<int64_t>& normalized_shape) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto fused_layer_norm_backward_cuda(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean, const Tensor& inv_std, const std::vector<int64_t>& normalized_shape, cudaStream_t stream = 0) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // Creation operations
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
@@ -1804,10 +1806,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // Forward with affine transform
         Tensor output = cuda::batchnorm2d_forward_affine(inputs[0], batch_mean, batch_var, inputs[3], inputs[4], epsilon, stream);
 
-        // Update running stats
+        // Update running stats. The RUNNING variance uses the UNBIASED
+        // (Bessel-corrected) estimate — var * count/(count-1) — to match cuDNN's
+        // batchnorm training and the nn-layer CPU path; the normalization above
+        // deliberately uses the biased var. Without this, the non-cuDNN fused
+        // path's running_var was systematically ~(count-1)/count too small and
+        // diverged from cuDNN/PyTorch at inference.
         Tensor running_mean = inputs[1];
         Tensor running_var = inputs[2];
-        cuda::batchnorm2d_update_running_stats(running_mean, running_var, batch_mean, batch_var, momentum, stream);
+        int64_t bn_count = inputs[0].shape()[0] * inputs[0].shape()[2] * inputs[0].shape()[3];
+        Tensor running_batch_var = batch_var;
+        if (bn_count >= 2) {
+            running_batch_var = tenzor::mul(
+                batch_var, static_cast<double>(bn_count) / static_cast<double>(bn_count - 1));
+        }
+        cuda::batchnorm2d_update_running_stats(running_mean, running_var, batch_mean, running_batch_var, momentum, stream);
 
         // Compute saved_inv_var for backward pass
         // inv_var = 1 / sqrt(var + eps) — computed on device via existing kernels
@@ -1844,7 +1857,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #else
         // Fallback to basic fused kernel
         auto [output, mean, inv_std] = cuda::fused_layer_norm_cuda(
-            inputs[0], normalized_shape, inputs[1], inputs[2], eps
+            inputs[0], normalized_shape, inputs[1], inputs[2], eps, get_cuda_stream(attrs)
         );
 #endif
         return std::vector<Tensor>{output, mean, inv_std};
@@ -1855,7 +1868,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::RMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        auto [output, rrms] = cuda::fused_rms_norm_cuda(inputs[0], inputs[1], eps);
+        auto [output, rrms] = cuda::fused_rms_norm_cuda(inputs[0], inputs[1], eps, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, rrms};
     });
 
@@ -1863,7 +1876,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // inputs: [input, weight]
         // attrs: eps
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        auto [output, rrms] = cuda::fused_rms_norm_cuda(inputs[0], inputs[1], eps);
+        auto [output, rrms] = cuda::fused_rms_norm_cuda(inputs[0], inputs[1], eps, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, rrms};
     });
 
@@ -2589,7 +2602,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // inputs: [grad_output, input, weight, mean, inv_std]
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [grad_input, grad_weight, grad_bias] = cuda::fused_layer_norm_backward_cuda(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape);
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
 
@@ -3587,14 +3600,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [output, mean, inv_std] = cuda::fused_layer_norm_cuda(
-            inputs[0], normalized_shape, inputs[1], inputs[2], eps);
+            inputs[0], normalized_shape, inputs[1], inputs[2], eps, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, mean, inv_std};
     });
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, mean, inv_std, weight]
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [grad_input, grad_weight, grad_bias] = cuda::fused_layer_norm_backward_cuda(
-            inputs[0], inputs[1], inputs[4], inputs[2], inputs[3], normalized_shape);
+            inputs[0], inputs[1], inputs[4], inputs[2], inputs[3], normalized_shape, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
 #endif
@@ -3805,7 +3818,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // (Previously these were swapped — weight and rrms transposed — which
         // produced a wrong input gradient: gradcheck off by ~0.12.)
         auto [grad_input, grad_weight] = cuda::fused_rms_norm_backward_cuda(
-            inputs[0], inputs[1], inputs[3], inputs[2]);
+            inputs[0], inputs[1], inputs[3], inputs[2], get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight};
     });
 

@@ -355,6 +355,11 @@ auto quantize_per_channel_symmetric(const Tensor& input, int64_t axis, QuantDTyp
 
     auto shape = input_f32.shape();
     int64_t num_channels = shape[axis];
+    if (num_channels <= 0) {
+        throw std::invalid_argument(
+            "quantize_per_channel: quantization axis has size 0 (nothing to "
+            "quantize / division by zero)");
+    }
     int64_t rest = input_f32.numel() / num_channels;
 
     // Move channel dim to front if needed, then reshape to [C, rest]
@@ -386,6 +391,11 @@ auto quantize_per_channel_asymmetric(const Tensor& input, int64_t axis, QuantDTy
 
     auto shape = input_f32.shape();
     int64_t num_channels = shape[axis];
+    if (num_channels <= 0) {
+        throw std::invalid_argument(
+            "quantize_per_channel: quantization axis has size 0 (nothing to "
+            "quantize / division by zero)");
+    }
     int64_t rest = input_f32.numel() / num_channels;
 
     // Move channel dim to front if needed, then reshape to [C, rest]
@@ -640,6 +650,11 @@ auto calibrate_quantization_params(
         // Per-channel quantization
         auto shape = samples[0].shape();
         int64_t num_channels = shape[axis];
+        if (num_channels <= 0) {
+            throw std::invalid_argument(
+                "quantize (per-channel): quantization axis has size 0 "
+                "(nothing to quantize / division by zero)");
+        }
 
         // Create min/max on CPU for data access
         Tensor min({num_channels}, DType::Float32, Device::cpu());

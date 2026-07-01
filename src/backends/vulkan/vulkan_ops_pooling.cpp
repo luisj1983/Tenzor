@@ -428,7 +428,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
         vkCmdPushConstants(fillCmd, fill_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(FillPushConstants), &fill_push_constants);
-        uint32_t fill_workgroups = div_wg(fill_push_constants.n_elements, devices_[device_id].workgroupSize);
+        uint32_t fill_workgroups = div_wg_checked(fill_push_constants.n_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(fillCmd, fill_workgroups, 1, 1);
 
         VkMemoryBarrier fillBarrier{};
@@ -499,7 +499,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     } else {
         total_elements = static_cast<uint32_t>(batch * channels * H_out * W_out);
     }
-    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(total_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -640,7 +640,7 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input_orig, const OpA
     if (input.dtype() == DType::Float16) {
         threads = (static_cast<uint32_t>(logical_numel) + 1) / 2;
     }
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(threads, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(threads, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -787,7 +787,7 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input_orig, const OpA
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(logical_numel, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(logical_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -914,7 +914,7 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
 
     // Dispatch: f64 uses input-centric gather (over input elements), others use output-centric scatter
     int64_t dispatch_count = is_input_centric ? input.numel() : grad_output.numel();
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(dispatch_count, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1048,7 +1048,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (iterate over grad_output elements)
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(grad_output.numel(), devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(grad_output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1147,7 +1147,7 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = div_wg(grad_out_numel, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(grad_out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1247,7 +1247,7 @@ auto VulkanBackend::dispatchMaxPool1dForward(const Tensor& input, const OpAttrib
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -1310,7 +1310,7 @@ auto VulkanBackend::dispatchMaxPool1dBackward(const Tensor& grad_output, const T
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-    vkCmdDispatch(cmdBuffer, div_wg(grad_out_numel, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmdBuffer, div_wg_checked(grad_out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1378,7 +1378,7 @@ auto VulkanBackend::dispatchAvgPool1dForward(const Tensor& input, const OpAttrib
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1448,7 +1448,7 @@ auto VulkanBackend::dispatchAvgPool1dBackward(const Tensor& grad_output, const T
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 
     int64_t dispatch_count_1d = is_input_centric_1d ? input.numel() : grad_output.numel();
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(dispatch_count_1d, devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(dispatch_count_1d, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1502,7 +1502,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool1d(const Tensor& input, int64_t outpu
     pc.pool_type = 0;
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1556,7 +1556,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool1d(const Tensor& input, int64_t outpu
     pc.pool_type = 1;
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1611,7 +1611,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool1dBackward(const Tensor& grad_output,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, div_wg(grad_out_numel, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmdBuffer, div_wg_checked(grad_out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1774,7 +1774,7 @@ auto VulkanBackend::dispatchMaxPool3dForward(const Tensor& input, const OpAttrib
     pc.ceil_mode = ceil_mode ? 1u : 0u;
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1826,7 +1826,7 @@ auto VulkanBackend::dispatchMaxPool3dBackward(const Tensor& grad_output, const T
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, div_wg(grad_out_numel, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmdBuffer, div_wg_checked(grad_out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1924,7 +1924,7 @@ auto VulkanBackend::dispatchAvgPool3dForward(const Tensor& input, const OpAttrib
     pc.count_include_pad = static_cast<uint32_t>(count_include_pad);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2016,7 +2016,7 @@ auto VulkanBackend::dispatchAvgPool3dBackward(const Tensor& grad_output, const T
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     int64_t dispatch_count_3d = is_input_centric_3d ? input.numel() : grad_output.numel();
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(dispatch_count_3d, devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(dispatch_count_3d, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2077,7 +2077,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3d(const Tensor& input, int64_t out_d
     pc.pool_type = 0;
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2138,7 +2138,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool3d(const Tensor& input, int64_t out_d
     pc.pool_type = 1;
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch")), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2188,7 +2188,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3dBackward(const Tensor& grad_output,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmdBuffer, div_wg(grad_out_numel, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmdBuffer, div_wg_checked(grad_out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2283,7 +2283,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool3dBackward(const Tensor& grad_output,
     uint32_t total_elements = needs_input_iteration
         ? static_cast<uint32_t>(batch * channels * D_in * H_in * W_in)
         : static_cast<uint32_t>(batch * channels * D_out * H_out * W_out);
-    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(total_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());

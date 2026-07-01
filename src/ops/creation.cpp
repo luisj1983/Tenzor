@@ -518,7 +518,11 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             break;
         }
         case DType::Complex64: {
-            std::normal_distribution<float> dist(0.0f, 1.0f);
+            // Standard complex normal: total variance 1 => variance 1/2 per real
+            // and imaginary component (std = sqrt(0.5)), matching torch.randn for
+            // complex dtypes. Filling each component with N(0,1) would give
+            // E[|z|^2] = 2 (a factor-sqrt(2) too large in magnitude).
+            std::normal_distribution<float> dist(0.0f, static_cast<float>(std::sqrt(0.5)));
             auto* ptr = static_cast<std::complex<float>*>(data);
             for (size_t i = 0; i < numel; ++i) {
                 ptr[i] = {dist(gen), dist(gen)};
@@ -526,7 +530,7 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             break;
         }
         case DType::Complex128: {
-            std::normal_distribution<double> dist(0.0, 1.0);
+            std::normal_distribution<double> dist(0.0, std::sqrt(0.5));
             auto* ptr = static_cast<std::complex<double>*>(data);
             for (size_t i = 0; i < numel; ++i) {
                 ptr[i] = {dist(gen), dist(gen)};
@@ -644,10 +648,21 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
     // than 1.
     double range = end - start;
     double raw = range / step;
-    // Tolerance scaled by the magnitude of the quotient so it tracks the FP
-    // error that accumulates in the division for large ranges.
-    double eps = 1e-9 * std::max(1.0, std::fabs(raw));
-    int64_t numel = static_cast<int64_t>(std::ceil(raw - eps));
+    // Robust element count. The quotient carries FP error that grows with its
+    // magnitude (~|raw|*eps_machine), so a fixed absolute epsilon is wrong for
+    // large ranges while a large relative epsilon (the previous 1e-9*|raw|, which
+    // reaches 1.0 once |raw|>=1e9) silently drops whole elements — e.g.
+    // arange(0, 1e9, 1) returned 999,999,999. Instead: if the quotient is within
+    // a magnitude-scaled but strictly sub-half tolerance of an integer, the final
+    // grid point coincides with the excluded half-open end, so the count is that
+    // integer; otherwise round up to include the trailing partial step. Exact
+    // integer counts (arange(0,5,1)=5, arange(0,1e9,1)=1e9) are preserved, and
+    // FP-overshoot cases (arange(0.1,0.4,0.1)=3) still collapse correctly.
+    double rounded = std::round(raw);
+    double tol = std::min(0.25, std::max(1e-9, std::fabs(raw) * 1e-12));
+    int64_t numel = (std::fabs(raw - rounded) < tol)
+                        ? static_cast<int64_t>(rounded)
+                        : static_cast<int64_t>(std::ceil(raw));
     if (numel < 0) numel = 0;
 
     // Use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -696,21 +711,21 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<int8_t>(start + i * step);
+                ptr[i] = saturate_to_int<int8_t>(start + i * step);
             }
             break;
         }
         case DType::UInt8: {
             uint8_t* ptr = static_cast<uint8_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<uint8_t>(start + i * step);
+                ptr[i] = saturate_to_int<uint8_t>(start + i * step);
             }
             break;
         }
         case DType::Int16: {
             int16_t* ptr = static_cast<int16_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<int16_t>(start + i * step);
+                ptr[i] = saturate_to_int<int16_t>(start + i * step);
             }
             break;
         }
@@ -724,21 +739,21 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
         case DType::UInt16: {
             uint16_t* ptr = static_cast<uint16_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<uint16_t>(start + i * step);
+                ptr[i] = saturate_to_int<uint16_t>(start + i * step);
             }
             break;
         }
         case DType::UInt32: {
             uint32_t* ptr = static_cast<uint32_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<uint32_t>(start + i * step);
+                ptr[i] = saturate_to_int<uint32_t>(start + i * step);
             }
             break;
         }
         case DType::UInt64: {
             uint64_t* ptr = static_cast<uint64_t*>(data);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<uint64_t>(start + i * step);
+                ptr[i] = saturate_to_int<uint64_t>(start + i * step);
             }
             break;
         }

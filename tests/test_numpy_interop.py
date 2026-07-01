@@ -11,7 +11,7 @@ import unittest
 import numpy as np
 
 # Add build directory to path to import tenzor
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../build/python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../build/python/tenzor'))
 
 try:
     import tenzor_core as tz

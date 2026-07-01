@@ -1003,11 +1003,19 @@ auto SlogdetBackward::backward_with_variables(std::vector<Variable> grad_outputs
     auto ndim = inv_A.tensor().ndim();
     auto inv_At = adjoint_var(inv_A);
 
-    auto gd_shape = std::vector<int64_t>(grad_outputs[1].shape().begin(), grad_outputs[1].shape().end());
+    // slogdet returns (sign, logabsdet); the gradient of interest is w.r.t.
+    // logabsdet (slot 1). The engine can collapse a tuple op's incoming grads to
+    // a single slot, so reading grad_outputs[1] unguarded is an out-of-bounds
+    // access. A lone incoming grad is the logabsdet grad (sign is
+    // piecewise-constant → zero gradient), matching the first-order backward().
+    const Variable& grad_logabsdet =
+        (grad_outputs.size() >= 2) ? grad_outputs[1] : grad_outputs[0];
+
+    auto gd_shape = std::vector<int64_t>(grad_logabsdet.shape().begin(), grad_logabsdet.shape().end());
     while (gd_shape.size() < static_cast<size_t>(ndim)) {
         gd_shape.push_back(1);
     }
-    auto grad_expanded = tenzor::reshape(grad_outputs[1], gd_shape);
+    auto grad_expanded = tenzor::reshape(grad_logabsdet, gd_shape);
 
     return {grad_expanded * inv_At};
 }
@@ -1670,10 +1678,10 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
 // CholeskySolveBackward
 // ============================================================================
 // Forward: X = cholesky_solve(B, L) = L^{-T} L^{-1} B   (lower)
-// Backward:
-//   grad_B = cholesky_solve(grad_X, L)
-//   grad_L = -tril(L^{-T} @ S @ L^{-1})
-//     where S = grad_X @ X^T + X @ grad_X^T  (symmetrized)
+// Backward (lower; upper is symmetric):
+//   grad_B = cholesky_solve(grad_X, L) = A^{-1} grad_X
+//   common = grad_B @ X^T + X @ grad_B^T        (symmetrized; uses grad_B)
+//   grad_L = -tril(common @ L)
 
 auto CholeskySolveBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("CholeskySolveBackward::forward should not be called directly");
@@ -1686,29 +1694,26 @@ auto CholeskySolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
 
     auto ndim = X.ndim();
 
-    // grad_B = cholesky_solve(grad_X, L, upper)
+    // grad_B = cholesky_solve(grad_X, L, upper) = A^{-1} grad_X  (A = L L^T lower)
     auto grad_B = tenzor::linalg::cholesky_solve(grad_X, L, upper_);
 
-    // grad_L: S = grad_X @ X^T + X @ grad_X^T (symmetrized outer product)
+    // grad_A = -grad_B @ X^T  (from X = A^{-1} B). For A = L L^T the factor
+    // gradient is grad_L = tril((grad_A + grad_A^T) @ L). Symmetrising grad_A:
+    //   common = grad_B @ X^T + X @ grad_B^T   (note: grad_B, NOT grad_X)
+    //   grad_L (lower) = -tril(common @ L)
+    //   grad_U (upper) = -triu(U @ common)
+    // Matches torch.cholesky_solve_backward. The previous code used grad_X in
+    // the outer product and applied A^{-1} (cholesky_solve) to S instead of
+    // right-multiplying by L, giving a systematically mis-scaled grad_L.
     auto Xt = transpose(X, ndim - 2, ndim - 1);
-    auto grad_Xt = transpose(grad_X, ndim - 2, ndim - 1);
-    auto S = add(matmul(grad_X, Xt), matmul(X, grad_Xt));
+    auto grad_Bt = transpose(grad_B, ndim - 2, ndim - 1);
+    auto common = add(matmul(grad_B, Xt), matmul(X, grad_Bt));
 
-    // grad_L = -tril(L^{-T} @ S @ L^{-1})
-    // For lower: L^{-1} @ S via solve_triangular(L, S, lower)
-    //            then L^{-T} @ result via solve_triangular(L^T, result, upper)
-    auto L_ndim = L.ndim();
     if (!upper_) {
-        auto temp = tenzor::linalg::solve_triangular(L, S, false);
-        auto Lt = transpose(L, L_ndim - 2, L_ndim - 1);
-        auto grad_L_full = tenzor::linalg::solve_triangular(Lt, temp, true);
-        auto grad_L = neg(tril(grad_L_full));
+        auto grad_L = neg(tril(matmul(common, L)));
         return {grad_B, grad_L};
     } else {
-        auto Ut = transpose(L, L_ndim - 2, L_ndim - 1);
-        auto temp = tenzor::linalg::solve_triangular(Ut, S, false);
-        auto grad_U_full = tenzor::linalg::solve_triangular(L, temp, true);
-        auto grad_U = neg(triu(grad_U_full));
+        auto grad_U = neg(triu(matmul(L, common)));
         return {grad_B, grad_U};
     }
 }
@@ -1735,18 +1740,16 @@ auto CholeskySolveBackward::backward_with_variables(std::vector<Variable> grad_o
     // grad_B = cholesky_solve(grad_X, L, upper) — Variable-level.
     auto grad_B = tenzor::cholesky_solve(grad_X, L, upper_);
 
-    // S = grad_X @ X^T + X @ grad_X^T (symmetrized rank-2 outer product).
+    // common = grad_B @ X^T + X @ grad_B^T  (symmetrised; uses grad_B, not grad_X)
+    // grad_L (lower) = -tril(common @ L);  grad_U (upper) = -triu(U @ common).
+    // Mirrors the corrected Tensor-level backward / torch.cholesky_solve_backward.
     auto Xt = tenzor::transpose(X, ndim - 2, ndim - 1);
-    auto grad_Xt = tenzor::transpose(grad_X, ndim - 2, ndim - 1);
-    auto S = tenzor::matmul(grad_X, Xt) + tenzor::matmul(X, grad_Xt);
+    auto grad_Bt = tenzor::transpose(grad_B, ndim - 2, ndim - 1);
+    auto common = tenzor::matmul(grad_B, Xt) + tenzor::matmul(X, grad_Bt);
 
-    // grad_L = -tril(cholesky_solve(S, L, upper=false))  for lower;
-    // grad_U = -triu(cholesky_solve(S, U, upper=true))   for upper.
-    // cholesky_solve(M, L, upper=false) computes (L L^T)^{-1} M = L^{-T} L^{-1} M
-    // which matches the Tensor-level double-triangular-solve chain.
-    auto grad_L_full = tenzor::cholesky_solve(S, L, upper_);
-    Variable grad_L = upper_ ? tenzor::neg(tenzor::triu(grad_L_full))
-                              : tenzor::neg(tenzor::tril(grad_L_full));
+    Variable grad_L = upper_
+        ? tenzor::neg(tenzor::triu(tenzor::matmul(L, common)))
+        : tenzor::neg(tenzor::tril(tenzor::matmul(common, L)));
     return {grad_B, grad_L};
 }
 

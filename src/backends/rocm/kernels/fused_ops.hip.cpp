@@ -842,7 +842,8 @@ auto fused_layer_norm_hip(
     const std::vector<int64_t>& normalized_shape,
     const Tensor& weight,
     const Tensor& bias,
-    float eps
+    float eps,
+    hipStream_t stream
 ) -> Tensor {
     // Float16/BFloat16: upcast to Float32, compute, convert back. Float64
     // computes natively in double precision below — previously Float64 was
@@ -854,7 +855,7 @@ auto fused_layer_norm_hip(
         auto input_f32 = input.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto b_f32 = bias.to(DType::Float32);
-        auto result = fused_layer_norm_hip(input_f32, normalized_shape, w_f32, b_f32, eps);
+        auto result = fused_layer_norm_hip(input_f32, normalized_shape, w_f32, b_f32, eps, stream);
         return result.to(orig_dtype);
     }
 
@@ -865,7 +866,7 @@ auto fused_layer_norm_hip(
 
     int64_t batch_size = input.numel() / norm_size;
 
-    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
+    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device(), stream);
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -873,7 +874,7 @@ auto fused_layer_norm_hip(
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(fused_layer_norm_kernel<float, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<float>(),
             weight.data<float>(),
             bias.data<float>(),
@@ -885,7 +886,7 @@ auto fused_layer_norm_hip(
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(fused_layer_norm_kernel<double, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<double>(),
             weight.data<double>(),
             bias.data<double>(),
@@ -1496,7 +1497,9 @@ __global__ void flash_attention_backward_kernel_hip(
     float* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
     const int seq_len,
     const float scale,
-    const bool causal
+    const bool causal,
+    const float dropout_p,    // dropout probability used in the forward; 0 disables
+    const uint32_t rng_seed   // Philox seed used in the forward; 0 disables
 ) {
     const int kv_tile_idx = blockIdx.x;  // which KV tile (column block)
     const int batch_head = blockIdx.y;
@@ -1617,7 +1620,13 @@ __global__ void flash_attention_backward_kernel_hip(
         __syncthreads();
 
         // Compute P_ij = exp(S_ij - l_i)  [Br x Bc]
-        // Apply causal mask: P_ij = 0 where query_pos < key_pos
+        // Apply causal mask, then RE-APPLY the exact Philox dropout mask the
+        // forward used (counter (batch_head, q_start+i, kv_start+j, seed) with
+        // the same inverted 1/(1-p) scale) so dQ/dK/dV differentiate the DROPPED
+        // attention weights. Without this the backward used undropped weights and
+        // produced wrong gradients whenever dropout was active.
+        const bool bwd_apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
+        const float bwd_dropout_scale = bwd_apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
         for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
             int i = idx / Bc;
             int j = idx % Bc;
@@ -1627,6 +1636,14 @@ __global__ void flash_attention_backward_kernel_hip(
                     p = 0.0f;
                 } else {
                     p = expf(S_tile[i * Bc + j] - l_tile[i]);
+                    if (bwd_apply_dropout) {
+                        float u = philox_uniform_hip(static_cast<uint32_t>(batch_head),
+                                                     static_cast<uint32_t>(q_start + i),
+                                                     static_cast<uint32_t>(kv_start + j),
+                                                     rng_seed);
+                        if (u < dropout_p) p = 0.0f;
+                        else p *= bwd_dropout_scale;
+                    }
                 }
             }
             S_tile[i * Bc + j] = p;  // Reuse S_tile for P_ij
@@ -1718,7 +1735,9 @@ auto flash_attention_backward_hip(
     const Tensor& O,     // [batch_heads, seq_len, head_dim]
     const Tensor& L,     // [batch_heads, seq_len] logsumexp
     float scale,
-    bool causal
+    bool causal,
+    float dropout_p = 0.0f,      // forward dropout probability; 0 disables
+    uint32_t rng_seed = 0u       // forward Philox seed; 0 disables
 ) -> std::vector<Tensor> {
     const auto dtype = Q.dtype();
 
@@ -1731,7 +1750,7 @@ auto flash_attention_backward_hip(
         auto O_f32  = O.to(DType::Float32);
         // L is already Float32 from the forward pass
         auto [dQ, dK, dV] = [&]() {
-            auto result = flash_attention_backward_hip(dO_f32, Q_f32, K_f32, V_f32, O_f32, L, scale, causal);
+            auto result = flash_attention_backward_hip(dO_f32, Q_f32, K_f32, V_f32, O_f32, L, scale, causal, dropout_p, rng_seed);
             return std::make_tuple(std::move(result[0]), std::move(result[1]), std::move(result[2]));
         }();
         return {dQ.to(DType::Float16), dK.to(DType::Float16), dV.to(DType::Float16)};
@@ -1745,7 +1764,7 @@ auto flash_attention_backward_hip(
         auto V_f32  = V.to(DType::Float32);
         auto O_f32  = O.to(DType::Float32);
         auto [dQ, dK, dV] = [&]() {
-            auto result = flash_attention_backward_hip(dO_f32, Q_f32, K_f32, V_f32, O_f32, L, scale, causal);
+            auto result = flash_attention_backward_hip(dO_f32, Q_f32, K_f32, V_f32, O_f32, L, scale, causal, dropout_p, rng_seed);
             return std::make_tuple(std::move(result[0]), std::move(result[1]), std::move(result[2]));
         }();
         return {dQ.to(DType::BFloat16), dK.to(DType::BFloat16), dV.to(DType::BFloat16)};
@@ -1797,7 +1816,7 @@ auto flash_attention_backward_hip(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<32, Br, Bc, BLOCK_SIZE>),
             grid, threads, smem, 0,
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal);
+            seq_len_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
     } else if (head_dim == 64) {
         size_t smem = compute_bwd_smem(64);
@@ -1805,7 +1824,7 @@ auto flash_attention_backward_hip(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<64, Br, Bc, BLOCK_SIZE>),
             grid, threads, smem, 0,
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal);
+            seq_len_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
     } else if (head_dim == 128) {
         size_t smem = compute_bwd_smem(128);
@@ -1813,7 +1832,7 @@ auto flash_attention_backward_hip(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<128, Br, Bc, BLOCK_SIZE>),
             grid, threads, smem, 0,
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal);
+            seq_len_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
     } else {
         throw std::runtime_error(
@@ -2046,7 +2065,8 @@ __global__ void fused_rms_norm_kernel(
 auto fused_rms_norm_hip(
     const Tensor& input,
     const Tensor& weight,
-    float eps
+    float eps,
+    hipStream_t stream
 ) -> std::pair<Tensor, Tensor> {
     // Float16/BFloat16: upcast to Float32, compute, convert back. Float64 is
     // computed natively below — downcasting it to Float32 would lose precision
@@ -2055,7 +2075,7 @@ auto fused_rms_norm_hip(
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
-        auto [result, rrms] = fused_rms_norm_hip(input_f32, weight_f32, eps);
+        auto [result, rrms] = fused_rms_norm_hip(input_f32, weight_f32, eps, stream);
         return {result.to(orig_dtype), rrms};
     }
 
@@ -2067,8 +2087,8 @@ auto fused_rms_norm_hip(
         batch_size *= shape[i];
     }
 
-    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
-    Tensor rrms = create_hip_zeros({batch_size}, input.dtype(), input.device());
+    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device(), stream);
+    Tensor rrms = create_hip_zeros({batch_size}, input.dtype(), input.device(), stream);
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -2076,7 +2096,7 @@ auto fused_rms_norm_hip(
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(fused_rms_norm_kernel<float, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<float>(),
             weight.data<float>(),
             output.data<float>(),
@@ -2088,7 +2108,7 @@ auto fused_rms_norm_hip(
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(fused_rms_norm_kernel<double, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<double>(),
             weight.data<double>(),
             output.data<double>(),

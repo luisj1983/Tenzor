@@ -123,7 +123,7 @@ auto VulkanBackend::dispatchGridSample(const Tensor& input, const Tensor& grid,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(GridSamplePushConstants), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -207,7 +207,7 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
                                fill_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, fill_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(FillPushConstants), &fpc);
-        uint32_t wg = div_wg(fpc.n_elements, devices_[device_id].workgroupSize);
+        uint32_t wg = div_wg_checked(fpc.n_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, wg, 1, 1);
 
         VkMemoryBarrier mb{};
@@ -264,7 +264,7 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(GridSampleBackwardPushConstants), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -322,7 +322,7 @@ auto VulkanBackend::dispatchAffineGridBackward(const Tensor& grad_grid,
                                fill_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, fill_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(FillPushConstants), &fpc);
-        uint32_t wg = div_wg(fpc.n_elements, devices_[device_id].workgroupSize);
+        uint32_t wg = div_wg_checked(fpc.n_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, wg, 1, 1);
 
         VkMemoryBarrier mb{};
@@ -363,7 +363,7 @@ auto VulkanBackend::dispatchAffineGridBackward(const Tensor& grad_grid,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(AffineGridBackwardPushConstants), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -416,7 +416,7 @@ auto VulkanBackend::dispatchAffineGrid(const Tensor& theta, const std::vector<in
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(AffineGridPushConstants), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);

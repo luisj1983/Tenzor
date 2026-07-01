@@ -240,7 +240,7 @@ auto VulkanBackend::dispatchAdvancedIndex(const Tensor& src,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    uint32_t groups = div_wg(static_cast<uint64_t>(prep.total), devices_[device_id].workgroupSize);
+    uint32_t groups = div_wg_checked(static_cast<uint64_t>(prep.total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, groups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -333,7 +333,7 @@ auto VulkanBackend::dispatchAdvancedIndexPut(const Tensor& src,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    uint32_t groups = div_wg(static_cast<uint64_t>(prep.total), devices_[device_id].workgroupSize);
+    uint32_t groups = div_wg_checked(static_cast<uint64_t>(prep.total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, groups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);

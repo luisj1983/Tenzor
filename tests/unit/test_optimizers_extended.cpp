@@ -8,6 +8,7 @@
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
+#include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/variable.hpp"
@@ -191,6 +192,40 @@ TEST_P(OptimizersExtendedTest, RMSpropLoadStateDictRejectsParamCountMismatch) {
     state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(params_.size() + 1);
     auto dst = RMSprop(params_, 0.01);
     EXPECT_THROW(dst.load_state_dict(state), std::runtime_error);
+}
+
+// ============================================================================
+// SGD Tests
+// ============================================================================
+
+// Regression: SGD with momentum saves a "velocity_initialized" flags tensor
+// alongside the per-parameter "velocity_<i>" buffers. The load_state_dict
+// buffer-count guard counted every key with the "velocity_" prefix, so the
+// flags tensor inflated the count by one and load_state_dict wrongly threw
+// "velocity buffer count mismatch" on a valid same-shape round-trip.
+TEST_P(OptimizersExtendedTest, SGDMomentumStateDictRoundTrip) {
+    auto src = SGD(params_, /*lr=*/0.01, /*momentum=*/0.9, /*dampening=*/0.0,
+                   /*weight_decay=*/1e-4);
+
+    // Run a few steps so the velocity buffers and their initialized flags are
+    // populated (this is what adds the "velocity_initialized" key).
+    for (int i = 0; i < 3; ++i) {
+        src.zero_grad();
+        param1_->set_grad(ones({2, 3}, DType::Float32, device));
+        param2_->set_grad(ones({4}, DType::Float32, device));
+        src.step();
+    }
+
+    auto state = src.state_dict();
+
+    // The round-trip into a same-shaped optimiser must NOT throw.
+    auto dst = SGD(params_, 0.01, 0.9, 0.0, 1e-4);
+    EXPECT_NO_THROW(dst.load_state_dict(state));
+
+    // A genuine parameter-count mismatch must still be rejected.
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(params_.size() + 1);
+    auto dst2 = SGD(params_, 0.01, 0.9, 0.0, 1e-4);
+    EXPECT_THROW(dst2.load_state_dict(state), std::runtime_error);
 }
 
 // ============================================================================

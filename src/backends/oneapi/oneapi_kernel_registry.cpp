@@ -3989,11 +3989,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             Tensor output = oneapi::batchnorm2d_forward_affine(
                 inputs[0], mean, variance, inputs[3], inputs[4], epsilon, queue);
 
-            // Step 3: Update running stats
+            // Step 3: Update running stats. Running variance uses the UNBIASED
+            // (Bessel-corrected) estimate to match PyTorch / the nn-layer path;
+            // normalization above uses the biased var.
             Tensor running_mean = inputs[1];
             Tensor running_var = inputs[2];
+            auto in_shape = inputs[0].shape();
+            int64_t bn_count = in_shape[0] * in_shape[2] * in_shape[3];
+            Tensor running_var_in = variance;
+            if (bn_count >= 2) {
+                running_var_in = tenzor::mul(
+                    variance, static_cast<double>(bn_count) / static_cast<double>(bn_count - 1));
+            }
             oneapi::batchnorm2d_update_running_stats(
-                running_mean, running_var, mean, variance, momentum, queue);
+                running_mean, running_var, mean, running_var_in, momentum, queue);
 
             return {output, mean, variance, running_mean, running_var};
         });

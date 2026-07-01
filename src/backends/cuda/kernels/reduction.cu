@@ -4514,8 +4514,11 @@ __global__ void norm_along_dim_kernel(
         tmp /= meta.shape[d];
     }
 
-    // Accumulate along the reduction dimension
-    T acc = cuda_zero<T>();
+    // Accumulate along the reduction dimension in a wider type (float for
+    // Float16/BFloat16, double for Float64) so a long reduction does not lose
+    // precision to the narrow storage dtype. Narrowed back to T on store.
+    using Acc = typename AccumType<T>::type;
+    Acc acc = Acc(0);
 
     if (p == 1.0f) {
         // L1 norm: sum of |x|
@@ -4525,10 +4528,10 @@ __global__ void norm_along_dim_kernel(
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * meta.strides[d];
             }
-            T val = input[in_idx];
-            acc = acc + (val < cuda_zero<T>() ? -val : val);
+            Acc val = Acc(input[in_idx]);
+            acc = acc + (val < Acc(0) ? -val : val);
         }
-        output[out_idx] = acc;
+        output[out_idx] = T(acc);
     } else if (p == 2.0f) {
         // L2 norm: sqrt(sum of x^2)
         for (int64_t i = 0; i < dim_size; i++) {
@@ -4537,10 +4540,10 @@ __global__ void norm_along_dim_kernel(
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * meta.strides[d];
             }
-            T val = input[in_idx];
+            Acc val = Acc(input[in_idx]);
             acc = acc + val * val;
         }
-        output[out_idx] = sqrt(acc);
+        output[out_idx] = T(sqrt(acc));
     } else {
         // General Lp norm: (sum of |x|^p)^(1/p)
         for (int64_t i = 0; i < dim_size; i++) {
@@ -4549,10 +4552,10 @@ __global__ void norm_along_dim_kernel(
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * meta.strides[d];
             }
-            T val = input[in_idx];
-            acc = acc + pow(val < cuda_zero<T>() ? -val : val, T(p));
+            Acc val = Acc(input[in_idx]);
+            acc = acc + pow(val < Acc(0) ? -val : val, Acc(p));
         }
-        output[out_idx] = pow(acc, T(1.0f / p));
+        output[out_idx] = T(pow(acc, Acc(1.0f / p)));
     }
     }
 }
@@ -6393,7 +6396,10 @@ __global__ void renorm_compute_norm_kernel(
     int64_t indices[DIM_META_MAX_RANK] = {};
     indices[dim] = slice_idx;
 
-    T acc = T(0);
+    // Accumulate the p-norm in a wider type (float for Float16/BFloat16) to
+    // avoid precision loss over the slice; narrow back to T when storing.
+    using Acc = typename AccumType<T>::type;
+    Acc acc = Acc(0);
     for (int64_t flat = 0; flat < slice_size; ++flat) {
         // Unpack flat index into multi-dim coords for dims != dim.
         int64_t tmp = flat;
@@ -6406,23 +6412,23 @@ __global__ void renorm_compute_norm_kernel(
         for (int64_t d = 0; d < ndim; ++d) {
             in_idx += indices[d] * meta.strides[d];
         }
-        T val = input[in_idx];
-        T absval = val < T(0) ? -val : val;
+        Acc val = Acc(input[in_idx]);
+        Acc absval = val < Acc(0) ? -val : val;
         if (p == 1.0f) {
             acc += absval;
         } else if (p == 2.0f) {
             acc += val * val;
         } else {
-            acc += pow(absval, T(p));
+            acc += pow(absval, Acc(p));
         }
     }
 
     if (p == 2.0f) {
-        norms[slice_idx] = sqrt(acc);
+        norms[slice_idx] = T(sqrt(acc));
     } else if (p != 1.0f) {
-        norms[slice_idx] = pow(acc, T(1.0f / p));
+        norms[slice_idx] = T(pow(acc, Acc(1.0f / p)));
     } else {
-        norms[slice_idx] = acc;
+        norms[slice_idx] = T(acc);
     }
 }
 

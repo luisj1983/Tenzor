@@ -163,8 +163,8 @@ auto VulkanBackend::dispatchSTFT(const Tensor& input, int64_t n_fft,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(STFTFrameWindowPC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint64_t>(total),
-                                      devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(static_cast<uint64_t>(total),
+                                      devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -342,8 +342,8 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(ISTFTOverlapAddPC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint64_t>(overlap_total),
-                                      devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(static_cast<uint64_t>(overlap_total),
+                                      devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -369,8 +369,8 @@ auto VulkanBackend::dispatchISTFT(const Tensor& input, int64_t n_fft,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(ISTFTNormalizePC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint64_t>(overlap_total),
-                                      devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(static_cast<uint64_t>(overlap_total),
+                                      devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);

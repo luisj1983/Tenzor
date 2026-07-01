@@ -830,26 +830,6 @@ IreeInvoker::~IreeInvoker() {
 
 namespace {
 
-// Wrap `s` in single quotes for /bin/sh, escaping any embedded single quote
-// as the '\'' sequence. Mirrors iree_paths.cpp's shell_quote (which is in that
-// file's anonymous namespace and not exported). Used before building popen()
-// command strings so a resolved binary path containing a space, ';', '$()' or
-// quote cannot break or inject into the command.
-auto shell_quote(const std::string& s) -> std::string {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('\'');
-    for (char c : s) {
-        if (c == '\'') {
-            out += "'\\''";
-        } else {
-            out.push_back(c);
-        }
-    }
-    out.push_back('\'');
-    return out;
-}
-
 // Prepend `dir` to LD_LIBRARY_PATH (or set it if unset). Called before
 // the first IREE HIP HAL device probe so dlopen("libamdhip64.so") finds
 // a working copy on hosts where /opt/rocm is corrupt. setenv() during
@@ -932,8 +912,8 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
     // --list_devices=<driver>` and treat any non-empty device line as
     // success.
     //
-    // Use popen() with a short pipe; the binary returns within a few
-    // hundred ms even on a cold ROCm load.
+    // Probe via a short-lived subprocess (exec_capture); the binary returns
+    // within a few hundred ms even on a cold ROCm load.
     std::string run_module;
     try {
         run_module = resolve_iree_run_module();
@@ -942,32 +922,20 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
         cache[driver_name] = false;
         return false;
     }
-    // Shell-quote the resolved binary path (it may come from an env override or
-    // an install dir containing spaces / shell metacharacters); driver_name is
-    // an internal literal but quote it too for uniformity.
-    std::string cmd = shell_quote(run_module) + " --list_devices=" +
-                      shell_quote(driver_name) + " 2>/dev/null";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        std::lock_guard<std::mutex> g(cache_mu);
-        cache[driver_name] = false;
-        return false;
-    }
-    char buf[1024];
-    std::string out;
-    while (std::fgets(buf, sizeof(buf), pipe)) {
-        out += buf;
-    }
-    int rc = pclose(pipe);
+    // Probe directly via fork/exec (no shell): `iree-run-module
+    // --list_devices=<driver>`. run_module may come from an env override or an
+    // install dir with odd characters; passing argv verbatim removes any
+    // shell-metacharacter / injection concern.
+    const std::string out =
+        exec_capture(run_module, {"--list_devices=" + driver_name},
+                     /*capture_stderr=*/false);
     bool subproc_ok = false;
-    if (rc == 0) {
-        // Any line containing "://" denotes a device URI; an empty list
-        // implies no devices, "FLAGS ERROR" implies the driver couldn't
-        // load its underlying vendor library.
-        if (out.find("://") != std::string::npos &&
-            out.find("FLAGS ERROR") == std::string::npos) {
-            subproc_ok = true;
-        }
+    // Any line containing "://" denotes a device URI; an empty list implies no
+    // devices, "FLAGS ERROR" implies the driver couldn't load its underlying
+    // vendor library. A spawn/exec failure yields empty output → not ok.
+    if (out.find("://") != std::string::npos &&
+        out.find("FLAGS ERROR") == std::string::npos) {
+        subproc_ok = true;
     }
 
     std::lock_guard<std::mutex> g(cache_mu);

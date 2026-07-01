@@ -301,7 +301,12 @@ auto SGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state) 
     // never silently mis-align velocity buffers to the wrong parameters.
     size_t saved_count = 0;
     for (const auto& [key, _] : state) {
-        if (key.rfind("velocity_", 0) == 0) ++saved_count;
+        // Count only the per-parameter velocity buffers ("velocity_<i>"), not
+        // the "velocity_initialized" flags tensor which also shares the
+        // "velocity_" prefix and would otherwise inflate the count by one.
+        if (key.rfind("velocity_", 0) == 0 && key != "velocity_initialized") {
+            ++saved_count;
+        }
     }
     if (saved_count > 0 && saved_count != velocity_buffers_.size()) {
         throw std::runtime_error(

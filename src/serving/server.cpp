@@ -65,7 +65,17 @@ auto sanitize_repository_path(const std::string& requested,
                 "model_path must not contain a '..' path component");
         }
     }
-    fs::path root = root_dir.empty() ? fs::path(".") : fs::path(root_dir);
+    // Fail closed: refuse to resolve model paths when no repository root is
+    // configured. Previously an empty root silently defaulted to "." (the
+    // current working directory), letting a network client load and deserialize
+    // ANY parseable file under the server's CWD subtree. A model repository must
+    // be explicitly configured.
+    if (root_dir.empty()) {
+        throw std::invalid_argument(
+            "model repository root is not configured; refusing to resolve model "
+            "paths against the current working directory");
+    }
+    fs::path root = fs::path(root_dir);
     fs::path root_canon = fs::weakly_canonical(root);
     fs::path resolved = fs::weakly_canonical(root / req);
     // A raw string-prefix compare has no path-separator boundary, so a root of

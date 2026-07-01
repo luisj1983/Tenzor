@@ -11,8 +11,9 @@ broken binding fails the suite instead of printing a checkmark.
 import sys
 import os
 
-# Add the build directory to Python path
-build_dir = os.path.join(os.path.dirname(__file__), '..', 'build', 'python')
+# Add the build directory to Python path (tenzor_core.so lives under
+# build/python/tenzor, alongside the wrapping tenzor package).
+build_dir = os.path.join(os.path.dirname(__file__), '..', 'build', 'python', 'tenzor')
 sys.path.insert(0, build_dir)
 
 try:

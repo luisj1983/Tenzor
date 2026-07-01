@@ -1717,6 +1717,11 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
                         const Tensor& weight, const Tensor& bias, float eps) -> Tensor {
     // Ensure input is contiguous for optimal memory access patterns
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    // weight/bias are read via data<T>()[i] (no stride handling), so a
+    // non-contiguous affine param (e.g. a strided slice with numel==norm_size)
+    // would be read with the wrong layout. Contiguify like GroupNorm/InstanceNorm.
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c = bias.is_contiguous() ? bias : bias.contiguous();
 
     auto in_shape = input_cont.shape();
     int64_t norm_size = 1;
@@ -1735,8 +1740,8 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
 
     if (input_cont.dtype() == DType::Float32) {
         const float* in_data = input_cont.data<float>();
-        const float* w_data = weight.data<float>();
-        const float* b_data = bias.data<float>();
+        const float* w_data = weight_c.data<float>();
+        const float* b_data = bias_c.data<float>();
         float* out_data = output.data<float>();
 
 #ifdef TENZOR_USE_ONEDNN
@@ -1752,15 +1757,15 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
         layer_norm_simd(in_data, out_data, w_data, b_data, batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::Float64) {
         layer_norm_scalar<double>(input_cont.data<double>(), output.data<double>(),
-                                  weight.data<double>(), bias.data<double>(),
+                                  weight_c.data<double>(), bias_c.data<double>(),
                                   batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::Float16) {
         layer_norm_scalar<Float16>(input_cont.data<Float16>(), output.data<Float16>(),
-                                   weight.data<Float16>(), bias.data<Float16>(),
+                                   weight_c.data<Float16>(), bias_c.data<Float16>(),
                                    batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::BFloat16) {
         layer_norm_scalar<BFloat16>(input_cont.data<BFloat16>(), output.data<BFloat16>(),
-                                    weight.data<BFloat16>(), bias.data<BFloat16>(),
+                                    weight_c.data<BFloat16>(), bias_c.data<BFloat16>(),
                                     batch_size, norm_size, eps);
     } else {
         throw std::runtime_error("Unsupported dtype for layer_norm");
@@ -1825,6 +1830,9 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
     -> std::tuple<Tensor, Tensor, Tensor> {
     // Ensure input is contiguous for optimal memory access patterns
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    // Contiguify affine params (read via data<T>()[i] without stride handling).
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c = bias.is_contiguous() ? bias : bias.contiguous();
 
     auto in_shape = input_cont.shape();
     int64_t norm_size = 1;
@@ -1850,8 +1858,8 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
 
     if (input_cont.dtype() == DType::Float32) {
         const float* in_data = input_cont.data<float>();
-        const float* w_data = weight.data<float>();
-        const float* b_data = bias.data<float>();
+        const float* w_data = weight_c.data<float>();
+        const float* b_data = bias_c.data<float>();
         float* out_data = output.data<float>();
 
         layer_norm_simd_with_stats(in_data, out_data, w_data, b_data,
@@ -1859,17 +1867,17 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
                                     batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::Float64) {
         layer_norm_scalar_with_stats<double, double>(input_cont.data<double>(), output.data<double>(),
-                                             weight.data<double>(), bias.data<double>(),
+                                             weight_c.data<double>(), bias_c.data<double>(),
                                              mean.data<double>(), rstd.data<double>(),
                                              batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::Float16) {
         layer_norm_scalar_with_stats<Float16>(input_cont.data<Float16>(), output.data<Float16>(),
-                                              weight.data<Float16>(), bias.data<Float16>(),
+                                              weight_c.data<Float16>(), bias_c.data<Float16>(),
                                               mean.data<float>(), rstd.data<float>(),
                                               batch_size, norm_size, eps);
     } else if (input_cont.dtype() == DType::BFloat16) {
         layer_norm_scalar_with_stats<BFloat16>(input_cont.data<BFloat16>(), output.data<BFloat16>(),
-                                               weight.data<BFloat16>(), bias.data<BFloat16>(),
+                                               weight_c.data<BFloat16>(), bias_c.data<BFloat16>(),
                                                mean.data<float>(), rstd.data<float>(),
                                                batch_size, norm_size, eps);
     } else {
@@ -2090,14 +2098,26 @@ void group_norm_impl_with_stats(const T2* in_data, T2* out_data, const T2* w_dat
                                  int64_t N, int64_t C, int64_t spatial_size, int64_t num_groups, double eps) {
     int64_t channels_per_group = C / num_groups;
 
-    // Accumulate mean/var in double regardless of T2/Stats so the Float32
-    // (Stats=float) autograd path matches the non-stats inference impl, which
-    // accumulates in double. Narrow only when writing the saved stats / output.
-    // Float16/BFloat16 have no direct conversion to/from double; accumulate them
-    // in float (still wider than the storage type). float/double accumulate in
-    // double for full precision.
-    using Acc = std::conditional_t<
-        std::is_same_v<T2, Float16> || std::is_same_v<T2, BFloat16>, float, double>;
+    // Accumulate mean/var in double for ALL storage types so this autograd/
+    // training path matches the non-stats inference impl (which uses a double
+    // accumulator even for Float16/BFloat16); otherwise F16/BF16 GroupNorm drifts
+    // between train and eval. Float16/BFloat16 convert to/from double via float
+    // (the inference impl already relies on this), so double is safe here too.
+    using Acc = double;
+    // Float16/BFloat16 have no direct static_cast to/from double; route through
+    // float (exact widening for half). float/double convert directly.
+    auto to_acc = [](T2 v) -> Acc {
+        if constexpr (std::is_same_v<T2, Float16> || std::is_same_v<T2, BFloat16>)
+            return static_cast<Acc>(static_cast<float>(v));
+        else
+            return static_cast<Acc>(v);
+    };
+    auto from_acc = [](Acc a) -> T2 {
+        if constexpr (std::is_same_v<T2, Float16> || std::is_same_v<T2, BFloat16>)
+            return static_cast<T2>(static_cast<float>(a));
+        else
+            return static_cast<T2>(a);
+    };
 
     #pragma omp parallel for collapse(2) if(N * num_groups > 16)
     for (int64_t n = 0; n < N; ++n) {
@@ -2108,7 +2128,7 @@ void group_norm_impl_with_stats(const T2* in_data, T2* out_data, const T2* w_dat
             Acc mean = Acc(0);
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    mean += static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]);
+                    mean += to_acc(in_data[(n * C + c) * spatial_size + s]);
                 }
             }
             mean /= static_cast<Acc>(group_size);
@@ -2116,7 +2136,7 @@ void group_norm_impl_with_stats(const T2* in_data, T2* out_data, const T2* w_dat
             Acc var = Acc(0);
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    Acc diff = static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                    Acc diff = to_acc(in_data[(n * C + c) * spatial_size + s]) - mean;
                     var += diff * diff;
                 }
             }
@@ -2131,8 +2151,8 @@ void group_norm_impl_with_stats(const T2* in_data, T2* out_data, const T2* w_dat
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
                     int64_t idx = (n * C + c) * spatial_size + s;
-                    Acc normalized = (static_cast<Acc>(in_data[idx]) - mean) * inv_std;
-                    out_data[idx] = static_cast<T2>(normalized * static_cast<Acc>(w_data[c]) + static_cast<Acc>(b_data[c]));
+                    Acc normalized = (to_acc(in_data[idx]) - mean) * inv_std;
+                    out_data[idx] = from_acc(normalized * to_acc(w_data[c]) + to_acc(b_data[c]));
                 }
             }
         }
@@ -2203,26 +2223,39 @@ template<typename T, typename Stats>
 void instance_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
                                     Stats* mean_out, Stats* inv_std_out,
                                     int64_t N, int64_t C, int64_t spatial_size, double eps) {
-    // Accumulate mean/var in double regardless of T/Stats so the Float32
-    // (Stats=float) autograd path matches the non-stats inference impl, which
-    // accumulates in double. Narrow only when writing the saved stats / output.
-    // Float16/BFloat16 have no direct conversion to/from double; accumulate them
-    // in float. float/double accumulate in double for full precision.
-    using Acc = std::conditional_t<
-        std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, double>;
+    // Accumulate mean/var in double for ALL storage types so this autograd/
+    // training path matches the non-stats inference impl (which uses a double
+    // accumulator even for Float16/BFloat16); otherwise F16/BF16 InstanceNorm
+    // drifts between train and eval. Float16/BFloat16 convert to/from double via
+    // float (the inference impl already relies on this), so double is safe here.
+    using Acc = double;
+    // Float16/BFloat16 have no direct static_cast to/from double; route through
+    // float (exact widening for half). float/double convert directly.
+    auto to_acc = [](T v) -> Acc {
+        if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>)
+            return static_cast<Acc>(static_cast<float>(v));
+        else
+            return static_cast<Acc>(v);
+    };
+    auto from_acc = [](Acc a) -> T {
+        if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>)
+            return static_cast<T>(static_cast<float>(a));
+        else
+            return static_cast<T>(a);
+    };
 
     #pragma omp parallel for collapse(2) if(N * C > 16)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             Acc mean = Acc(0);
             for (int64_t s = 0; s < spatial_size; ++s) {
-                mean += static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]);
+                mean += to_acc(in_data[(n * C + c) * spatial_size + s]);
             }
             mean /= static_cast<Acc>(spatial_size);
 
             Acc var = Acc(0);
             for (int64_t s = 0; s < spatial_size; ++s) {
-                Acc diff = static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                Acc diff = to_acc(in_data[(n * C + c) * spatial_size + s]) - mean;
                 var += diff * diff;
             }
             var /= static_cast<Acc>(spatial_size);
@@ -2233,13 +2266,13 @@ void instance_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_dat
             mean_out[n * C + c] = static_cast<Stats>(mean);
             inv_std_out[n * C + c] = static_cast<Stats>(inv_std);
 
-            Acc w = w_data ? static_cast<Acc>(w_data[c]) : Acc(1);
-            Acc b = b_data ? static_cast<Acc>(b_data[c]) : Acc(0);
+            Acc w = w_data ? to_acc(w_data[c]) : Acc(1);
+            Acc b = b_data ? to_acc(b_data[c]) : Acc(0);
 
             for (int64_t s = 0; s < spatial_size; ++s) {
                 int64_t idx = (n * C + c) * spatial_size + s;
-                Acc normalized = (static_cast<Acc>(in_data[idx]) - mean) * inv_std;
-                out_data[idx] = static_cast<T>(normalized * w + b);
+                Acc normalized = (to_acc(in_data[idx]) - mean) * inv_std;
+                out_data[idx] = from_acc(normalized * w + b);
             }
         }
     }
@@ -2317,6 +2350,8 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                  const Tensor& weight) -> std::vector<Tensor> {
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     Tensor grad_cont = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    // Contiguify weight (read via data<T>()[i] without stride handling).
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
 
     auto in_shape = input_cont.shape();
     int64_t norm_size = 1;
@@ -2350,7 +2385,7 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     if (input_cont.dtype() == DType::Float32) {
         const float* in_data = input_cont.data<float>();
         const float* grad_out_data = grad_cont.data<float>();
-        const float* w_data = weight.data<float>();
+        const float* w_data = weight_c.data<float>();
         float* grad_in_data = grad_input.data<float>();
         float* grad_w_data = grad_weight.data<float>();
         float* grad_b_data = grad_bias.data<float>();
@@ -2411,7 +2446,7 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     } else if (input_cont.dtype() == DType::Float64) {
         const double* in_data = input_cont.data<double>();
         const double* grad_out_data = grad_cont.data<double>();
-        const double* w_data = weight.data<double>();
+        const double* w_data = weight_c.data<double>();
         double* grad_in_data = grad_input.data<double>();
         double* grad_w_data = grad_weight.data<double>();
         double* grad_b_data = grad_bias.data<double>();
@@ -2479,14 +2514,14 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
         if (input_cont.dtype() == DType::Float16) {
             const Float16* in_raw = input_cont.data<Float16>();
             const Float16* grad_raw = grad_cont.data<Float16>();
-            const Float16* w_raw = weight.data<Float16>();
+            const Float16* w_raw = weight_c.data<Float16>();
             for (int64_t i = 0; i < total; ++i) in_f32[i] = static_cast<float>(in_raw[i]);
             for (int64_t i = 0; i < total; ++i) grad_out_f32[i] = static_cast<float>(grad_raw[i]);
             for (int64_t i = 0; i < norm_size; ++i) w_f32[i] = static_cast<float>(w_raw[i]);
         } else {
             const BFloat16* in_raw = input_cont.data<BFloat16>();
             const BFloat16* grad_raw = grad_cont.data<BFloat16>();
-            const BFloat16* w_raw = weight.data<BFloat16>();
+            const BFloat16* w_raw = weight_c.data<BFloat16>();
             for (int64_t i = 0; i < total; ++i) in_f32[i] = static_cast<float>(in_raw[i]);
             for (int64_t i = 0; i < total; ++i) grad_out_f32[i] = static_cast<float>(grad_raw[i]);
             for (int64_t i = 0; i < norm_size; ++i) w_f32[i] = static_cast<float>(w_raw[i]);

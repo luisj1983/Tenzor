@@ -492,7 +492,7 @@ auto Variable::operator+(const Variable& other) const -> Variable {
     }
     // Compute result
     auto result = impl_->data_ + other.impl_->data_;
-    bool needs_grad = impl_->requires_grad_ || other.impl_->requires_grad_;
+    bool needs_grad = is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_);
     Variable output(result, needs_grad);
 
     if (is_grad_enabled() && needs_grad) {
@@ -522,7 +522,7 @@ auto Variable::operator-(const Variable& other) const -> Variable {
     }
     // Compute result
     auto result = impl_->data_ - other.impl_->data_;
-    bool needs_grad = impl_->requires_grad_ || other.impl_->requires_grad_;
+    bool needs_grad = is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_);
     Variable output(result, needs_grad);
 
     if (is_grad_enabled() && needs_grad) {
@@ -552,7 +552,7 @@ auto Variable::operator*(const Variable& other) const -> Variable {
     }
     // Compute result
     auto result = impl_->data_ * other.impl_->data_;
-    bool needs_grad = impl_->requires_grad_ || other.impl_->requires_grad_;
+    bool needs_grad = is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_);
     Variable output(result, needs_grad);
 
     if (is_grad_enabled() && needs_grad) {
@@ -595,7 +595,7 @@ auto Variable::operator/(const Variable& other) const -> Variable {
     }
     // Compute result
     auto result = impl_->data_ / other.impl_->data_;
-    bool needs_grad = impl_->requires_grad_ || other.impl_->requires_grad_;
+    bool needs_grad = is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_);
     Variable output(result, needs_grad);
 
     if (is_grad_enabled() && needs_grad) {

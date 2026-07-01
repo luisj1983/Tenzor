@@ -102,7 +102,8 @@ TEST_P(DTypeSpecificOpsTest, BooleanLogic) {
 }
 
 TEST_P(DTypeSpecificOpsTest, IntegerDivision) {
-    // Int32 for integer division behavior
+    // True division of two integer tensors promotes to floating point (PyTorch
+    // `/` / torch.div semantics), consistent with the tensor-scalar div path.
     auto a_cpu = ones({100}, DType::Int32, Device::cpu());
     auto a_data = a_cpu.data<int32_t>();
 
@@ -113,13 +114,14 @@ TEST_P(DTypeSpecificOpsTest, IntegerDivision) {
     auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
     auto b = ones({100}, DType::Int32, device) * 3;
 
-    auto c = div(a, b);  // 7 / 3 = 2 (integer division)
+    auto c = div(a, b);  // 7 / 3 = 2.333... (true division -> float result)
 
+    EXPECT_EQ(c.dtype(), DType::Float32);
     auto c_cpu = c.to(Device::cpu());
-    const int32_t* data = c_cpu.data<int32_t>();
+    const float* data = c_cpu.data<float>();
 
     for (int i = 0; i < 100; ++i) {
-        EXPECT_EQ(data[i], 2);  // NOT 2.333...
+        EXPECT_NEAR(data[i], 7.0f / 3.0f, 1e-5f);  // 2.333..., NOT 2
     }
 }
 

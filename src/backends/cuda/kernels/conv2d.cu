@@ -707,6 +707,19 @@ auto conv2d_forward_kernel(
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
+    // BFloat16 has no dedicated conv kernel (it would fall through to the Float32
+    // path and hit a data<float>() dtype-mismatch throw); widen to Float32
+    // on-device, reuse the Float32 path, and narrow back. GPU widen-narrow, not a
+    // CPU fallback.
+    if (input_in.dtype() == DType::BFloat16) {
+        Tensor b32;
+        const Tensor* b32ptr = nullptr;
+        if (bias) { b32 = bias->to(DType::Float32); b32ptr = &b32; }
+        Tensor out32 = conv2d_forward_kernel(input_in.to(DType::Float32),
+                                             weight_in.to(DType::Float32), b32ptr,
+                                             stride, padding, dilation, groups, stream);
+        return out32.to(DType::BFloat16);
+    }
     // Kernels index with hard-coded contiguous NCHW offset arithmetic;
     // materialize contiguous input/weight so non-contiguous (sliced/transposed)
     // tensors are read correctly (mirrors conv3d_forward_kernel).
@@ -1301,6 +1314,24 @@ auto conv2d_backward_kernel(
     bool compute_grad_bias,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Route BOTH half-precision types through the verified Float32 im2col path
+    // (widen-narrow on-device, not a CPU fallback). BFloat16 has no dedicated
+    // kernel. Float16 has one (conv2d_backward_f16) but its grad_input GEMM
+    // treats the (out_channels_per_group, col_cols) weight as (col_cols,
+    // out_channels_per_group) — a reshape scramble whenever those two dims
+    // differ (i.e. essentially every real conv), producing wrong grad_input on
+    // the non-cuDNN path. The Float32 path builds correctly-shaped buffers.
+    if (input_in.dtype() == DType::BFloat16 || input_in.dtype() == DType::Float16) {
+        const DType odt = input_in.dtype();
+        auto [gi, gw, gb] = conv2d_backward_kernel(
+            grad_output_in.to(DType::Float32), input_in.to(DType::Float32),
+            weight_in.to(DType::Float32), stride, padding, dilation, groups,
+            compute_grad_input, compute_grad_weight, compute_grad_bias, stream);
+        auto narrow = [odt](const Tensor& t) {
+            return t.impl() ? t.to(odt) : t;
+        };
+        return {narrow(gi), narrow(gw), narrow(gb)};
+    }
     // Kernels index with hard-coded contiguous NCHW arithmetic; materialize
     // contiguous tensors so non-contiguous inputs are read correctly.
     Tensor grad_output = grad_output_in.contiguous();

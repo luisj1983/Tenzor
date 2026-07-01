@@ -1153,44 +1153,38 @@ TEST_P(InPlaceOpsTest, InPlaceDivision) {
 // exception, mirroring the out-of-place div() guard. Previously the Int32/Int64
 // in-place path did a bare `a /= b` with no zero check, so an integer 0 divisor
 // triggered a SIGFPE that hard-crashed the process instead of throwing.
-TEST_P(InPlaceOpsTest, InPlaceIntegerDivisionByZeroThrows) {
-    if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "CPU-specific integer divide-by-zero guard";
-    }
-
-    // Int32, same-shape path.
+TEST_P(InPlaceOpsTest, InPlaceIntegerDivisionThrows) {
+    // In-place true division produces a floating result that cannot be cast back
+    // into an integer (or Bool) tensor, so div_ on any integer tensor throws
+    // (PyTorch `/=` semantics). This is enforced at the op layer, so it holds on
+    // every backend and also covers the integer divide-by-zero case.
     {
         auto a = full({4}, 12.0, DType::Int32, device);
         auto b = full({4}, 3.0, DType::Int32, device);
-        b.data<int32_t>()[2] = 0;  // introduce a zero divisor
         EXPECT_THROW(div_(a, b), std::runtime_error)
-            << "Int32 same-shape in-place div by zero must throw";
+            << "Int32 in-place true division must throw on " << device.to_string();
     }
-
-    // Int64, same-shape path.
     {
         auto a = full({4}, 12.0, DType::Int64, device);
         auto b = full({4}, 3.0, DType::Int64, device);
-        b.data<int64_t>()[0] = 0;
         EXPECT_THROW(div_(a, b), std::runtime_error)
-            << "Int64 same-shape in-place div by zero must throw";
+            << "Int64 in-place true division must throw on " << device.to_string();
     }
-
-    // Int32 broadcast path (scalar zero divisor broadcast over a).
+    // Zero divisor is rejected through the same throw path.
     {
         auto a = full({4}, 12.0, DType::Int32, device);
         auto b = full({1}, 0.0, DType::Int32, device);
         EXPECT_THROW(div_(a, b), std::runtime_error)
-            << "Int32 broadcast in-place div by zero must throw";
+            << "Int32 in-place div by zero must throw on " << device.to_string();
     }
-
-    // A non-zero integer divisor must still succeed and compute correctly.
+    // Floating-point in-place division succeeds and computes correctly.
     {
-        auto a = full({4}, 12.0, DType::Int32, device);
-        auto b = full({4}, 4.0, DType::Int32, device);
+        auto a = full({4}, 12.0, DType::Float32, device);
+        auto b = full({4}, 4.0, DType::Float32, device);
         EXPECT_NO_THROW(div_(a, b));
         auto a_cpu = a.to(Device::cpu());
-        EXPECT_EQ(a_cpu.data<int32_t>()[0], 3) << "Failed on " << device.to_string();
+        EXPECT_NEAR(a_cpu.data<float>()[0], 3.0f, 1e-6f)
+            << "Failed on " << device.to_string();
     }
 }
 

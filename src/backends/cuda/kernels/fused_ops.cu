@@ -968,7 +968,8 @@ auto fused_layer_norm_cuda(
     const std::vector<int64_t>& normalized_shape,
     const Tensor& weight,
     const Tensor& bias,
-    float eps
+    float eps,
+    cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
     // Per docs/internals/attention-contract.md: mean/inv_std must be Float32
     // for FP16/BF16 inputs (rstd dynamic range exceeds FP16 max=65504 when
@@ -980,7 +981,7 @@ auto fused_layer_norm_cuda(
         auto wt_f32 = weight.to(DType::Float32);
         auto bs_f32 = bias.to(DType::Float32);
         auto [out_f32, mean_f32, inv_std_f32] = fused_layer_norm_cuda(
-            in_f32, normalized_shape, wt_f32, bs_f32, eps);
+            in_f32, normalized_shape, wt_f32, bs_f32, eps, stream);
         return std::make_tuple(out_f32.to(orig), mean_f32, inv_std_f32);
     }
 
@@ -999,7 +1000,7 @@ auto fused_layer_norm_cuda(
     int blocks = batch_size;
 
     if (input.dtype() == DType::Float32) {
-        fused_layer_norm_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(),
             weight.data<float>(),
             bias.data<float>(),
@@ -1012,7 +1013,7 @@ auto fused_layer_norm_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        fused_layer_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(),
             weight.data<double>(),
             bias.data<double>(),
@@ -1025,7 +1026,7 @@ auto fused_layer_norm_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
-        fused_layer_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<const __half*>(weight.data_ptr()),
             reinterpret_cast<const __half*>(bias.data_ptr()),
@@ -1038,7 +1039,7 @@ auto fused_layer_norm_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
-        fused_layer_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr()),
@@ -1155,7 +1156,8 @@ auto fused_layer_norm_backward_cuda(
     const Tensor& weight,
     const Tensor& mean,
     const Tensor& inv_std,
-    const std::vector<int64_t>& normalized_shape
+    const std::vector<int64_t>& normalized_shape,
+    cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
@@ -1173,7 +1175,7 @@ auto fused_layer_norm_backward_cuda(
         auto [gi, gw, gb] = fused_layer_norm_backward_cuda(
             grad_output.to(DType::Float32), input.to(DType::Float32),
             weight.to(DType::Float32), mean.to(DType::Float32),
-            inv_std.to(DType::Float32), normalized_shape);
+            inv_std.to(DType::Float32), normalized_shape, stream);
         return {gi.to(orig), gw.to(orig), gb.to(orig)};
     }
 
@@ -1186,7 +1188,7 @@ auto fused_layer_norm_backward_cuda(
     int blocks = batch_size;
 
     if (input.dtype() == DType::Float32) {
-        fused_layer_norm_backward_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_backward_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<float>(),
             input.data<float>(),
             weight.data<float>(),
@@ -1200,7 +1202,7 @@ auto fused_layer_norm_backward_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        fused_layer_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(),
             input.data<double>(),
             weight.data<double>(),
@@ -1214,7 +1216,7 @@ auto fused_layer_norm_backward_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
-        fused_layer_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<const __half*>(weight.data_ptr()),
@@ -1228,7 +1230,7 @@ auto fused_layer_norm_backward_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
-        fused_layer_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_layer_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
@@ -1393,7 +1395,8 @@ __global__ void fused_rms_norm_kernel(
 auto fused_rms_norm_cuda(
     const Tensor& input,
     const Tensor& weight,
-    float eps
+    float eps,
+    cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor> {
     // Wave E2: native F16/BF16 dispatch via Acc=F32 inside the kernel template.
     // RRMS tensor is allocated as F32 for half-precision inputs (rstd dynamic
@@ -1418,7 +1421,7 @@ auto fused_rms_norm_cuda(
     int blocks = batch_size;
 
     if (input.dtype() == DType::Float32) {
-        fused_rms_norm_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(),
             weight.data<float>(),
             output.data<float>(),
@@ -1429,7 +1432,7 @@ auto fused_rms_norm_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        fused_rms_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(),
             weight.data<double>(),
             output.data<double>(),
@@ -1440,7 +1443,7 @@ auto fused_rms_norm_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
-        fused_rms_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<const __half*>(weight.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
@@ -1451,7 +1454,7 @@ auto fused_rms_norm_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
-        fused_rms_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
@@ -1546,7 +1549,8 @@ auto fused_rms_norm_backward_cuda(
     const Tensor& grad_output,
     const Tensor& input,
     const Tensor& weight,
-    const Tensor& rrms
+    const Tensor& rrms,
+    cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor> {
     auto shape = input.shape();
     int64_t norm_size = shape.back();
@@ -1578,7 +1582,7 @@ auto fused_rms_norm_backward_cuda(
     int blocks = batch_size;
 
     if (input.dtype() == DType::Float32) {
-        fused_rms_norm_backward_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_backward_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<float>(),
             input.data<float>(),
             weight.data<float>(),
@@ -1590,7 +1594,7 @@ auto fused_rms_norm_backward_cuda(
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
-        fused_rms_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(),
             input.data<double>(),
             weight.data<double>(),
@@ -1605,7 +1609,7 @@ auto fused_rms_norm_backward_cuda(
         // H1 fix: native F16 dispatch. Acc=float per rms_acc_type<__half>.
         // Per forward contract, rrms is F32 and grad_weight is F32.
         // grad_output / input / weight / grad_input are __half.
-        fused_rms_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<const __half*>(weight.data_ptr()),
@@ -1618,7 +1622,7 @@ auto fused_rms_norm_backward_cuda(
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         // H1 fix: native BF16 dispatch, mirrors F16 path.
-        fused_rms_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+        fused_rms_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),

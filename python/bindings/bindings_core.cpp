@@ -262,6 +262,70 @@ bool variable_setitem_autograd(tenzor::Variable& self,
         return false;  // nothing to differentiate — plain in-place is correct
     }
 
+    // (0) Fast path for a 1-D integer FANCY index on dim 0 (e.g. v[[2,0]] = w or
+    //     v[idx_tensor] = w). The mask-based masked_scatter below fills selected
+    //     positions in DESTINATION row-major order, which disagrees with the
+    //     value's key (index) order for unsorted/duplicate integer indices — e.g.
+    //     v[[2,0]] = w would wrongly assign v[0]=w[0], v[2]=w[1]. index_copy
+    //     respects the index order and is differentiable. Bool masks / slices /
+    //     tuples still take the mask path below (correct for those).
+    {
+        std::optional<tenzor::Tensor> idx_opt;
+        if (py::isinstance<tenzor::Tensor>(key)) {
+            auto kt = key.cast<tenzor::Tensor>();
+            if (kt.ndim() == 1 &&
+                (kt.dtype() == tenzor::DType::Int64 || kt.dtype() == tenzor::DType::Int32)) {
+                idx_opt = kt.to(tenzor::DType::Int64);
+            }
+        } else if (py::isinstance<py::list>(key)) {
+            auto lst = key.cast<py::list>();
+            std::vector<int64_t> vals;
+            bool all_int = py::len(lst) > 0;
+            for (auto item : lst) {
+                if (!py::isinstance<py::int_>(item)) { all_int = false; break; }
+                vals.push_back(item.cast<int64_t>());
+            }
+            if (all_int) {
+                tenzor::Tensor it_t({static_cast<int64_t>(vals.size())},
+                                    tenzor::DType::Int64, self.tensor().device());
+                std::memcpy(it_t.data_ptr(), vals.data(), vals.size() * sizeof(int64_t));
+                idx_opt = it_t;
+            }
+        }
+        if (idx_opt.has_value()) {
+            tenzor::Tensor idx = *idx_opt;
+            int64_t n = idx.numel();
+            std::vector<int64_t> src_shape;
+            src_shape.push_back(n);
+            for (size_t d = 1; d < self.tensor().shape().size(); ++d) {
+                src_shape.push_back(self.tensor().shape()[d]);
+            }
+            tenzor::Variable base(self.tensor(), self.requires_grad());
+            base.set_grad_fn(self.grad_fn());
+            tenzor::Variable src;
+            if (py::isinstance<py::int_>(value) || py::isinstance<py::float_>(value)) {
+                tenzor::Tensor filled = tenzor::full(
+                    src_shape, value.cast<double>(), self.tensor().dtype(), self.tensor().device());
+                src = tenzor::Variable(filled, false);
+            } else {
+                tenzor::Variable value_var =
+                    py::isinstance<tenzor::Variable>(value)
+                        ? value.cast<tenzor::Variable>()
+                        : tenzor::Variable(value.cast<tenzor::Tensor>(), false);
+                // Broadcast the value to [n, *rest] so a single-row or scalar RHS
+                // lines up with the index selection order (and the graph flows).
+                tenzor::Tensor zeros_src = tenzor::zeros(
+                    src_shape, self.tensor().dtype(), self.tensor().device());
+                src = value_var + tenzor::Variable(zeros_src, false);
+            }
+            tenzor::Variable result = tenzor::index_copy(base, 0, idx, src);
+            self.set_data_view(result.tensor());
+            self.set_grad_fn(result.grad_fn());
+            self.set_requires_grad(result.requires_grad());
+            return true;
+        }
+    }
+
     // (1) Build a full-shape boolean mask of the selected positions by reusing
     //     the (non-differentiable) Tensor.__setitem__ machinery on a scratch
     //     tensor. This transparently handles every key form Tensor indexing
@@ -3385,7 +3449,15 @@ Returns:
                 if (src.numel() == 1) {
                     auto src_cast = (src.dtype() == dst.dtype()) ? src : src.to(dst.dtype());
                     auto dst_shape_vec = std::vector<int64_t>(dst_shape.begin(), dst_shape.end());
-                    auto expanded = tenzor::expand(src_cast, dst_shape_vec).contiguous();
+                    // Reshape the 1-element source to the destination rank before
+                    // expanding. expand() requires the target rank to be >= the
+                    // source rank, so a [1] source cannot expand onto a 0-dim
+                    // (scalar) destination such as t[0] on a 1-D tensor. Reshaping
+                    // to all-ones of the destination rank (empty for a scalar dst)
+                    // makes expand a pure broadcast in every case.
+                    std::vector<int64_t> ones_shape(dst_shape_vec.size(), 1);
+                    auto src_reshaped = tenzor::reshape(src_cast.contiguous(), ones_shape);
+                    auto expanded = tenzor::expand(src_reshaped, dst_shape_vec).contiguous();
                     if (dst.is_contiguous()) {
                         size_t bytes = dst.numel() * dst.dtype_size();
                         if (dst.device().type == tenzor::Device::Type::CPU) {
@@ -3648,35 +3720,45 @@ Returns:
                 }
                 case SetIndexKind::Tuple: {
                     target = self;
-                    int squeeze_count = 0;
+                    // `cur_dim` tracks the current PHYSICAL dimension of `target`.
+                    // Slicing keeps a dimension in place (it does not remove it),
+                    // and integer entries are squeezed only AFTER the whole loop,
+                    // so every int/slice entry advances the cursor by exactly one
+                    // physical dim, and an ellipsis advances it by the number of
+                    // dims it absorbs. (The previous `i - squeeze_count` formula
+                    // moved the cursor backwards onto the just-sliced size-1 dim,
+                    // making t[1,2] throw and t[1,:,2:4] hit the wrong axes.)
+                    int64_t cur_dim = 0;
                     std::vector<int64_t> squeeze_dims;
                     for (size_t i = 0; i < tuple_entries.size(); ++i) {
-                        size_t adjusted_dim = i - squeeze_count;
                         auto target_shape = target.shape();
-                        if (adjusted_dim >= target_shape.size()) {
-                            throw std::out_of_range("Too many indices");
-                        }
                         auto& entry = tuple_entries[i];
                         if (entry.is_ellipsis) {
                             int64_t remaining_indices = static_cast<int64_t>(tuple_entries.size()) - static_cast<int64_t>(i) - 1;
-                            int64_t remaining_dims = static_cast<int64_t>(target_shape.size()) - static_cast<int64_t>(adjusted_dim);
+                            int64_t remaining_dims = static_cast<int64_t>(target_shape.size()) - cur_dim;
                             int64_t dims_to_skip = remaining_dims - remaining_indices;
                             if (dims_to_skip < 0) {
                                 throw std::runtime_error("Invalid ellipsis: too many indices");
                             }
-                            squeeze_count += dims_to_skip;
+                            cur_dim += dims_to_skip;
                         } else if (entry.is_int) {
+                            if (cur_dim >= static_cast<int64_t>(target_shape.size())) {
+                                throw std::out_of_range("Too many indices");
+                            }
                             int64_t idx = entry.int_val;
-                            if (idx < 0) idx += target_shape[adjusted_dim];
-                            if (idx < 0 || idx >= target_shape[adjusted_dim]) {
+                            if (idx < 0) idx += target_shape[cur_dim];
+                            if (idx < 0 || idx >= target_shape[cur_dim]) {
                                 throw std::out_of_range("Index out of range");
                             }
-                            target = target.slice(adjusted_dim, idx, idx + 1);
-                            squeeze_dims.push_back(adjusted_dim);
-                            squeeze_count++;
+                            target = target.slice(cur_dim, idx, idx + 1);
+                            squeeze_dims.push_back(cur_dim);
+                            cur_dim++;
                         } else {
                             // Slice entry — resolve against current dim size
-                            int64_t dim_size = target_shape[adjusted_dim];
+                            if (cur_dim >= static_cast<int64_t>(target_shape.size())) {
+                                throw std::out_of_range("Too many indices");
+                            }
+                            int64_t dim_size = target_shape[cur_dim];
                             int64_t start = entry.start, stop = entry.stop;
                             if (start == std::numeric_limits<int64_t>::min()) start = 0;
                             else if (start < 0) start += dim_size;
@@ -3685,15 +3767,16 @@ Returns:
                             start = std::clamp(start, int64_t(0), dim_size);
                             stop = std::clamp(stop, int64_t(0), dim_size);
                             // Audit J11: stepped slice supported via Tensor::slice's step arg.
-                            target = target.slice(adjusted_dim, start, stop, entry.step);
+                            target = target.slice(cur_dim, start, stop, entry.step);
+                            cur_dim++;
                         }
                     }
-                    // Squeeze indexed dimensions (from back to front)
+                    // Squeeze the integer-indexed dimensions. Removing a higher
+                    // physical dim never shifts a lower one, so squeezing strictly
+                    // highest-first needs no index adjustment. squeeze_dims is built
+                    // ascending, so iterate it in reverse.
                     for (auto it = squeeze_dims.rbegin(); it != squeeze_dims.rend(); ++it) {
                         int64_t dim = *it;
-                        for (auto prev_it = it + 1; prev_it != squeeze_dims.rend(); ++prev_it) {
-                            if (*prev_it < dim) dim--;
-                        }
                         if (dim >= 0 && dim < target.ndim()) {
                             auto ts = target.shape();
                             if (ts[dim] == 1) target = target.squeeze(dim);

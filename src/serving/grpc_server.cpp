@@ -195,8 +195,11 @@ public:
             // absolute paths, real ".." traversal components, and symlink
             // escapes — while still accepting filenames that merely contain the
             // substring ".." (e.g. "model..v2.tz"). The gRPC server has no
-            // configured repository root, so it resolves relative to the
-            // current directory.
+            // configured repository root, so sanitize_repository_path now
+            // fails CLOSED (rejects) rather than silently resolving against the
+            // current working directory — a network client must not be able to
+            // load arbitrary files under the server's CWD. Configure a model
+            // repository root to enable LoadModel over gRPC.
             std::string mp;
             try {
                 mp = tenzor::serving::sanitize_repository_path(

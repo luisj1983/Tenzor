@@ -252,13 +252,18 @@ auto AsinBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
                            saved_tensors_[0].dtype(), saved_tensors_[0].device());
     Variable one_var(one_tensor, false);
     auto one_minus_sq = one_var - input_var * input_var;
-    // Clamp at Tensor level for numerical safety, wrap as constant
-    auto clamped = clamp_min(one_minus_sq.tensor(), 0.0);
-    auto eps = full(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
-                                          saved_tensors_[0].shape().end()),
-                    detail::dtype_epsilon(saved_tensors_[0].dtype()),
-                    saved_tensors_[0].dtype(), saved_tensors_[0].device());
-    auto denom = Variable(sqrt(add(clamped, eps)), false);
+    // Keep the denominator DIFFERENTIABLE so the second derivative retains the
+    // x/(1-x^2)^{3/2} term. The old code extracted .tensor() before clamping,
+    // detaching sqrt(1-x^2) from the graph and making gradgradcheck/HVP through
+    // asin silently too small. clamp(.,0,2) bounds only the min on the valid
+    // domain (1-x^2 <= 1, so 2 is never hit) and stays differentiable.
+    auto clamped = tenzor::clamp(one_minus_sq, 0.0, 2.0);
+    Variable eps_var(full(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
+                                               saved_tensors_[0].shape().end()),
+                          detail::dtype_epsilon(saved_tensors_[0].dtype()),
+                          saved_tensors_[0].dtype(), saved_tensors_[0].device()),
+                     false);
+    auto denom = tenzor::sqrt(clamped + eps_var);
     return {grad_outputs[0] / denom};
 }
 
@@ -292,13 +297,15 @@ auto AcosBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
                            saved_tensors_[0].dtype(), saved_tensors_[0].device());
     Variable one_var(one_tensor, false);
     auto one_minus_sq = one_var - input_var * input_var;
-    // Clamp at Tensor level for numerical safety, wrap as constant
-    auto clamped = clamp_min(one_minus_sq.tensor(), 0.0);
-    auto eps = full(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
-                                          saved_tensors_[0].shape().end()),
-                    detail::dtype_epsilon(saved_tensors_[0].dtype()),
-                    saved_tensors_[0].dtype(), saved_tensors_[0].device());
-    auto denom = Variable(sqrt(add(clamped, eps)), false);
+    // Keep the denominator DIFFERENTIABLE for a correct second derivative (see
+    // AsinBackward): clamp only the min on the valid domain, at Variable level.
+    auto clamped = tenzor::clamp(one_minus_sq, 0.0, 2.0);
+    Variable eps_var(full(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
+                                               saved_tensors_[0].shape().end()),
+                          detail::dtype_epsilon(saved_tensors_[0].dtype()),
+                          saved_tensors_[0].dtype(), saved_tensors_[0].device()),
+                     false);
+    auto denom = tenzor::sqrt(clamped + eps_var);
     return {tenzor::neg(grad_outputs[0] / denom)};
 }
 
@@ -551,7 +558,15 @@ auto BesselI1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector
     const auto& input = saved_tensors_[0];
     auto i0 = tenzor::bessel_i0(input);
     auto i1 = tenzor::bessel_i1(input);
-    auto i1_over_x = div(i1, input);
+    // I1'(x) = I0(x) - I1(x)/x. At x=0, I1(x)/x is 0/0 = NaN, but its limit is
+    // 1/2 (I1(x) ~ x/2 near 0), giving I1'(0) = I0(0) - 1/2 = 1/2. Mask the
+    // singular divisor BEFORE dividing (NaN*0 stays NaN), then substitute the
+    // removable-singularity value 0.5 at x==0.
+    auto zero = tenzor::zeros_like(input);
+    auto mask = tenzor::ne(input, zero);
+    auto safe_x = tenzor::where(mask, input, tenzor::ones_like(input));
+    auto i1_over_x = tenzor::where(mask, div(i1, safe_x),
+                                   mul(tenzor::ones_like(input), 0.5));
     return {mul(grad, sub(i0, i1_over_x))};
 }
 
@@ -561,7 +576,16 @@ auto BesselI1Backward::backward_with_variables(std::vector<Variable> grad_output
                                                 : Variable(saved_tensors_[0], false);
     auto i0 = tenzor::bessel_i0(input_var);
     auto i1 = tenzor::bessel_i1(input_var);
-    return {grad_outputs[0] * (i0 - i1 / input_var)};
+    // See backward(): I1(x)/x has a removable singularity at x=0 with limit 0.5.
+    // Build the (non-differentiable) mask/constants at the tensor level and wrap
+    // them as non-grad Variables (mirrors SincBackward::backward_with_variables).
+    auto zero_t = tenzor::zeros_like(input_var.tensor());
+    Variable mask_var(tenzor::ne(input_var.tensor(), zero_t), false);
+    Variable ones_var(tenzor::ones_like(input_var.tensor()), false);
+    Variable half_var(tenzor::mul(tenzor::ones_like(input_var.tensor()), 0.5), false);
+    auto safe_x = tenzor::where(mask_var, input_var, ones_var);
+    auto i1_over_x = tenzor::where(mask_var, i1 / safe_x, half_var);
+    return {grad_outputs[0] * (i0 - i1_over_x)};
 }
 
 // SincBackward implementation

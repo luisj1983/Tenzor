@@ -324,9 +324,9 @@ auto VulkanBackend::dispatchDropout(const Tensor& input, float p, bool training)
     uint32_t workgroups;
     if (is_float16 || is_bfloat16) {
         uint32_t num_pairs = (static_cast<uint32_t>(numel) + 1) / 2;
-        workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
+        workgroups = div_wg_checked(num_pairs, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     } else {
-        workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+        workgroups = div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -410,9 +410,9 @@ auto VulkanBackend::dispatchDropoutBackward(const Tensor& grad_output, const Ten
     uint32_t workgroups;
     if (is_float16 || is_bfloat16) {
         uint32_t num_pairs = (static_cast<uint32_t>(numel) + 1) / 2;
-        workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
+        workgroups = div_wg_checked(num_pairs, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     } else {
-        workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+        workgroups = div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 

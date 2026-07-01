@@ -404,7 +404,7 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
     // Calculate output shape
     std::vector<int64_t> out_shape(ndim);
     for (int64_t i = 0; i < ndim; ++i) {
-        out_shape[i] = shape[i] * repeats[i];
+        out_shape[i] = checked_mul_i64(shape[i], repeats[i], "repeat");
     }
 
     // For non-CPU devices, use dispatcher
@@ -521,7 +521,7 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
     // Calculate output shape
     std::vector<int64_t> out_shape(out_ndim);
     for (int64_t i = 0; i < out_ndim; ++i) {
-        out_shape[i] = padded_shape[i] * padded_reps[i];
+        out_shape[i] = checked_mul_i64(padded_shape[i], padded_reps[i], "tile");
     }
 
     // For non-CPU devices, use dispatcher. Serialize the right-aligned
@@ -681,7 +681,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
     // Calculate total output elements
     int64_t total_elements = 1;
     for (auto s : shape) {
-        total_elements *= s;
+        total_elements = checked_mul_i64(total_elements, s, "expand");
     }
 
     // Fill output by replicating input - dtype-aware implementation
@@ -1381,6 +1381,14 @@ auto rot90(const Tensor& input, int64_t k, std::vector<int64_t> dims) -> Tensor 
     int64_t ndim = static_cast<int64_t>(input.shape().size());
     int64_t d0 = dims[0] < 0 ? dims[0] + ndim : dims[0];
     int64_t d1 = dims[1] < 0 ? dims[1] + ndim : dims[1];
+    if (d0 < 0 || d0 >= ndim || d1 < 0 || d1 >= ndim) {
+        throw std::out_of_range("rot90: rotation dim out of range for input rank");
+    }
+    // Equal dims would silently degrade to repeated flips + no-op permutes rather
+    // than a rotation; PyTorch raises here.
+    if (d0 == d1) {
+        throw std::runtime_error("rot90: rotation dimensions must be different");
+    }
 
     k = ((k % 4) + 4) % 4; // normalize to [0, 3]
     if (k == 0) return input;

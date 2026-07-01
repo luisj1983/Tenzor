@@ -446,6 +446,13 @@ else()
 endif()
 
 # Optional: Intel oneDNN for optimized DNN primitives (Conv, BatchNorm, etc.)
+# TENZOR_USE_ONEDNN gates the ENTIRE block below. Previously the FindOneDNN
+# include ran unconditionally, so -DTENZOR_USE_ONEDNN=OFF (which the FATAL_ERROR
+# message advises when TBB is missing) was a silent no-op — the only real
+# escape was removing oneDNN from CMAKE_PREFIX_PATH. Now the option actually
+# disables discovery/linking.
+option(TENZOR_USE_ONEDNN "Use Intel oneDNN for optimized DNN primitives (Conv, BatchNorm, etc.)" ON)
+if(TENZOR_USE_ONEDNN)
 include(${PROJECT_SOURCE_DIR}/cmake/FindOneDNN.cmake OPTIONAL RESULT_VARIABLE ONEDNN_MODULE_FOUND)
 if(ONEDNN_MODULE_FOUND AND ONEDNN_FOUND)
     # oneDNN's pre-built libdnnl.so links libtbb.so.12 (release). During library
@@ -503,6 +510,9 @@ if(ONEDNN_MODULE_FOUND AND ONEDNN_FOUND)
     target_include_directories(tenzor_backend_cpu PRIVATE ${ONEDNN_INCLUDE_DIRS})
     target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_USE_ONEDNN)
     message(STATUS "CPU Backend: Intel oneDNN enabled for optimized DNN primitives")
+endif()
+else()
+    message(STATUS "CPU Backend: Intel oneDNN disabled (TENZOR_USE_ONEDNN=OFF)")
 endif()
 
 # Installation (FHS layout only; wheel installs are handled centrally in the

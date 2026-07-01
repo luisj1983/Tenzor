@@ -823,8 +823,7 @@ auto GlooBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
             (rank_ - step - 2 + 2 * world_size_) % world_size_;
 
         Tensor incoming = zeros_like(accum[recv_chunk_idx]);
-        send_tensor(accum[send_chunk_idx], send_rank);
-        recv_tensor(incoming, recv_rank);
+        sendrecv_concurrent(accum[send_chunk_idx], send_rank, incoming, recv_rank);
 
         // apply_reduce_op treats AVG as SUM (no world_size context); the final
         // average is applied below, matching reduce()/ring_all_reduce.
@@ -899,19 +898,18 @@ auto GlooBackend::finalize() -> void {
         server_socket_ = -1;
     }
 
-    // Clean up rendezvous store files. Must use the SAME per-user path that
-    // write_port_to_store() created — the previous hardcoded
-    // /tmp/tenzor_rendezvous_<port> (no uid, no XDG) never matched the write
-    // path, so rank files leaked and a later run on the same port could read a
-    // stale port and connect to a dead/wrong peer.
+    // Clean up ONLY this rank's own rendezvous file. The previous code did
+    // remove_all(store_path) on the shared per-port directory, which races
+    // catastrophically when a second rendezvous on the same port (e.g. the next
+    // test in a suite) has already started: one rank's finalize would delete the
+    // peer's freshly written rank file, making the peer time out ("Timeout
+    // waiting for rank N to write port"). Removing only our own file leaves the
+    // peer's files untouched; each rank is responsible for its own. Must use the
+    // SAME per-user path write_port_to_store() created.
     std::string store_path = rendezvous_store_path();
-    if (std::filesystem::exists(store_path)) {
-        try {
-            std::filesystem::remove_all(store_path);
-        } catch (...) {
-            // Ignore errors during cleanup
-        }
-    }
+    std::string own_rank_file = store_path + "/rank_" + std::to_string(rank_);
+    std::error_code ec;
+    std::filesystem::remove(own_rank_file, ec);  // ignore errors during cleanup
 
     initialized_ = false;
 }
@@ -1165,12 +1163,30 @@ auto GlooBackend::write_port_to_store(int rank, int port) -> void {
     ::chmod(store_path.c_str(), 0700);
 
     std::string rank_file = store_path + "/rank_" + std::to_string(rank);
-    std::ofstream file(rank_file);
-    if (!file) {
-        throw std::runtime_error("Failed to write to rendezvous store");
+    // Write atomically: a plain ofstream truncates then fills the file, so a
+    // reader on the peer rank that opens it mid-write reads an empty/partial file
+    // (observed as "Invalid port in rendezvous store"). Write to a unique temp
+    // file, then rename() it into place — rename is atomic on POSIX, so the
+    // reader always sees either the complete previous file or the complete new
+    // one, never a torn read.
+    std::string tmp_file = rank_file + ".tmp." + std::to_string(::getpid());
+    {
+        std::ofstream file(tmp_file, std::ios::trunc);
+        if (!file) {
+            throw std::runtime_error("Failed to write to rendezvous store");
+        }
+        file << port << std::endl;
+        file.flush();
+        if (!file) {
+            throw std::runtime_error("Failed to write to rendezvous store");
+        }
     }
-    file << port << std::endl;
-    file.close();
+    std::error_code ec;
+    std::filesystem::rename(tmp_file, rank_file, ec);
+    if (ec) {
+        std::filesystem::remove(tmp_file, ec);
+        throw std::runtime_error("Failed to commit rendezvous store file");
+    }
 }
 
 auto GlooBackend::read_port_from_store(int rank) -> int {
@@ -1281,20 +1297,53 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
 
     // Write the received data back into the caller's tensor. For a non-CPU
     // destination get_cpu_buffer produced a separate CPU staging copy, so move
-    // it to the original device. For a CPU destination get_cpu_buffer returns a
-    // NEW contiguous tensor whenever the caller's tensor was non-contiguous, so
-    // the bytes landed in that copy and must be reflected back; mirror
-    // ring_all_reduce's explicit CPU else-branch instead of silently dropping
-    // the data. (For a contiguous CPU tensor get_cpu_buffer shares storage and
-    // this is a no-op rebind.)
-    // Write the received data back THROUGH the caller's existing storage rather
-    // than rebinding the reference. A plain `tensor = cpu_tensor` rebinds the
-    // intrusive_ptr to a fresh impl, detaching any aliased Variable/view/grad
-    // (H6 aliasing hazard). zero_() += writes through the original storage,
-    // preserving aliases and reflecting a non-contiguous CPU staging copy back
-    // into the caller's strided tensor.
-    tensor.zero_();
-    tensor += cpu_tensor.to(tensor.device());
+    // it to the original device. For a non-contiguous CPU destination it produced
+    // a NEW contiguous copy, so the bytes landed there and must be reflected
+    // back. We write THROUGH the caller's existing storage (zero_() +=) rather
+    // than rebinding the reference (`tensor = cpu_tensor`), which would detach any
+    // aliased Variable/view/grad (H6 aliasing hazard).
+    //
+    // CRITICAL: get_cpu_buffer() returns the caller's tensor ITSELF for a
+    // contiguous CPU tensor, so conn->recv already wrote the received bytes
+    // directly into `tensor`'s storage and `cpu_tensor` aliases `tensor`. In that
+    // case `tensor.zero_()` would also zero `cpu_tensor`, and `tensor +=
+    // cpu_tensor` would add zero — destroying the just-received data (breaking
+    // every Gloo recv/broadcast/reduce/gather/scatter on the normal CPU path).
+    // Only write back when cpu_tensor is a DISTINCT buffer. Mirrors
+    // ring_all_reduce's aliases_caller guard.
+    const bool aliases_caller =
+        cpu_tensor.device().type == tensor.device().type &&
+        cpu_tensor.data_ptr() == tensor.data_ptr();
+    if (!aliases_caller) {
+        tensor.zero_();
+        tensor += cpu_tensor.to(tensor.device());
+    }
+}
+
+auto GlooBackend::sendrecv_concurrent(const Tensor& send_tensor_data, int send_peer,
+                                      Tensor& recv_tensor_data, int recv_peer) -> void {
+    // Send on a worker thread while this thread receives. send_peer and recv_peer
+    // are distinct connections, so the two operations are independent and run
+    // simultaneously without any ring-ordering deadlock (see header). Capture any
+    // send exception and re-throw after joining so failures are not lost.
+    std::exception_ptr send_err;
+    std::thread sender([&] {
+        try {
+            send_tensor(send_tensor_data, send_peer);
+        } catch (...) {
+            send_err = std::current_exception();
+        }
+    });
+    try {
+        recv_tensor(recv_tensor_data, recv_peer);
+    } catch (...) {
+        sender.join();
+        throw;
+    }
+    sender.join();
+    if (send_err) {
+        std::rethrow_exception(send_err);
+    }
 }
 
 auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceOp op) -> void {
@@ -1381,15 +1430,27 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
             // on different chunks, so a rank could skip its send while its
             // neighbour blocked on the matching recv → deadlock (and an
             // all_reduce/barrier on a tensor with numel < world_size hung the job).
+            // Build the outgoing chunk and receive buffer, then exchange them
+            // concurrently when both directions are active so a chunk larger than
+            // the socket buffer cannot deadlock the ring (send blocks until
+            // flushed). Guards stay independent per chunk so the ring stays paired.
+            Tensor send_chunk;
             if (send_count > 0) {
-                Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+                send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
                 std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * elem_size);
+            }
+            Tensor recv_chunk;
+            if (recv_count > 0) {
+                recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+            }
+            if (send_count > 0 && recv_count > 0) {
+                sendrecv_concurrent(send_chunk, send_rank, recv_chunk, recv_rank);
+            } else if (send_count > 0) {
                 send_tensor(send_chunk, send_rank);
+            } else if (recv_count > 0) {
+                recv_tensor(recv_chunk, recv_rank);
             }
             if (recv_count > 0) {
-                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
-                recv_tensor(recv_chunk, recv_rank);
-
                 // Reduce received data into our chunk
                 auto* recv_data = static_cast<scalar_t*>(recv_chunk.data_ptr());
                 for (size_t j = 0; j < recv_count; ++j) {
@@ -1434,14 +1495,25 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
             size_t recv_count = (recv_start < static_cast<size_t>(total_elements))
                 ? std::min(chunk_size, static_cast<size_t>(total_elements) - recv_start) : 0;
 
+            // Concurrent exchange (see reduce-scatter phase above) to avoid the
+            // send-before-recv ring deadlock on large chunks.
+            Tensor send_chunk;
             if (send_count > 0) {
-                Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+                send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
                 std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * elem_size);
+            }
+            Tensor recv_chunk;
+            if (recv_count > 0) {
+                recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+            }
+            if (send_count > 0 && recv_count > 0) {
+                sendrecv_concurrent(send_chunk, send_rank, recv_chunk, recv_rank);
+            } else if (send_count > 0) {
                 send_tensor(send_chunk, send_rank);
+            } else if (recv_count > 0) {
+                recv_tensor(recv_chunk, recv_rank);
             }
             if (recv_count > 0) {
-                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
-                recv_tensor(recv_chunk, recv_rank);
                 // Copy received data to our buffer
                 std::memcpy(data_ptr + recv_start, recv_chunk.data_ptr(), recv_count * elem_size);
             }

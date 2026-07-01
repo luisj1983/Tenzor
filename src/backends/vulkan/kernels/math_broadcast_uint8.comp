@@ -66,9 +66,23 @@ void main() {
             res = val_a * val_b;
             break;
         case 3: // div
-            res = val_a / val_b;
+            res = (val_b != 0u) ? (val_a / val_b) : 0u;  // guard divide-by-zero (was UB)
+            break;
+        case 24: // fmod (trunc-based)
+            res = (val_b != 0u) ? (val_a % val_b) : 0u;
+            break;
+        case 25: // remainder — for non-negative unsigned operands floored == truncated
+            res = (val_b != 0u) ? (val_a % val_b) : 0u;
+            break;
+        case 26: // minimum
+            res = (val_a < val_b) ? val_a : val_b;
+            break;
+        case 27: // maximum
+            res = (val_a > val_b) ? val_a : val_b;
             break;
         default:
+            // min/max/fmod/remainder (op 24-27) previously fell here and
+            // silently produced all-zeros; now handled above.
             res = 0u;
             break;
     }

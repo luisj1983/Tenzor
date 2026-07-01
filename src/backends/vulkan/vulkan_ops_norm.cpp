@@ -197,6 +197,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     if (is_f64_bn) {
         // f64: one workgroup per (batch, channel) pair
         uint32_t workgroups_bn = static_cast<uint32_t>(batch * channels);
+        checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups_bn);
         vkCmdDispatch(cmdBuffer, workgroups_bn, 1, 1);
     } else {
         // For packed half (F16/BF16), each thread processes a word (2 elements),
@@ -205,7 +206,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
             dispatch_count = (n_elements + 1) / 2;  // number of words
         }
-        uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     }
 
@@ -229,7 +230,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         vkCmdPushConstants(f16_gi_cmd, pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT,
                            0, static_cast<uint32_t>(sizeof(PushConstants)), &pc_pass1);
-        uint32_t f16_words = div_wg((n_elements + 1) / 2, devices_[device_id].workgroupSize);
+        uint32_t f16_words = div_wg_checked((n_elements + 1) / 2, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(f16_gi_cmd, f16_words, 1, 1);
         insertComputeOnlyBarrier(f16_gi_cmd);
         endSingleTimeCommands(f16_gi_cmd, device_id);
@@ -253,7 +254,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         vkCmdPushConstants(bf16_gi_cmd, bn_input_pipeline_bf16->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT,
                            0, static_cast<uint32_t>(offsetof(PushConstants, pass)), &push_constants);
-        uint32_t bf16_words = div_wg((n_elements + 1) / 2, devices_[device_id].workgroupSize);
+        uint32_t bf16_words = div_wg_checked((n_elements + 1) / 2, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(bf16_gi_cmd, bf16_words, 1, 1);
         insertComputeOnlyBarrier(bf16_gi_cmd);
         endSingleTimeCommands(bf16_gi_cmd, device_id);
@@ -276,7 +277,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         vkCmdPushConstants(bn_input_cmd, bn_input_pipeline->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT,
                            0, static_cast<uint32_t>(offsetof(PushConstants, pass)), &push_constants);
-        uint32_t bn_input_wg = div_wg(n_elements, devices_[device_id].workgroupSize);
+        uint32_t bn_input_wg = div_wg_checked(n_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(bn_input_cmd, bn_input_wg, 1, 1);
         insertComputeOnlyBarrier(bn_input_cmd);
         endSingleTimeCommands(bn_input_cmd, device_id);
@@ -360,7 +361,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         vkCmdPushConstants(gi_cmd, bn_input_pipeline_f64->layout(),
                            VK_SHADER_STAGE_COMPUTE_BIT,
                            0, static_cast<uint32_t>(offsetof(PushConstants, pass)), &push_constants);
-        uint32_t gi_wg = div_wg(n_elements, devices_[device_id].workgroupSize);
+        uint32_t gi_wg = div_wg_checked(n_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(gi_cmd, gi_wg, 1, 1);
         insertComputeOnlyBarrier(gi_cmd);
         endSingleTimeCommands(gi_cmd, device_id);
@@ -529,7 +530,7 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     if (input.dtype() == DType::Float16) {
         dispatch_count = (input.numel() + 1) / 2;  // number of words
     }
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(dispatch_count, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -642,7 +643,8 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
         uint32_t workgroups = (shader_name == "batchnorm2d_mean_var" ||
                                shader_name == "batchnorm2d_mean_var_f64")
             ? static_cast<uint32_t>(channels)
-            : static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
+            : static_cast<uint32_t>(div_wg_checked(input.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
+        checkSparseRowDispatch(device_id, "batchnorm", workgroups);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -702,7 +704,8 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
         uint32_t workgroups = (shader_name == "batchnorm2d_mean_var" ||
                                shader_name == "batchnorm2d_mean_var_f64")
             ? static_cast<uint32_t>(channels)
-            : static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
+            : static_cast<uint32_t>(div_wg_checked(input.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
+        checkSparseRowDispatch(device_id, "batchnorm", workgroups);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -851,6 +854,7 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
 
     // One workgroup per batch element
     uint32_t workgroups = static_cast<uint32_t>(batch_size);
+    checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1005,6 +1009,7 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
 
     // One workgroup per (batch, group) pair
     uint32_t workgroups = static_cast<uint32_t>(N * num_groups);
+    checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -1153,6 +1158,7 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
 
     // One workgroup per batch element
     uint32_t workgroups = static_cast<uint32_t>(batch_size);
+    checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -1340,6 +1346,7 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
 
     // One workgroup per (batch, group) pair
     uint32_t workgroups = static_cast<uint32_t>(num_wg_gn);
+    checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -1459,7 +1466,7 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
         push_constants.num_embeddings = static_cast<uint32_t>(num_embeddings);
 
         uint64_t total_threads = static_cast<uint64_t>(num_indices) * embedding_dim;
-        uint32_t workgroups = static_cast<uint32_t>(div_wg(total_threads, devices_[device_id].workgroupSize));
+        uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(total_threads, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -1519,7 +1526,7 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
 
     // Total threads = num_indices * embedding_dim (one per element)
     uint64_t total_threads = static_cast<uint64_t>(num_indices) * embedding_dim;
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(total_threads, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(total_threads, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -1623,6 +1630,7 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
 
     // One workgroup per batch element
     uint32_t workgroups = static_cast<uint32_t>(batch_size);
+    checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -1736,6 +1744,7 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
 
     // One workgroup per batch element
     uint32_t workgroups = static_cast<uint32_t>(batch_size);
+    checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);

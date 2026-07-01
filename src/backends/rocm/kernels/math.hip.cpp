@@ -5219,15 +5219,18 @@ __global__ void logical_xor_kernel_f16(const __half* a, const __half* b, uint8_t
 // Element-wise Min/Max Kernels
 // ============================================================================
 
+// NaN semantics: match the CPU reference (minimum_typed uses `a < b ? a : b`,
+// which propagates a NaN in the SECOND operand: min(5,NaN)=NaN). fminf/fmin
+// instead return the non-NaN operand, diverging on backend-parity tests.
 __global__ void minimum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = fminf(a[idx], b[idx]);
+        output[idx] = (a[idx] < b[idx]) ? a[idx] : b[idx];
     }
 }
 
 __global__ void minimum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = fmin(a[idx], b[idx]);
+        output[idx] = (a[idx] < b[idx]) ? a[idx] : b[idx];
     }
 }
 
@@ -5235,19 +5238,19 @@ __global__ void minimum_kernel_f16(const __half* a, const __half* b, __half* out
     HIP_KERNEL_LOOP(idx, n) {
         float va = tenzor::rocm::safe_h2f(a[idx]);
         float vb = tenzor::rocm::safe_h2f(b[idx]);
-        output[idx] = tenzor::rocm::safe_f2h(fminf(va, vb));
+        output[idx] = tenzor::rocm::safe_f2h((va < vb) ? va : vb);
     }
 }
 
 __global__ void maximum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = fmaxf(a[idx], b[idx]);
+        output[idx] = (a[idx] > b[idx]) ? a[idx] : b[idx];
     }
 }
 
 __global__ void maximum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = fmax(a[idx], b[idx]);
+        output[idx] = (a[idx] > b[idx]) ? a[idx] : b[idx];
     }
 }
 
@@ -5255,7 +5258,7 @@ __global__ void maximum_kernel_f16(const __half* a, const __half* b, __half* out
     HIP_KERNEL_LOOP(idx, n) {
         float va = tenzor::rocm::safe_h2f(a[idx]);
         float vb = tenzor::rocm::safe_h2f(b[idx]);
-        output[idx] = tenzor::rocm::safe_f2h(fmaxf(va, vb));
+        output[idx] = tenzor::rocm::safe_f2h((va > vb) ? va : vb);
     }
 }
 

@@ -28,6 +28,16 @@ inline void validate_index_dtype(const Tensor& index, const char* op) {
             std::string(dtype_name(index.dtype())));
     }
 }
+
+// Validate an index tensor and normalise it to Int64. Int32 indices are an
+// advertised, supported dtype, but every backend indexing kernel requires
+// Int64 (e.g. the CPU kernels assert dtype==Int64), so cast Int32->Int64 here —
+// matching index()/index_put() which already do this. Returns the tensor
+// unchanged when it is already Int64.
+inline Tensor validate_and_cast_index(const Tensor& index, const char* op) {
+    validate_index_dtype(index, op);
+    return (index.dtype() == DType::Int32) ? index.to(DType::Int64) : index;
+}
 }  // namespace
 
 auto slice(const Tensor& input, int64_t dim, int64_t start,
@@ -36,7 +46,7 @@ auto slice(const Tensor& input, int64_t dim, int64_t start,
 }
 
 auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
-    validate_index_dtype(index, "index_select");
+    const Tensor index_i = validate_and_cast_index(index, "index_select");
     // audit-6 BB.1: normalise negative dim at the dispatcher so backends that
     // index `shape[dim]` without their own normalisation don't underflow.
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
@@ -46,12 +56,12 @@ auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tens
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> inputs = {input, index};
+    std::vector<Tensor> inputs = {input, index_i};
     return dispatch(OpId::IndexSelect, inputs, attrs)[0];
 }
 
 auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
-    validate_index_dtype(index, "gather");
+    const Tensor index_i = validate_and_cast_index(index, "gather");
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
@@ -59,12 +69,12 @@ auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> inputs = {input, index};
+    std::vector<Tensor> inputs = {input, index_i};
     return dispatch(OpId::Gather, inputs, attrs)[0];
 }
 
 auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
-    validate_index_dtype(index, "scatter");
+    const Tensor index_i = validate_and_cast_index(index, "scatter");
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
@@ -72,12 +82,12 @@ auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> inputs = {input, index, src};
+    std::vector<Tensor> inputs = {input, index_i, src};
     return dispatch(OpId::Scatter, inputs, attrs)[0];
 }
 
 auto scatter_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
-    validate_index_dtype(index, "scatter_add");
+    const Tensor index_i = validate_and_cast_index(index, "scatter_add");
     // audit-6 BB.1: normalise negative dim at the dispatcher so backends that
     // index `shape[dim]` without their own normalisation don't underflow.
     // Mirrors select_scatter / slice_scatter (Y.6).
@@ -88,13 +98,14 @@ auto scatter_add(const Tensor& input, int64_t dim, const Tensor& index, const Te
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> inputs = {input, index, src};
+    std::vector<Tensor> inputs = {input, index_i, src};
     return dispatch(OpId::ScatterAdd, inputs, attrs)[0];
 }
 
 auto scatter_reduce(const Tensor& input, int64_t dim, const Tensor& index,
                     const Tensor& src, const std::string& reduce,
                     bool include_self) -> Tensor {
+    const Tensor index_i = validate_and_cast_index(index, "scatter_reduce");
     // audit-6 BB.1: same negative-dim normalisation as scatter_add above.
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
@@ -105,7 +116,7 @@ auto scatter_reduce(const Tensor& input, int64_t dim, const Tensor& index,
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Reduction, reduce);
     attrs.set(AttrKey::IncludeSelf, include_self);
-    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), src.contiguous()};
+    std::vector<Tensor> inputs = {input.contiguous(), index_i.contiguous(), src.contiguous()};
     return dispatch(OpId::ScatterReduce, inputs, attrs)[0];
 }
 
@@ -669,7 +680,7 @@ auto one_hot(const Tensor& input, int64_t num_classes) -> Tensor {
 }
 
 auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
-    validate_index_dtype(index, "index_add");
+    const Tensor index_i = validate_and_cast_index(index, "index_add");
     // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
@@ -678,12 +689,12 @@ auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tens
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), source.contiguous()};
+    std::vector<Tensor> inputs = {input.contiguous(), index_i.contiguous(), source.contiguous()};
     return dispatch(OpId::IndexAdd, inputs, attrs)[0];
 }
 
 auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
-    validate_index_dtype(index, "index_copy");
+    const Tensor index_i = validate_and_cast_index(index, "index_copy");
     // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
@@ -692,11 +703,15 @@ auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Ten
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), source.contiguous()};
+    std::vector<Tensor> inputs = {input.contiguous(), index_i.contiguous(), source.contiguous()};
     return dispatch(OpId::IndexCopy, inputs, attrs)[0];
 }
 
 auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, double value) -> Tensor {
+    // Validate + normalise the index dtype like the rest of the indexing family
+    // (previously omitted, producing a confusing data<int64_t>() DTypeException
+    // for Int32/Float indices instead of a clear message + Int32 support).
+    const Tensor index_i = validate_and_cast_index(index, "index_fill");
     // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
     if (dim < 0) dim += ndim;
@@ -706,7 +721,7 @@ auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, double va
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Value, value);
-    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous()};
+    std::vector<Tensor> inputs = {input.contiguous(), index_i.contiguous()};
     return dispatch(OpId::IndexFill, inputs, attrs)[0];
 }
 
@@ -753,7 +768,7 @@ auto index_reduce(const Tensor& input, int64_t dim, const Tensor& index,
 }
 
 auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor {
-    validate_index_dtype(indices, "take_along_dim");
+    const Tensor indices_i = validate_and_cast_index(indices, "take_along_dim");
     // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6) so
     // backends that index `shape[dim]` raw don't underflow on negative dim.
     const int64_t ndim = static_cast<int64_t>(input.shape().size());
@@ -763,7 +778,7 @@ auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> 
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
-    std::vector<Tensor> inputs = {input.contiguous(), indices.contiguous()};
+    std::vector<Tensor> inputs = {input.contiguous(), indices_i.contiguous()};
     return dispatch(OpId::TakeAlongDim, inputs, attrs)[0];
 }
 

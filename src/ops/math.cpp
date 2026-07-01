@@ -87,6 +87,21 @@ template<OpId Op>
 auto binary_op_promoted(const char* name, const Tensor& a, const Tensor& b) -> Tensor {
     auto [ap, bp] = promote_inputs(a, b);
     validate_broadcast_shapes(name, ap.shape(), bp.shape());
+    // Early return for empty-tensor broadcasts (e.g. {0,5} op {1,5} -> {0,5}).
+    // Backends can't derive the broadcast output shape from an empty operand,
+    // so compute it here — mirrors the add() fast path so sub/mul/div/min/max
+    // agree with add on empty broadcasts.
+    if (ap.numel() == 0 || bp.numel() == 0) {
+        auto sa = ap.shape(); auto sb = bp.shape();
+        size_t nd = std::max(sa.size(), sb.size());
+        std::vector<int64_t> out(nd);
+        for (size_t i = 0; i < nd; ++i) {
+            int64_t da = i < sa.size() ? sa[sa.size()-1-i] : 1;
+            int64_t db = i < sb.size() ? sb[sb.size()-1-i] : 1;
+            out[nd-1-i] = (da == 1) ? db : da;
+        }
+        return Tensor(out, ap.dtype(), ap.device());
+    }
     Tensor ac = ap.is_contiguous() ? ap : ap.contiguous();
     Tensor bc = bp.is_contiguous() ? bp : bp.contiguous();
     std::vector<Tensor> inputs = {ac, bc};
@@ -166,10 +181,16 @@ auto mul(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto div(const Tensor& a, const Tensor& b) -> Tensor {
-    // True division of two Bool tensors must promote to a float dtype (PyTorch
-    // `/` semantics). promote_types(Bool, Bool) == Bool, and the Div kernel would
-    // otherwise perform integer division on bool (`x / false` is UB / SIGFPE).
-    if (a.dtype() == DType::Bool && b.dtype() == DType::Bool) {
+    // True division must yield a floating-point result (PyTorch `/` semantics),
+    // consistent with the scalar path (dispatch_scalar_binop's promote_for_div).
+    // When BOTH operands are integer or Bool, promote_types stays integer/Bool
+    // and the Div kernel would truncate (integer division) or hit bool / false
+    // UB — e.g. div(Int32{3}, Int32{2}) must be 1.5, not 1. Promote to the
+    // default float dtype first. Mixed int/float inputs already promote to float
+    // via binary_op_promoted, so they need no special handling here.
+    const bool a_int = is_integer_type(a.dtype()) || a.dtype() == DType::Bool;
+    const bool b_int = is_integer_type(b.dtype()) || b.dtype() == DType::Bool;
+    if (a_int && b_int) {
         Tensor af = a.to(DType::Float32);
         Tensor bf = b.to(DType::Float32);
         return detail::binary_op_promoted<OpId::Div>("div", af, bf);
@@ -366,6 +387,15 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
 
 auto dot(const Tensor& a, const Tensor& b) -> Tensor {
     auto [ap, bp] = promote_inputs(a, b);
+    // dot_kernel is Float32/Float64-only across backends (see reduction.cpp). For
+    // half-precision floats, widen to Float32, compute, then narrow the scalar
+    // result back to the original dtype (matches the widen-narrow pattern used
+    // elsewhere for Float16/BFloat16).
+    if (ap.dtype() == DType::Float16 || ap.dtype() == DType::BFloat16) {
+        DType orig = ap.dtype();
+        Tensor r = dot(ap.to(DType::Float32), bp.to(DType::Float32));
+        return r.to(orig);
+    }
     auto ac = ap.is_contiguous() ? ap : ap.contiguous();
     auto bc = bp.is_contiguous() ? bp : bp.contiguous();
     std::vector<Tensor> inputs = {ac, bc};
@@ -613,12 +643,12 @@ auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
 auto div_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
     // True division produces a floating result; it cannot be stored back into a
-    // Bool tensor in place (matches PyTorch: "result type Float can't be cast to
-    // the desired output type Bool"). Also avoids bool/bool integer-divide UB.
-    if (self.dtype() == DType::Bool) {
+    // Bool or integer tensor in place (matches PyTorch: "result type Float can't
+    // be cast to the desired output type <Int>").
+    if (self.dtype() == DType::Bool || is_integer_type(self.dtype())) {
         throw std::runtime_error(
-            "div_: in-place true division is not supported for Bool tensors "
-            "(result type cannot be cast back to Bool)");
+            "div_: in-place true division is not supported for integer or Bool "
+            "tensors (result type Float cannot be cast back to the tensor dtype)");
     }
     validate_inplace_broadcast("div_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
@@ -796,11 +826,21 @@ auto searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool righ
 // ============================================================================
 
 auto gumbel_softmax(const Tensor& logits, double tau, bool hard, int64_t dim) -> Tensor {
+    // Normalise the (default -1) dim at the dispatch layer so every backend
+    // receives a non-negative axis; backends that index shape[dim] raw would
+    // otherwise underflow on the negative default. See cosine_similarity.
+    int64_t ndim = static_cast<int64_t>(logits.shape().size());
+    int64_t actual_dim = (dim < 0) ? dim + ndim : dim;
+    if (actual_dim < 0 || actual_dim >= ndim) {
+        throw std::invalid_argument(
+            "gumbel_softmax: dim " + std::to_string(dim) +
+            " is out of range for a rank-" + std::to_string(ndim) + " input");
+    }
     std::array<Tensor, 1> inputs = {logits};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Tau, tau);
     attrs.set(AttrKey::Hard, hard);
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, actual_dim);
     return dispatch<OpId::GumbelSoftmax>(inputs, attrs)[0];
 }
 
@@ -984,9 +1024,18 @@ auto cosine_similarity(const Tensor& x1, const Tensor& x2,
 }
 
 auto renorm(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tensor {
+    // Normalise the dim at the dispatch layer so every backend receives a
+    // non-negative axis (backends index shape[dim] raw). See cosine_similarity.
+    int64_t ndim = static_cast<int64_t>(input.shape().size());
+    int64_t actual_dim = (dim < 0) ? dim + ndim : dim;
+    if (actual_dim < 0 || actual_dim >= ndim) {
+        throw std::invalid_argument(
+            "renorm: dim " + std::to_string(dim) +
+            " is out of range for a rank-" + std::to_string(ndim) + " input");
+    }
     OpAttributes attrs;
     attrs.set(AttrKey::P, p);
-    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dim, actual_dim);
     attrs.set(AttrKey::MaxNorm, maxnorm);
     std::array<Tensor, 1> inputs = {input};
     return dispatch_single(OpId::Renorm, inputs, attrs);
@@ -999,6 +1048,20 @@ auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tens
     // smallest representable subnormal (collapsing to 0) and the diff/tol math
     // loses precision. In both cases promote to a higher floating compute dtype
     // (matching PyTorch's promote-to-compute-type) so tolerances are honoured.
+    // Complex inputs: compare complex magnitudes. abs(a-b) and abs(b) collapse to
+    // the real component dtype, so build the tolerance in that real dtype rather
+    // than casting the complex operands to Float32 (which would silently discard
+    // the imaginary part and report e.g. isclose(1+3j, 1+0j) == true).
+    if (is_complex_type(a.dtype()) || is_complex_type(b.dtype())) {
+        DType real_dt = (a.dtype() == DType::Complex128 || b.dtype() == DType::Complex128)
+                            ? DType::Float64 : DType::Float32;
+        auto diff = tenzor::abs(tenzor::sub(a, b));
+        auto tol = tenzor::add(
+            tenzor::full({1}, atol, real_dt, a.device()),
+            tenzor::mul(tenzor::full({1}, rtol, real_dt, a.device()),
+                        tenzor::abs(b)));
+        return tenzor::le(diff, tol);
+    }
     auto needs_promote = [](DType d) {
         return d != DType::Float32 && d != DType::Float64;
     };

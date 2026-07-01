@@ -52,16 +52,22 @@ void main() {
         if (idx < params.n) {
             float val = input_data[idx];
 
+            // NaN propagation (match CPU/PyTorch: a NaN in the input makes the
+            // arg-reduce return the index of the FIRST NaN). A NaN compares false
+            // in every ordering, so `val > best` / `val < best` would never pick
+            // it; detect NaN via `x != x`. Once this thread holds a NaN we keep
+            // it — the ascending scan means the first NaN in the stride wins.
+            bool best_is_nan = (best_value != best_value);
+            bool val_is_nan = (val != val);
+            bool take;
             if (params.op == 0) { // argmax
-                if (val > best_value) {
-                    best_value = val;
-                    best_index = int64_t(i);
-                }
+                take = !best_is_nan && (val_is_nan || val > best_value);
             } else { // argmin
-                if (val < best_value) {
-                    best_value = val;
-                    best_index = int64_t(i);
-                }
+                take = !best_is_nan && (val_is_nan || val < best_value);
+            }
+            if (take) {
+                best_value = val;
+                best_index = int64_t(i);
             }
         }
     }
@@ -84,15 +90,27 @@ void main() {
             // always losing, so it can never win a value tie.
             bool other_valid = other_idx >= 0;
             bool cur_valid = cur_idx >= 0;
+            float cur_val = shared_vals[tid];
+            bool other_nan = (other_val != other_val);
+            bool cur_nan = (cur_val != cur_val);
             bool take;
-            if (params.op == 0) { // argmax
-                take = other_valid && (!cur_valid ||
-                       other_val > shared_vals[tid] ||
-                       (other_val == shared_vals[tid] && other_idx < cur_idx));
-            } else { // argmin
-                take = other_valid && (!cur_valid ||
-                       other_val < shared_vals[tid] ||
-                       (other_val == shared_vals[tid] && other_idx < cur_idx));
+            if (!other_valid) {
+                take = false;
+            } else if (!cur_valid) {
+                take = true;
+            } else if (cur_nan) {
+                // Already hold a NaN: only a NaN with a LOWER source index beats
+                // it (first-NaN-index semantics).
+                take = other_nan && other_idx < cur_idx;
+            } else if (other_nan) {
+                // Other is NaN, current isn't -> NaN wins (propagates).
+                take = true;
+            } else if (params.op == 0) { // argmax, both non-NaN
+                take = other_val > cur_val ||
+                       (other_val == cur_val && other_idx < cur_idx);
+            } else { // argmin, both non-NaN
+                take = other_val < cur_val ||
+                       (other_val == cur_val && other_idx < cur_idx);
             }
             if (take) {
                 shared_vals[tid] = other_val;

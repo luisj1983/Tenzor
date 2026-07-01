@@ -124,7 +124,7 @@ auto VulkanBackend::dispatchSpecialMathUnary(const Tensor& input, uint32_t opcod
     uint32_t num_work_items = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16)
         ? (static_cast<uint32_t>(input.numel()) + 1) / 2
         : static_cast<uint32_t>(input.numel());
-    uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(num_work_items, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -189,8 +189,8 @@ auto VulkanBackend::dispatchSpecialMathBinary(const Tensor& a, const Tensor& b, 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BinaryPushConstants), &pc);
 
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(work_a.numel()),
-                                  devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(work_a.numel()),
+                                  devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -267,8 +267,8 @@ auto VulkanBackend::dispatchSpecialMathTernary(const Tensor& a, const Tensor& b,
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BinaryPushConstants), &pc);
 
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(compute_a.numel()),
-                                  devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(compute_a.numel()),
+                                  devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);

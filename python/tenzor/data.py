@@ -634,7 +634,15 @@ class WeightedRandomSampler(Sampler[int]):
         return iter(indices)
 
     def __len__(self) -> int:
-        return self.num_samples
+        if self.replacement:
+            return self.num_samples
+        # Without replacement, zero/negative-weight items are excluded from the
+        # candidate pool, so __iter__ yields at most min(num_samples,
+        # #positive-weight items). Reporting num_samples here made a DataLoader
+        # over-count batches / under-fill when there were fewer positive-weight
+        # items than requested.
+        num_positive = sum(1 for w in self.weights if w > 0.0)
+        return min(self.num_samples, num_positive)
 
 
 class SubsetRandomSampler(Sampler[int]):
@@ -824,6 +832,11 @@ class _PrefetchWorker:
         # contract where worker RNG is seeded with ``seed + worker_id``;
         # here worker_id is always 0.
         self._seed = seed
+        # Epoch counter so a persistent worker re-seeds with a DIFFERENT (but
+        # reproducible) value each epoch. Without this, reset_for_new_epoch
+        # restarted the worker with the same seed, reproducing identical random
+        # augmentation every epoch.
+        self._epoch = 0
         # Audit item Z.15: with num_workers=1 the fast path used a plain
         # thread but never invoked worker_init_fn nor populated
         # get_worker_info().  Multi-worker semantics now match for
@@ -841,15 +854,17 @@ class _PrefetchWorker:
         # Install a per-thread WorkerInfo so user code that calls
         # get_worker_info() inside the dataset iterator sees the same
         # contract as the multi-process path.
+        epoch_seed = self._seed + self._epoch
         _worker_info_tls.info = WorkerInfo(
             id=0,
             num_workers=1,
-            seed=self._seed,
+            seed=epoch_seed,
             dataset=self._dataset,
         )
         # Seed this worker's RNG to match the multi-process formula
-        # (seed + worker_id) with worker_id == 0.
-        random.seed(self._seed)
+        # (seed + worker_id) with worker_id == 0, varied by epoch so successive
+        # epochs produce different (but reproducible) augmentation.
+        random.seed(epoch_seed)
         try:
             if self._worker_init_fn is not None:
                 self._worker_init_fn(0)
@@ -930,7 +945,10 @@ class _PrefetchWorker:
             pass
         if self._thread.is_alive():
             self._thread.join(timeout=5.0)
-        # Reset state for the new epoch.
+        # Reset state for the new epoch. Advance the epoch counter so _run seeds
+        # the worker RNG with a fresh (seed + epoch) value — otherwise every
+        # epoch reproduced the same random augmentation sequence.
+        self._epoch += 1
         self._iterable = iterable
         if dataset is not None:
             self._dataset = dataset

@@ -7,13 +7,13 @@ import sys
 import os
 import numpy as np
 
-# Add build directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../build'))
+# Add build directory to path (tenzor_core.so lives under build/python/tenzor)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build', 'python', 'tenzor'))
 
 try:
-    import test_numpy_core as tz
+    import tenzor_core as tz
 except ImportError as e:
-    print(f"Error importing test_numpy_core: {e}")
+    print(f"Error importing tenzor_core: {e}")
     sys.exit(1)
 
 def test_basic_conversion():

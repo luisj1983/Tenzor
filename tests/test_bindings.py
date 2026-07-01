@@ -5,7 +5,11 @@ Tests all newly added bindings to ensure they work correctly.
 """
 
 import sys
+import os
 import numpy as np
+
+# tenzor_core.so lives under build/python/tenzor
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build', 'python', 'tenzor'))
 
 # Import tenzor
 try:

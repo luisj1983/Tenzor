@@ -147,7 +147,7 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch compute workgroups
-    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(total_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -298,7 +298,7 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = div_wg(transpose_input.numel(), devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(transpose_input.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -444,7 +444,7 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -708,7 +708,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(total_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier

@@ -797,20 +797,21 @@ auto batchnorm2d_mean_var(const Tensor& input,
                 input.data<double>(), mean.data<double>(), variance.data<double>(), N, C, H, W);
             CUDA_CHECK(cudaGetLastError());
         }
-    } else if (input.dtype() == DType::Float16) {
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         // Compute statistics in Float32 to avoid a half-precision accumulator,
         // which loses precision / overflows and diverges from the CPU/PyTorch
         // reference. This runs on the GPU (widen the input, reuse the Float32
-        // reduction path, narrow the resulting stats back to Float16) — it is NOT
-        // a CPU fallback. Mirrors the ROCm BatchNorm widen-narrow pattern.
+        // reduction path, narrow the resulting stats back to the half dtype) — it
+        // is NOT a CPU fallback. Mirrors the ROCm BatchNorm widen-narrow pattern.
+        // Handles BFloat16 identically to Float16.
         Tensor input_f32 = input.to(DType::Float32);
         Tensor mean_f32 = mean.to(DType::Float32);
         Tensor variance_f32 = variance.to(DType::Float32);
         batchnorm2d_mean_var(input_f32, mean_f32, variance_f32, stream);
-        mean = mean_f32.to(DType::Float16);
-        variance = variance_f32.to(DType::Float16);
+        mean = mean_f32.to(input.dtype());
+        variance = variance_f32.to(input.dtype());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 }
 
@@ -820,6 +821,16 @@ auto batchnorm2d_forward(const Tensor& input,
                          const Tensor& variance,
                          float epsilon,
                          cudaStream_t stream) -> Tensor {
+    // BFloat16 has no dedicated normalize kernel; widen to Float32 on-device,
+    // reuse the Float32 path, and narrow back (GPU widen-narrow, not a CPU
+    // fallback). Previously BFloat16 fell through to a runtime_error.
+    if (input.dtype() == DType::BFloat16) {
+        Tensor out32 = batchnorm2d_forward(input.to(DType::Float32),
+                                           mean.to(DType::Float32),
+                                           variance.to(DType::Float32),
+                                           epsilon, stream);
+        return out32.to(DType::BFloat16);
+    }
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -868,6 +879,14 @@ auto batchnorm2d_forward_affine(const Tensor& input,
                                 const Tensor& beta,
                                 float epsilon,
                                 cudaStream_t stream) -> Tensor {
+    // BFloat16: widen to Float32, reuse the Float32 path, narrow back (GPU
+    // widen-narrow, not a CPU fallback).
+    if (input.dtype() == DType::BFloat16) {
+        Tensor out32 = batchnorm2d_forward_affine(
+            input.to(DType::Float32), mean.to(DType::Float32), variance.to(DType::Float32),
+            gamma.to(DType::Float32), beta.to(DType::Float32), epsilon, stream);
+        return out32.to(DType::BFloat16);
+    }
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -921,6 +940,13 @@ auto batchnorm2d_forward_affine_optimized(const Tensor& input,
                                           const Tensor& beta,
                                           float epsilon,
                                           cudaStream_t stream) -> Tensor {
+    // BFloat16: widen to Float32, reuse the Float32 path, narrow back.
+    if (input.dtype() == DType::BFloat16) {
+        Tensor out32 = batchnorm2d_forward_affine_optimized(
+            input.to(DType::Float32), mean.to(DType::Float32), variance.to(DType::Float32),
+            gamma.to(DType::Float32), beta.to(DType::Float32), epsilon, stream);
+        return out32.to(DType::BFloat16);
+    }
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -1019,8 +1045,22 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean,
             reinterpret_cast<const __half*>(batch_var.data<Float16>()),
             momentum, C);
         CUDA_CHECK(cudaGetLastError());
+    } else if (running_mean.dtype() == DType::BFloat16) {
+        // BFloat16: widen to Float32, update, narrow the in-place running tensors
+        // back (GPU widen-narrow, not a CPU fallback).
+        Tensor rm32 = running_mean.to(DType::Float32);
+        Tensor rv32 = running_var.to(DType::Float32);
+        Tensor bm32 = batch_mean.to(DType::Float32);
+        Tensor bv32 = batch_var.to(DType::Float32);
+        batchnorm2d_update_running_stats(rm32, rv32, bm32, bv32, momentum, stream);
+        Tensor rm_bf = rm32.to(DType::BFloat16);
+        Tensor rv_bf = rv32.to(DType::BFloat16);
+        CUDA_CHECK(cudaMemcpyAsync(running_mean.data_ptr(), rm_bf.data_ptr(),
+                                   C * sizeof(BFloat16), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(running_var.data_ptr(), rv_bf.data_ptr(),
+                                   C * sizeof(BFloat16), cudaMemcpyDeviceToDevice, stream));
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 }
 
@@ -1032,6 +1072,15 @@ auto batchnorm2d_backward(const Tensor& grad_output,
                          const Tensor& gamma,
                          float epsilon,
                          cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor> {
+    // BFloat16: widen to Float32, reuse the Float32 path, narrow the three grads
+    // back (GPU widen-narrow, not a CPU fallback).
+    if (input.dtype() == DType::BFloat16) {
+        auto [gi, gg, gb] = batchnorm2d_backward(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            mean.to(DType::Float32), variance.to(DType::Float32),
+            gamma.to(DType::Float32), epsilon, stream);
+        return {gi.to(DType::BFloat16), gg.to(DType::BFloat16), gb.to(DType::BFloat16)};
+    }
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];

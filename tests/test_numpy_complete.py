@@ -5,8 +5,12 @@ Tests all 15 DTypes bidirectional conversion with zero-copy verification
 """
 
 import sys
+import os
 import numpy as np
 import pytest
+
+# tenzor_core.so lives under build/python/tenzor
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build', 'python', 'tenzor'))
 
 try:
     import tenzor_core as tz
@@ -54,14 +58,18 @@ class TestNumpyInteropComplete:
         assert np.allclose(np_arr, np_arr2, rtol=1e-3)
 
     def test_bfloat16_representation(self):
-        """Test BFloat16 as uint16 representation"""
-        # BFloat16 tensors convert to uint16 in NumPy (bit representation)
-        # This is expected since NumPy doesn't natively support bfloat16
+        """Test BFloat16 NumPy representation"""
+        # When the ml_dtypes package is present, the binding exports a native
+        # ml_dtypes.bfloat16 array; otherwise it falls back to the uint16 bit
+        # representation (NumPy has no built-in bfloat16). Accept either.
         tensor = tz.Tensor([2, 3], tz.dtype.bfloat16, tz.Device.cpu())
         np_arr = tensor.numpy()
 
-        # Should be uint16 (bit representation of bfloat16)
-        assert np_arr.dtype == np.uint16
+        try:
+            import ml_dtypes
+            assert np_arr.dtype == ml_dtypes.bfloat16 or np_arr.dtype == np.uint16
+        except ImportError:
+            assert np_arr.dtype == np.uint16
         assert np_arr.shape == (2, 3)
 
     def test_int8_conversion(self):
@@ -257,15 +265,21 @@ class TestMemorySafety:
         assert np_arr.shape == (50, 50)
 
     def test_numpy_lifetime_after_tensor_deletion(self):
-        """Tensor deletion shouldn't affect NumPy array (copy case)"""
+        """from_numpy is zero-copy (shared buffer); the array stays valid after
+        the tensor is deleted."""
         np_arr = np.ones((30, 30), dtype=np.float32)
         tensor = tz.Tensor.from_numpy(np_arr)
 
-        # Modify tensor
+        # from_numpy shares the NumPy buffer (matches torch.from_numpy), so a
+        # write through the tensor is visible in the original array.
         tensor.fill_(99.0)
+        assert np_arr[0, 0] == 99.0
 
-        # Original NumPy array should be unchanged (copy was made)
-        assert np_arr[0, 0] == 1.0
+        # The NumPy array owns the buffer, so deleting the tensor view must not
+        # invalidate it (no dangling free / use-after-free).
+        del tensor
+        assert np_arr[0, 0] == 99.0
+        assert np_arr.shape == (30, 30)
 
 
 class TestDTypeMapping:

@@ -254,7 +254,10 @@ jobs:
     name: GPU Smoke (self-hosted)
     runs-on: [self-hosted, gpu, linux]
     needs: build-and-smoke
-    if: github.event_name == 'pull_request'
+    # SECURITY: only run on PRs from the SAME repository, never forks. A
+    # self-hosted runner executes the PR's build/test code with access to the
+    # host; an unguarded fork PR would be arbitrary-code-execution on our runner.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -836,7 +839,13 @@ jobs:
     name: GPU Backend Parity (self-hosted)
     runs-on: [self-hosted, linux, gpu]
     needs: build-and-smoke
-    if: github.event_name == 'pull_request' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    # SECURITY: for the pull_request trigger, only run on SAME-repo PRs (never
+    # forks) — a fork PR would execute attacker code on the self-hosted GPU
+    # runner. schedule/main-ref triggers are inherently trusted.
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || github.event_name == 'schedule'
+      || github.ref == 'refs/heads/main'
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -980,13 +989,14 @@ jobs:
             -DTENZOR_BUILD_TESTS=OFF \
             -DTENZOR_BUILD_PYTHON=OFF
           ninja -C build fuzz_deserialize fuzz_safetensors fuzz_tensor_creation \
-            fuzz_reshape fuzz_autograd_backward fuzz_matmul_shapes fuzz_type_promotion
+            fuzz_reshape fuzz_autograd_backward fuzz_matmul_shapes fuzz_type_promotion \
+            fuzz_onnx_importer
 
       - name: Run fuzz targets (60s each)
         run: |
           for target in fuzz_deserialize fuzz_safetensors fuzz_tensor_creation \
                         fuzz_reshape fuzz_autograd_backward fuzz_matmul_shapes \
-                        fuzz_type_promotion; do
+                        fuzz_type_promotion fuzz_onnx_importer; do
             echo "=== Fuzzing $target ==="
             timeout 70 ./build/fuzz/$target -max_total_time=60 fuzz/corpus/${target#fuzz_}/ 2>&1 || true
           done

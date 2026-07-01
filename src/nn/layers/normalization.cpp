@@ -1,4 +1,5 @@
 #include "tenzor/nn/layers/normalization.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -2251,27 +2252,34 @@ public:
         // Reshape grad_output from 3D to 4D
         Tensor grad_output_4d = grad_output_3d.reshape({N, C, L_, 1});
 
+        // The forward saves mean/rstd/weight at Float32 for a half input, so the
+        // saved operands have mixed dtypes; the backward kernel branches on the
+        // input dtype and would call weight.data<half>() on a float tensor.
+        // Upcast every operand to one compute dtype (float for half), then narrow
+        // the grads back below.
+        const DType compute_dt =
+            (original_dtype == DType::Float16 || original_dtype == DType::BFloat16)
+                ? DType::Float32 : original_dtype;
+
         std::vector<Tensor> inputs_vec;
         if (original_device.type != Device::Type::CPU) {
-            inputs_vec = {grad_output_4d.contiguous(), input_4d.contiguous(),
-                         weight.contiguous(), mean.contiguous(), rstd.contiguous()};
+            inputs_vec = {grad_output_4d.to(compute_dt).contiguous(), input_4d.to(compute_dt).contiguous(),
+                         weight.to(compute_dt).contiguous(), mean.to(compute_dt).contiguous(), rstd.to(compute_dt).contiguous()};
         } else {
-            inputs_vec = {grad_output_4d.to(Device::cpu()).contiguous(),
-                         input_4d.to(Device::cpu()).contiguous(),
-                         weight.to(Device::cpu()).contiguous(),
-                         mean.to(Device::cpu()).contiguous(),
-                         rstd.to(Device::cpu()).contiguous()};
+            inputs_vec = {grad_output_4d.to(Device::cpu()).to(compute_dt).contiguous(),
+                         input_4d.to(Device::cpu()).to(compute_dt).contiguous(),
+                         weight.to(Device::cpu()).to(compute_dt).contiguous(),
+                         mean.to(Device::cpu()).to(compute_dt).contiguous(),
+                         rstd.to(Device::cpu()).to(compute_dt).contiguous()};
         }
         auto results = dispatch<OpId::InstanceNormBackward>(inputs_vec);
 
-        // Reshape grad_input from 4D back to 3D
+        // Reshape grad_input from 4D back to 3D, then narrow all grads back to
+        // the original dtype/device (results are in compute_dt after the upcast).
         Tensor grad_input = results[0].reshape({N, C, L_});
-        if (original_device.type == Device::Type::CPU) {
-            return {grad_input.to(original_dtype).to(original_device).contiguous(),
-                    results[1].to(original_dtype).to(original_device).contiguous(),
-                    results[2].to(original_dtype).to(original_device).contiguous()};
-        }
-        return {grad_input, results[1], results[2]};
+        return {grad_input.to(original_dtype).to(original_device).contiguous(),
+                results[1].to(original_dtype).to(original_device).contiguous(),
+                results[2].to(original_dtype).to(original_device).contiguous()};
     }
 
     auto name() const -> std::string override { return "InstanceNorm1dBackwardFn"; }
@@ -2374,26 +2382,41 @@ public:
         auto original_device = grad_output_orig.device();
         auto original_dtype = grad_output_orig.dtype();
 
+        // The forward saves mean/rstd/weight at Float32 for a Float16/BFloat16
+        // input (for stat precision), so the saved tensors have MIXED dtypes
+        // (input/grad_output half; weight/stats float). The backend backward
+        // kernel branches on the input dtype and reads every operand at that
+        // dtype, so a half input + float weight makes it call weight.data<half>()
+        // on a float tensor and throw. Upcast all operands to a single compute
+        // dtype (float for half inputs), dispatch, then narrow the grads back to
+        // the original dtype.
+        const DType compute_dt =
+            (original_dtype == DType::Float16 || original_dtype == DType::BFloat16)
+                ? DType::Float32 : original_dtype;
+
         // GPU fast path
         if (original_device.type != Device::Type::CPU) {
-            auto go = grad_output_orig.contiguous();
-            auto inp = input_orig.contiguous();
-            auto wt = weight_orig.contiguous();
-            auto mn = mean_orig.contiguous();
-            auto rs = rstd_orig.contiguous();
+            auto go = grad_output_orig.to(compute_dt).contiguous();
+            auto inp = input_orig.to(compute_dt).contiguous();
+            auto wt = weight_orig.to(compute_dt).contiguous();
+            auto mn = mean_orig.to(compute_dt).contiguous();
+            auto rs = rstd_orig.to(compute_dt).contiguous();
 
             // InstanceNormBackward: inputs [grad_output, input, weight, mean, rstd]
             std::vector<Tensor> inputs_vec = {go, inp, wt, mn, rs};
             auto results = dispatch<OpId::InstanceNormBackward>(inputs_vec);
+            for (auto& r : results) {
+                r = r.to(original_dtype).to(original_device).contiguous();
+            }
             return results;
         }
 
         // CPU path: dispatch to kernel
-        auto go = grad_output_orig.to(Device::cpu()).contiguous();
-        auto inp = input_orig.to(Device::cpu()).contiguous();
-        auto mn = mean_orig.to(Device::cpu()).contiguous();
-        auto rs = rstd_orig.to(Device::cpu()).contiguous();
-        auto wt = weight_orig.to(Device::cpu()).contiguous();
+        auto go = grad_output_orig.to(Device::cpu()).to(compute_dt).contiguous();
+        auto inp = input_orig.to(Device::cpu()).to(compute_dt).contiguous();
+        auto mn = mean_orig.to(Device::cpu()).to(compute_dt).contiguous();
+        auto rs = rstd_orig.to(Device::cpu()).to(compute_dt).contiguous();
+        auto wt = weight_orig.to(Device::cpu()).to(compute_dt).contiguous();
 
         // InstanceNormBackward: inputs [grad_output, input, weight, mean, rstd]
         std::vector<Tensor> inputs_vec = {go, inp, wt, mn, rs};
@@ -2469,6 +2492,24 @@ public:
 
         // grad_bias = sum(grad_output, dims=[0, spatial_dims]) -> [C]
         Variable grad_bias_var = sum(sum(grad_out_r, 0, false), 1, false);  // [C]
+
+        // Narrow the grads back to the grad_output (= original input/param)
+        // dtype. The saved mean/rstd/weight are stored at Float32 for a
+        // Float16/BFloat16 input, so the Variable ops above promote grad_input
+        // (and grad_weight/bias) to Float32; without this narrow, backward
+        // returns a Float32 gradient for a Float16 tensor (dtype mismatch on
+        // accumulation). Differentiable, so create_graph=true still works.
+        // Mirrors the Tensor-level backward() which narrows to original_dtype.
+        DType out_dtype = grad_out.tensor().dtype();
+        if (grad_input.tensor().dtype() != out_dtype) {
+            grad_input = tenzor::nn::variable_cast(grad_input, out_dtype);
+        }
+        if (grad_weight_var.tensor().dtype() != out_dtype) {
+            grad_weight_var = tenzor::nn::variable_cast(grad_weight_var, out_dtype);
+        }
+        if (grad_bias_var.tensor().dtype() != out_dtype) {
+            grad_bias_var = tenzor::nn::variable_cast(grad_bias_var, out_dtype);
+        }
 
         std::vector<Variable> result;
         result.push_back(std::move(grad_input));

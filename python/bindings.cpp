@@ -205,8 +205,11 @@ PYBIND11_MODULE(tenzor_core, m) {
         m, "AutogradError", py_tenzor_error.ptr());
     py::register_exception<tenzor::BackendException>(
         m, "BackendError", py_tenzor_error.ptr());
+    // Map to Python's builtin MemoryError (like the IndexError/ValueError/...
+    // parity exceptions below) so `except MemoryError:` catches an OOM, instead
+    // of basing it on TenzorError (which only `except RuntimeError:` would catch).
     py::register_exception<tenzor::MemoryException>(
-        m, "MemoryError", py_tenzor_error.ptr());
+        m, "MemoryError", PyExc_MemoryError);
     // 5th-audit B'7: register every TenzorException-derived class that ships
     // in the public API. Pre-fix `TensorBoardException` was missing and would
     // surface only through the catch-all translator below, losing its

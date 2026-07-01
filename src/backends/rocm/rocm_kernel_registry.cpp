@@ -748,7 +748,8 @@ namespace rocm {
     auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor;
     auto fused_gelu_hip(const Tensor& input) -> Tensor;
     auto fused_layer_norm_hip(const Tensor& input, const std::vector<int64_t>& normalized_shape,
-                              const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+                              const Tensor& weight, const Tensor& bias, float eps,
+                              hipStream_t stream = nullptr) -> Tensor;
     auto fused_conv_batchnorm_relu_hip(const Tensor& conv_output, const Tensor& running_mean,
                                        const Tensor& running_var, const Tensor& weight,
                                        const Tensor& bias, float eps) -> Tensor;
@@ -757,7 +758,8 @@ namespace rocm {
                              float dropout_p = 0.0f, uint32_t rng_seed = 0u) -> std::pair<Tensor, Tensor>;
     auto flash_attention_backward_hip(
         const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
-        const Tensor& O, const Tensor& L, float scale, bool causal) -> std::vector<Tensor>;
+        const Tensor& O, const Tensor& L, float scale, bool causal,
+        float dropout_p = 0.0f, uint32_t rng_seed = 0u) -> std::vector<Tensor>;
 
     // Audit A.11 — native Float64 FlashAttention (flash_attention_f64.hip.cpp).
     // audit V.16: stream is now plumbed so workspace zeroing and kernel launches
@@ -772,7 +774,7 @@ namespace rocm {
 
     // Fused RMSNorm
     auto fused_rms_norm_hip(const Tensor& input, const Tensor& weight,
-                            float eps) -> std::pair<Tensor, Tensor>;
+                            float eps, hipStream_t stream = nullptr) -> std::pair<Tensor, Tensor>;
 
     // Fused LayerNorm Backward
     auto fused_layer_norm_backward_hip(const Tensor& grad_output, const Tensor& input,
@@ -2128,13 +2130,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::RMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        auto [output, rrms] = rocm::fused_rms_norm_hip(inputs[0], inputs[1], eps);
+        auto [output, rrms] = rocm::fused_rms_norm_hip(inputs[0], inputs[1], eps, get_hip_stream(attrs));
         return std::vector<Tensor>{output, rrms};
     });
 
     table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        auto [output, rrms] = rocm::fused_rms_norm_hip(inputs[0], inputs[1], eps);
+        auto [output, rrms] = rocm::fused_rms_norm_hip(inputs[0], inputs[1], eps, get_hip_stream(attrs));
         return std::vector<Tensor>{output, rrms};
     });
 
@@ -2367,6 +2369,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             // Falls back to [dO, Q, K, V, O] (no L) for composed-ops path
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
+            // Forward dropout probability + Philox seed, so the backward can
+            // re-apply the SAME dropout mask when recomputing the attention
+            // weights (else dQ/dK/dV are computed against undropped weights).
+            float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
+            uint32_t rng_seed = static_cast<uint32_t>(attrs.get_int(AttrKey::Seed, 0));
 
             const Tensor& dO = inputs[0];
             const Tensor& Q = inputs[1];
@@ -2381,7 +2388,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
             if (has_lse && fused_supported && Q.dtype() == DType::Float32) {
                 const Tensor& L = inputs[5];
-                return rocm::flash_attention_backward_hip(dO, Q, K, V, O, L, scale, causal);
+                return rocm::flash_attention_backward_hip(dO, Q, K, V, O, L, scale, causal, dropout_p, rng_seed);
             }
 
             // Audit A.11 — native Float64 backward. Recomputes per-row LSE
@@ -3261,10 +3268,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         Tensor output = rocm::batchnorm2d_forward_affine(
             inputs[0], mean, variance, inputs[3], inputs[4], epsilon, stream);
 
-        // Step 3: Update running stats
+        // Step 3: Update running stats. Running variance uses the UNBIASED
+        // (Bessel-corrected) estimate to match PyTorch / the nn-layer path;
+        // normalization above uses the biased var.
         Tensor running_mean = inputs[1];
         Tensor running_var = inputs[2];
-        rocm::batchnorm2d_update_running_stats(running_mean, running_var, mean, variance, momentum, stream);
+        int64_t bn_count = shape[0] * shape[2] * shape[3];
+        Tensor running_var_in = variance;
+        if (bn_count >= 2) {
+            running_var_in = tenzor::mul(
+                variance, static_cast<double>(bn_count) / static_cast<double>(bn_count - 1));
+        }
+        rocm::batchnorm2d_update_running_stats(running_mean, running_var, mean, running_var_in, momentum, stream);
 
         return std::vector<Tensor>{output, mean, variance, running_mean, running_var};
     });

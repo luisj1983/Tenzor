@@ -52,7 +52,7 @@ auto VulkanBackend::dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, i
     push_constants.padding = 0;
 
     uint64_t total = static_cast<uint64_t>(N) * M;
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(total, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -189,7 +189,7 @@ auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float
         struct { uint32_t N; } compact_pc;
         compact_pc.N = static_cast<uint32_t>(N);
 
-        uint32_t compact_wg = div_wg(static_cast<uint64_t>(N), devices_[device_id].workgroupSize);
+        uint32_t compact_wg = div_wg_checked(static_cast<uint64_t>(N), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         VkCommandBuffer compact_cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(compact_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compact_pipeline->pipeline());
         vkCmdBindDescriptorSets(compact_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -278,7 +278,7 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
     push_constants.num_classes = static_cast<uint32_t>(num_classes);
 
     uint64_t total = static_cast<uint64_t>(batch_size) * num_classes;
-    uint32_t workgroups = static_cast<uint32_t>(div_wg(total, devices_[device_id].workgroupSize));
+    uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -308,7 +308,7 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
 
     int32_t device_id = input.device().index;
     uint32_t n = static_cast<uint32_t>(numel);
-    uint32_t n_workgroups = div_wg(n, devices_[device_id].workgroupSize);
+    uint32_t n_workgroups = div_wg_checked(n, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
 
     // Ensure input is Float32 for the nonzero_count shader
     Tensor input_f32 = (input.dtype() == DType::Float32) ? input : input.to(DType::Float32);
@@ -499,7 +499,7 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
                            cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
     vkCmdPushConstants(cast_cmd, cast_pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cast_pc), &cast_pc);
-    vkCmdDispatch(cast_cmd, div_wg(total_elements, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cast_cmd, div_wg_checked(total_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeBarrier(cast_cmd);
     endSingleTimeCommands(cast_cmd, device_id);
 

@@ -264,6 +264,21 @@ private:
     auto recv_tensor(Tensor& tensor, int peer_rank) -> void;
 
     /**
+     * @brief Concurrently send to one peer and receive from another.
+     *
+     * Used by the ring collectives, where each rank sends to (rank+1) and
+     * receives from (rank-1) over DIFFERENT connections. send_tensor() blocks
+     * until every byte is flushed; if every rank sends before it receives, a
+     * chunk larger than the OS socket send buffer makes all ranks block in their
+     * send simultaneously — a ring deadlock. Running the send on a separate
+     * thread while this thread receives guarantees each socket always has one
+     * side reading while the other writes. Exceptions from the send thread are
+     * re-thrown on the caller.
+     */
+    auto sendrecv_concurrent(const Tensor& send_tensor_data, int send_peer,
+                             Tensor& recv_tensor_data, int recv_peer) -> void;
+
+    /**
      * @brief Apply reduction operation to two tensors.
      */
     auto apply_reduce_op(Tensor& result, const Tensor& operand, ReduceOp op) -> void;

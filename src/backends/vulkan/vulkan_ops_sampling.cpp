@@ -119,7 +119,7 @@ auto VulkanBackend::dispatchBernoulli(const Tensor& probs) -> Tensor {
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(BernoulliPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -164,7 +164,7 @@ auto VulkanBackend::dispatchBucketize(const Tensor& input, const Tensor& boundar
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(BucketizePC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -227,7 +227,7 @@ auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) 
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(CDistPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -323,7 +323,7 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
                                    hist_pipeline->layout(), 0, 1, &ds, 0, nullptr);
             vkCmdPushConstants(cmd, hist_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                               0, sizeof(hist_pc), &hist_pc);
-            uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+            uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
             vkCmdDispatch(cmd, workgroups, 1, 1);
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
@@ -346,8 +346,8 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
                                    edge_pipeline->layout(), 0, 1, &ds, 0, nullptr);
             vkCmdPushConstants(cmd, edge_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                               0, sizeof(edge_pc), &edge_pc);
-            uint32_t workgroups = div_wg(static_cast<uint32_t>(bins + 1),
-                                          devices_[device_id].workgroupSize);
+            uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(bins + 1),
+                                          devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
             vkCmdDispatch(cmd, workgroups, 1, 1);
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
@@ -380,7 +380,7 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
                                    pipeline->layout(), 0, 1, &ds, 0, nullptr);
             vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                               0, sizeof(HistogramPC), &pc);
-            uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+            uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
             vkCmdDispatch(cmd, workgroups, 1, 1);
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
@@ -485,7 +485,7 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
                                pack_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pack_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(pack_pc), &pack_pc);
-        uint32_t workgroups = div_wg(static_cast<uint32_t>(D), devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(D), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -532,8 +532,8 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
                                    edge_pipeline->layout(), 0, 1, &ds, 0, nullptr);
             vkCmdPushConstants(cmd, edge_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                               0, sizeof(edge_pc), &edge_pc);
-            uint32_t workgroups = div_wg(static_cast<uint32_t>(nb + 1),
-                                          devices_[device_id].workgroupSize);
+            uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(nb + 1),
+                                          devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
             vkCmdDispatch(cmd, workgroups, 1, 1);
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
@@ -591,7 +591,7 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(HistogramddPC), &pc);
-        uint32_t workgroups = div_wg(static_cast<uint32_t>(N), devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(N), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -631,8 +631,8 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
                                    dens_pipeline->layout(), 0, 1, &ds, 0, nullptr);
             vkCmdPushConstants(cmd, dens_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                               0, sizeof(dens_pc), &dens_pc);
-            uint32_t workgroups = div_wg(static_cast<uint32_t>(total_bins),
-                                          devices_[device_id].workgroupSize);
+            uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total_bins),
+                                          devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
             vkCmdDispatch(cmd, workgroups, 1, 1);
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
@@ -771,8 +771,8 @@ auto VulkanBackend::dispatchMultinomial(const Tensor& probs, int64_t num_samples
                                sample_pipeline->layout(), 0, 1, &samp_ds, 0, nullptr);
         vkCmdPushConstants(cmd, sample_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(MultinomialSamplePC), &samp_pc);
-        uint32_t workgroups = div_wg(static_cast<uint32_t>(num_samples),
-                                      devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(num_samples),
+                                      devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
@@ -815,7 +815,7 @@ auto VulkanBackend::dispatchPoissonSample(const Tensor& rates) -> Tensor {
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(BernoulliPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -861,7 +861,7 @@ auto VulkanBackend::dispatchNormalSample(const Tensor& mean, const Tensor& stdde
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(BernoulliPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -907,7 +907,7 @@ auto VulkanBackend::dispatchExponentialSample(const Tensor& rate) -> Tensor {
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(BernoulliPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -954,7 +954,7 @@ auto VulkanBackend::dispatchGammaSample(const Tensor& concentration, const Tenso
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(BernoulliPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(n), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -1244,7 +1244,7 @@ auto VulkanBackend::dispatchTrapezoid(const Tensor& y, int64_t dim, double dx,
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(TrapezoidPC), &pc);
     }
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -1352,7 +1352,7 @@ auto VulkanBackend::dispatchCumulativeTrapezoid(const Tensor& y, int64_t dim, do
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(CumulativeTrapezoidPC), &pc);
     }
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -1413,7 +1413,7 @@ auto VulkanBackend::dispatchGradient(const Tensor& input, int64_t dim, double sp
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(GradientPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(total), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -1466,7 +1466,7 @@ auto VulkanBackend::dispatchPairwiseDistance(const Tensor& x1, const Tensor& x2,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PairwiseDistPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(N), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(N), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -1519,7 +1519,7 @@ auto VulkanBackend::dispatchPdist(const Tensor& input, double p) -> Tensor {
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PdistPC), &pc);
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(num_pairs), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(num_pairs), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmd, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);

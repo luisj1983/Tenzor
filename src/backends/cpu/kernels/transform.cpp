@@ -624,7 +624,13 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
         return result;
     }
 
-    // Otherwise, need to copy with stride
+    // Otherwise, need to copy with stride. The linear src_idx below assumes a
+    // packed row-major layout, so operate on a contiguous copy and honour the
+    // tensor's offset — the previous code read storage()->data() (raw base, no
+    // offset) and ignored input strides, corrupting the result for a
+    // non-contiguous or offset input (e.g. a strided slice fed a second strided
+    // slice via slice_multi_kernel).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
     auto output = Tensor::empty_uninitialized(new_shape, input.dtype(), input.device());
 
     size_t elem_size = dtype_size(input.dtype());
@@ -637,7 +643,8 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
         inner_size *= shape[d];
     }
 
-    const uint8_t* src = static_cast<const uint8_t*>(input.storage()->data());
+    const uint8_t* src = static_cast<const uint8_t*>(in_c.storage()->data())
+                         + static_cast<size_t>(in_c.offset()) * elem_size;
     uint8_t* dst = static_cast<uint8_t*>(output.storage()->data());
 
     int64_t dst_idx = 0;

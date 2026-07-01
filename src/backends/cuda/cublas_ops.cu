@@ -480,9 +480,15 @@ auto cublas_matmul(const Tensor& a, const Tensor& b) -> Tensor {
     // Create output tensor
     Tensor result({M, N}, (a.dtype() == DType::Int8 ? DType::Int32 : a.dtype()), a.device());
 
+    // cublas_gemm_ex derives lda/ldb/ldc from the logical M/N/K (contiguous
+    // row-major), so a non-contiguous input (e.g. a transposed view) would be
+    // read with the wrong strides. Contiguify first.
+    Tensor a_c = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_c = b.is_contiguous() ? b : b.contiguous();
+
     // Get data pointers based on dtype
-    const void* a_ptr = a.data_ptr();
-    const void* b_ptr = b.data_ptr();
+    const void* a_ptr = a_c.data_ptr();
+    const void* b_ptr = b_c.data_ptr();
     void* c_ptr = result.data_ptr();
 
     // Perform matrix multiplication with Tensor Core acceleration
@@ -524,9 +530,14 @@ auto cublas_batched_matmul(const Tensor& a, const Tensor& b) -> Tensor {
     // Create output tensor
     Tensor result({batch_size, M, N}, (a.dtype() == DType::Int8 ? DType::Int32 : a.dtype()), a.device());
 
+    // cublas_batched_gemm_ex derives lda/ldb/ldc and batch strides from the
+    // logical shape (contiguous), so contiguify non-contiguous inputs first.
+    Tensor a_c = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_c = b.is_contiguous() ? b : b.contiguous();
+
     // Get data pointers
-    const void* a_ptr = a.data_ptr();
-    const void* b_ptr = b.data_ptr();
+    const void* a_ptr = a_c.data_ptr();
+    const void* b_ptr = b_c.data_ptr();
     void* c_ptr = result.data_ptr();
 
     // Perform batched matrix multiplication with Tensor Core acceleration

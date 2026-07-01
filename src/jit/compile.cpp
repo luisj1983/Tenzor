@@ -567,26 +567,22 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
                     f.write(mlir_text.data(),
                             static_cast<std::streamsize>(mlir_text.size()));
                 }
-                const std::string cmd =
-                    iree_compile +
-                    // --iree-input-type=auto picks up StableHLO on both old
-                    // (3.0–3.10) and new (3.11+) IREE. Older accepted
-                    // =stablehlo but 3.11+ rejects it; "auto" is the safe
-                    // common value.
-                    " --iree-input-type=auto" +
-                    " --iree-hal-target-backends=" + opts.target +
-                    " --mlir-disable-threading" +
-                    " --mlir-print-ir-after-all" +
-                    " --compile-to=vm" +
-                    " -o /dev/null " + tmp_in.string() + " 2>&1";
-                std::string captured;
-                if (FILE* pipe = ::popen(cmd.c_str(), "r")) {
-                    char buf[4096];
-                    while (auto n = std::fread(buf, 1, sizeof(buf), pipe)) {
-                        captured.append(buf, n);
-                    }
-                    ::pclose(pipe);
-                }
+                // Run iree-compile directly (no shell) capturing combined
+                // stdout+stderr; the pipeline IR is printed to stderr.
+                // --iree-input-type=auto picks up StableHLO on both old
+                // (3.0–3.10) and new (3.11+) IREE. Older accepted =stablehlo
+                // but 3.11+ rejects it; "auto" is the safe common value.
+                const std::string captured =
+                    ::tenzor::jit::mlir_jit::exec_capture(
+                        iree_compile,
+                        {"--iree-input-type=auto",
+                         "--iree-hal-target-backends=" + opts.target,
+                         "--mlir-disable-threading",
+                         "--mlir-print-ir-after-all",
+                         "--compile-to=vm",
+                         "-o", "/dev/null",
+                         tmp_in.string()},
+                        /*capture_stderr=*/true);
                 std::ofstream f(subdir / "iree.log",
                                 std::ios::binary | std::ios::trunc);
                 f.write(captured.data(),
@@ -716,26 +712,23 @@ auto CompiledFunction::dump_iree(std::span<const Variable> inputs) -> std::strin
     const std::string& iree_compile =
         ::tenzor::jit::mlir_jit::resolve_iree_compile();
 
-    const std::string cmd =
-        iree_compile +
-        // --iree-input-type=auto picks up StableHLO on both old and new
-        // IREE (3.0–3.10 also accepted =stablehlo; 3.11+ replaced it).
-        " --iree-input-type=auto" +
-        " --iree-hal-target-backends=" + target +
-        " --mlir-disable-threading" +
-        " --mlir-print-ir-after-all" +
-        " --compile-to=vm" +
-        " -o /dev/null " + tmp_in.string() + " 2>&1";
-
-    std::string captured;
-    if (FILE* pipe = ::popen(cmd.c_str(), "r")) {
-        char buf[4096];
-        while (auto n = std::fread(buf, 1, sizeof(buf), pipe)) {
-            captured.append(buf, n);
-        }
-        ::pclose(pipe);
-    } else {
-        captured = "<failed to spawn iree-compile via popen()>\n";
+    // Run iree-compile directly (no shell) capturing combined stdout+stderr;
+    // the pipeline IR is printed to stderr. --iree-input-type=auto picks up
+    // StableHLO on both old and new IREE (3.0–3.10 also accepted =stablehlo;
+    // 3.11+ replaced it).
+    std::string captured =
+        ::tenzor::jit::mlir_jit::exec_capture(
+            iree_compile,
+            {"--iree-input-type=auto",
+             "--iree-hal-target-backends=" + target,
+             "--mlir-disable-threading",
+             "--mlir-print-ir-after-all",
+             "--compile-to=vm",
+             "-o", "/dev/null",
+             tmp_in.string()},
+            /*capture_stderr=*/true);
+    if (captured.empty()) {
+        captured = "<failed to spawn iree-compile>\n";
     }
     std::error_code _ec;
     fs::remove(tmp_in, _ec);

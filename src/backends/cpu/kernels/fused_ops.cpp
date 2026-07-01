@@ -1898,11 +1898,20 @@ auto batchnorm2d_fused_training_kernel(const Tensor& input, Tensor& running_mean
     Tensor batch_mean = mean_var[0];
     Tensor batch_var = mean_var[1];
 
-    // Forward with affine
+    // Forward with affine (uses the BIASED batch variance)
     Tensor output = batchnorm2d_forward_affine_kernel(input, batch_mean, batch_var, gamma, beta, epsilon);
 
-    // Update running stats
-    batchnorm2d_update_running_stats_kernel(running_mean, running_var, batch_mean, batch_var, momentum);
+    // Update running stats. The RUNNING variance uses the UNBIASED
+    // (Bessel-corrected) estimate var * count/(count-1) to match PyTorch / cuDNN
+    // and the nn-layer's non-fused path; normalization above keeps the biased var.
+    auto in_shape = input.shape();
+    int64_t bn_count = in_shape[0] * in_shape[2] * in_shape[3];
+    Tensor running_batch_var = batch_var;
+    if (bn_count >= 2) {
+        running_batch_var = tenzor::mul(
+            batch_var, static_cast<double>(bn_count) / static_cast<double>(bn_count - 1));
+    }
+    batchnorm2d_update_running_stats_kernel(running_mean, running_var, batch_mean, running_batch_var, momentum);
 
     // Return: output, running_mean, running_var, saved_mean, saved_inv_var
     // Compute saved_inv_var for backward pass

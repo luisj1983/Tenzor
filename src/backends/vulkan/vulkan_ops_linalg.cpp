@@ -1595,7 +1595,7 @@ auto VulkanBackend::dispatchLSTMCellForward(const Tensor& input, const Tensor& h
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
@@ -1661,7 +1661,7 @@ auto VulkanBackend::dispatchGRUCellForward(const Tensor& input, const Tensor& hx
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
@@ -1713,7 +1713,7 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                pipe->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipe->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(values.numel(), devices_[dev_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg_checked(values.numel(), devices_[dev_id].workgroupSize, devices_[dev_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, dev_id);
 
@@ -1760,7 +1760,7 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg(values.numel(), devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(values.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
@@ -1835,7 +1835,7 @@ auto VulkanBackend::dispatchQuantizedLinear(
                       0, sizeof(pc), &pc);
 
     int64_t total = M * N;
-    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
@@ -1947,7 +1947,7 @@ auto VulkanBackend::dispatchQuantizedConv2d(
                       0, sizeof(pc), &pc);
 
     int64_t total = batch * out_channels * h_out * w_out;
-    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
@@ -2748,7 +2748,7 @@ auto VulkanBackend::dispatchCross(const Tensor& a, const Tensor& b,
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(num_pairs), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(num_pairs), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -3304,7 +3304,7 @@ auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor&
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg(M, devices_[device_id].workgroupSize), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(M, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 

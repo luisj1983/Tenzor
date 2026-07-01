@@ -10,6 +10,9 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <vector>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace tenzor::jit::mlir_jit {
@@ -117,38 +120,6 @@ auto resolve_iree_binary(const char* env_var,
         "iree-base-runtime`).");
 }
 
-/// Wrap `s` in single quotes for /bin/sh, escaping any embedded single quote.
-/// A literal ' is rendered as the '\'' sequence (close-quote, escaped quote,
-/// reopen-quote). Without this, a single quote in the path would terminate the
-/// quoted region and let the remainder be interpreted by the shell.
-auto shell_quote(const std::string& s) -> std::string {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('\'');
-    for (char c : s) {
-        if (c == '\'') {
-            out += "'\\''";
-        } else {
-            out.push_back(c);
-        }
-    }
-    out.push_back('\'');
-    return out;
-}
-
-/// One-shot popen(cmd) and return stdout as a string.
-auto popen_capture(const std::string& cmd) -> std::string {
-    FILE* p = popen(cmd.c_str(), "r");
-    if (p == nullptr) return {};
-    std::string out;
-    char buf[1024];
-    while (std::fgets(buf, sizeof(buf), p) != nullptr) {
-        out.append(buf);
-    }
-    pclose(p);
-    return out;
-}
-
 /// Parse one whitespace-separated token per line from `text`, stripping a
 /// trailing colon, and return all entries.
 auto parse_token_list(const std::string& text) -> std::set<std::string> {
@@ -186,6 +157,61 @@ auto parse_token_list(const std::string& text) -> std::set<std::string> {
 
 }  // namespace
 
+auto exec_capture(const std::string& exe,
+                  const std::vector<std::string>& args,
+                  bool capture_stderr) -> std::string {
+    // Build argv in the parent (post-fork allocation in a multithreaded
+    // process is unsafe); the child only calls async-signal-safe functions.
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 2);
+    argv.push_back(const_cast<char*>(exe.c_str()));
+    for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    int fds[2];
+    if (::pipe(fds) != 0) return {};
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(fds[0]);
+        ::close(fds[1]);
+        return {};
+    }
+
+    if (pid == 0) {
+        // Child: wire stdout (and optionally stderr) to the pipe write end.
+        ::dup2(fds[1], STDOUT_FILENO);
+        if (capture_stderr) {
+            ::dup2(fds[1], STDERR_FILENO);
+        } else {
+            const int devnull = ::open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                ::dup2(devnull, STDERR_FILENO);
+                ::close(devnull);
+            }
+        }
+        ::close(fds[0]);
+        ::close(fds[1]);
+        // execvp: uses `exe` directly when it contains a slash, else searches
+        // $PATH — matching the previous shell behaviour without a shell.
+        ::execvp(exe.c_str(), argv.data());
+        _exit(127);  // exec failed; skip atexit handlers.
+    }
+
+    // Parent: drain the pipe, then reap the child.
+    ::close(fds[1]);
+    std::string out;
+    char buf[4096];
+    ssize_t n;
+    while ((n = ::read(fds[0], buf, sizeof(buf))) > 0) {
+        out.append(buf, static_cast<std::size_t>(n));
+    }
+    ::close(fds[0]);
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    return out;
+}
+
 auto resolve_iree_compile() -> const std::string& {
     static const std::string cached =
         resolve_iree_binary("TENZOR_IREE_COMPILE", "iree-compile");
@@ -201,10 +227,9 @@ auto resolve_iree_run_module() -> const std::string& {
 auto iree_compile_supported_targets() -> const std::set<std::string>& {
     static const std::set<std::string> cached = []() {
         const std::string& bin = resolve_iree_compile();
-        // Quote the path so shells with spaces or odd characters still work.
-        const std::string cmd =
-            shell_quote(bin) + " --iree-hal-list-target-backends 2>/dev/null";
-        const std::string out = popen_capture(cmd);
+        const std::string out =
+            exec_capture(bin, {"--iree-hal-list-target-backends"},
+                         /*capture_stderr=*/false);
         return parse_token_list(out);
     }();
     return cached;
@@ -213,9 +238,8 @@ auto iree_compile_supported_targets() -> const std::set<std::string>& {
 auto iree_runtime_supported_drivers() -> const std::set<std::string>& {
     static const std::set<std::string> cached = []() {
         const std::string& bin = resolve_iree_run_module();
-        const std::string cmd =
-            shell_quote(bin) + " --list_drivers 2>/dev/null";
-        const std::string out = popen_capture(cmd);
+        const std::string out =
+            exec_capture(bin, {"--list_drivers"}, /*capture_stderr=*/false);
         return parse_token_list(out);
     }();
     return cached;

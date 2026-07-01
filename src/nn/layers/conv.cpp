@@ -940,7 +940,11 @@ ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels,
     if (opW_ >= sW_ && opW_ != 0)   throw std::invalid_argument("output_padding (W) must be smaller than stride (W)");
 
     std::vector<int64_t> weight_shape = {in_channels, out_channels / groups, kH_, kW_};
-    int64_t fan_in = in_channels * kH_ * kW_;
+    // Transposed-conv weight is (in, out/groups, kH, kW); its fan_in is the
+    // number of input connections per output element = (out/groups)*kH*kW, NOT
+    // in_channels*kH*kW (that is fan_out). Matches PyTorch's
+    // _calculate_fan_in_and_fan_out on weight.size(1).
+    int64_t fan_in = (out_channels / groups) * kH_ * kW_;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     register_parameter("weight", Variable(weight_tensor, true));
@@ -1076,7 +1080,8 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto ConvTranspose2d::reset_parameters() -> void {
-    int64_t fan_in = in_channels_ * kH_ * kW_;
+    // fan_in for transposed weight (in, out/groups, kH, kW) is (out/groups)*kH*kW.
+    int64_t fan_in = (out_channels_ / groups_) * kH_ * kW_;
     float std = std::sqrt(2.0f / fan_in);
 
     std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kH_, kW_};
@@ -1649,7 +1654,8 @@ ConvTranspose3d::ConvTranspose3d(int64_t in_channels, int64_t out_channels,
     if (opW_ >= sW_ && opW_ != 0)   throw std::invalid_argument("output_padding (W) must be smaller than stride (W)");
 
     std::vector<int64_t> weight_shape = {in_channels, out_channels / groups, kD_, kH_, kW_};
-    int64_t fan_in = in_channels * kD_ * kH_ * kW_;
+    // Transposed-conv fan_in = (out/groups)*kD*kH*kW (weight.size(1)*receptive).
+    int64_t fan_in = (out_channels / groups) * kD_ * kH_ * kW_;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     register_parameter("weight", Variable(weight_tensor, true));
@@ -1778,7 +1784,8 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto ConvTranspose3d::reset_parameters() -> void {
-    int64_t fan_in = in_channels_ * kD_ * kH_ * kW_;
+    // fan_in for transposed weight = (out/groups)*kD*kH*kW.
+    int64_t fan_in = (out_channels_ / groups_) * kD_ * kH_ * kW_;
     float std = std::sqrt(2.0f / fan_in);
 
     std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kD_, kH_, kW_};
@@ -1992,7 +1999,8 @@ ConvTranspose1d::ConvTranspose1d(int64_t in_channels, int64_t out_channels, int6
 
     // Weight shape: [in_channels, out_channels/groups, kernel_size]
     std::vector<int64_t> weight_shape = {in_channels, out_channels / groups, kernel_size};
-    int64_t fan_in = in_channels * kernel_size;
+    // Transposed-conv fan_in = (out/groups)*kernel_size (weight.size(1)*receptive).
+    int64_t fan_in = (out_channels / groups) * kernel_size;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     register_parameter("weight", Variable(weight_tensor, true));
@@ -2139,7 +2147,8 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto ConvTranspose1d::reset_parameters() -> void {
-    int64_t fan_in = in_channels_ * kernel_size_;
+    // fan_in for transposed weight = (out/groups)*kernel_size.
+    int64_t fan_in = (out_channels_ / groups_) * kernel_size_;
     float std = std::sqrt(2.0f / fan_in);
 
     std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kernel_size_};

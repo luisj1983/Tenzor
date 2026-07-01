@@ -261,13 +261,18 @@ auto DiceLoss::forward(const Variable& input, const Variable& target) -> Variabl
 
     // Compute intersection, input_sum, and target_sum
     auto intersection = input * target;
-    // Sum over all dims except batch (dim 0) for per-sample Dice computation
+    // Sum over the SPATIAL dims only, keeping batch (dim 0) AND channel (dim 1)
+    // so Dice is computed per channel per sample (as documented above and as
+    // standard multi-class Dice does). Previously this reduced down to dim 1,
+    // collapsing the channel dimension into a single pooled foreground/background
+    // Dice — losing per-class weighting and merging per-class gradients.
     int64_t ndim = static_cast<int64_t>(input.shape().size());
     Variable intersection_sum = intersection;
     Variable input_sum_v = input;
     Variable target_sum_v = target;
-    // Reduce dims from last to first (skipping batch dim 0)
-    for (int64_t d = ndim - 1; d >= 1; --d) {
+    // Reduce spatial dims from last down to 2 (skip batch dim 0 and channel dim 1).
+    // For a 2-D (N, C) input the loop is a no-op, giving per-(N,C) Dice directly.
+    for (int64_t d = ndim - 1; d >= 2; --d) {
         intersection_sum = sum(intersection_sum, d, false);
         input_sum_v = sum(input_sum_v, d, false);
         target_sum_v = sum(target_sum_v, d, false);

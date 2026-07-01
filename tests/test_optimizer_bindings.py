@@ -5,7 +5,7 @@ import sys
 import os
 
 # Add the build directory to the path to import tenzor_core
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build', 'python', 'tenzor'))
 
 import tenzor_core as tz
 

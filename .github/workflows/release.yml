@@ -67,15 +67,26 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF
             -DTENZOR_BUILD_ONEAPI=OFF
             -DTENZOR_BUILD_VULKAN=OFF"
-          # System packages needed inside the build container (extend here if
-          # the build surfaces additional missing dependencies).
-          CIBW_BEFORE_ALL_LINUX: yum install -y libgomp || dnf install -y libgomp
-          # Smoke test: backend discovery + a real op through the dispatch
-          # table proves the backend .so files were bundled and found.
+          # System packages needed inside the build container. Beyond libgomp,
+          # the CPU backend needs LAPACKE (linalg: inv/det/svd/solve), an
+          # optimized BLAS (GEMM), and protobuf (ONNX import/export). Without
+          # these, find_package() silently disables those features and the
+          # shipped wheel throws at runtime on linalg/ONNX and runs GEMM slow.
+          CIBW_BEFORE_ALL_LINUX: >-
+            (yum install -y libgomp lapack-devel openblas-devel protobuf-devel protobuf-compiler ||
+             dnf install -y libgomp lapack-devel openblas-devel protobuf-devel protobuf-compiler)
+          # Smoke test: backend discovery + a real op AND a linalg op prove the
+          # backend .so files were bundled/found and LAPACKE was actually linked
+          # (a wheel missing LAPACKE would throw here instead of silently
+          # shipping a linalg-less build).
           CIBW_TEST_COMMAND: >-
             python -c "import tenzor as tz; tz.initialize();
             x = tz.ones([2, 3]); y = (x + x).numpy();
             assert y.shape == (2, 3) and float(y.max()) == 2.0;
+            import numpy as np;
+            a = tz.tensor(np.array([[4.0, 0.0], [0.0, 9.0]], dtype=np.float32));
+            d = float(tz.linalg.det(a).numpy());
+            assert abs(d - 36.0) < 1e-3, d;
             print('tenzor wheel OK')"
 
       - uses: actions/upload-artifact@v4
@@ -98,4 +109,6 @@ jobs:
           path: dist/
 
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned to an immutable commit SHA (supply-chain hardening) instead of
+        # the mutable release/v1 tag. Bump deliberately when upgrading.
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

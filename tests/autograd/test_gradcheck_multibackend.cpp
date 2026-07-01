@@ -1941,6 +1941,27 @@ TEST_P(GradCheckMultiBackendTest, LinalgCholeskySolve) {
         << "cholesky_solve gradcheck failed on " << device().to_string();
 }
 
+// Regression for the CholeskySolve grad-w.r.t.-factor bug: the pre-fix backward
+// used grad_X (not grad_B) in the outer product and applied A^{-1} instead of
+// right-multiplying by L, giving a systematically mis-scaled grad_L. The
+// LinalgCholeskySolve test above only checks grad w.r.t. B, so it never caught
+// this. Here L (the Cholesky factor) is the differentiated input.
+TEST_P(GradCheckMultiBackendTest, LinalgCholeskySolve_GradL) {
+    if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
+    if (dtype() == DType::Float32) {
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "CholeskySolve grad-w.r.t.-factor gradcheck requires Float64 precision"); return;
+    }
+    int64_t n = 3;
+    auto A_t = make_spd(n, dtype(), device());
+    auto L = Variable(::tenzor::linalg::cholesky(A_t, /*upper=*/false), true);
+    auto B_var = Variable(randn({n, 2}, dtype(), device()), false);
+    auto f = [&B_var](const Variable& l) -> Variable {
+        return tenzor::sum(::tenzor::cholesky_solve(B_var, l, /*upper=*/false));
+    };
+    EXPECT_TRUE(gradcheck(f, L, eps(), tol(), tol()))
+        << "cholesky_solve grad-w.r.t.-L gradcheck failed on " << device().to_string();
+}
+
 TEST_P(GradCheckMultiBackendTest, LinalgCholeskyInverse) {
     if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     if (dtype() == DType::Float32) {

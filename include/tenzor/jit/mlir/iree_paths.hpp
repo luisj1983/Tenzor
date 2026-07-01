@@ -18,8 +18,20 @@
 
 #include <set>
 #include <string>
+#include <vector>
 
 namespace tenzor::jit::mlir_jit {
+
+/// Run `exe` with `args` directly via fork/execvp — NO shell is involved, so
+/// arguments are passed verbatim and cannot be reinterpreted as shell syntax
+/// (eliminates command-injection surface from interpolated paths/targets).
+/// Captures the child's stdout, and its stderr too when `capture_stderr` is
+/// true (otherwise stderr is redirected to /dev/null, mirroring `2>/dev/null`).
+/// Returns the captured output, or an empty string if the child could not be
+/// spawned.
+auto exec_capture(const std::string& exe,
+                  const std::vector<std::string>& args,
+                  bool capture_stderr = false) -> std::string;
 
 /// Discover the most-capable `iree-compile` binary available to this process.
 /// Result is cached the first time it is called.
