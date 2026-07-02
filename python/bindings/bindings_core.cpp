@@ -3429,11 +3429,19 @@ Returns:
             auto val = is_scalar_value ? make_scalar_tensor() : value_tensor;
 
             // Helper function to copy data from source to destination with broadcasting
-            auto copy_with_broadcast = [](tenzor::Tensor& dst, const tenzor::Tensor& src) {
+            auto copy_with_broadcast = [](tenzor::Tensor& dst, const tenzor::Tensor& src_in) {
                 // Check device compatibility
-                if (dst.device().type != src.device().type) {
+                if (dst.device().type != src_in.device().type) {
                     throw std::runtime_error("Source and destination tensors must be on the same device");
                 }
+
+                // Cast the source to the destination dtype up front. Every copy
+                // path below byte-copies dst.numel()*dst.dtype_size() bytes from
+                // the source, so a dtype-mismatched RHS (e.g. x_f32[...] = int64
+                // tensor) would otherwise be reinterpreted (same-size dtypes) or
+                // copied with the wrong byte count. PyTorch casts here.
+                tenzor::Tensor src = (src_in.dtype() == dst.dtype())
+                                         ? src_in : src_in.to(dst.dtype());
 
                 auto dst_shape = dst.shape();
                 auto src_shape = src.shape();
@@ -3760,12 +3768,26 @@ Returns:
                             }
                             int64_t dim_size = target_shape[cur_dim];
                             int64_t start = entry.start, stop = entry.stop;
-                            if (start == std::numeric_limits<int64_t>::min()) start = 0;
+                            // Resolve slice sentinels step-aware, mirroring the
+                            // __getitem__ tuple path. For a negative step the
+                            // defaults are start=dim_size-1, stop=-1 ("down to and
+                            // including index 0"), and the clamp range differs;
+                            // the previous positive-only handling produced an
+                            // empty/degenerate range for `x[..., ::-1] = y`, so
+                            // the assignment silently wrote nothing.
+                            if (start == std::numeric_limits<int64_t>::min())
+                                start = (entry.step > 0) ? 0 : dim_size - 1;
                             else if (start < 0) start += dim_size;
-                            if (stop == std::numeric_limits<int64_t>::max()) stop = dim_size;
+                            if (stop == std::numeric_limits<int64_t>::max())
+                                stop = (entry.step > 0) ? dim_size : -1;
                             else if (stop < 0) stop += dim_size;
-                            start = std::clamp(start, int64_t(0), dim_size);
-                            stop = std::clamp(stop, int64_t(0), dim_size);
+                            if (entry.step > 0) {
+                                start = std::clamp(start, int64_t(0), dim_size);
+                                stop = std::clamp(stop, int64_t(0), dim_size);
+                            } else {
+                                start = std::clamp(start, int64_t(0), dim_size - 1);
+                                stop = std::clamp(stop, int64_t(-1), dim_size - 1);
+                            }
                             // Audit J11: stepped slice supported via Tensor::slice's step arg.
                             target = target.slice(cur_dim, start, stop, entry.step);
                             cur_dim++;

@@ -100,8 +100,14 @@ public:
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& saved = saved_tensors();
-        auto& softmax_out = saved[0];
-        auto& grad = grad_outputs[0];
+        // Widen Float16/BFloat16 to Float32 for the whole backward so the
+        // per-segment dot-product (nested_sum) accumulates in full precision,
+        // mirroring the nested layernorm / attention backwards; the final grad
+        // is narrowed back to the input dtype below.
+        const DType orig_dtype = grad_outputs[0].dtype();
+        const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+        Tensor softmax_out = widen ? saved[0].to(DType::Float32) : saved[0];
+        Tensor grad = widen ? grad_outputs[0].to(DType::Float32) : grad_outputs[0];
 
         // grad_input[i] = softmax_out[i] * (grad[i] - sum(grad[i] * softmax_out[i]))
         // Applied per-segment using offsets.
@@ -150,6 +156,7 @@ public:
 
         // grad_input = softmax_out * (grad - expanded_dot_sums)
         auto grad_input = tenzor::mul(softmax_out, tenzor::sub(grad, expanded));
+        if (widen) grad_input = grad_input.to(orig_dtype);
 
         // nested_softmax's set_input_variables({values}) has a single slot.
         // Returning a trailing Tensor() for "offsets" is a mismatch (offsets

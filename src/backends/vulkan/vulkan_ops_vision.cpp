@@ -252,7 +252,13 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
     Tensor indices_i32 = (indices.dtype() == DType::Int32) ? indices : indices.to(DType::Int32);
 
     int64_t batch_size = indices_i32.numel();
-    Tensor output({batch_size, num_classes}, out_dtype, indices.device());
+    // one_hot appends the class axis while preserving the index shape:
+    // [d0, ..., dk] -> [d0, ..., dk, num_classes] (matching PyTorch and the
+    // CPU/CUDA/oneAPI kernels). The flat shader fill is unchanged since the
+    // buffer layout [flat_index, class] is identical.
+    std::vector<int64_t> out_shape(indices.shape().begin(), indices.shape().end());
+    out_shape.push_back(num_classes);
+    Tensor output(out_shape, out_dtype, indices.device());
 
     const void* buf_indices = indices_i32.data_ptr();
     const void* buf_output = output.data_ptr();

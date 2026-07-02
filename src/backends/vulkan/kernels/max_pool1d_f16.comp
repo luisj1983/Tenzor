@@ -65,7 +65,7 @@ void main() {
             uint input_idx = n * params.channels * params.in_length +
                             c * params.in_length + uint(l_in);
             float val = float(readF16Element(input_idx));
-            if (val > max_val) {
+            if (val > max_val || val != val) {
                 max_val = val;
                 max_idx = int(input_idx);
             }

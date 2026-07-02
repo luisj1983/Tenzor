@@ -466,9 +466,19 @@ void fallback_coo_spmv(const int64_t* idx_ptr, const T* vals, const T* x, T* y,
     // silently dropped on one path and cause an out-of-bounds write here. Row
     // bounds are only known when the caller supplied a row count (M>0).
     if constexpr (std::is_same_v<T, Acc>) {
+        // For the legacy M==0 caller the row bound is unknown; infer it from the
+        // largest in-range row index (mirrors the else branch), so `y[row]` is
+        // never written out of bounds when M<=0.
+        int64_t rows = M;
+        if (rows <= 0) {
+            for (int64_t i = 0; i < nnz; ++i) {
+                if (idx_ptr[i] + 1 > rows) rows = idx_ptr[i] + 1;
+            }
+        }
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
             if (M > 0 && (row < 0 || row >= M)) continue;
+            if (row < 0 || row >= rows) continue;
             int64_t col = idx_ptr[nnz + i];
             y[row] += vals[i] * x[col];
         }
@@ -575,9 +585,18 @@ void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
     // input would be silently dropped on one path and cause an out-of-bounds
     // write here. Row bounds are only known when the caller supplied M>0.
     if constexpr (std::is_same_v<T, Acc>) {
+        // Legacy M==0: infer the row bound from the largest in-range row index
+        // (mirrors the else branch) so C[row*N+n] is never written OOB.
+        int64_t rows = M;
+        if (rows <= 0) {
+            for (int64_t i = 0; i < nnz; ++i) {
+                if (idx_ptr[i] + 1 > rows) rows = idx_ptr[i] + 1;
+            }
+        }
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
             if (M > 0 && (row < 0 || row >= M)) continue;
+            if (row < 0 || row >= rows) continue;
             int64_t col = idx_ptr[nnz + i];
             T val = vals[i];
             for (int64_t n = 0; n < N; ++n) {

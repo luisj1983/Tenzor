@@ -5878,18 +5878,23 @@ auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 // =========================================================================
 
 auto conj_kernel(const Tensor& input) -> Tensor {
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    int64_t n = input.numel();
+    // Materialize a contiguous view first: the element loop below reads the
+    // storage flat (in[i]), so a non-contiguous input (e.g. a transposed
+    // complex matrix from conj(transpose(x))) would otherwise be conjugated in
+    // physical order and written as if it were logical order — wrong values.
+    const Tensor in_t = input.is_contiguous() ? input : input.contiguous();
+    auto shape_vec = std::vector<int64_t>(in_t.shape().begin(), in_t.shape().end());
+    int64_t n = in_t.numel();
 
-    if (input.dtype() == DType::Complex64) {
-        Tensor result(shape_vec, DType::Complex64, input.device());
-        const auto* in = input.data<std::complex<float>>();
+    if (in_t.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Complex64, in_t.device());
+        const auto* in = in_t.data<std::complex<float>>();
         auto* out = result.data<std::complex<float>>();
         for (int64_t i = 0; i < n; ++i) out[i] = std::conj(in[i]);
         return result;
-    } else if (input.dtype() == DType::Complex128) {
-        Tensor result(shape_vec, DType::Complex128, input.device());
-        const auto* in = input.data<std::complex<double>>();
+    } else if (in_t.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Complex128, in_t.device());
+        const auto* in = in_t.data<std::complex<double>>();
         auto* out = result.data<std::complex<double>>();
         for (int64_t i = 0; i < n; ++i) out[i] = std::conj(in[i]);
         return result;
@@ -5899,18 +5904,22 @@ auto conj_kernel(const Tensor& input) -> Tensor {
 }
 
 auto real_kernel(const Tensor& input) -> Tensor {
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    int64_t n = input.numel();
+    // Contiguify first — the loop reads storage flat, so a non-contiguous
+    // (e.g. transposed) complex input must be materialized to read the real
+    // parts in logical order.
+    const Tensor in_t = input.is_contiguous() ? input : input.contiguous();
+    auto shape_vec = std::vector<int64_t>(in_t.shape().begin(), in_t.shape().end());
+    int64_t n = in_t.numel();
 
-    if (input.dtype() == DType::Complex64) {
-        Tensor result(shape_vec, DType::Float32, input.device());
-        const auto* in = input.data<std::complex<float>>();
+    if (in_t.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Float32, in_t.device());
+        const auto* in = in_t.data<std::complex<float>>();
         auto* out = result.data<float>();
         for (int64_t i = 0; i < n; ++i) out[i] = in[i].real();
         return result;
-    } else if (input.dtype() == DType::Complex128) {
-        Tensor result(shape_vec, DType::Float64, input.device());
-        const auto* in = input.data<std::complex<double>>();
+    } else if (in_t.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Float64, in_t.device());
+        const auto* in = in_t.data<std::complex<double>>();
         auto* out = result.data<double>();
         for (int64_t i = 0; i < n; ++i) out[i] = in[i].real();
         return result;
@@ -5920,18 +5929,22 @@ auto real_kernel(const Tensor& input) -> Tensor {
 }
 
 auto imag_kernel(const Tensor& input) -> Tensor {
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    int64_t n = input.numel();
+    // Contiguify first — the loop reads storage flat, so a non-contiguous
+    // (e.g. transposed) complex input must be materialized to read the
+    // imaginary parts in logical order.
+    const Tensor in_t = input.is_contiguous() ? input : input.contiguous();
+    auto shape_vec = std::vector<int64_t>(in_t.shape().begin(), in_t.shape().end());
+    int64_t n = in_t.numel();
 
-    if (input.dtype() == DType::Complex64) {
-        Tensor result(shape_vec, DType::Float32, input.device());
-        const auto* in = input.data<std::complex<float>>();
+    if (in_t.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Float32, in_t.device());
+        const auto* in = in_t.data<std::complex<float>>();
         auto* out = result.data<float>();
         for (int64_t i = 0; i < n; ++i) out[i] = in[i].imag();
         return result;
-    } else if (input.dtype() == DType::Complex128) {
-        Tensor result(shape_vec, DType::Float64, input.device());
-        const auto* in = input.data<std::complex<double>>();
+    } else if (in_t.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Float64, in_t.device());
+        const auto* in = in_t.data<std::complex<double>>();
         auto* out = result.data<double>();
         for (int64_t i = 0; i < n; ++i) out[i] = in[i].imag();
         return result;

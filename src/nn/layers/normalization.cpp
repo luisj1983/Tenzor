@@ -1680,12 +1680,20 @@ public:
             return results;
         }
 
-        // CPU path: pointer-based access
-        auto grad_output = grad_output_orig.to(Device::cpu()).to(DType::Float32).contiguous();
-        auto input = input_orig.to(Device::cpu()).to(DType::Float32).contiguous();
-        auto mean = mean_orig.to(Device::cpu()).to(DType::Float32).contiguous();
-        auto rstd = rstd_orig.to(Device::cpu()).to(DType::Float32).contiguous();
-        auto weight = weight_orig.to(Device::cpu()).to(DType::Float32).contiguous();
+        // CPU path: keep Float64 inputs in double precision. The reduction below
+        // is already done in double, so the previous unconditional .to(Float32)
+        // on the stored data was the only place that discarded the extra F64
+        // mantissa bits (contradicting the S.15 double-accumulation intent and
+        // causing gradcheck drift). Float16/BFloat16 widen to Float32; Float32
+        // stays Float32; Float64 stays Float64.
+        const DType work_dtype =
+            (original_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+
+        auto grad_output = grad_output_orig.to(Device::cpu()).to(work_dtype).contiguous();
+        auto input = input_orig.to(Device::cpu()).to(work_dtype).contiguous();
+        auto mean = mean_orig.to(Device::cpu()).to(work_dtype).contiguous();
+        auto rstd = rstd_orig.to(Device::cpu()).to(work_dtype).contiguous();
+        auto weight = weight_orig.to(Device::cpu()).to(work_dtype).contiguous();
 
         auto shape = input.shape();
         int64_t N = shape[0];
@@ -1694,82 +1702,77 @@ public:
         int64_t W = shape[3];
         int64_t spatial_size = H * W;
 
-        auto* input_data = input.data<float>();
-        auto* mean_data = mean.data<float>();
-        auto* rstd_data = rstd.data<float>();
-        auto* grad_out_data = grad_output.data<float>();
-        auto* weight_data = weight.data<float>();
-
         auto grad_input = zeros_like(input);
-        auto grad_weight = zeros({C}, DType::Float32, Device::cpu());
-        auto grad_bias = zeros({C}, DType::Float32, Device::cpu());
+        auto grad_weight = zeros({C}, work_dtype, Device::cpu());
+        auto grad_bias = zeros({C}, work_dtype, Device::cpu());
 
-        auto* grad_in_data = grad_input.data<float>();
-        auto* grad_weight_data = grad_weight.data<float>();
-        auto* grad_bias_data = grad_bias.data<float>();
+        // S.15: all arithmetic is done in double; only the storage type T varies
+        // (float for F32/half-widened, double for F64) so no precision is lost.
+        auto compute = [&]<typename T>() {
+            const T* input_data = input.data<T>();
+            const T* mean_data = mean.data<T>();
+            const T* rstd_data = rstd.data<T>();
+            const T* grad_out_data = grad_output.data<T>();
+            const T* weight_data = weight.data<T>();
+            T* grad_in_data = grad_input.data<T>();
+            T* grad_weight_data = grad_weight.data<T>();
+            T* grad_bias_data = grad_bias.data<T>();
 
-        // Process each batch and group
-        for (int64_t n = 0; n < N; n++) {
-            for (int64_t g = 0; g < num_groups_; g++) {
-                int64_t group_idx = n * num_groups_ + g;
-                double mu = static_cast<double>(mean_data[group_idx]);
-                double inv_std = static_cast<double>(rstd_data[group_idx]);
+            for (int64_t n = 0; n < N; n++) {
+                for (int64_t g = 0; g < num_groups_; g++) {
+                    int64_t group_idx = n * num_groups_ + g;
+                    double mu = static_cast<double>(mean_data[group_idx]);
+                    double inv_std = static_cast<double>(rstd_data[group_idx]);
 
-                int64_t c_start = g * group_size_;
-                int64_t c_end = c_start + group_size_;
+                    int64_t c_start = g * group_size_;
+                    int64_t c_end = c_start + group_size_;
 
-                // S.15 (mirrored from LayerNormBackward): the forward computes
-                // mean/variance in double, so the backward reduction must also
-                // accumulate in double — mixing float reductions with a double
-                // mean/var gives 4–7% drift on F32 gradchecks. The grad_input
-                // recomputation below is likewise done in double, cast back to
-                // F32 only on store.
-                double sum_grad_out = 0.0;
-                double sum_grad_out_normalized = 0.0;
-                int64_t group_numel = group_size_ * spatial_size;
+                    double sum_grad_out = 0.0;
+                    double sum_grad_out_normalized = 0.0;
+                    int64_t group_numel = group_size_ * spatial_size;
 
-                for (int64_t c = c_start; c < c_end; c++) {
-                    for (int64_t h = 0; h < H; h++) {
-                        for (int64_t w = 0; w < W; w++) {
-                            int64_t idx = ((n * C + c) * H + h) * W + w;
-                            double x_normalized =
-                                (static_cast<double>(input_data[idx]) - mu) * inv_std;
-                            double grad_out = static_cast<double>(grad_out_data[idx]) *
-                                              static_cast<double>(weight_data[c]);
-
-                            sum_grad_out += grad_out;
-                            sum_grad_out_normalized += grad_out * x_normalized;
-
-                            // Accumulate weight and bias gradients
-                            grad_weight_data[c] += static_cast<float>(
-                                static_cast<double>(grad_out_data[idx]) * x_normalized);
-                            grad_bias_data[c] += grad_out_data[idx];
+                    for (int64_t c = c_start; c < c_end; c++) {
+                        double gw = 0.0, gb = 0.0;  // per-channel accumulators in double
+                        for (int64_t h = 0; h < H; h++) {
+                            for (int64_t w = 0; w < W; w++) {
+                                int64_t idx = ((n * C + c) * H + h) * W + w;
+                                double x_normalized =
+                                    (static_cast<double>(input_data[idx]) - mu) * inv_std;
+                                double grad_out = static_cast<double>(grad_out_data[idx]) *
+                                                  static_cast<double>(weight_data[c]);
+                                sum_grad_out += grad_out;
+                                sum_grad_out_normalized += grad_out * x_normalized;
+                                gw += static_cast<double>(grad_out_data[idx]) * x_normalized;
+                                gb += static_cast<double>(grad_out_data[idx]);
+                            }
                         }
+                        grad_weight_data[c] += static_cast<T>(gw);
+                        grad_bias_data[c] += static_cast<T>(gb);
                     }
-                }
 
-                // Compute input gradients
-                double mean_grad_out = sum_grad_out / static_cast<double>(group_numel);
-                double mean_grad_out_normalized =
-                    sum_grad_out_normalized / static_cast<double>(group_numel);
+                    double mean_grad_out = sum_grad_out / static_cast<double>(group_numel);
+                    double mean_grad_out_normalized =
+                        sum_grad_out_normalized / static_cast<double>(group_numel);
 
-                for (int64_t c = c_start; c < c_end; c++) {
-                    for (int64_t h = 0; h < H; h++) {
-                        for (int64_t w = 0; w < W; w++) {
-                            int64_t idx = ((n * C + c) * H + h) * W + w;
-                            double x_normalized =
-                                (static_cast<double>(input_data[idx]) - mu) * inv_std;
-                            double grad_out = static_cast<double>(grad_out_data[idx]) *
-                                              static_cast<double>(weight_data[c]);
-
-                            grad_in_data[idx] = static_cast<float>(
-                                (grad_out - mean_grad_out -
-                                 x_normalized * mean_grad_out_normalized) * inv_std);
+                    for (int64_t c = c_start; c < c_end; c++) {
+                        for (int64_t h = 0; h < H; h++) {
+                            for (int64_t w = 0; w < W; w++) {
+                                int64_t idx = ((n * C + c) * H + h) * W + w;
+                                double x_normalized =
+                                    (static_cast<double>(input_data[idx]) - mu) * inv_std;
+                                double grad_out = static_cast<double>(grad_out_data[idx]) *
+                                                  static_cast<double>(weight_data[c]);
+                                grad_in_data[idx] = static_cast<T>(
+                                    (grad_out - mean_grad_out -
+                                     x_normalized * mean_grad_out_normalized) * inv_std);
+                            }
                         }
                     }
                 }
             }
-        }
+        };
+        if (work_dtype == DType::Float64) compute.template operator()<double>();
+        else compute.template operator()<float>();
 
         // Move results back to original device and dtype
         return {grad_input.to(original_dtype).to(original_device).contiguous(),
@@ -2896,19 +2899,25 @@ public:
             return results;
         }
 
-        // CPU path: pointer-based access
+        // CPU path: keep Float64 in double precision. The previous unconditional
+        // .to(Float32) plus the `float sum_grad_x` accumulator truncated F64
+        // inputs and reduced in single precision (gradcheck drift). All
+        // arithmetic below is in double; only the storage type T varies
+        // (Float64 for F64 input, Float32 otherwise).
+        const DType work_dtype =
+            (original_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
         auto grad_output = (grad_output_orig.device() == Device::cpu())
-                          ? grad_output_orig.contiguous().to(DType::Float32)
-                          : grad_output_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+                          ? grad_output_orig.contiguous().to(work_dtype)
+                          : grad_output_orig.contiguous().to(Device::cpu()).to(work_dtype);
         auto input = (input_orig.device() == Device::cpu())
-                    ? input_orig.contiguous().to(DType::Float32)
-                    : input_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+                    ? input_orig.contiguous().to(work_dtype)
+                    : input_orig.contiguous().to(Device::cpu()).to(work_dtype);
         auto rrms = (rrms_orig.device() == Device::cpu())
-                   ? rrms_orig.contiguous().to(DType::Float32)
-                   : rrms_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+                   ? rrms_orig.contiguous().to(work_dtype)
+                   : rrms_orig.contiguous().to(Device::cpu()).to(work_dtype);
         auto weight = (weight_orig.device() == Device::cpu())
-                     ? weight_orig.contiguous().to(DType::Float32)
-                     : weight_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+                     ? weight_orig.contiguous().to(work_dtype)
+                     : weight_orig.contiguous().to(Device::cpu()).to(work_dtype);
 
         auto shape = input.shape();
         int64_t batch_size = 1;
@@ -2918,49 +2927,49 @@ public:
 
         int64_t N = normalized_size_;
 
-        auto* input_data = input.data<float>();
-        auto* rrms_data = rrms.data<float>();
-        auto* grad_out_data = grad_output.data<float>();
-        auto* weight_data = weight.data<float>();
-
         // Allocate gradient tensors
         auto grad_input = zeros_like(input);
-        auto grad_weight = zeros({N}, grad_output.dtype(), grad_output.device());
-
-        auto* grad_in_data = grad_input.data<float>();
-        auto* grad_weight_data = grad_weight.data<float>();
+        auto grad_weight = zeros({N}, work_dtype, Device::cpu());
 
         // Compute gradients for each batch element
-        // RMSNorm: y = x * rrms * weight
-        // where rrms = 1 / sqrt(mean(x^2) + eps)
-        //
-        // d/dx[y] = weight * rrms - x * weight * rrms^3 * mean(x) / N
-        // d/dweight[y] = x * rrms
-        for (int64_t b = 0; b < batch_size; b++) {
-            float inv_rms = rrms_data[b];
-            float inv_rms_cubed = inv_rms * inv_rms * inv_rms;
+        // RMSNorm: y = x * rrms * weight, rrms = 1 / sqrt(mean(x^2) + eps)
+        // d/dx[y] = weight*rrms - x*weight*rrms^3*mean(x)/N ; d/dweight[y] = x*rrms
+        auto compute = [&]<typename T>() {
+            const T* input_data = input.data<T>();
+            const T* rrms_data = rrms.data<T>();
+            const T* grad_out_data = grad_output.data<T>();
+            const T* weight_data = weight.data<T>();
+            T* grad_in_data = grad_input.data<T>();
+            T* grad_weight_data = grad_weight.data<T>();
 
-            // Compute sum for gradient correction term
-            float sum_grad_x = 0.0f;
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                sum_grad_x += grad_out_data[idx] * weight_data[i] * input_data[idx];
+            for (int64_t b = 0; b < batch_size; b++) {
+                double inv_rms = static_cast<double>(rrms_data[b]);
+                double inv_rms_cubed = inv_rms * inv_rms * inv_rms;
+
+                double sum_grad_x = 0.0;
+                for (int64_t i = 0; i < N; i++) {
+                    int64_t idx = b * N + i;
+                    sum_grad_x += static_cast<double>(grad_out_data[idx]) *
+                                  static_cast<double>(weight_data[i]) *
+                                  static_cast<double>(input_data[idx]);
+                }
+                double correction = sum_grad_x * inv_rms_cubed / static_cast<double>(N);
+
+                for (int64_t i = 0; i < N; i++) {
+                    int64_t idx = b * N + i;
+                    double x = static_cast<double>(input_data[idx]);
+                    double normalized = x * inv_rms;
+                    grad_weight_data[i] += static_cast<T>(
+                        static_cast<double>(grad_out_data[idx]) * normalized);
+                    grad_in_data[idx] = static_cast<T>(
+                        static_cast<double>(grad_out_data[idx]) *
+                            static_cast<double>(weight_data[i]) * inv_rms -
+                        x * correction);
+                }
             }
-            float correction = sum_grad_x * inv_rms_cubed / N;
-
-            // Compute input and weight gradients
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float x = input_data[idx];
-                float normalized = x * inv_rms;
-
-                // Weight gradient
-                grad_weight_data[i] += grad_out_data[idx] * normalized;
-
-                // Input gradient: d/dx = weight * rrms - x * correction
-                grad_in_data[idx] = grad_out_data[idx] * weight_data[i] * inv_rms - x * correction;
-            }
-        }
+        };
+        if (work_dtype == DType::Float64) compute.template operator()<double>();
+        else compute.template operator()<float>();
 
         // Transfer gradients back to original device and dtype if needed
         Tensor grad_input_final = (original_device == Device::cpu())

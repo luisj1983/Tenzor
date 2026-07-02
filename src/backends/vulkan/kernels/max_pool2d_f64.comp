@@ -69,7 +69,7 @@ void main() {
                                 uint(w_in);
 
                 double val = input_data[input_idx];
-                max_val = max(max_val, val);
+                max_val = (val > max_val || val != val) ? val : max_val;
             }
         }
     }

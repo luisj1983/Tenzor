@@ -269,6 +269,24 @@ TEST_P(RepeatInterleaveTest, Scalar2D_Dim1) {
     EXPECT_FLOAT_EQ(data[7], 4.0f);
 }
 
+// Regression: scalar repeat_interleave with a negative dim must normalize the
+// dim before indexing the shape. The oneAPI scalar kernel read shape[dim] with
+// a raw negative dim (OOB); dim=-1 must behave like dim=1 for a 2D input.
+TEST_P(RepeatInterleaveTest, Scalar2D_DimNegative) {
+    std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
+    auto input = from_data<float>(data_vec.data(), {2, 2}, device);
+    auto out_neg = repeat_interleave(input, 2, -1).cpu();
+    auto out_pos = repeat_interleave(input, 2, 1).cpu();
+    ASSERT_EQ(out_neg.ndim(), 2);
+    ASSERT_EQ(out_neg.shape()[0], 2);
+    ASSERT_EQ(out_neg.shape()[1], 4);
+    ASSERT_EQ(out_neg.numel(), out_pos.numel());
+    const float* n = out_neg.data<float>();
+    const float* p = out_pos.data<float>();
+    for (int64_t i = 0; i < out_neg.numel(); ++i)
+        EXPECT_FLOAT_EQ(n[i], p[i]) << "dim=-1 != dim=1 at " << i << " on " << device.to_string();
+}
+
 TEST_P(RepeatInterleaveTest, Tensor1D) {
     // [1, 2, 3] with repeats=[1, 2, 3] -> [1, 2, 2, 3, 3, 3]
     auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);

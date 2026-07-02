@@ -569,6 +569,25 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
 
     // Use global random number generator
     auto& gen = get_rng();
+    // Reject ranges that do not fit the requested integer dtype; otherwise the
+    // per-dtype static_cast below would silently wrap (PyTorch raises here).
+    {
+        const int64_t hi_incl = high - 1;
+        bool fits = true;
+        switch (dtype) {
+            case DType::Int64: break;
+            case DType::Int32: fits = (low >= -2147483648LL && hi_incl <= 2147483647LL); break;
+            case DType::Int16: fits = (low >= -32768 && hi_incl <= 32767); break;
+            case DType::Int8:  fits = (low >= -128 && hi_incl <= 127); break;
+            case DType::UInt8: fits = (low >= 0 && hi_incl <= 255); break;
+            default: break;  // unsupported dtype reported by the switch below
+        }
+        if (!fits) {
+            throw std::out_of_range(
+                "randint: range [" + std::to_string(low) + ", " + std::to_string(high) +
+                ") does not fit in the requested integer dtype");
+        }
+    }
     std::uniform_int_distribution<int64_t> dist(low, high - 1);
 
     // Fill with random integers based on dtype
@@ -1367,6 +1386,25 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
     size_t numel = tensor.numel();
     void* data = tensor.storage()->data();
     auto& eng = generator.engine();
+    // Reject ranges that do not fit the requested integer dtype; otherwise the
+    // per-dtype static_cast below would silently wrap (PyTorch raises here).
+    {
+        const int64_t hi_incl = high - 1;
+        bool fits = true;
+        switch (dtype) {
+            case DType::Int64: break;
+            case DType::Int32: fits = (low >= -2147483648LL && hi_incl <= 2147483647LL); break;
+            case DType::Int16: fits = (low >= -32768 && hi_incl <= 32767); break;
+            case DType::Int8:  fits = (low >= -128 && hi_incl <= 127); break;
+            case DType::UInt8: fits = (low >= 0 && hi_incl <= 255); break;
+            default: break;  // unsupported dtype reported by the switch below
+        }
+        if (!fits) {
+            throw std::out_of_range(
+                "randint: range [" + std::to_string(low) + ", " + std::to_string(high) +
+                ") does not fit in the requested integer dtype");
+        }
+    }
     std::uniform_int_distribution<int64_t> dist(low, high - 1);
 
     switch (dtype) {
@@ -1519,23 +1557,29 @@ auto randint_like(const Tensor& tensor, int64_t low, int64_t high) -> Tensor {
 }
 
 auto tril_indices(int64_t row, int64_t col, int64_t offset,
-                  DType /*dtype*/, Device device) -> Tensor {
+                  DType dtype, Device device) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::M, row);
     attrs.set(AttrKey::N, col);
     attrs.set(AttrKey::Diagonal, offset);
     std::vector<Tensor> inputs;  // no input tensors
-    return dispatch_to_device(OpId::TrilIndices, device.type, inputs, attrs)[0];
+    // Kernels emit Int64; honor the caller's requested index dtype (PyTorch
+    // defaults to Int64 but allows other integer types).
+    auto result = dispatch_to_device(OpId::TrilIndices, device.type, inputs, attrs)[0];
+    if (result.dtype() != dtype) result = result.to(dtype);
+    return result;
 }
 
 auto triu_indices(int64_t row, int64_t col, int64_t offset,
-                  DType /*dtype*/, Device device) -> Tensor {
+                  DType dtype, Device device) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::M, row);
     attrs.set(AttrKey::N, col);
     attrs.set(AttrKey::Diagonal, offset);
     std::vector<Tensor> inputs;  // no input tensors
-    return dispatch_to_device(OpId::TriuIndices, device.type, inputs, attrs)[0];
+    auto result = dispatch_to_device(OpId::TriuIndices, device.type, inputs, attrs)[0];
+    if (result.dtype() != dtype) result = result.to(dtype);
+    return result;
 }
 
 auto complex(const Tensor& real, const Tensor& imag) -> Tensor {
@@ -1555,9 +1599,14 @@ auto complex(const Tensor& real, const Tensor& imag) -> Tensor {
     }
 
     // Dispatch through backend for GPU tensors (backends already cover both
-    // Float32→Complex64 and Float64→Complex128 paths).
+    // Float32→Complex64 and Float64→Complex128 paths). Contiguify first: the
+    // GPU ComplexTensor kernels index real/imag flat, so a non-contiguous
+    // (e.g. transposed) input would be read with the wrong layout — the CPU
+    // path below already contiguifies.
     if (real.device().type != Device::Type::CPU) {
-        std::array<Tensor, 2> inputs = {real, imag};
+        Tensor r = real.is_contiguous() ? real : real.contiguous();
+        Tensor im = imag.is_contiguous() ? imag : imag.contiguous();
+        std::array<Tensor, 2> inputs = {r, im};
         return dispatch_single(OpId::ComplexTensor, inputs);
     }
 

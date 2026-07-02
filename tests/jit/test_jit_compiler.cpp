@@ -1086,6 +1086,54 @@ TEST_F(JITCompilerTest, CommonSubexpressionElimination_WithDuplicates) {
     EXPECT_LT(graph.num_nodes(), 3);
 }
 
+// Regression: three (or more) mutually-equivalent nodes must all collapse to a
+// single canonical value with no dangling reference. The pairwise replacement
+// map formed a chain (o3->o2, o2->o1) that, when applied, redirected a consumer
+// to o2 whose producer relu2 was then removed — leaving a dangling value.
+TEST_F(JITCompilerTest, CommonSubexpressionElimination_ThreeDuplicates) {
+    Graph graph;
+    auto input = graph.create_value("input", {2, 3}, DType::Float32, device_);
+    auto o1 = graph.create_value("o1", {2, 3}, DType::Float32, device_);
+    auto o2 = graph.create_value("o2", {2, 3}, DType::Float32, device_);
+    auto o3 = graph.create_value("o3", {2, 3}, DType::Float32, device_);
+    auto a1 = graph.create_value("a1", {2, 3}, DType::Float32, device_);
+    auto a2 = graph.create_value("a2", {2, 3}, DType::Float32, device_);
+
+    auto relu1 = graph.create_node(OpType::ReLU, "relu1");
+    relu1->add_input(input); relu1->add_output(o1); o1->set_node(relu1);
+    auto relu2 = graph.create_node(OpType::ReLU, "relu2");
+    relu2->add_input(input); relu2->add_output(o2); o2->set_node(relu2);
+    auto relu3 = graph.create_node(OpType::ReLU, "relu3");
+    relu3->add_input(input); relu3->add_output(o3); o3->set_node(relu3);
+    // Consumers reference all three duplicate outputs.
+    auto add1 = graph.create_node(OpType::Add, "add1");
+    add1->add_input(o1); add1->add_input(o2); add1->add_output(a1); a1->set_node(add1);
+    auto add2 = graph.create_node(OpType::Add, "add2");
+    add2->add_input(a1); add2->add_input(o3); add2->add_output(a2); a2->set_node(add2);
+
+    graph.add_node(relu1); graph.add_node(relu2); graph.add_node(relu3);
+    graph.add_node(add1); graph.add_node(add2);
+    graph.set_inputs({input}); graph.set_outputs({a2});
+
+    CommonSubexpressionEliminationPass pass;
+    pass.run(graph);
+
+    // No dangling references: every input of every remaining node must be the
+    // graph input or produced by a node still present in the graph.
+    std::unordered_set<const Node*> present;
+    for (const auto& n : graph.nodes()) present.insert(n.get());
+    for (const auto& n : graph.nodes()) {
+        for (const auto& in : n->inputs()) {
+            const bool is_graph_input = (in->id() == input->id());
+            auto producer = in->node();
+            const bool produced = producer && present.count(producer.get()) > 0;
+            EXPECT_TRUE(is_graph_input || produced)
+                << "dangling value '" << in->id()
+                << "' consumed after CSE (producer removed)";
+        }
+    }
+}
+
 TEST_F(JITCompilerTest, CommonSubexpressionElimination_PassName) {
     CommonSubexpressionEliminationPass pass;
     EXPECT_EQ(pass.name(), "CommonSubexpressionElimination");

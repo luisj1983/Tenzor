@@ -204,6 +204,46 @@ TEST(FSDPTest, ShardingStrategies) {
     }
 }
 
+// Regression: FULL_SHARD must write optimizer updates back into the persistent
+// shard. Simulate an optimizer step (add 1.0 to the materialized full param),
+// release, then re-gather: the update must survive. Without the writeback the
+// gather rebuilds the full params from the stale shard and reverts the weights,
+// so training makes zero progress. This reproduces even at world_size=1.
+TEST(FSDPTest, FullShardWritebackPreservesUpdates) {
+    auto model = std::make_shared<FSDPTestModel>(8, 16, 4);
+    auto pg = dist::ProcessGroup::create_process_group(
+        dist::Backend::GLOO, 0, 1, "localhost", 29650);
+    dist::FSDPConfig config;
+    config.strategy = dist::ShardingStrategy::FULL_SHARD;
+    dist::FullyShardedDataParallel fsdp(*model, *pg, config);
+
+    // Materialize the full params and snapshot the first weight.
+    fsdp.summon_full_params();
+    auto params = model->parameters();
+    ASSERT_FALSE(params.empty());
+    auto& p = params[0];
+    Tensor before = p->tensor().to(Device::cpu()).contiguous().clone();
+
+    // Simulate an optimizer step: add 1.0 to the full param in place.
+    auto& t = p->tensor();
+    std::vector<int64_t> tshape(t.shape().begin(), t.shape().end());
+    add_(t, tenzor::full(tshape, 1.0, t.dtype(), t.device()));
+    fsdp.release_full_params();
+
+    // Re-gather: the +1 update must be preserved.
+    fsdp.summon_full_params();
+    Tensor after = model->parameters()[0]->tensor().to(Device::cpu()).contiguous();
+    fsdp.release_full_params();
+
+    ASSERT_EQ(after.numel(), before.numel());
+    const float* b = before.data<float>();
+    const float* a = after.data<float>();
+    for (int64_t i = 0; i < after.numel(); ++i) {
+        EXPECT_NEAR(a[i], b[i] + 1.0f, 1e-4f)
+            << "FULL_SHARD writeback missing: gather reverted the update at " << i;
+    }
+}
+
 TEST(FSDPTest, MemoryReduction) {
     auto model = std::make_shared<FSDPTestModel>(32, 64, 16);
     auto pg = dist::ProcessGroup::create_process_group(

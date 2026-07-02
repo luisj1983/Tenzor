@@ -189,6 +189,33 @@ TEST_P(LossTest, CrossEntropyBasic) {
     EXPECT_GT(loss_data[0], 0.0f) << "Failed on " << device.to_string();
 }
 
+// Regression: CrossEntropy on a >2D [N,C,H,W] input with a class-index target
+// [N,H,W] (semantic segmentation) must equal the same CE computed by flattening
+// to [N*H*W, C] / [N*H*W]. The previous code appended the one-hot class axis at
+// the end, misaligning it with the input, and threw a broadcast error.
+TEST_P(LossTest, CrossEntropySegmentation2DTarget) {
+    auto in_t = arange(0, 12, 1, DType::Float32, Device::cpu()).reshape({1, 3, 2, 2});
+    in_t = in_t.to(device);
+    auto tgt = zeros({1, 2, 2}, DType::Int64, Device::cpu());
+    int64_t* td = tgt.data<int64_t>();
+    td[0] = 0; td[1] = 1; td[2] = 2; td[3] = 0;
+    tgt = tgt.to(device);
+
+    auto seg = cross_entropy(Variable(in_t, true), tgt, Reduction::Mean);
+
+    // Reference: move C to last, flatten pixels -> [N*H*W, C] and [N*H*W].
+    auto in_flat = in_t.permute({0, 2, 3, 1}).contiguous().reshape({4, 3});
+    auto tgt_flat = tgt.reshape({4});
+    auto ref = cross_entropy(Variable(in_flat, true), tgt_flat, Reduction::Mean);
+
+    auto s = seg.tensor().to(Device::cpu()).to(DType::Float64).data<double>()[0];
+    auto r = ref.tensor().to(Device::cpu()).to(DType::Float64).data<double>()[0];
+    EXPECT_NEAR(s, r, 1e-4) << "segmentation CE != flattened CE on " << device.to_string();
+
+    // Gradient must flow back to the input (graph not severed).
+    seg.backward();
+}
+
 TEST_P(LossTest, CrossEntropyUniformLogits) {
     // For uniform logits across classes, cross entropy should be approximately log(num_classes)
     auto logits = Variable(zeros({4, 3}, DType::Float32, device), true);

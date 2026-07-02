@@ -542,10 +542,20 @@ auto conv3d_forward_kernel(
 
     Tensor output({is[0], ws[0], out_d, out_h, out_w}, input.dtype(), input.device());
 
+    // conv3d_forward_impl indexes input/weight as flat packed NCDHW/OIDHW
+    // buffers, so a non-contiguous view (transposed / channels-last) would be
+    // read with the wrong layout. Every sibling conv kernel guards this way;
+    // the Float16/BFloat16 path is already contiguous via .to(Float32).
+    const Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor w_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c;
+    const Tensor* bias_ptr = bias;
+    if (bias && !bias->is_contiguous()) { bias_c = bias->contiguous(); bias_ptr = &bias_c; }
+
     if (input.dtype() == DType::Float32) {
-        conv3d_forward_impl<float>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
+        conv3d_forward_impl<float>(in_c, w_c, bias_ptr, output, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float64) {
-        conv3d_forward_impl<double>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
+        conv3d_forward_impl<double>(in_c, w_c, bias_ptr, output, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         auto in_f32 = input.to(DType::Float32);
@@ -582,10 +592,15 @@ auto conv3d_backward_input_kernel(
 ) -> Tensor {
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
+    // Flat-indexing impl: contiguify grad_output/weight (a non-contiguous
+    // grad_output is common when an upstream transpose feeds the gradient).
+    const Tensor go_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor w_c = weight.is_contiguous() ? weight : weight.contiguous();
+
     if (grad_output.dtype() == DType::Float32) {
-        conv3d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
+        conv3d_backward_input_impl<float>(go_c, w_c, grad_input, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv3d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
+        conv3d_backward_input_impl<double>(go_c, w_c, grad_input, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
@@ -619,10 +634,14 @@ auto conv3d_backward_weight_kernel(
 ) -> Tensor {
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
+    // Flat-indexing impl: contiguify grad_output/input before use.
+    const Tensor go_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+
     if (grad_output.dtype() == DType::Float32) {
-        conv3d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
+        conv3d_backward_weight_impl<float>(go_c, in_c, grad_weight, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv3d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
+        conv3d_backward_weight_impl<double>(go_c, in_c, grad_weight, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);

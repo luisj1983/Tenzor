@@ -77,7 +77,7 @@ void main() {
                 float val = input_data[input_idx];
 
                 // Update max if current value is larger
-                if (val > max_val) {
+                if (val > max_val || val != val) {
                     max_val = val;
                     max_h = h_in;
                     max_w = w_in;

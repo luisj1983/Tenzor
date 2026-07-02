@@ -245,13 +245,21 @@ DiceLoss::DiceLoss(double smooth, const std::string& reduction)
     }
 }
 
-auto DiceLoss::forward(const Variable& input, const Variable& target) -> Variable {
+auto DiceLoss::forward(const Variable& input_in, const Variable& target_in) -> Variable {
     // Validate: input must be at least 2D (batch + channel dimensions)
-    if (input.shape().size() < 2) {
+    if (input_in.shape().size() < 2) {
         throw std::invalid_argument(
             "DiceLoss: input must be at least 2D (batch + channels), got " +
-            std::to_string(input.shape().size()) + "D");
+            std::to_string(input_in.shape().size()) + "D");
     }
+
+    // Widen Float16/BFloat16 to Float32: the spatial sums below accumulate over
+    // H*W elements and overflow half precision (max 65504) for large maps,
+    // giving inf/inf = NaN. Every sibling advanced loss widens the same way.
+    const DType orig_dtype = input_in.tensor().dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable input = widen ? tenzor::nn::variable_cast(input_in, DType::Float32) : input_in;
+    Variable target = widen ? tenzor::nn::variable_cast(target_in, DType::Float32) : target_in;
 
     // Dice = 1 - (2 * |X ∩ Y| + smooth) / (|X| + |Y| + smooth)
     // For differentiable version: intersection = sum(input * target)
@@ -301,7 +309,8 @@ auto DiceLoss::forward(const Variable& input, const Variable& target) -> Variabl
     auto one = scalar_var(1.0f, dice_coeff);
     auto loss = (dice_coeff * neg_one) + one;
 
-    return apply_reduction(loss, reduction_);
+    auto reduced = apply_reduction(loss, reduction_);
+    return widen ? tenzor::nn::variable_cast(reduced, orig_dtype) : reduced;
 }
 
 //==============================================================================
@@ -938,10 +947,18 @@ auto soft_margin_loss(const Variable& input, const Variable& target,
 HingeEmbeddingLoss::HingeEmbeddingLoss(double margin, Reduction reduction)
     : margin_(margin), reduction_(reduction) {}
 
-auto HingeEmbeddingLoss::forward(const Variable& input, const Variable& target) -> Variable {
+auto HingeEmbeddingLoss::forward(const Variable& input_in, const Variable& target_in) -> Variable {
     // loss = x  if y = 1
     // loss = max(0, margin - x)  if y = -1
     // Combined: loss = (y == 1) * x + (y == -1) * max(0, margin - x)
+
+    // Widen Float16/BFloat16 to Float32 for consistency with the other advanced
+    // losses (the sum reduction stays well-conditioned, but this keeps the whole
+    // family on the same precision contract); narrow the result back.
+    const DType orig_dtype = input_in.tensor().dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable input = widen ? tenzor::nn::variable_cast(input_in, DType::Float32) : input_in;
+    Variable target = widen ? tenzor::nn::variable_cast(target_in, DType::Float32) : target_in;
 
     auto one = scalar_var(1.0f, input);
     auto neg_one = scalar_var(-1.0f, input);
@@ -955,7 +972,8 @@ auto HingeEmbeddingLoss::forward(const Variable& input, const Variable& target) 
     auto loss = pos_mask * input + neg_mask * hinge_part;
 
     auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss, red_str);
+    auto reduced = apply_reduction(loss, red_str);
+    return widen ? tenzor::nn::variable_cast(reduced, orig_dtype) : reduced;
 }
 
 auto hinge_embedding_loss(const Variable& input, const Variable& target,
@@ -1265,14 +1283,19 @@ MultiMarginLoss::MultiMarginLoss(int p, double margin, Reduction reduction)
     }
 }
 
-auto MultiMarginLoss::forward(const Variable& input, const Tensor& target) -> Variable {
+auto MultiMarginLoss::forward(const Variable& input_in, const Tensor& target) -> Variable {
     // loss = 1/C * sum_{j != y} max(0, margin - x[y] + x[j])^p
     // input: (N, C), target: (N,) with class indices
 
-    if (input.tensor().ndim() < 2) {
+    if (input_in.tensor().ndim() < 2) {
         throw std::invalid_argument(
             "MultiMarginLoss: expects >=2D logits [N, C, ...]");
     }
+    // Widen Float16/BFloat16 to Float32 for consistency with the other advanced
+    // losses (target is class indices, so it is not widened); narrow back below.
+    const DType orig_dtype = input_in.tensor().dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable input = widen ? tenzor::nn::variable_cast(input_in, DType::Float32) : input_in;
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1313,7 +1336,8 @@ auto MultiMarginLoss::forward(const Variable& input, const Tensor& target) -> Va
     }
 
     auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss_per_sample, red_str);
+    auto reduced = apply_reduction(loss_per_sample, red_str);
+    return widen ? tenzor::nn::variable_cast(reduced, orig_dtype) : reduced;
 }
 
 auto multi_margin_loss(const Variable& input, const Tensor& target,

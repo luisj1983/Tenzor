@@ -70,7 +70,11 @@ struct FlashAttentionKernelBFloat16 {};
 // Fused Add + ReLU
 // ============================================================================
 
-auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto fused_add_relu_kernel(const Tensor& a_orig, const Tensor& b_orig, sycl::queue& queue) -> Tensor {
+    // Contiguify: the kernel reads a[i]+b[i] flat, so views with differing
+    // physical layouts would be paired incorrectly (matches the CPU kernel).
+    const Tensor a = a_orig.is_contiguous() ? a_orig : a_orig.contiguous();
+    const Tensor b = b_orig.is_contiguous() ? b_orig : b_orig.contiguous();
     if (a.dtype() != b.dtype()) {
         throw std::invalid_argument("fused_add_relu: input dtypes must match");
     }
@@ -132,7 +136,9 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue)
 // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
 // ============================================================================
 
-auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto fused_gelu_kernel(const Tensor& input_orig, sycl::queue& queue) -> Tensor {
+    // Contiguify: the kernel reads/writes input flat (matches the CPU kernel).
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -195,13 +201,17 @@ auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // ============================================================================
 
 auto fused_layer_norm_kernel(
-    const Tensor& input,
+    const Tensor& input_orig,
     const Tensor& weight,  // gamma
     const Tensor& bias,    // beta
     const std::vector<int64_t>& normalized_shape,
     float epsilon,
     sycl::queue& queue
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Contiguify: the kernel indexes input flat (in_ptr + b*norm_size), so a
+    // non-contiguous view would read the wrong storage and corrupt the saved
+    // mean/inv_std. Mirrors the CPU kernel's guard.
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     // Calculate normalized dimension size
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
@@ -918,7 +928,7 @@ auto fused_linear_relu_kernel(
 // ============================================================================
 
 auto fused_batchnorm_relu_kernel(
-    const Tensor& input,
+    const Tensor& input_orig,
     const Tensor& running_mean,
     const Tensor& running_var,
     const Tensor& weight,
@@ -926,6 +936,9 @@ auto fused_batchnorm_relu_kernel(
     float epsilon,
     sycl::queue& queue
 ) -> Tensor {
+    // Contiguify: the kernel indexes input flat as NCHW, so a channels-last /
+    // permuted view would map elements to the wrong channel (matches CPU).
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t batch_size = shape[0];
     int64_t num_features = shape[1];
@@ -1449,8 +1462,12 @@ auto fused_softmax_cross_entropy_grad_kernel(
 // Returns: (output, rrms) where rrms = 1/sqrt(mean(x^2) + eps)
 // ============================================================================
 
-auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
+auto fused_rms_norm_kernel(const Tensor& input_orig, const Tensor& weight, float eps,
                             sycl::queue& queue) -> std::tuple<Tensor, Tensor> {
+    // Contiguify: the kernel indexes input flat (in_ptr + b*norm_size), so a
+    // non-contiguous residual view would read the wrong storage and corrupt the
+    // saved rrms. Mirrors the CPU kernel's guard.
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t norm_size = shape.back();
     int64_t batch_size = input.numel() / norm_size;

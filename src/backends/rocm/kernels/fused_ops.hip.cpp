@@ -245,13 +245,16 @@ __global__ void fused_batchnorm_relu_kernel(
 }
 
 auto fused_batchnorm_relu_hip(
-    const Tensor& input,
+    const Tensor& input_orig,
     const Tensor& running_mean,
     const Tensor& running_var,
     const Tensor& weight,
     const Tensor& bias,
     float eps
 ) -> Tensor {
+    // Contiguify: the kernel indexes input flat as NCHW, so a channels-last /
+    // permuted view would map elements to the wrong channel (matches CPU).
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     // Non-Float32: upcast to Float32, compute, convert back
     if (input.dtype() != DType::Float32) {
         DType orig_dtype = input.dtype();
@@ -631,7 +634,11 @@ inline bool have_same_shape(const Tensor& a, const Tensor& b) {
 
 } // namespace detail_fused
 
-auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
+auto fused_add_relu_hip(const Tensor& a_orig, const Tensor& b_orig) -> Tensor {
+    // Contiguify both operands: the kernel reads a[i]+b[i] flat, so views with
+    // differing physical layouts would be paired incorrectly (matches CPU).
+    const Tensor a = a_orig.is_contiguous() ? a_orig : a_orig.contiguous();
+    const Tensor b = b_orig.is_contiguous() ? b_orig : b_orig.contiguous();
     // Float16/BFloat16: upcast to Float32, compute, convert back
     if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
         DType orig_dtype = a.dtype();
@@ -734,7 +741,9 @@ __global__ void fused_gelu_kernel(
     }
 }
 
-auto fused_gelu_hip(const Tensor& input) -> Tensor {
+auto fused_gelu_hip(const Tensor& input_orig) -> Tensor {
+    // Contiguify: the kernel reads/writes input flat (matches the CPU kernel).
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     // Non-Float32: upcast to Float32, compute, convert back
     if (input.dtype() != DType::Float32) {
         DType orig_dtype = input.dtype();
@@ -838,13 +847,17 @@ __global__ void fused_layer_norm_kernel(
 }
 
 auto fused_layer_norm_hip(
-    const Tensor& input,
+    const Tensor& input_orig,
     const std::vector<int64_t>& normalized_shape,
     const Tensor& weight,
     const Tensor& bias,
     float eps,
     hipStream_t stream
 ) -> Tensor {
+    // Contiguify: the kernel indexes input flat (input + b*norm_size), so a
+    // non-contiguous view would read the wrong storage and corrupt the saved
+    // mean/inv_std. Mirrors the CPU kernel; F16/BF16 contiguifies via .to().
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     // Float16/BFloat16: upcast to Float32, compute, convert back. Float64
     // computes natively in double precision below — previously Float64 was
     // also routed through Float32, which silently dropped the input to
@@ -2063,11 +2076,15 @@ __global__ void fused_rms_norm_kernel(
 }
 
 auto fused_rms_norm_hip(
-    const Tensor& input,
+    const Tensor& input_orig,
     const Tensor& weight,
     float eps,
     hipStream_t stream
 ) -> std::pair<Tensor, Tensor> {
+    // Contiguify: the kernel indexes input flat (input + b*norm_size), so a
+    // non-contiguous residual view would read the wrong storage and corrupt the
+    // saved rrms. Mirrors the CPU kernel; the F16/BF16 path contiguifies via .to().
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     // Float16/BFloat16: upcast to Float32, compute, convert back. Float64 is
     // computed natively below — downcasting it to Float32 would lose precision
     // and diverge from the CPU/CUDA native-FP64 path.

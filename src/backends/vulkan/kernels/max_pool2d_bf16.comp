@@ -78,7 +78,7 @@ void main() {
                                 uint(h_in) * params.in_width +
                                 uint(w_in);
                 float val = float(readBF16Element(input_idx));
-                max_val = max(max_val, val);
+                max_val = (val > max_val || val != val) ? val : max_val;
             }
         }
     }

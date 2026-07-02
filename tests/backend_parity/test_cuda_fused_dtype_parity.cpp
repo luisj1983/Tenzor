@@ -101,6 +101,49 @@ TEST_F(CudaFusedDtypeParity, FusedRMSNorm_F16_NativeMatchesRef) {
     }
 }
 
+// Regression: fused RMSNorm must produce the same result on a non-contiguous
+// input as on its contiguous equivalent. The GPU kernels index storage flat, so
+// a missing contiguity guard reads the wrong layout. Compares each available GPU
+// backend's non-contiguous result against the CPU contiguous reference.
+TEST_F(CudaFusedDtypeParity, FusedRMSNorm_NonContiguousMatchesContiguous) {
+    auto input = random_f32({4, 8});   // logical [4,8], contiguous on CPU
+    auto weight = random_f32({8});
+    OpAttributes attrs;
+    attrs.set(AttrKey::Eps, static_cast<double>(1e-6));
+
+    std::vector<Tensor> ref_inputs = {input, weight};
+    Tensor ref = dispatch(OpId::FusedRMSNorm, ref_inputs, attrs)[0]
+                     .to(Device::cpu()).to(DType::Float64);
+
+    // base[j,i] = input[i,j]; base.transpose(0,1) is a non-contiguous view whose
+    // logical values equal `input`.
+    Tensor base = input.transpose(0, 1).contiguous();  // [8,4] contiguous
+
+    struct Cand { const char* name; Device dev; };
+    std::vector<Cand> cands = {
+        {"cuda", Device::cuda(0)}, {"oneapi", Device::oneapi(0)},
+        {"rocm", Device::rocm(0)}, {"vulkan", Device::vulkan(0)},
+    };
+    int tested = 0;
+    for (auto& c : cands) {
+        try { auto probe = zeros({1}, DType::Float32, c.dev); (void)probe; }
+        catch (...) { continue; }
+        Tensor in_nc = base.to(c.dev).transpose(0, 1);  // [4,8] non-contiguous
+        ASSERT_FALSE(in_nc.is_contiguous()) << c.name;
+        std::vector<Tensor> inp = {in_nc, weight.to(c.dev)};
+        Tensor out = dispatch(OpId::FusedRMSNorm, inp, attrs)[0]
+                         .to(Device::cpu()).to(DType::Float64);
+        ASSERT_EQ(out.numel(), ref.numel()) << c.name;
+        const double* r = ref.data<double>();
+        const double* o = out.data<double>();
+        for (int64_t i = 0; i < ref.numel(); ++i)
+            EXPECT_NEAR(o[i], r[i], 1e-3) << c.name << " elem " << i;
+        ++tested;
+    }
+    if (tested == 0)
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "no GPU backend");
+}
+
 TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_BF16_NativeMatchesRef) {
     if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 

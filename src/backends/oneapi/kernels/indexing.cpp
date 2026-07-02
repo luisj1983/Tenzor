@@ -1889,8 +1889,14 @@ auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values,
 // ============================================================================
 // IndexAdd - atomically adds source into output at indexed positions
 // ============================================================================
-auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
-                      const Tensor& source, sycl::queue& queue) -> Tensor {
+auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index_orig,
+                      const Tensor& source_orig, sycl::queue& queue) -> Tensor {
+    // Contiguify source/index: the kernel reads src_ptr/idx_ptr flat, so a
+    // non-contiguous grad_output fed as source (common in index_select/gather
+    // backward) or a strided index would read the wrong elements. scatter_add
+    // guards the same way.
+    const Tensor index = index_orig.is_contiguous() ? index_orig : index_orig.contiguous();
+    const Tensor source = source_orig.is_contiguous() ? source_orig : source_orig.contiguous();
     // Non-Float32: convert to Float32 and recurse
     if (input.dtype() != DType::Float32) {
         auto f32_in = input.to(DType::Float32);
@@ -1954,8 +1960,11 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // ============================================================================
 // IndexCopy - copies source into output at indexed positions
 // ============================================================================
-auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index,
-                       const Tensor& source, sycl::queue& queue) -> Tensor {
+auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index_orig,
+                       const Tensor& source_orig, sycl::queue& queue) -> Tensor {
+    // Contiguify source/index (read flat below; matches scatter_add's guard).
+    const Tensor index = index_orig.is_contiguous() ? index_orig : index_orig.contiguous();
+    const Tensor source = source_orig.is_contiguous() ? source_orig : source_orig.contiguous();
     // Non-Float32: convert to Float32 and recurse
     if (input.dtype() != DType::Float32) {
         auto f32_in = input.to(DType::Float32);
@@ -2015,8 +2024,10 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // ============================================================================
 // IndexFill - fills output at indexed positions with a scalar value
 // ============================================================================
-auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index_orig,
                        float value, sycl::queue& queue) -> Tensor {
+    // Contiguify index (read flat below; matches scatter_add's guard).
+    const Tensor index = index_orig.is_contiguous() ? index_orig : index_orig.contiguous();
     // Non-Float32: convert to Float32 and recurse
     if (input.dtype() != DType::Float32) {
         auto f32_in = input.to(DType::Float32);

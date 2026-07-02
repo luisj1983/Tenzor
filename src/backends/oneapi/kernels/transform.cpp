@@ -3044,6 +3044,9 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     auto shape = in_cont.shape();
     int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape
+                               // (the tensor-repeats variant already does this;
+                               // omitting it here read shape[dim] out of bounds)
 
     int64_t in_dim_size = shape[dim];
     int64_t out_dim_size = in_dim_size * repeats;

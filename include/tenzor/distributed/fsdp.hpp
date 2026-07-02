@@ -332,6 +332,13 @@ private:
     auto shard_params() -> void;
 
     /**
+     * @brief Refresh local_shard_ from the current (optimizer-updated) param
+     *        Variables so the next all_gather_params() rebuilds the updated
+     *        weights instead of the pre-step shard. Safe to call every step.
+     */
+    auto reshard_from_params() -> void;
+
+    /**
      * @brief Write values from flat_param_ back into original parameter Variables.
      */
     auto unflatten_params() -> void;

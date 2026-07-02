@@ -100,7 +100,12 @@ auto binary_op_promoted(const char* name, const Tensor& a, const Tensor& b) -> T
             int64_t db = i < sb.size() ? sb[sb.size()-1-i] : 1;
             out[nd-1-i] = (da == 1) ? db : da;
         }
-        return Tensor(out, ap.dtype(), ap.device());
+        // Comparison ops produce Bool regardless of operand dtype; the non-empty
+        // path gets this right via the kernel, so mirror it for empty operands.
+        constexpr bool is_comparison =
+            (Op == OpId::Eq || Op == OpId::Ne || Op == OpId::Lt ||
+             Op == OpId::Le || Op == OpId::Gt || Op == OpId::Ge);
+        return Tensor(out, is_comparison ? DType::Bool : ap.dtype(), ap.device());
     }
     Tensor ac = ap.is_contiguous() ? ap : ap.contiguous();
     Tensor bc = bp.is_contiguous() ? bp : bp.contiguous();

@@ -93,7 +93,7 @@ void main() {
                                 uint(h_in) * params.in_width + uint(w_in);
 
                 float val = float(readBF16Element(input_idx));
-                if (val > max_val) {
+                if (val > max_val || val != val) {
                     max_val = val;
                     max_idx = int(input_idx);
                 }

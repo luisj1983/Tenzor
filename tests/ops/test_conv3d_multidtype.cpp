@@ -55,6 +55,32 @@ TEST_P(Conv3dMultiDTypeTest, ForwardShapeNoBias) {
     expectShape(output.tensor(), {2, 8, 4, 4, 4});
 }
 
+// Regression: Conv3d on a non-contiguous (permuted) NCDHW input must match the
+// result on the contiguous equivalent. The kernels index the input flat, so a
+// missing contiguity guard would read the wrong storage layout.
+TEST_P(Conv3dMultiDTypeTest, NonContiguousInputMatchesContiguous) {
+    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 too imprecise";
+    const int64_t N = 1, C = 2, D = 4, H = 4, W = 4;
+    nn::Conv3d conv(C, 4, 3, 1, 1);
+    convert_model(conv);
+
+    // Build a non-contiguous NCDHW view by transposing a (C,N,D,H,W) tensor.
+    auto base = tenzor::arange(0, C * N * D * H * W, 1, dtype(), device())
+                    .reshape({C, N, D, H, W});
+    auto x_view = tenzor::transpose(base, 0, 1);  // (N,C,D,H,W), non-contiguous
+    ASSERT_FALSE(x_view.is_contiguous());
+    auto x_cont = x_view.contiguous();
+
+    auto out_view = conv.forward(Variable(x_view)).tensor().to(Device::cpu()).to(DType::Float64);
+    auto out_cont = conv.forward(Variable(x_cont)).tensor().to(Device::cpu()).to(DType::Float64);
+    ASSERT_EQ(out_view.numel(), out_cont.numel());
+    const double* a = out_view.data<double>();
+    const double* b = out_cont.data<double>();
+    const double tol = (dtype() == DType::Float64) ? 1e-9 : 1e-3;
+    for (int64_t i = 0; i < out_view.numel(); ++i)
+        EXPECT_NEAR(a[i], b[i], tol) << "mismatch at " << i << " on " << device().to_string();
+}
+
 // ============================================================================
 // Backward Tests
 // ============================================================================

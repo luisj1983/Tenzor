@@ -6114,34 +6114,38 @@ __global__ void conj_kernel_c128(const double* input, double* output, int64_t n)
 }
 
 auto conj_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
-    int64_t n = input.numel();
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    // The element kernels read storage flat (2*idx), so a non-contiguous
+    // (e.g. transposed) complex input must be materialized contiguous first,
+    // otherwise it is conjugated in physical order and written as logical order.
+    const Tensor in_t = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = in_t.numel();
+    std::vector<int64_t> shape(in_t.shape().begin(), in_t.shape().end());
 
-    if (input.dtype() == DType::Complex64) {
-        Tensor result(shape, DType::Complex64, input.device());
+    if (in_t.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Complex64, in_t.device());
         if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(conj_kernel_c64, grid, block, 0, stream,
-            reinterpret_cast<const float*>(input.data_ptr()),
+            reinterpret_cast<const float*>(in_t.data_ptr()),
             reinterpret_cast<float*>(result.data_ptr()), n);
         HIP_CHECK(hipGetLastError());
         return result;
-    } else if (input.dtype() == DType::Complex128) {
-        Tensor result(shape, DType::Complex128, input.device());
+    } else if (in_t.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Complex128, in_t.device());
         if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(conj_kernel_c128, grid, block, 0, stream,
-            reinterpret_cast<const double*>(input.data_ptr()),
+            reinterpret_cast<const double*>(in_t.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()), n);
         HIP_CHECK(hipGetLastError());
         return result;
     }
     // For real dtypes, conjugate is identity
-    Tensor result(shape, input.dtype(), input.device());
-    HIP_CHECK(hipMemcpyAsync(result.data_ptr(), input.data_ptr(),
-                   n * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream));
+    Tensor result(shape, in_t.dtype(), in_t.device());
+    HIP_CHECK(hipMemcpyAsync(result.data_ptr(), in_t.data_ptr(),
+                   n * dtype_size(in_t.dtype()), hipMemcpyDeviceToDevice, stream));
     return result;
 }
 

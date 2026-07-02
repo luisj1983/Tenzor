@@ -212,6 +212,60 @@ auto FSDPUnit::shard_params() -> void {
     }
 }
 
+auto FSDPUnit::reshard_from_params() -> void {
+    // Refresh local_shard_ (the persistent sharded source of truth) from the
+    // current param Variables. After backward the optimizer updates the full
+    // param Variables (original_params_) in place, but nothing else writes those
+    // updates back into local_shard_; since all_gather_params() rebuilds the
+    // full params from local_shard_ every step, without this the next forward
+    // would restore the pre-step weights and FULL_SHARD training would make zero
+    // progress. On the first step this reproduces the init shard (no-op).
+    //
+    // Unlike flatten_params(), this does NOT touch original_params_/param_shapes_
+    // /param_numels_/total_numel_ (which flatten_params appends to), so it is
+    // safe to call every step.
+    if (total_numel_ == 0 || original_params_.empty()) {
+        return;
+    }
+    auto dtype = original_params_[0]->tensor().dtype();
+    auto device = original_params_[0]->tensor().device();
+
+    // Rebuild a flat buffer from the current (optimizer-updated) params.
+    Tensor flat = zeros({static_cast<int64_t>(total_numel_)}, dtype, device);
+    size_t offset = 0;
+    for (const auto& param : original_params_) {
+        if (!param) continue;
+        size_t numel = param->tensor().numel();
+        Tensor param_flat =
+            param->tensor().reshape({static_cast<int64_t>(numel)}).contiguous();
+        flat = slice_scatter(flat, param_flat, /*dim=*/0,
+                             static_cast<int64_t>(offset),
+                             static_cast<int64_t>(offset + numel));
+        offset += numel;
+    }
+
+    // Extract this rank's shard (shard_numel_/shard_offset_ were set by
+    // shard_params() at construction and do not change).
+    const auto range =
+        FSDPUnit::compute_shard_range(total_numel_, pg_->world_size(), pg_->rank());
+    size_t actual = range.valid_numel;
+    Tensor new_shard = zeros({static_cast<int64_t>(shard_numel_)}, dtype, device);
+    if (actual > 0) {
+        Tensor valid_src = slice(flat, /*dim=*/0,
+                                 static_cast<int64_t>(shard_offset_),
+                                 static_cast<int64_t>(shard_offset_ + actual))
+                               .contiguous();
+        new_shard = slice_scatter(new_shard, valid_src, /*dim=*/0, /*start=*/0,
+                                  static_cast<int64_t>(actual));
+    }
+    // Match local_shard_'s current device (e.g. CPU when cpu_offload is on and
+    // reload hasn't run); the caller reloads before gather when needed.
+    if (local_shard_.is_valid() && new_shard.device() != local_shard_.device()) {
+        new_shard = new_shard.to(local_shard_.device());
+    }
+    local_shard_ = new_shard;
+}
+
 auto FSDPUnit::unflatten_params() -> void {
     if (!params_full_ || total_numel_ == 0) {
         return;
@@ -404,13 +458,31 @@ auto FSDPUnit::scatter_grads_to_params() -> void {
 // ============================================================================
 
 auto FSDPUnit::all_gather_params() -> void {
-    if (params_full_ || total_numel_ == 0) {
+    if (total_numel_ == 0) {
+        return;
+    }
+    // FULL_SHARD skips a redundant re-gather when the full params are already
+    // materialized. SHARD_GRAD_OP (ZeRO-2) keeps params resident (params_full_
+    // stays true), but after the optimizer step each rank has updated only its
+    // own shard slice of the full param, so the ranks have diverged and must be
+    // reconciled by re-gathering every step — hence it does NOT early-return.
+    if (params_full_ && config_.strategy != ShardingStrategy::SHARD_GRAD_OP) {
         return;
     }
 
     // Reload from CPU if offloaded
     if (offloaded_) {
         reload_from_cpu();
+    }
+
+    // Writeback: capture any optimizer update to the full param Variables into
+    // local_shard_ before rebuilding the full params from it. For FULL_SHARD
+    // this is the difference between training and a no-op; for SHARD_GRAD_OP it
+    // extracts this rank's post-step shard slice so the subsequent gather
+    // reconciles the divergent ranks. (No-op on the first step.)
+    if (config_.strategy == ShardingStrategy::FULL_SHARD ||
+        config_.strategy == ShardingStrategy::SHARD_GRAD_OP) {
+        reshard_from_params();
     }
 
     int ws = pg_->world_size();

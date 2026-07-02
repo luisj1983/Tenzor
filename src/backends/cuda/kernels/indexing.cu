@@ -101,15 +101,20 @@ __global__ void index_select_kernel_impl(
     }
 }
 
-auto index_select_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index,
+auto index_select_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_orig,
                          cudaStream_t stream) -> Tensor {
-    // The kernel addresses input with contiguous strides, so a non-contiguous
-    // (transposed/sliced/permuted) view would read the wrong storage. Use a
-    // contiguous copy (matches the CPU reference and the sibling gather kernel).
+    // The kernel addresses input with contiguous strides and reads the index
+    // linearly, so non-contiguous (transposed/sliced/permuted) views would read
+    // the wrong storage. Shadow both params with contiguous copies (matches the
+    // CPU reference and the sibling gather kernel).
     Tensor input_contig;
     const Tensor& input = input_orig.is_contiguous()
         ? input_orig
         : (input_contig = input_orig.contiguous());
+    Tensor index_contig;
+    const Tensor& index = index_orig.is_contiguous()
+        ? index_orig
+        : (index_contig = index_orig.contiguous());
     // Normalize dimension
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;

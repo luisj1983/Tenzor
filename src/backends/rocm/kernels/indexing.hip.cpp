@@ -710,10 +710,15 @@ __global__ void index_select_kernel(
 }
 
 auto index_select_hip(
-    const Tensor& input,
+    const Tensor& input_orig,
     int64_t dim,
-    const Tensor& indices
+    const Tensor& indices_orig
 ) -> Tensor {
+    // The kernel reads input and indices with flat/contiguous addressing, so a
+    // non-contiguous view (transposed input, or a strided index like
+    // arange(6)[::2]) would read the wrong storage. Shadow with contiguous copies.
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    const Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
 
     auto input_shape = input.shape();
 
@@ -2089,11 +2094,15 @@ auto scatter_hip(
 }
 
 auto index_select_hip(
-    const Tensor& input,
+    const Tensor& input_orig,
     int64_t dim,
-    const Tensor& indices,
+    const Tensor& indices_orig,
     hipStream_t stream
 ) -> Tensor {
+    // Contiguify: the kernel reads input/indices with flat addressing, so a
+    // non-contiguous input or a strided index view would read the wrong storage.
+    const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    const Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto input_shape = input.shape();
 
     // Normalize negative dim (PyTorch semantics: dim=-1 → last)
@@ -3153,7 +3162,13 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
                     hipStream_t stream) -> Tensor {
     int64_t batch_size = indices.numel();
 
-    Tensor output({batch_size, num_classes}, DType::Float32, indices.device());
+    // one_hot appends the class axis while preserving the index shape:
+    // [d0, ..., dk] -> [d0, ..., dk, num_classes] (matching PyTorch and the
+    // CPU/CUDA/oneAPI kernels). The flat kernel fill below is unchanged since
+    // the buffer layout [flat_index, class] is identical.
+    std::vector<int64_t> out_shape(indices.shape().begin(), indices.shape().end());
+    out_shape.push_back(num_classes);
+    Tensor output(out_shape, DType::Float32, indices.device());
 
     if (batch_size == 0) return output;
 

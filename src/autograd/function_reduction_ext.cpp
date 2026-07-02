@@ -666,12 +666,24 @@ auto LogSumExpBackward::backward_with_variables(std::vector<Variable> grad_outpu
     std::vector<int64_t> ones(input.ndim(), 1);
 
     Variable softmax_var;
-    if (has_saved_variables() && has_dim) {
-        // Variable-level: lse = logsumexp(input, dim, keepdim); softmax =
-        // exp(input - expand(lse)). grad_fn chains back through input.
-        auto lse_v = tenzor::logsumexp(saved_variables_[0], dim, keepdim);
-        if (!keepdim) {
-            lse_v = tenzor::unsqueeze(lse_v, dim);
+    if (has_saved_variables()) {
+        // Variable-level: recompute softmax through the saved input Variable so
+        // grad_fn chains back for double-backward. Handle both the per-dim and
+        // the global (no-dim) reduction — gating this on has_dim severed the
+        // higher-order graph for a global logsumexp (e.g. an HVP through a
+        // global-logsumexp loss), dropping the softmax-Jacobian term.
+        Variable lse_v;
+        if (has_dim) {
+            lse_v = tenzor::logsumexp(saved_variables_[0], dim, keepdim);
+            if (!keepdim) {
+                lse_v = tenzor::unsqueeze(lse_v, dim);
+            }
+        } else {
+            // Global reduction over all elements: flatten, reduce dim 0, then
+            // reshape the resulting scalar to an all-ones rank-matching shape.
+            auto flat = tenzor::reshape(saved_variables_[0], {-1});
+            lse_v = tenzor::logsumexp(flat, /*dim=*/0, /*keepdim=*/false);
+            lse_v = tenzor::reshape(lse_v, ones);
         }
         lse_v = tenzor::expand(lse_v, input_shape_vec);
         softmax_var = tenzor::exp(saved_variables_[0] - lse_v);

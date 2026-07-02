@@ -5712,21 +5712,25 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
 // =========================================================================
 
 auto conj_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    int64_t n = input.numel();
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    // The element kernels read storage flat (2*idx); a non-contiguous
+    // (transposed) complex input must be materialized contiguous first so the
+    // conjugate is applied in logical, not physical, order.
+    const Tensor in_t = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = in_t.numel();
+    std::vector<int64_t> shape(in_t.shape().begin(), in_t.shape().end());
 
-    if (input.dtype() == DType::Complex64) {
-        Tensor result(shape, DType::Complex64, input.device());
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_t.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Complex64, in_t.device());
+        const float* in_ptr = get_data_ptr<const float>(in_t);
         float* out_ptr = get_data_ptr<float>(result);
         queue.parallel_for<ConjKernelComplex64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             out_ptr[2 * idx]     =  in_ptr[2 * idx];
             out_ptr[2 * idx + 1] = -in_ptr[2 * idx + 1];
         }).wait();
         return result;
-    } else if (input.dtype() == DType::Complex128) {
-        Tensor result(shape, DType::Complex128, input.device());
-        const double* in_ptr = get_data_ptr<const double>(input);
+    } else if (in_t.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Complex128, in_t.device());
+        const double* in_ptr = get_data_ptr<const double>(in_t);
         double* out_ptr = get_data_ptr<double>(result);
         queue.parallel_for<ConjKernelComplex128>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             out_ptr[2 * idx]     =  in_ptr[2 * idx];
@@ -5735,26 +5739,30 @@ auto conj_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         return result;
     }
     // For real dtypes, conjugate is identity
-    Tensor result(shape, input.dtype(), input.device());
-    queue.memcpy(result.data_ptr(), input.data_ptr(), n * dtype_size(input.dtype()));
+    Tensor result(shape, in_t.dtype(), in_t.device());
+    queue.memcpy(result.data_ptr(), in_t.data_ptr(), n * dtype_size(in_t.dtype()));
     return result;
 }
 
 auto real_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    int64_t n = input.numel();
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    // Contiguify first — the kernel reads storage flat (2*idx), so a
+    // non-contiguous complex input must be materialized to read the real parts
+    // in logical order.
+    const Tensor in_t = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = in_t.numel();
+    std::vector<int64_t> shape(in_t.shape().begin(), in_t.shape().end());
 
-    if (input.dtype() == DType::Complex64) {
-        Tensor result(shape, DType::Float32, input.device());
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_t.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, in_t.device());
+        const float* in_ptr = get_data_ptr<const float>(in_t);
         float* out_ptr = get_data_ptr<float>(result);
         queue.parallel_for<RealKernelComplex64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             out_ptr[idx] = in_ptr[2 * idx];
         }).wait();
         return result;
-    } else if (input.dtype() == DType::Complex128) {
-        Tensor result(shape, DType::Float64, input.device());
-        const double* in_ptr = get_data_ptr<const double>(input);
+    } else if (in_t.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, in_t.device());
+        const double* in_ptr = get_data_ptr<const double>(in_t);
         double* out_ptr = get_data_ptr<double>(result);
         queue.parallel_for<RealKernelComplex128>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             out_ptr[idx] = in_ptr[2 * idx];
@@ -5762,26 +5770,30 @@ auto real_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         return result;
     }
     // For real dtypes, real() is identity
-    Tensor result(shape, input.dtype(), input.device());
-    queue.memcpy(result.data_ptr(), input.data_ptr(), n * dtype_size(input.dtype()));
+    Tensor result(shape, in_t.dtype(), in_t.device());
+    queue.memcpy(result.data_ptr(), in_t.data_ptr(), n * dtype_size(in_t.dtype()));
     return result;
 }
 
 auto imag_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    int64_t n = input.numel();
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    // Contiguify first — the kernel reads storage flat (2*idx+1), so a
+    // non-contiguous complex input must be materialized to read the imaginary
+    // parts in logical order.
+    const Tensor in_t = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = in_t.numel();
+    std::vector<int64_t> shape(in_t.shape().begin(), in_t.shape().end());
 
-    if (input.dtype() == DType::Complex64) {
-        Tensor result(shape, DType::Float32, input.device());
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_t.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, in_t.device());
+        const float* in_ptr = get_data_ptr<const float>(in_t);
         float* out_ptr = get_data_ptr<float>(result);
         queue.parallel_for<ImagKernelComplex64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             out_ptr[idx] = in_ptr[2 * idx + 1];
         }).wait();
         return result;
-    } else if (input.dtype() == DType::Complex128) {
-        Tensor result(shape, DType::Float64, input.device());
-        const double* in_ptr = get_data_ptr<const double>(input);
+    } else if (in_t.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, in_t.device());
+        const double* in_ptr = get_data_ptr<const double>(in_t);
         double* out_ptr = get_data_ptr<double>(result);
         queue.parallel_for<ImagKernelComplex128>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             out_ptr[idx] = in_ptr[2 * idx + 1];
@@ -5789,8 +5801,8 @@ auto imag_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         return result;
     }
     // For real dtypes, imaginary part is zero
-    Tensor result(shape, input.dtype(), input.device());
-    queue.memset(result.data_ptr(), 0, n * dtype_size(input.dtype()));
+    Tensor result(shape, in_t.dtype(), in_t.device());
+    queue.memset(result.data_ptr(), 0, n * dtype_size(in_t.dtype()));
     return result;
 }
 

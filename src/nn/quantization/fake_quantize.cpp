@@ -454,26 +454,30 @@ auto FakeQuantizeFunction::backward(std::vector<Tensor> grad_outputs) -> std::ve
     //   [(quant_min - zero_point) * scale, (quant_max - zero_point) * scale]
     // For per-channel quant the bounds are per-channel tensors broadcast
     // along axis_; otherwise they are scalars.
-    Tensor min_t, max_t;
+    // Build broadcast scale/zero_point tensors for both per-channel and
+    // per-tensor cases so the mask can be computed on the ROUNDED integer level.
+    Tensor scale_bc, zp_bc;
     if (per_channel_) {
         int64_t ndim = input.ndim();
         int64_t axis = axis_ < 0 ? axis_ + ndim : axis_;
         int64_t channels = ndim > 0 ? input.shape()[static_cast<size_t>(axis)] : 1;
-        Tensor scale_bc = broadcast_channel_param(scale_t_, ndim, axis, channels, input.dtype(), input.device());
-        Tensor zp_bc = broadcast_channel_param(zero_point_t_, ndim, axis, channels, input.dtype(), input.device());
-        Tensor qmin = full({1}, quant_min_, input.dtype(), input.device());
-        Tensor qmax = full({1}, quant_max_, input.dtype(), input.device());
-        min_t = (qmin - zp_bc) * scale_bc;
-        max_t = (qmax - zp_bc) * scale_bc;
+        scale_bc = broadcast_channel_param(scale_t_, ndim, axis, channels, input.dtype(), input.device());
+        zp_bc = broadcast_channel_param(zero_point_t_, ndim, axis, channels, input.dtype(), input.device());
     } else {
-        float range_min = (quant_min_ - zero_point_) * scale_;
-        float range_max = (quant_max_ - zero_point_) * scale_;
-        min_t = full({1}, range_min, input.dtype(), input.device());
-        max_t = full({1}, range_max, input.dtype(), input.device());
+        scale_bc = full({1}, scale_, input.dtype(), input.device());
+        zp_bc = full({1}, static_cast<float>(zero_point_), input.dtype(), input.device());
     }
+    Tensor qmin_t = full({1}, static_cast<float>(quant_min_), input.dtype(), input.device());
+    Tensor qmax_t = full({1}, static_cast<float>(quant_max_), input.dtype(), input.device());
 
-    // Mask: true where input is within quantizable range
-    Tensor mask = ge(input, min_t) * le(input, max_t);
+    // STE mask on the ROUNDED integer level q = round(x/scale + zp), not on the
+    // float range (qmin..qmax)*scale. A value whose x/scale+zp lands in
+    // (qmax, qmax+0.5] rounds to qmax — genuinely in range, not clamped — so its
+    // gradient must pass. Masking on the float range zeroes it, narrowing the
+    // pass-through region by ~half a step. This matches the LSQ backward, which
+    // masks on round(v).
+    Tensor q = round_half_to_even(input / scale_bc + zp_bc);
+    Tensor mask = ge(q, qmin_t) * le(q, qmax_t);
 
     // Zero out gradients for out-of-range values
     auto shape = grad_output.shape();
@@ -609,7 +613,10 @@ auto LSQFakeQuantizeFunction::backward(std::vector<Tensor> grad_outputs)
     lsq_broadcast(s, zero_point_, x, per_channel_, axis_, s_bc, z_bc);
 
     Tensor v = x / s_bc + z_bc;           // v = x/s + z
-    Tensor r = tenzor::round(v);          // pre-clamp integer level
+    // Use the same rounding as the forward (round-half-to-even); tenzor::round
+    // is half-away-from-zero and would disagree with the forward-emitted level
+    // on exact .5 ties, misclassifying the region and the (r - v) scale grad.
+    Tensor r = round_half_to_even(v);     // pre-clamp integer level
 
     Tensor qmin_t = full({1}, static_cast<double>(quant_min_), x.dtype(), x.device());
     Tensor qmax_t = full({1}, static_cast<double>(quant_max_), x.dtype(), x.device());

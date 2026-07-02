@@ -137,6 +137,31 @@ auto CommonSubexpressionEliminationPass::run(Graph& graph) -> bool {
         }
     }
 
+    // Resolve each replacement target to its transitive root before applying.
+    // With three (or more) mutually-equivalent nodes n0,n1,n2, the pairwise loop
+    // above leaves a chain like {o1->o0, o2->o1} (pair (1,2) overwrites (0,2)).
+    // Applying that directly would redirect o2's consumers to o1, whose producer
+    // n1 is then removed as a duplicate — leaving a dangling value reference.
+    // Collapsing every target to the canonical root (o0) makes the map
+    // {o1->o0, o2->o0}, so the apply order no longer matters. A canonical output
+    // (the first node in a bucket) is never itself replaced, so the walk
+    // terminates; the `seen` guard is a defensive cycle break.
+    {
+        auto resolve_root = [&](std::string id) {
+            std::unordered_set<std::string> seen;
+            auto it = value_replacements.find(id);
+            while (it != value_replacements.end() && seen.insert(id).second) {
+                id = it->second;
+                it = value_replacements.find(id);
+            }
+            return id;
+        };
+        for (auto& [old_id, new_id] : value_replacements) {
+            (void)old_id;
+            new_id = resolve_root(new_id);
+        }
+    }
+
     // Apply replacements: redirect consumers and remove dead duplicate nodes
     for (const auto& [old_id, new_id] : value_replacements) {
         graph.replace_value(old_id, new_id);
@@ -2078,7 +2103,14 @@ auto LICMPass::run(Graph& graph) -> bool {
                     break;
                 }
             }
-            if (all_external && !body_node->inputs().empty()) {
+            // Exclude stateful ops (Dropout, BatchNorm in training, etc.) — the
+            // same guard CSE uses. Hoisting one out of the loop computes it once
+            // and threads it as a passthrough, collapsing per-iteration random
+            // draws / running-stat updates into a single value. That is a
+            // wrong-output transform the moment the executor honors training-mode
+            // semantics, even if the value happens to be loop-invariant.
+            if (all_external && !body_node->inputs().empty() &&
+                !is_stateful_op(body_node->op_type())) {
                 invariant_nodes.push_back(body_node);
             }
         }

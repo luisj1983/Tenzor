@@ -254,8 +254,13 @@ auto index_select_kernel(const Tensor& input_arg, int64_t dim, const Tensor& ind
     // Create output tensor
     Tensor output(output_shape, input.dtype(), input.device());
 
-    // Get index data (move to CPU if needed)
+    // Get index data (move to CPU if needed). Contiguify as well: the loop
+    // below reads index_data flat (index_data[i]), so a non-contiguous index
+    // view (e.g. a strided slice like arange(6)[::2]) would otherwise be read
+    // in physical order and select the wrong elements. gather_kernel already
+    // does this for its index.
     auto index_cpu = index.device().type == Device::Type::CPU ? index : index.to(Device::cpu());
+    if (!index_cpu.is_contiguous()) index_cpu = index_cpu.contiguous();
     const int64_t* index_data = index_cpu.data<int64_t>();
 
     // Compute strides for iteration

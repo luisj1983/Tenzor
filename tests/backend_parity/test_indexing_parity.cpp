@@ -38,6 +38,29 @@ TEST_P(IndexingParity, IndexSelect_Dim0) {
     }, {input, idx}, 0, 0, "IndexSelect_Dim0");
 }
 
+// Regression (ground truth, not parity): a strided/non-contiguous Int64 index
+// must select the logically-indexed rows. A flat read of the index storage
+// would pick physical slots [0,1,2] instead of the logical [0,2,4].
+TEST_P(IndexingParity, IndexSelect_NonContiguousIndex) {
+    auto input = zeros({5, 3}, DType::Float32, Device::cpu());
+    float* p = input.data<float>();
+    for (int i = 0; i < 15; ++i) p[i] = static_cast<float>(i);  // row r = [3r,3r+1,3r+2]
+    input = input.to(device);
+
+    // Strided view [0,2,4] taken from arange(6) with step 2 (physical stride 2).
+    auto full = arange(0, 6, 1, DType::Int64, device);
+    auto idx = slice(full, /*dim=*/0, /*start=*/0, /*end=*/6, /*step=*/2);
+    ASSERT_FALSE(idx.is_contiguous()) << "index must be non-contiguous to exercise the bug";
+
+    auto out = index_select(input, 0, idx);
+    auto out_cpu = out.to(Device::cpu());
+    ASSERT_EQ(out_cpu.shape()[0], 3);
+    ASSERT_EQ(out_cpu.shape()[1], 3);
+    const float* o = out_cpu.data<float>();
+    const float expected[9] = {0,1,2, 6,7,8, 12,13,14};  // rows 0, 2, 4
+    for (int i = 0; i < 9; ++i) EXPECT_FLOAT_EQ(o[i], expected[i]) << "at flat index " << i;
+}
+
 TEST_P(IndexingParity, Gather_Dim0) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");

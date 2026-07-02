@@ -142,5 +142,35 @@ def test_setitem_no_grad_context_is_plain_inplace():
     assert np.array_equal(_np(y), np.array([3, 2, 3, 2], dtype=np.float32))
 
 
+# ---------------------------------------------------------------------------
+# Regression: Tensor.__setitem__ must cast a dtype-mismatched RHS to the
+# destination dtype rather than byte-reinterpreting it. Previously only the
+# scalar branch cast; the exact-shape and broadcast branches memcpy'd raw
+# bytes, so an int64 RHS was reinterpreted as float32 (garbage) or copied with
+# the wrong byte count.
+# ---------------------------------------------------------------------------
+
+def test_setitem_tensor_dtype_mismatch_exact_shape_casts():
+    x = tz.zeros([4], tz.dtype.float32)
+    x[0:2] = tz.Tensor.from_numpy(np.array([7, 9], dtype=np.int64))
+    out = np.asarray(x)
+    assert float(out[0]) == 7.0 and float(out[1]) == 9.0, f"exact-shape cast failed: {out.tolist()}"
+
+
+def test_setitem_tensor_dtype_mismatch_same_size_casts():
+    # int32 -> float32 are both 4 bytes: a raw copy would reinterpret the bits.
+    x = tz.zeros([3], tz.dtype.float32)
+    x[0:3] = tz.Tensor.from_numpy(np.array([5, 6, 7], dtype=np.int32))
+    out = np.asarray(x)
+    assert out.tolist() == [5.0, 6.0, 7.0], f"same-size cast failed: {out.tolist()}"
+
+
+def test_setitem_tensor_dtype_mismatch_broadcast_casts():
+    x = tz.zeros([2, 3], tz.dtype.float32)
+    x[:] = tz.Tensor.from_numpy(np.array([1, 2, 3], dtype=np.int64))
+    out = np.asarray(x)
+    assert out.tolist() == [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], f"broadcast cast failed: {out.tolist()}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

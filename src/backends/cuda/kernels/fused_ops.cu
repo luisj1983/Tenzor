@@ -341,13 +341,20 @@ __global__ void fused_batchnorm_relu_kernel(
 }
 
 auto fused_batchnorm_relu_cuda(
-    const Tensor& input,
+    const Tensor& input_orig,
     const Tensor& running_mean,
     const Tensor& running_var,
     const Tensor& weight,
     const Tensor& bias,
     float eps
 ) -> Tensor {
+    // Contiguify: the kernel indexes input flat as NCHW, so a non-contiguous
+    // (channels-last / permuted) view would map each element to the wrong
+    // channel. Mirrors the CPU kernel's guard; the F16/BF16 path contiguifies
+    // via .to(Float32).
+    Tensor input_contig;
+    const Tensor& input = input_orig.is_contiguous()
+        ? input_orig : (input_contig = input_orig.contiguous());
     int64_t batch_size = input.shape()[0];
     int64_t num_features = input.shape()[1];
     int64_t spatial_size = 1;
@@ -677,7 +684,13 @@ __global__ void fused_add_relu_kernel(
     }
 }
 
-auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
+auto fused_add_relu_cuda(const Tensor& a_orig, const Tensor& b_orig) -> Tensor {
+    // Contiguify both operands: the kernel reads a[i]+b[i] flat, so two views
+    // with differing physical layouts (e.g. one transposed) would be paired
+    // element-for-element incorrectly. Mirrors the CPU kernel's guard.
+    Tensor a_contig, b_contig;
+    const Tensor& a = a_orig.is_contiguous() ? a_orig : (a_contig = a_orig.contiguous());
+    const Tensor& b = b_orig.is_contiguous() ? b_orig : (b_contig = b_orig.contiguous());
     int32_t device_id = a.device().index;
     auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
     cudaStream_t stream = stream_guard.get();
@@ -828,7 +841,12 @@ __global__ void fused_gelu_kernel<double>(
     }
 }
 
-auto fused_gelu_cuda(const Tensor& input) -> Tensor {
+auto fused_gelu_cuda(const Tensor& input_orig) -> Tensor {
+    // Contiguify: the kernel reads/writes input flat, so a non-contiguous view
+    // would read scrambled positions (matches the CPU kernel's guard).
+    Tensor input_contig;
+    const Tensor& input = input_orig.is_contiguous()
+        ? input_orig : (input_contig = input_orig.contiguous());
     Tensor output = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device());
 
     int64_t n = input.numel();
@@ -982,13 +1000,20 @@ __global__ void fused_layer_norm_kernel(
  * @return Tuple of (output, mean, inv_std) where mean and inv_std are saved for backward
  */
 auto fused_layer_norm_cuda(
-    const Tensor& input,
+    const Tensor& input_orig,
     const std::vector<int64_t>& normalized_shape,
     const Tensor& weight,
     const Tensor& bias,
     float eps,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Contiguify: the kernel indexes input flat (input + b*norm_size), so a
+    // non-contiguous view (e.g. LayerNorm over the last dim of a transposed
+    // activation) would read the wrong storage and corrupt the saved mean/rstd.
+    // Mirrors the CPU kernel; the F16/BF16 path contiguifies via .to(Float32).
+    Tensor input_contig;
+    const Tensor& input = input_orig.is_contiguous()
+        ? input_orig : (input_contig = input_orig.contiguous());
     // Per docs/internals/attention-contract.md: mean/inv_std must be Float32
     // for FP16/BF16 inputs (rstd dynamic range exceeds FP16 max=65504 when
     // var ~ 1e-11). Mirrors fused_rms_norm_cuda's widen-narrow at line 1241
@@ -1411,11 +1436,17 @@ __global__ void fused_rms_norm_kernel(
  * @return Tuple of (output, rrms) where rrms is saved for backward
  */
 auto fused_rms_norm_cuda(
-    const Tensor& input,
+    const Tensor& input_orig,
     const Tensor& weight,
     float eps,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor> {
+    // Contiguify: the kernel indexes input flat (input + b*norm_size, and
+    // float4-vectorizes the row), so a non-contiguous residual view would read
+    // the wrong storage and corrupt the saved rrms. Mirrors the CPU kernel.
+    Tensor input_contig;
+    const Tensor& input = input_orig.is_contiguous()
+        ? input_orig : (input_contig = input_orig.contiguous());
     // Wave E2: native F16/BF16 dispatch via Acc=F32 inside the kernel template.
     // RRMS tensor is allocated as F32 for half-precision inputs (rstd dynamic
     // range exceeds F16 max=65504 when var ~ 1e-11) — same pattern as

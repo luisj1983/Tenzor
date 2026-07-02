@@ -204,6 +204,25 @@ TEST_P(QuantizationTest, QuantizePerTensor_Asymmetric) {
     EXPECT_GT(snr_db, 30.0f);
 }
 
+// Regression: one-sided (all-positive, non-zero-straddling) data must extend
+// the asymmetric quant range to include zero. Otherwise the zero_point falls
+// outside [qmin,qmax], gets clamped, and the top of the range collapses — e.g.
+// values in (5.5, 6.0] all snapping down to 5.5.
+TEST_P(QuantizationTest, AsymmetricOneSidedRangePreservesMax) {
+    auto x = zeros({8}, DType::Float32, Device::cpu());
+    float vals[8] = {0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 5.9f, 6.0f};
+    std::memcpy(x.data<float>(), vals, sizeof(vals));
+    x = x.to(device);
+
+    auto q = quantize_per_tensor_asymmetric(x, QuantDType::INT8);
+    Tensor deq = q.dequantize().cpu();
+    const float* d = deq.data<float>();
+    // Both ends must round-trip within ~1 quant step (range/255 ≈ 0.024). With
+    // the un-extended range the max (6.0) collapsed to ~5.5 (error ~0.5).
+    EXPECT_NEAR(d[7], 6.0f, 0.05f) << "one-sided max collapsed (range not extended to include 0)";
+    EXPECT_NEAR(d[0], 0.5f, 0.05f);
+}
+
 TEST_P(QuantizationTest, QuantizePerChannel_Asymmetric) {
     auto q_tensor = quantize_per_channel_asymmetric(weights_, 0);
 

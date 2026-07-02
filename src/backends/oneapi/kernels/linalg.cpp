@@ -817,70 +817,88 @@ auto linalg_svd_kernel(const Tensor& input, bool full_matrices, sycl::queue& que
         return {U.to(orig_dtype), S.to(orig_dtype), Vh.to(orig_dtype)};
     }
     auto shape = input.shape();
-    int64_t m = shape[shape.size() - 2];
-    int64_t n = shape[shape.size() - 1];
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t m = shape[ndim - 2];
+    int64_t n = shape[ndim - 1];
     int64_t k = std::min(m, n);
+
+    // Batched input (..., m, n): compute SVD per matrix. gesvd is a 2D LAPACK
+    // primitive, so we loop over the leading batch dims — each batch is a packed
+    // m*n block of the contiguous input — and write into the batched outputs.
+    // Reduced-batch buffers are allocated once and reused across iterations.
+    int64_t nbatch = 1;
+    std::vector<int64_t> batch_dims;
+    for (int64_t i = 0; i + 2 < ndim; ++i) { batch_dims.push_back(shape[i]); nbatch *= shape[i]; }
 
     auto jobz = full_matrices ? ::oneapi::mkl::jobsvd::vectors : ::oneapi::mkl::jobsvd::somevec;
     int64_t u_cols = full_matrices ? m : k;
     int64_t vt_rows = full_matrices ? n : k;
 
+    std::vector<int64_t> u_shape = batch_dims;  u_shape.push_back(m);       u_shape.push_back(u_cols);
+    std::vector<int64_t> s_shape = batch_dims;  s_shape.push_back(k);
+    std::vector<int64_t> vt_shape = batch_dims; vt_shape.push_back(vt_rows); vt_shape.push_back(n);
+
+    // Ensure each batch matrix is a packed m*n block.
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+
     if (input.dtype() == DType::Float32) {
+        Tensor S(s_shape, input.dtype(), input.device());
+        Tensor U(u_shape, input.dtype(), input.device());
+        Tensor Vt(vt_shape, input.dtype(), input.device());
+        const float* in_ptr = get_data_ptr<const float>(in_c);
+        float* s_ptr = get_data_ptr<float>(S);
+        float* u_ptr = get_data_ptr<float>(U);
+        float* vt_ptr = get_data_ptr<float>(Vt);
+
         SyclDeviceBuffer<float> d_a(m * n, queue);
         SyclDeviceBuffer<float> d_s(k, queue);
         SyclDeviceBuffer<float> d_u(m * u_cols, queue);
         SyclDeviceBuffer<float> d_vt(vt_rows * n, queue);
-
-        row_to_col_major<float, SyclTransposeSvdAF32>(
-            d_a.get(), get_data_ptr<const float>(input), m, n, queue);
-
         // ldvt must be the number of VT rows (vt_rows), NOT n. d_vt is sized
         // vt_rows*n; passing ldvt=n would make LAPACK write an n*n column-major
         // matrix and overflow the buffer for the wide non-full case (m<n,
         // full_matrices=false, where vt_rows=min(m,n)=m<n).
         auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<float>(queue, jobz, jobz, m, n, m, m, vt_rows);
         SyclDeviceBuffer<float> scratch(sp, queue);
-        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), vt_rows, scratch.get(), sp).wait();
 
-        Tensor S({k}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(S.data_ptr()), d_s.get(), k * sizeof(float)).wait();
-
-        // U: column-major (m x u_cols) -> row-major on device
-        Tensor U({m, u_cols}, input.dtype(), input.device());
-        col_to_row_major<float, SyclTransposeSvdUF32>(
-            get_data_ptr<float>(U), d_u.get(), m, u_cols, queue);
-
-        // Vt: column-major (vt_rows x n) -> row-major on device
-        Tensor Vt({vt_rows, n}, input.dtype(), input.device());
-        col_to_row_major<float, SyclTransposeSvdVtF32>(
-            get_data_ptr<float>(Vt), d_vt.get(), vt_rows, n, queue);
-
+        for (int64_t b = 0; b < nbatch; ++b) {
+            row_to_col_major<float, SyclTransposeSvdAF32>(
+                d_a.get(), in_ptr + b * m * n, m, n, queue);
+            ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), vt_rows, scratch.get(), sp).wait();
+            queue.memcpy(s_ptr + b * k, d_s.get(), k * sizeof(float)).wait();
+            col_to_row_major<float, SyclTransposeSvdUF32>(
+                u_ptr + b * m * u_cols, d_u.get(), m, u_cols, queue);
+            col_to_row_major<float, SyclTransposeSvdVtF32>(
+                vt_ptr + b * vt_rows * n, d_vt.get(), vt_rows, n, queue);
+        }
         return {U, S, Vt};
     } else if (input.dtype() == DType::Float64) {
+        Tensor S(s_shape, input.dtype(), input.device());
+        Tensor U(u_shape, input.dtype(), input.device());
+        Tensor Vt(vt_shape, input.dtype(), input.device());
+        const double* in_ptr = get_data_ptr<const double>(in_c);
+        double* s_ptr = get_data_ptr<double>(S);
+        double* u_ptr = get_data_ptr<double>(U);
+        double* vt_ptr = get_data_ptr<double>(Vt);
+
         SyclDeviceBuffer<double> d_a(m * n, queue);
         SyclDeviceBuffer<double> d_s(k, queue);
         SyclDeviceBuffer<double> d_u(m * u_cols, queue);
         SyclDeviceBuffer<double> d_vt(vt_rows * n, queue);
-
-        row_to_col_major<double, SyclTransposeSvdAF64>(
-            d_a.get(), get_data_ptr<const double>(input), m, n, queue);
-
         // ldvt = vt_rows (not n); see Float32 branch for rationale.
         auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<double>(queue, jobz, jobz, m, n, m, m, vt_rows);
         SyclDeviceBuffer<double> scratch(sp, queue);
-        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), vt_rows, scratch.get(), sp).wait();
 
-        Tensor S({k}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(S.data_ptr()), d_s.get(), k * sizeof(double)).wait();
-
-        Tensor U({m, u_cols}, input.dtype(), input.device());
-        col_to_row_major<double, SyclTransposeSvdUF64>(
-            get_data_ptr<double>(U), d_u.get(), m, u_cols, queue);
-
-        Tensor Vt({vt_rows, n}, input.dtype(), input.device());
-        col_to_row_major<double, SyclTransposeSvdVtF64>(
-            get_data_ptr<double>(Vt), d_vt.get(), vt_rows, n, queue);
-
+        for (int64_t b = 0; b < nbatch; ++b) {
+            row_to_col_major<double, SyclTransposeSvdAF64>(
+                d_a.get(), in_ptr + b * m * n, m, n, queue);
+            ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), vt_rows, scratch.get(), sp).wait();
+            queue.memcpy(s_ptr + b * k, d_s.get(), k * sizeof(double)).wait();
+            col_to_row_major<double, SyclTransposeSvdUF64>(
+                u_ptr + b * m * u_cols, d_u.get(), m, u_cols, queue);
+            col_to_row_major<double, SyclTransposeSvdVtF64>(
+                vt_ptr + b * vt_rows * n, d_vt.get(), vt_rows, n, queue);
+        }
         return {U, S, Vt};
     } else {
         throw std::runtime_error("linalg_svd: only Float32 and Float64 supported");

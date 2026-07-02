@@ -74,13 +74,21 @@ auto compute_asymmetric_params(float min_val, float max_val, QuantDType dtype)
         return {scale, zero_point};
     }
 
+    // Extend the observed range to include zero (matching PyTorch's
+    // choose_qparams). Without this, one-sided data (e.g. ReLU activations in
+    // [0.5, 6.0]) yields a zero_point outside [quant_min, quant_max] that is
+    // then clamped, shifting the representable window and dropping the far end
+    // of the range. Weights usually straddle zero so they are unaffected; the
+    // degenerate min==max branch above already does this.
+    float lo = std::min(min_val, 0.0f);
+    float hi = std::max(max_val, 0.0f);
     float quant_range = static_cast<float>(quant_max - quant_min);
-    float scale = (max_val - min_val) / quant_range;
+    float scale = (hi - lo) / quant_range;
 
     // Additional safety check for very small scales
     scale = std::max(scale, EPSILON);
 
-    int32_t zero_point = static_cast<int32_t>(std::round(quant_min - min_val / scale));
+    int32_t zero_point = static_cast<int32_t>(std::round(quant_min - lo / scale));
     zero_point = std::clamp(zero_point, quant_min, quant_max);
 
     return {scale, zero_point};

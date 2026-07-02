@@ -230,7 +230,12 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     // use the upcast target_c (F16/BF16 -> F32) for the dtype probe and the
     // downstream one-hot construction so the smoothed-target arithmetic is
     // entirely Float32.
-    bool is_float_target = (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 || target_c.dtype() == DType::Float16 || target_c.dtype() == DType::BFloat16) && target_c.ndim() == 2;
+    // A soft (probability) target has the same rank as the input ([N,C] or the
+    // >2D [N,C,d1,...] segmentation case); a class-index target has one fewer
+    // dim ([N] or [N,d1,...]). Detecting soft targets by ndim==2 broke the >2D
+    // case (a [N,C,H,W] soft target was misrouted into the class-index/OneHot
+    // branch, and a [N,H,W] class-index target produced a misaligned one-hot).
+    bool is_float_target = (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 || target_c.dtype() == DType::Float16 || target_c.dtype() == DType::BFloat16) && target_c.ndim() == input_c.tensor().ndim();
 
     // J.5: track which samples to ignore (class-index path only — one-hot
     // / soft targets carry weights directly so ignore_index is N/A there).
@@ -269,6 +274,19 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         std::vector<Tensor> oh_inputs = {safe_target};
         auto oh_results = dispatch(OpId::OneHot, oh_inputs, oh_attrs);
         Tensor one_hot = oh_results[0];
+
+        // OneHot appends the class axis: a class-index target [N, d1, ..., dk]
+        // becomes [N, d1, ..., dk, C]. For the >2D (segmentation) case move the
+        // trailing class axis to position 1 so it aligns with log_probs
+        // [N, C, d1, ..., dk]. For the 2D case ([N] -> [N, C]) it is already at
+        // position 1, so this is a no-op.
+        if (one_hot.ndim() > 2) {
+            std::vector<int64_t> perm(static_cast<size_t>(one_hot.ndim()));
+            perm[0] = 0;
+            perm[1] = one_hot.ndim() - 1;
+            for (int64_t i = 2; i < one_hot.ndim(); ++i) perm[static_cast<size_t>(i)] = i - 1;
+            one_hot = one_hot.permute(perm).contiguous();
+        }
 
         // Convert to input dtype if needed (one_hot shader produces Float32)
         if (one_hot.dtype() != input_c.tensor().dtype()) {
@@ -427,10 +445,12 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
 
     auto num_classes = input_c.tensor().shape()[1];
 
+    // Soft target has the same rank as the input ([N,C] or >2D [N,C,d1,...]);
+    // a class-index target has one fewer dim. See CrossEntropyLoss for details.
     const bool is_float_target =
         (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 ||
          target_c.dtype() == DType::Float16 || target_c.dtype() == DType::BFloat16) &&
-        target_c.ndim() == 2;
+        target_c.ndim() == input_c.tensor().ndim();
 
     Variable one_hot_var;
     std::optional<Tensor> keep_mask;  // populated on class-index path only
@@ -463,6 +483,16 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
         std::vector<Tensor> oh_inputs = {safe_target};
         auto oh_results = dispatch(OpId::OneHot, oh_inputs, oh_attrs);
         Tensor one_hot = oh_results[0];
+
+        // Move the trailing class axis appended by OneHot to position 1 for the
+        // >2D (segmentation) case so it aligns with the input [N, C, d1, ...].
+        if (one_hot.ndim() > 2) {
+            std::vector<int64_t> perm(static_cast<size_t>(one_hot.ndim()));
+            perm[0] = 0;
+            perm[1] = one_hot.ndim() - 1;
+            for (int64_t i = 2; i < one_hot.ndim(); ++i) perm[static_cast<size_t>(i)] = i - 1;
+            one_hot = one_hot.permute(perm).contiguous();
+        }
 
         if (one_hot.dtype() != input_c.tensor().dtype()) {
             one_hot = one_hot.to(input_c.tensor().dtype());

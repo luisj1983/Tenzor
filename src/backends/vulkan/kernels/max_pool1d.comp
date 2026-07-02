@@ -56,7 +56,7 @@ void main() {
                             uint(l_in);
 
             float val = input_data[input_idx];
-            if (val > max_val) {
+            if (val > max_val || val != val) {
                 max_val = val;
                 max_idx = int(input_idx);
             }

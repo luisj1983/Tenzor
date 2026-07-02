@@ -75,7 +75,7 @@ void main() {
         for (int h = h_start; h < h_end; h++) {
             for (int w = w_start; w < w_end; w++) {
                 float val = input_data[base + (uint(d) * params.H + uint(h)) * params.W + uint(w)];
-                if (val > max_val) {
+                if (val > max_val || val != val) {
                     max_val = val;
                     max_idx = (d * int(params.H) + h) * int(params.W) + w;
                 }

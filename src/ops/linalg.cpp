@@ -2051,10 +2051,17 @@ auto pinv(const Tensor& A, double rcond) -> Tensor {
     // pinv = (Vt^T * s_inv_row) @ U^T
     // Vt: (K, N) → V = Vt^T: (N, K). Broadcast s_inv (1, K) along the last
     // dim to scale columns of V.
+    // For a complex A = U S Vʰ the pseudoinverse is V S⁺ Uʰ, i.e. the
+    // conjugate transpose of U and Vt — a plain transpose omits the
+    // conjugation and yields a wrong result for complex inputs.
+    const bool is_complex = (U.dtype() == DType::Complex64 ||
+                             U.dtype() == DType::Complex128);
     Tensor V = tenzor::transpose(Vt, -2, -1);            // (N, K)
+    if (is_complex) V = tenzor::conj(V);
     Tensor s_inv_row = tenzor::reshape(s_inv, {1, k});   // (1, K), broadcasts
     Tensor V_scaled = tenzor::mul(V, s_inv_row);         // (N, K)
     Tensor UT = tenzor::transpose(U, -2, -1);            // (K, M)
+    if (is_complex) UT = tenzor::conj(UT);
     Tensor result = tenzor::matmul(V_scaled, UT);        // (N, M)
 
     return maybe_downcast(result, original_dtype);
@@ -2212,14 +2219,19 @@ auto cond(const Tensor& A, const std::string& p) -> Tensor {
     }
 
     if (p == "2") {
+        // Per-matrix condition number: reduce singular values over the last
+        // dim only so a batched input (..., N, N) yields a (...) result rather
+        // than a single global scalar mixing all batches.
         auto S = svdvals(A);
-        auto s_max = tenzor::max(S);
-        auto s_min = tenzor::min(S);
+        auto s_max = tenzor::max(S, -1, /*keepdim=*/false);
+        auto s_min = tenzor::min(S, -1, /*keepdim=*/false);
         return tenzor::div(s_max, s_min);
     } else if (p == "fro") {
-        auto norm_A = norm(A, "fro");
+        // Batch-aware Frobenius norm over the last two dims (vector_norm
+        // normalizes the negative dims), so cond is computed per matrix.
+        auto norm_A = vector_norm(A, 2.0, {-2, -1}, /*keepdim=*/false);
         auto A_inv = inv(A);
-        auto norm_inv = norm(A_inv, "fro");
+        auto norm_inv = vector_norm(A_inv, 2.0, {-2, -1}, /*keepdim=*/false);
         return tenzor::mul(norm_A, norm_inv);
     } else {
         throw std::invalid_argument("linalg::cond: unsupported norm order \"" + p +
@@ -2232,11 +2244,14 @@ auto matrix_rank(const Tensor& A, double tol) -> Tensor {
         throw std::invalid_argument("linalg::matrix_rank: input must be at least 2-D, got " +
                                     std::to_string(A.ndim()) + "-D");
     }
-    auto S = svdvals(A);
+    auto S = svdvals(A);  // (..., K)
     Tensor threshold;
     if (tol < 0) {
-        // Default tolerance: max(M,N) * max(S) * eps
-        auto s_max = tenzor::max(S);
+        // Default tolerance: max(M,N) * max(S) * eps. Reduce max over the last
+        // dim only (keepdim) so a batched input keeps a per-matrix threshold of
+        // shape (..., 1) that broadcasts against S; a global max would mix all
+        // batches into a single scalar.
+        auto s_max = tenzor::max(S, -1, /*keepdim=*/true);
         auto shape = A.shape();
         double mn = static_cast<double>(std::max(shape[shape.size()-2], shape[shape.size()-1]));
         // Use the true machine epsilon of the compute dtype svdvals returned
@@ -2250,7 +2265,10 @@ auto matrix_rank(const Tensor& A, double tol) -> Tensor {
         threshold = tenzor::full({1}, tol, S.dtype(), S.device());
     }
     auto mask = tenzor::gt(S, threshold);
-    return tenzor::sum(mask.to(DType::Int64));
+    // Count singular values above threshold per matrix (reduce the last dim
+    // only) so a batched (..., M, N) input returns a (...) tensor of ranks;
+    // a global sum would collapse all batches into one number.
+    return tenzor::sum(mask.to(DType::Int64), /*dim=*/-1, /*keepdim=*/false);
 }
 
 auto multi_dot(const std::vector<Tensor>& tensors) -> Tensor {
@@ -2667,6 +2685,21 @@ auto vector_norm(const Tensor& input, double ord,
     // (pow / sum / max) compute the correct result on every backend.
     if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
         x = tenzor::abs(input);
+    }
+
+    // Normalize negative dims against the input rank up front. The reduce
+    // helpers sort dims in descending order and reduce sequentially with the
+    // caller's keepdim; if a mixed/negative multi-dim set (e.g. {-2,-1}) were
+    // left un-normalized, the raw-value sort ([-1,-2]) plus keepdim=false would
+    // shift the remaining axes and reduce the wrong dimensions.
+    const int64_t nd = input.ndim();
+    for (auto& d : dim) {
+        if (d < 0) d += nd;
+        if (d < 0 || d >= nd) {
+            throw std::out_of_range(
+                "linalg::vector_norm: dim out of range for input of rank " +
+                std::to_string(nd));
+        }
     }
 
     // Helper: reduce over a single dim or all dims
