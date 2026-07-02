@@ -2114,7 +2114,7 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("mask") = tenzor::Tensor{},
              "Forward with segment-based training")
         .def("config", &tenzor::nn::HRM::config,
-             py::return_value_policy::reference)
+             py::return_value_policy::reference_internal)
         .def("num_parameters", &tenzor::nn::HRM::num_parameters)
         .def("apply_hrm_initialization", &tenzor::nn::HRM::apply_hrm_initialization)
         .def("get_qlearning_act", &tenzor::nn::HRM::get_qlearning_act);
@@ -3046,6 +3046,7 @@ void bind_compression(py::module& m) {
         tenzor::AutogradProfiler::instance().enable_trace();
         // Also enable OpProfiler + interceptor so forward ops are captured
         tenzor::OpProfiler::instance().enable();
+        std::lock_guard<std::mutex> lock(s_fwd_guard_mutex);
         if (!s_fwd_guard) {
             s_fwd_guard = std::make_unique<tenzor::ProfilingInterceptorGuard>();
         }

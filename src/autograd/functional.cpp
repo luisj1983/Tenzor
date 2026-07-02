@@ -51,27 +51,37 @@ auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
     std::vector<std::shared_ptr<Function>> topo;
     std::unordered_set<Function*> visited;
 
-    std::function<bool(const std::shared_ptr<Function>&)> dfs =
-        [&](const std::shared_ptr<Function>& node) -> bool {
-            if (!node) return true;                       // leaf edge
-            if (!visited.insert(node.get()).second) return true;
-            for (const auto& next : node->next_functions()) {
-                if (!dfs(next)) return false;
+    // Iterative post-order DFS with an explicit stack (not recursion) so a deep
+    // graph — e.g. a many-layer Hessian/JVP probe — cannot overflow the C++
+    // stack, matching BackwardEngine::topological_sort. Each frame tracks how
+    // many of its children have been expanded; the node is post-order visited
+    // once all children are done. Any node we can't dispatch through
+    // (Unknown op, or neither a single- nor multi-output JVP rule) rejects the
+    // whole traversal (no-workaround contract), exactly as the recursion did.
+    {
+        struct Frame { std::shared_ptr<Function> node; size_t child; };
+        std::vector<Frame> stack;
+        visited.insert(out_grad_fn.get());
+        stack.push_back({out_grad_fn, 0});
+        while (!stack.empty()) {
+            Frame& f = stack.back();
+            const auto& nexts = f.node->next_functions();
+            if (f.child < nexts.size()) {
+                const auto& next = nexts[f.child++];
+                if (next && visited.insert(next.get()).second) {
+                    stack.push_back({next, 0});
+                }
+                continue;
             }
-            // Early-reject any node we can't dispatch through: stops the
-            // walk before we spend effort on an unreachable fast path.
-            // A.4 multi-output extension: accept the node if EITHER a
-            // single-output rule OR a multi-output rule is registered.
-            OpId op = node->op_id();
+            OpId op = f.node->op_id();
             if (op == OpId::Unknown ||
                 (!has_jvp_rule(op) && !has_jvp_rule_multi(op))) {
-                return false;
+                return std::nullopt;
             }
-            topo.push_back(node);
-            return true;
-        };
-
-    if (!dfs(out_grad_fn)) return std::nullopt;
+            topo.push_back(f.node);
+            stack.pop_back();
+        }
+    }
     if (topo.empty()) return std::nullopt;
 
     // 2. Tangent tables.

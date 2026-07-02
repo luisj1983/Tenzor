@@ -138,10 +138,24 @@ auto HealthMonitor::monitor_loop() -> void {
         // timeout. Blocking here under the lock would serialize concurrent
         // get_state()/dead_workers() readers (including check_and_recover()'s
         // poll) behind the worst-case timeout each cycle.
+        // Bound each wait: a dead peer's promise is only fulfilled when the
+        // underlying send() gives up after the (potentially large) RPC timeout,
+        // so an unbounded get() would stall the whole monitor cycle behind the
+        // slowest peer. Wait at most a small multiple of the heartbeat interval;
+        // a probe still pending after that is treated as "not alive" for this
+        // cycle (the miss-count thresholds absorb transient slowness). The
+        // detached send_async thread may still fulfill the promise later — that
+        // is harmless, since nothing waits on the abandoned future.
+        const auto probe_timeout = config_.heartbeat_interval * 2;
         std::vector<bool> alive_results(workers_to_check.size(), false);
         for (size_t i = 0; i < workers_to_check.size(); ++i) {
             try {
-                alive_results[i] = futures[i].get();
+                if (futures[i].wait_for(probe_timeout) ==
+                    std::future_status::ready) {
+                    alive_results[i] = futures[i].get();
+                } else {
+                    alive_results[i] = false;  // timed out → not alive this cycle
+                }
             } catch (...) {
                 alive_results[i] = false;
             }

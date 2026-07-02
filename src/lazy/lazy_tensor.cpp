@@ -177,6 +177,27 @@ auto LazyGraph::merge_graphs(const std::shared_ptr<LazyGraph>& a,
     -> std::shared_ptr<LazyGraph> {
     if (a == b) return a;
 
+    // Resolve BOTH operands through their canonical_ chains first. Either
+    // operand may itself be the loser of a prior merge, in which case its own
+    // nodes_ is a stale pre-merge snapshot and its canonical_ points at the
+    // graph that actually holds the live node list. Reading/writing the raw
+    // a->nodes_/b->nodes_ here would append to (or dedup against) that stale
+    // vector, stranding nodes so flush()/nodes() never materialise them.
+    auto resolve = [](const std::shared_ptr<LazyGraph>& g)
+        -> std::shared_ptr<LazyGraph> {
+        std::shared_ptr<LazyGraph> cur = g;
+        std::unordered_set<LazyGraph*> visited;
+        visited.insert(cur.get());
+        while (auto next = cur->canonical_.lock()) {
+            if (!visited.insert(next.get()).second) break;  // cycle guard
+            cur = next;
+        }
+        return cur;
+    };
+    auto ra = resolve(a);
+    auto rb = resolve(b);
+    if (ra == rb) return ra;
+
     // Pick the larger graph as the base and append the smaller graph's nodes
     // into it (in place). Appending never invalidates existing nodes or their
     // cached results — each LazyNode holds shared_ptr references to its inputs,
@@ -187,8 +208,8 @@ auto LazyGraph::merge_graphs(const std::shared_ptr<LazyGraph>& a,
     // the already-large base. If the smaller graph's nodes are already all
     // present in the base (e.g. both operands derive from the same graph), the
     // append loop simply skips them and returns the base unchanged.
-    const auto& base = (a->nodes_.size() >= b->nodes_.size()) ? a : b;
-    const auto& other = (a->nodes_.size() >= b->nodes_.size()) ? b : a;
+    const auto& base = (ra->nodes_.size() >= rb->nodes_.size()) ? ra : rb;
+    const auto& other = (ra->nodes_.size() >= rb->nodes_.size()) ? rb : ra;
 
     std::unordered_set<LazyNode*> seen;
     seen.reserve(base->nodes_.size() + other->nodes_.size());

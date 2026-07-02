@@ -795,7 +795,7 @@ def _default_collate_impl(batch: list, _current_depth: int) -> Any:
         return _core.stack(batch, 0)
 
     # Numeric scalars: stack into a 1-D tensor matching PyTorch's default
-    # collate (int/bool -> int64, float -> float32).  Without this, the common
+    # collate (int/bool -> int64, float -> float64).  Without this, the common
     # ``Dataset.__getitem__ -> (tensor, int_label)`` pattern left the labels as
     # a raw Python list, breaking downstream loss/metric calls.  `bool` is a
     # subclass of `int`, so the int branch covers it (cast to int64).
@@ -804,7 +804,7 @@ def _default_collate_impl(batch: list, _current_depth: int) -> Any:
         return _core.Tensor.from_numpy(_np.asarray(batch, dtype=_np.int64))
     if isinstance(elem, float):
         import numpy as _np
-        return _core.Tensor.from_numpy(_np.asarray(batch, dtype=_np.float32))
+        return _core.Tensor.from_numpy(_np.asarray(batch, dtype=_np.float64))
 
     # Fallback for strings / other Python objects.
     return batch

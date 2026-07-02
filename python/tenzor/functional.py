@@ -1163,7 +1163,7 @@ def rms_norm(input: Variable, normalized_shape: int, eps: float = 1e-6, weight: 
     return _nn.functional_rms_norm(input, normalized_shape, eps, weight, bias)
 
 
-def interpolate(input: Variable, size: Sequence[int], mode: str = 'bilinear', align_corners: bool = False) -> Variable:
+def interpolate(input: Variable, size: Sequence[int], mode: str = 'nearest', align_corners: bool = False) -> Variable:
     """Resize the input using interpolation.
 
     Parameters
@@ -1280,7 +1280,7 @@ def checkpoint(fn, *args, **kwargs):
 
 
 
-def embedding(input: Variable, weight: Variable, padding_idx: int = -1) -> Variable:
+def embedding(input: Variable, weight: Variable, padding_idx: Optional[int] = None) -> Variable:
     """Look up embeddings in a fixed dictionary and size.
 
     Parameters
@@ -1290,8 +1290,9 @@ def embedding(input: Variable, weight: Variable, padding_idx: int = -1) -> Varia
     weight : Variable
         Embedding matrix of shape ``(num_embeddings, embedding_dim)``.
     padding_idx : int, optional
-        If non-negative, pads the output with zeros at this index.
-        Default: ``-1`` (no padding).
+        If given, the embedding row at this index is treated as padding and
+        its gradient is not updated.  Negative indices count from the end
+        (``padding_idx += num_embeddings``).  Default: ``None`` (no padding).
 
     Returns
     -------
@@ -1302,7 +1303,15 @@ def embedding(input: Variable, weight: Variable, padding_idx: int = -1) -> Varia
     -------
     >>> emb = F.embedding(token_ids, embed_weight)
     """
-    return _nn.functional_embedding(input, weight, padding_idx)
+    if padding_idx is None:
+        # Sentinel understood by the binding as "no padding row".
+        resolved_idx = -1
+    else:
+        resolved_idx = padding_idx
+        if resolved_idx < 0:
+            num_embeddings = weight.tensor().shape[0]
+            resolved_idx += num_embeddings
+    return _nn.functional_embedding(input, weight, resolved_idx)
 
 
 def one_hot(input, num_classes: int = -1):
@@ -2250,6 +2259,13 @@ def dropout2d(input: Variable, p: float = 0.5,
     n, c = shape[0], shape[1]
     x_dtype = input.tensor().dtype
     mask = (tz.rand([n, c, 1, 1]) >= p).to(x_dtype)
+    if p == 1.0:
+        # Every channel is dropped; the survivor scale 1/(1-p) is +inf and
+        # would turn the all-zero mask into NaN. Multiply by the zero mask so
+        # the output is all zeros with the input's shape/dtype/device and the
+        # gradient (a constant zero cotangent) flows correctly.
+        scaled_mask = tz.Variable(mask, requires_grad=False)
+        return tz.mul(input, scaled_mask)
     scale = 1.0 / (1.0 - p)
     # Q.13 / J.3: multiply at Variable level so autograd records the
     # dropout mask as a constant cotangent multiplier (grad_fn survives).
@@ -2276,6 +2292,14 @@ def alpha_dropout(input: Variable, p: float = 0.5,
     x_shape = list(input.tensor().shape)
     shape = x_shape
     keep = (tz.rand(shape) >= p).to(x_dtype)
+    if p == 1.0:
+        # Everything is dropped. The affine constant a = ((1-p)*...)**-0.5 is
+        # +inf here (and b = -inf), so the closed form below evaluates to
+        # NaN/Inf. The correct fully-dropped output is all zeros; multiply by
+        # the all-zero keep mask so the shape/dtype/device match and the
+        # gradient flows as a constant zero cotangent.
+        zero_coeff = tz.Variable(keep, requires_grad=False)
+        return tz.mul(input, zero_coeff)
     # Affine constants: a * (mask * x + (1 - mask) * alpha) + b.
     a = ((1 - p) * (1 + p * alpha * alpha)) ** -0.5
     b = -a * alpha * p

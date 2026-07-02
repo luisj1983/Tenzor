@@ -1265,12 +1265,16 @@ auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     }
 
     auto ndim = saved_tensors_[1].ndim();
-    auto Rt = tenzor::transpose(R, ndim - 2, ndim - 1);
-    auto Qt = tenzor::transpose(Q, saved_tensors_[0].ndim() - 2, saved_tensors_[0].ndim() - 1);
 
-    // M = R @ grad_R^T - grad_Q^T @ Q
+    // M = R @ grad_R^T - grad_Q^T @ Q  (PyTorch convention). The previous code
+    // used matmul(Q^T, grad_Q) = Q^T·grad_Q, the TRANSPOSE of grad_Q^T·Q, so
+    // copyltu then symmetrised the wrong triangle, giving a wrong first-order
+    // grad_A under create_graph (gradgradcheck through qr's Q factor). Mirror
+    // the corrected tensor backward().
     auto grad_Rt_var = tenzor::transpose(grad_R_var, ndim - 2, ndim - 1);
-    auto M = tenzor::matmul(R, grad_Rt_var) - tenzor::matmul(Qt, grad_Q_var);
+    auto grad_Qt_var = tenzor::transpose(grad_Q_var,
+                          saved_tensors_[0].ndim() - 2, saved_tensors_[0].ndim() - 1);
+    auto M = tenzor::matmul(R, grad_Rt_var) - tenzor::matmul(grad_Qt_var, Q);
 
     // copyltu(M) = tril(M) + tril(M, -1)^T
     auto M_tril = tenzor::tril(M);

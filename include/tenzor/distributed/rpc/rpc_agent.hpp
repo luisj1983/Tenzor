@@ -51,6 +51,12 @@ struct RpcAgentConfig {
     int32_t heartbeat_interval_ms{5000};
     /// Advisory only; the agent only ACKs heartbeats, it does not send them.
     bool enable_heartbeat{true};
+    /// Shared-secret token for authenticating RPC_CALL/RREF_* requests. When the
+    /// listener binds a non-loopback interface the agent requires every such
+    /// request to carry a matching token (constant-time compared); loopback-only
+    /// deployments may leave this empty and run unauthenticated. Leaving this
+    /// empty while binding non-loopback fails closed (all such requests rejected).
+    std::string auth_token;
 };
 
 /**
@@ -145,7 +151,17 @@ private:
     // One write-mutex per fd so concurrent send_framed() calls on the same
     // socket can't interleave bytes of two different messages.
     std::unordered_map<int, std::shared_ptr<std::mutex>> fd_write_mutexes_;
-    int listen_fd_ = -1;
+    // Listener fd is raced between accept_loop() (which reads it) and shutdown()
+    // (which closes it). Atomic so shutdown() can exchange-to-(-1) exactly once
+    // and the accept loop observes the close as an ::accept() error.
+    std::atomic<int> listen_fd_{-1};
+    // Whether the listener bound a loopback-only address. Set in accept_loop().
+    // When false (non-loopback), inbound RPC_CALL/RREF_* requests must present a
+    // matching auth token before dispatch. Defaults to true (fail-safe: the
+    // in-process/self path and pre-bind state require no token).
+    std::atomic<bool> loopback_only_{true};
+    // Shared-secret token copied from RpcAgentConfig at init(); see authorize().
+    std::string auth_token_;
     // Signals that accept_loop() has finished binding/listening (or
     // failed). Used by init() to surface bind failures synchronously.
     std::promise<bool> listen_ready_;
@@ -190,6 +206,13 @@ private:
     // outbound one; -1 (the default) means no inbound socket (self-loopback).
     auto dispatch_message(Message msg, int inbound_fd = -1) -> void;
     auto handle_rpc_call(const Message& msg) -> Message;
+    // Authorize an inbound sensitive request (RPC_CALL / RREF_FETCH /
+    // RREF_DELETE). Returns true when the listener is loopback-only (auth not
+    // required) or when the message carries a token matching the configured one
+    // (constant-time compare). Returns false when a token is required but is
+    // missing/mismatched, or when the listener is non-loopback but no token was
+    // configured (fail closed).
+    auto authorize(const Message& msg) const -> bool;
 };
 
 } // namespace rpc

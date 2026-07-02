@@ -117,7 +117,7 @@ private:
     std::shared_ptr<nn::Conv2d> pwconv1_;       ///< 1×1 expansion conv
     nn::GELU gelu_;                             ///< GELU activation
     std::shared_ptr<nn::Conv2d> pwconv2_;       ///< 1×1 projection conv
-    std::shared_ptr<LayerScale> gamma_;         ///< Layer scale module
+    Variable gamma_;                            ///< Layer scale parameter, timm-flat shape [dim] (reshaped to [dim,1,1] at use)
     std::shared_ptr<nn::DropPath> drop_path_;   ///< Stochastic depth (per-sample, seedable, train/eval-gated)
 };
 

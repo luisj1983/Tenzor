@@ -249,6 +249,13 @@ GPT2LMHeadModel::GPT2LMHeadModel(const GPT2Config& config)
 
     // Register module
     register_module("lm_head", lm_head_);
+
+    // Tie the LM head weight to the token embedding (GPT-2 shares these). The
+    // token embedding weight is [vocab, n_embd] and the Linear(n_embd, vocab)
+    // weight is [vocab, n_embd], so the identical parameter shared_ptr backs
+    // both and their gradients accumulate into one tensor.
+    lm_head_->register_parameter_shared(
+        "weight", embeddings_->token_embedding()->get_parameter("weight"));
 }
 
 auto GPT2LMHeadModel::forward(const Variable& input_ids,

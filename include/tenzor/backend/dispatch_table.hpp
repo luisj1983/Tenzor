@@ -224,6 +224,7 @@ struct alignas(64) BackendDispatchTable {
      * @return true if kernel exists
      */
     [[nodiscard]] bool has_kernel(OpId op) const noexcept {
+        if (static_cast<size_t>(op) >= OP_COUNT) return false;
         return kernels[static_cast<size_t>(op)] != nullptr ||
                single_output_kernels[static_cast<size_t>(op)] != nullptr ||
                inplace_kernels[static_cast<size_t>(op)] != nullptr;
@@ -236,6 +237,7 @@ struct alignas(64) BackendDispatchTable {
      * @return true if single-output kernel exists
      */
     [[nodiscard]] bool has_single_output_kernel(OpId op) const noexcept {
+        if (static_cast<size_t>(op) >= OP_COUNT) return false;
         return single_output_kernels[static_cast<size_t>(op)] != nullptr;
     }
 
@@ -246,6 +248,7 @@ struct alignas(64) BackendDispatchTable {
      * @return true if inplace kernel exists
      */
     [[nodiscard]] bool has_inplace_kernel(OpId op) const noexcept {
+        if (static_cast<size_t>(op) >= OP_COUNT) return false;
         return inplace_kernels[static_cast<size_t>(op)] != nullptr;
     }
 
@@ -256,6 +259,7 @@ struct alignas(64) BackendDispatchTable {
      * @return Kernel function pointer (nullptr if not registered)
      */
     [[nodiscard]] KernelFn get_kernel(OpId op) const noexcept {
+        if (static_cast<size_t>(op) >= OP_COUNT) return nullptr;
         return kernels[static_cast<size_t>(op)];
     }
 
@@ -266,6 +270,7 @@ struct alignas(64) BackendDispatchTable {
      * @return Single-output kernel function pointer (nullptr if not registered)
      */
     [[nodiscard]] SingleOutputKernelFn get_single_output_kernel(OpId op) const noexcept {
+        if (static_cast<size_t>(op) >= OP_COUNT) return nullptr;
         return single_output_kernels[static_cast<size_t>(op)];
     }
 
@@ -276,6 +281,7 @@ struct alignas(64) BackendDispatchTable {
      * @return Inplace kernel function pointer (nullptr if not registered)
      */
     [[nodiscard]] InplaceKernelFn get_inplace_kernel(OpId op) const noexcept {
+        if (static_cast<size_t>(op) >= OP_COUNT) return nullptr;
         return inplace_kernels[static_cast<size_t>(op)];
     }
 

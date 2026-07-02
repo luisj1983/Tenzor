@@ -4490,6 +4490,25 @@ auto VulkanBackend::dispatchAddcdiv(const Tensor& input, const Tensor& tensor1,
 
 auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
                                         const Tensor& index, const Tensor& src) -> Tensor {
+    // Shape contract (PyTorch): index.size(d) <= src.size(d) for every axis, and
+    // index.size(d) <= self.size(d) for d != dim. Reject an index that exceeds
+    // the input on a non-scatter axis (the CPU backend throws) before any GPU
+    // work, so Vulkan does not index OOB / silently corrupt the output.
+    {
+        auto ish = index.shape();
+        auto ssh = self.shape();
+        auto vsh = src.shape();
+        const int64_t nd = static_cast<int64_t>(ssh.size());
+        const int64_t d = dim < 0 ? dim + nd : dim;
+        if (static_cast<int64_t>(ish.size()) != nd)
+            throw std::runtime_error("VulkanBackend::dispatchScatterAdd: index rank must match self rank");
+        for (int64_t k = 0; k < nd; ++k) {
+            if (k < static_cast<int64_t>(vsh.size()) && ish[k] > vsh[k])
+                throw std::runtime_error("VulkanBackend::dispatchScatterAdd: index size exceeds src on axis " + std::to_string(k));
+            if (k != d && ish[k] > ssh[k])
+                throw std::runtime_error("VulkanBackend::dispatchScatterAdd: index size exceeds input on non-scatter axis " + std::to_string(k));
+        }
+    }
     auto self_shape = self.shape();
 
     // Handle empty tensors
@@ -4659,6 +4678,24 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
 auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
                                            const Tensor& index, const Tensor& src,
                                            const std::string& reduce, bool include_self) -> Tensor {
+    // Shape contract (PyTorch): index.size(d) <= src.size(d) for every axis, and
+    // index.size(d) <= self.size(d) for d != dim. Reject an index exceeding the
+    // input on a non-scatter axis before any GPU work (the CPU backend throws).
+    {
+        auto ish = index.shape();
+        auto ssh = self.shape();
+        auto vsh = src.shape();
+        const int64_t nd = static_cast<int64_t>(ssh.size());
+        const int64_t d = dim < 0 ? dim + nd : dim;
+        if (static_cast<int64_t>(ish.size()) != nd)
+            throw std::runtime_error("VulkanBackend::dispatchScatterReduce: index rank must match self rank");
+        for (int64_t k = 0; k < nd; ++k) {
+            if (k < static_cast<int64_t>(vsh.size()) && ish[k] > vsh[k])
+                throw std::runtime_error("VulkanBackend::dispatchScatterReduce: index size exceeds src on axis " + std::to_string(k));
+            if (k != d && ish[k] > ssh[k])
+                throw std::runtime_error("VulkanBackend::dispatchScatterReduce: index size exceeds input on non-scatter axis " + std::to_string(k));
+        }
+    }
     auto self_shape = self.shape();
 
     if (self.numel() == 0 || index.numel() == 0) {

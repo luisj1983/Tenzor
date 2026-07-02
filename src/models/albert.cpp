@@ -123,17 +123,43 @@ auto AlbertEncoder::forward(const Variable& hidden_states,
                              const Tensor& attention_mask) -> Variable {
     auto output = hidden_states;
 
+    // Convert the [batch, seq_len] binary padding mask into the additive
+    // [batch, 1, 1, seq_len] attention mask (0 = attend, -1e9 = ignore) exactly
+    // like BertEncoder::prepare_attention_mask, then pass it as the `src_mask`
+    // (2nd) argument. Previously the raw binary mask was passed as the
+    // `src_key_padding_mask` (3rd) argument, which has the wrong semantics for
+    // the additive-mask attention path this layer expects.
+    auto mask = prepare_attention_mask(attention_mask,
+                                       hidden_states.tensor().shape()[1],
+                                       hidden_states.tensor().dtype());
+
     // Apply the SAME layer multiple times (parameter sharing)
     // This reduces parameters by ~91% compared to BERT
     for (int64_t i = 0; i < config_.num_hidden_layers; ++i) {
-        // attention_mask is a [batch, seq_len] key-padding mask, which is the
-        // THIRD arg (src_key_padding_mask). The 2nd arg is src_mask, an
-        // [seq_len, seq_len] attention mask — passing the padding mask there
-        // gives the wrong shape and semantics.
-        output = shared_layer_->forward(output, Tensor{}, attention_mask);
+        output = shared_layer_->forward(output, mask, Tensor{});
     }
 
     return output;
+}
+
+auto AlbertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len,
+                                           DType compute_dtype) -> Tensor {
+    // "No mask" sentinel: downstream forward() checks .is_valid()/.numel() and
+    // skips mask application when this empty tensor is returned.
+    if (!mask.is_valid() || mask.numel() == 0) {
+        return Tensor{};
+    }
+
+    // Input mask is [batch, seq_len] with 1 for valid, 0 for padding. Convert to
+    // [batch, 1, 1, seq_len] with 0.0 for attended, -1e9 (or -1e4 for half) for
+    // masked positions so it broadcasts across heads and query positions.
+    auto batch_size = mask.shape()[0];
+    auto float_mask = mask.to(compute_dtype);
+    float mask_fill = (compute_dtype == DType::Float16 || compute_dtype == DType::BFloat16)
+                      ? 1e4f : 1e9f;
+    auto attn_mask = (float_mask - 1.0) * mask_fill;
+    attn_mask = attn_mask.reshape({batch_size, 1, 1, seq_len});
+    return attn_mask;
 }
 
 auto AlbertEncoder::forward_impl(const Variable& input) -> Variable {

@@ -100,6 +100,26 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
     auto topk_sum = tenzor::sum(topk_vals, /*dim=*/1, /*keepdim=*/true);
     auto topk_weights = topk_vals / topk_sum;
 
+    // On-graph combine weights: the gate that multiplies expert outputs must be
+    // derived from probs_v (a Variable) so the router receives the TASK loss
+    // gradient — even when aux_loss_weight_ == 0. Wrapping the combine weights
+    // with requires_grad=false (the previous behaviour) severed that path.
+    //
+    // combine_v[n, e] = probs_v[n, e] * route_norm[n, e], where
+    //   route_norm[n, e] = 1/topk_sum[n] if e is in row n's top-k, else 0.
+    // route_norm is a NON-differentiable constant (it encodes the argmax-style
+    // top-k selection and the renormalisation denominator, neither of which is
+    // learned through the expert path). Multiplying by probs_v keeps the gate
+    // ON-GRAPH, so combine_v[n, e] numerically equals the old w_e[n] for expert
+    // e but now carries a grad_fn back to the router logits.
+    Tensor sel_mask = tenzor::zeros({N, num_experts_}, probs_t.dtype(),
+                                    input.tensor().device());
+    Tensor ones_nk = tenzor::full({N, top_k_}, 1.0, probs_t.dtype(),
+                                  input.tensor().device());
+    sel_mask = tenzor::scatter(sel_mask, /*dim=*/1, topk_idx, ones_nk);  // 1 at selected
+    Tensor route_norm = tenzor::div(sel_mask, topk_sum);                 // [N, E] broadcast
+    Variable combine_v = probs_v * Variable(route_norm, /*requires_grad=*/false);
+
     // Variable accumulator so the addition lands on the autograd graph.
     Variable output = Variable(
         tenzor::zeros({N, D}, input.tensor().dtype(), input.tensor().device()),
@@ -152,11 +172,16 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
         if (dropout_) hidden = dropout_->forward(hidden);
         auto expert_out = down_[e]->forward(hidden);               // [M, D]
 
-        // Weight each routed row by its (constant) routing coefficient.
-        Tensor w_sub = tenzor::index_select(w_e, 0, routed_idx);   // [M]
-        auto w_sub_var = Variable(
-            tenzor::reshape(w_sub, std::vector<int64_t>{M, 1}), /*requires_grad=*/false);
-        auto weighted = expert_out * w_sub_var;                    // [M, D]
+        // Weight each routed row by its routing coefficient — pulled ON-GRAPH
+        // from combine_v (column e) so gradients flow back to the router. Both
+        // index_select ops are autograd-aware, so the gate stays differentiable.
+        Tensor col_idx = tenzor::full({1}, static_cast<double>(e), DType::Int64,
+                                      input.tensor().device());
+        auto w_col_v = tenzor::index_select(combine_v, /*dim=*/1, col_idx);  // [N, 1]
+        w_col_v = tenzor::reshape(w_col_v, std::vector<int64_t>{N});         // [N]
+        auto w_sub_var = tenzor::index_select(w_col_v, 0, routed_idx);       // [M]
+        w_sub_var = tenzor::reshape(w_sub_var, std::vector<int64_t>{M, 1});  // [M, 1]
+        auto weighted = expert_out * w_sub_var;                             // [M, D]
 
         // Scatter-add the weighted outputs back to their original rows.
         // scatter_add is autograd-aware (grad: identity for `output`, gather for

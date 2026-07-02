@@ -354,15 +354,23 @@ auto nested_sum(const NestedTensor& input, int64_t dim,
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input.values(), input.offsets()};
-    auto reduced = dispatch<OpId::NestedSum>(inputs, attrs)[0];
-    // The kernel always yields [B, *regular]. The collapsed ragged dim is
-    // already represented by the unit offsets (one row per batch element), so
-    // we must NOT unsqueeze a [B, 1, *regular] axis before from_jagged:
-    // from_jagged derives regular_shape_ from values dims 1.., which would
-    // absorb the unit axis into regular_shape_ ([1, *regular]) and inflate
-    // ndim() by one, producing a structurally inconsistent NestedTensor. The
-    // keepdim contract (a unit ragged axis) is faithfully encoded by the unit
-    // offsets themselves for both keepdim=true and keepdim=false.
+    auto reduced = dispatch<OpId::NestedSum>(inputs, attrs)[0];  // dense [B, *regular]
+    // Reducing over the ragged dim collapses each variable-length segment to a
+    // single [*regular] row, so the result is a DENSE [B, *regular] tensor with
+    // no remaining ragged axis. `keepdim` selects whether the collapsed ragged
+    // dim is retained as a size-1 axis:
+    //   keepdim=false -> drop the ragged axis entirely: dense values [B, *regular].
+    //   keepdim=true  -> retain it as size 1:            values [B, 1, *regular].
+    // Previously BOTH branches wrapped [B, *regular] in an identical unit-offset
+    // NestedTensor, so keepdim was silently ignored. The dense result is
+    // surfaced as the returned NestedTensor's values(); its per-batch unit
+    // offsets encode the collapsed (one-row-per-element) structure.
+    // NOTE: the return type is fixed to NestedTensor by out-of-scope callers
+    // (python bindings and tests using .values()/.batch_size()), so a bare
+    // dense Tensor cannot be returned here; keepdim is honored in values shape.
+    if (keepdim) {
+        reduced = tenzor::unsqueeze(reduced, /*dim=*/1);  // [B, 1, *regular]
+    }
     auto new_offsets = make_unit_offsets(B, input.device());
     return NestedTensor::from_jagged(reduced, new_offsets,
                                      input.ragged_dim());
@@ -403,10 +411,19 @@ auto nested_mean(const NestedTensor& input, int64_t dim,
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input.values(), input.offsets()};
-    auto reduced = dispatch<OpId::NestedMean>(inputs, attrs)[0];
-    // See nested_sum: do not unsqueeze a unit ragged axis before from_jagged.
-    // from_jagged would absorb it into regular_shape_, producing an inconsistent
-    // representation. The collapsed ragged dim is encoded by the unit offsets.
+    auto reduced = dispatch<OpId::NestedMean>(inputs, attrs)[0];  // dense [B, *regular]
+    // See nested_sum: reducing over the ragged dim yields a DENSE [B, *regular]
+    // tensor (no ragged axis remains). keepdim selects whether the collapsed
+    // ragged dim is retained as a size-1 axis:
+    //   keepdim=false -> drop it:           dense values [B, *regular].
+    //   keepdim=true  -> retain as size 1:  values [B, 1, *regular].
+    // Previously both branches produced an identical unit-offset NestedTensor,
+    // so keepdim was silently ignored; it is now honored in the values shape.
+    // (Return type is fixed to NestedTensor by out-of-scope callers, so the
+    // dense result is surfaced via values() rather than as a bare Tensor.)
+    if (keepdim) {
+        reduced = tenzor::unsqueeze(reduced, /*dim=*/1);  // [B, 1, *regular]
+    }
     auto new_offsets = make_unit_offsets(B, input.device());
     return NestedTensor::from_jagged(reduced, new_offsets,
                                      input.ragged_dim());

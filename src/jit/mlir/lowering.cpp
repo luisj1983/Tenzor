@@ -590,10 +590,20 @@ auto handle_where(LoweringContext& ctx,
     const auto& cond_in = node.inputs()[0];
     const auto& on_true_in = node.inputs()[1];
     const auto& on_false_in = node.inputs()[2];
-    const auto& cond = ctx.name_for(cond_in->id());
-    const auto& on_true = ctx.name_for(on_true_in->id());
-    const auto& on_false = ctx.name_for(on_false_in->id());
     const auto& out = node.outputs()[0];
+
+    // stablehlo.select does NOT broadcast: all three operands must already
+    // match the result shape. Tenzor's eager where() broadcasts the predicate
+    // and both value operands, so bring each up to out->shape() with the same
+    // broadcast_in_dim helper handle_binary uses before emitting the select.
+    auto cond = maybe_broadcast(body, ctx, ctx.name_for(cond_in->id()),
+                                cond_in->shape(), out->shape(), cond_in->dtype());
+    auto on_true = maybe_broadcast(body, ctx, ctx.name_for(on_true_in->id()),
+                                   on_true_in->shape(), out->shape(),
+                                   on_true_in->dtype());
+    auto on_false = maybe_broadcast(body, ctx, ctx.name_for(on_false_in->id()),
+                                    on_false_in->shape(), out->shape(),
+                                    on_false_in->dtype());
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
 
@@ -604,14 +614,15 @@ auto handle_where(LoweringContext& ctx,
     //   %out = "stablehlo.select"(%pred, %a, %b)
     //       : (tensor<NxNxi1>, tensor<NxNxf32>, tensor<NxNxf32>)
     //       -> tensor<NxNxf32>
+    // After the broadcasts above every operand carries out->shape().
     body << '%' << out_name
          << " = \"stablehlo.select\"(%" << cond << ", %" << on_true
          << ", %" << on_false << ") : (";
-    write_tensor_type_for_emit(body, cond_in->shape(), cond_in->dtype());
+    write_tensor_type_for_emit(body, out->shape(), cond_in->dtype());
     body << ", ";
-    write_tensor_type_for_emit(body, on_true_in->shape(), on_true_in->dtype());
+    write_tensor_type_for_emit(body, out->shape(), on_true_in->dtype());
     body << ", ";
-    write_tensor_type_for_emit(body, on_false_in->shape(), on_false_in->dtype());
+    write_tensor_type_for_emit(body, out->shape(), on_false_in->dtype());
     body << ") -> ";
     write_tensor_type_for_emit(body, out->shape(), out->dtype());
     body << '\n';

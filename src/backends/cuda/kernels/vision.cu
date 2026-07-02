@@ -432,6 +432,18 @@ __global__ void interpolate_bilinear_kernel(
     }
 }
 
+// Cubic convolution kernel weight (a = -0.75), matches CPU cubic_interp_coeff
+// and PyTorch upsample_bicubic2d. Templated on the compute type so Float64
+// preserves FP64 precision. Shared by the bicubic forward and backward kernels
+// so the backward stays the exact transpose of the forward.
+template <typename Compute>
+__device__ __forceinline__ Compute tz_bicubic_coeff(Compute x) {
+    Compute a = x < Compute(0) ? -x : x;
+    if (a <= Compute(1)) return Compute(1.25) * a * a * a - Compute(2.25) * a * a + Compute(1);
+    if (a < Compute(2))  return Compute(-0.75) * a * a * a + Compute(3.75) * a * a - Compute(6) * a + Compute(3);
+    return Compute(0);
+}
+
 // Bicubic interpolation kernel
 template<typename T>
 __global__ void interpolate_bicubic_kernel(
@@ -449,17 +461,6 @@ __global__ void interpolate_bicubic_kernel(
     // with the CPU reference; float otherwise.
     using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total_elements = batch * channels * out_h * out_w;
-
-    // Cubic interpolation coefficient function
-    auto cubic_interp1d = [](Compute x) -> Compute {
-        Compute abs_x = x < Compute(0) ? -x : x;
-        if (abs_x <= Compute(1)) {
-            return Compute(1.5) * abs_x * abs_x * abs_x - Compute(2.5) * abs_x * abs_x + Compute(1);
-        } else if (abs_x < Compute(2)) {
-            return Compute(-0.5) * abs_x * abs_x * abs_x + Compute(2.5) * abs_x * abs_x - Compute(4) * abs_x + Compute(2);
-        }
-        return Compute(0);
-    };
 
     TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, c, oh, ow)
@@ -501,8 +502,8 @@ __global__ void interpolate_bicubic_kernel(
                 iy = max(int64_t(0), min(iy, in_h - 1));
                 ix = max(int64_t(0), min(ix, in_w - 1));
 
-                Compute weight_y = cubic_interp1d(y - (y_int + dy));
-                Compute weight_x = cubic_interp1d(x - (x_int + dx));
+                Compute weight_y = tz_bicubic_coeff<Compute>(y - (y_int + dy));
+                Compute weight_x = tz_bicubic_coeff<Compute>(x - (x_int + dx));
                 Compute weight = weight_y * weight_x;
 
                 int64_t in_idx = b * (channels * in_h * in_w) +
@@ -883,17 +884,6 @@ __global__ void interpolate_bilinear_backward_kernel(
         atomicAdd(&grad_in[base_idx + y1 * in_w + x0], static_cast<T>(w10 * g));
         atomicAdd(&grad_in[base_idx + y1 * in_w + x1], static_cast<T>(w11 * g));
     }
-}
-
-// Cubic convolution kernel weight (a = -0.75), matches CPU cubic_interp_coeff
-// and PyTorch upsample_bicubic2d. Templated on the compute type so Float64
-// backward preserves FP64 precision.
-template <typename Compute>
-__device__ __forceinline__ Compute tz_bicubic_coeff(Compute x) {
-    Compute a = x < Compute(0) ? -x : x;
-    if (a <= Compute(1)) return Compute(1.25) * a * a * a - Compute(2.25) * a * a + Compute(1);
-    if (a < Compute(2))  return Compute(-0.75) * a * a * a + Compute(3.75) * a * a - Compute(6) * a + Compute(3);
-    return Compute(0);
 }
 
 // Bicubic backward (4D): scatter each output gradient to its 4x4 input neighborhood.

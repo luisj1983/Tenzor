@@ -1273,7 +1273,20 @@ auto float_power(const Tensor& base, const Tensor& exponent) -> Tensor {
     // For non-negative bases the magnitude is already correct (sign = +1).
     Tensor sign = where(neg_mask, sign_for_neg_base, pos_one);
 
-    return magnitude * sign;
+    Tensor result = magnitude * sign;
+
+    // The exp/log magnitude path yields NaN for 0^0 (0 * log(0) = 0 * -inf).
+    // Match torch.float_power's special cases:
+    //   - float_power(x, 0) == 1 for every base (including 0 and NaN)
+    //   - float_power(0, y) == 0 for y > 0
+    // Apply base==0 first, then exponent==0, so that 0^0 resolves to 1.
+    Tensor base_is_zero = eq(base_f64, zero);
+    Tensor exp_is_pos = gt(exp_f64, zero);
+    result = where(logical_and(base_is_zero, exp_is_pos), zeros_like(result), result);
+    Tensor exp_is_zero = eq(exp_f64, zero);
+    result = where(exp_is_zero, ones_like(result), result);
+
+    return result;
 }
 
 auto xlog1py(const Tensor& x, const Tensor& y) -> Tensor {

@@ -306,7 +306,7 @@ auto faster_rcnn_resnet50(
         1000,  // rpn_post_nms_top_n
         0.7,   // rpn_nms_thresh
         7,     // roi_output_size
-        1.0 / 16.0,  // roi_spatial_scale (ResNet C4)
+        1.0 / 32.0,  // roi_spatial_scale (ResNet C5 / forward_features is stride-32)
         2,     // roi_sampling_ratio
         0.5,   // roi_fg_iou_thresh
         0.5,   // roi_bg_iou_thresh
@@ -353,7 +353,7 @@ auto faster_rcnn_resnet101(
         1000,  // rpn_post_nms_top_n
         0.7,   // rpn_nms_thresh
         7,     // roi_output_size
-        1.0 / 16.0,  // roi_spatial_scale
+        1.0 / 32.0,  // roi_spatial_scale (ResNet C5 / forward_features is stride-32)
         2,     // roi_sampling_ratio
         0.5,   // roi_fg_iou_thresh
         0.5,   // roi_bg_iou_thresh

@@ -339,6 +339,14 @@ auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
     // non-CPU `values_` tensor, data_ptr() is a DEVICE pointer and memcpy'ing
     // it segfaults. Build the padded result on CPU (with values copied to host)
     // and move it back to the original device at the end.
+    //
+    // NOTE: this is intentionally a host copy rather than a graph of
+    // slice/cat/stack ops. `values_` is a plain Tensor (NestedTensor does not
+    // carry Variable-level autograd here), so reimplementing this with tensor
+    // ops would NOT make it differentiable, and dispatching cat/stack to a GPU
+    // backend for every ragged segment crashed the Vulkan path. Differentiable
+    // padded conversion, if needed, belongs at the Variable/NestedTensor
+    // autograd layer, not in this raw storage method.
     const Device target_device = values_.device();
     const bool on_device = (target_device.type != Device::Type::CPU);
 
@@ -362,8 +370,6 @@ auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
         int64_t end = off_ptr[i + 1];
         int64_t len = end - start;
         if (len > 0) {
-            // src: values[start : end] is contiguous [len, *regular_shape]
-            // dst: output[i, 0:len] at offset i * max_len * inner_size
             auto* src_ptr = static_cast<const char*>(values_host.data_ptr()) +
                             static_cast<size_t>(start * inner_size) * elem_size;
             auto* dst_ptr = static_cast<char*>(output.data_ptr()) +

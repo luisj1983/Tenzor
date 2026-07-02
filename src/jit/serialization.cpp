@@ -302,7 +302,15 @@ auto GraphReader::read_values(Graph& graph) -> void {
         std::string id = read_string();
         std::vector<int64_t> shape = read_int64_vector();
         DType dtype = static_cast<DType>(read_uint32());
-        auto dev_type = static_cast<Device::Type>(read_uint32());
+        uint32_t raw_dev_type = read_uint32();
+        // Validate the untrusted device-type integer against the enum before
+        // constructing the Device (mirrors the DType guard in read_tensor).
+        if (raw_dev_type >= static_cast<uint32_t>(Device::Type::COUNT)) {
+            throw std::runtime_error(
+                "GraphReader::read_values: unknown device type value " +
+                std::to_string(raw_dev_type));
+        }
+        auto dev_type = static_cast<Device::Type>(raw_dev_type);
         int64_t dev_index = read_int64();
 
         Device device(dev_type, dev_index);
@@ -608,7 +616,14 @@ auto GraphReader::read_tensor() -> Tensor {
                                  std::to_string(raw_dtype));
     }
     DType dtype = static_cast<DType>(raw_dtype);
-    auto dev_type = static_cast<Device::Type>(read_uint32());
+    uint32_t raw_dev_type = read_uint32();
+    // Validate the untrusted device-type integer against the enum before
+    // constructing the Device (mirrors the DType guard above).
+    if (raw_dev_type >= static_cast<uint32_t>(Device::Type::COUNT)) {
+        throw std::runtime_error("GraphReader::read_tensor: unknown device type value " +
+                                 std::to_string(raw_dev_type));
+    }
+    auto dev_type = static_cast<Device::Type>(raw_dev_type);
     int64_t dev_index = read_int64();
     Device original_device(dev_type, dev_index);
 

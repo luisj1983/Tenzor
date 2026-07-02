@@ -267,38 +267,57 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Calculate gather parameters
-    // dim_size = indices_shape[dim] for output index decomposition
-    // input_dim_size = input_shape[dim] for bounds check and input indexing
-    uint32_t dim_size = static_cast<uint32_t>(indices_shape[dim]);
+    // Calculate gather parameters. The index/output tensor may be smaller than
+    // the input in every non-gather dimension (PyTorch allows index.size(d) <=
+    // input.size(d) for d != dim), so a single collapsed inner/outer stride is
+    // wrong. Pass the index shape (for per-dim decomposition of the output
+    // position) and the input's contiguous strides (for recomposing the input
+    // offset) separately; the shader replaces the dim coordinate with the
+    // gathered index. input_c is contiguous, so its strides are row-major.
     uint32_t input_dim_size = static_cast<uint32_t>(input_shape[dim]);
-    uint32_t inner_size = 1;
-    for (int64_t d = dim + 1; d < ndim; ++d) {
-        inner_size *= static_cast<uint32_t>(indices_shape[d]);
-    }
-    uint32_t outer_size = 1;
-    for (int64_t d = 0; d < dim; ++d) {
-        outer_size *= static_cast<uint32_t>(indices_shape[d]);
+    std::vector<int64_t> in_strides(ndim, 1);
+    for (int64_t d = ndim - 2; d >= 0; --d) {
+        in_strides[d] = in_strides[d + 1] * input_shape[d + 1];
     }
 
-    // Push constants matching shader layout
+    // Push constants matching shader layout (uvec4/ivec4 packing, std140-aligned).
     struct PushConstants {
-        uint32_t input_size;
         uint32_t output_size;
+        uint32_t input_size;
+        uint32_t ndim;
         uint32_t dim;
-        uint32_t dim_size;
-        uint32_t inner_size;
-        uint32_t outer_size;
         uint32_t input_dim_size;
+        uint32_t _pad0;
+        uint32_t _pad1;
+        uint32_t _pad2;
+        uint32_t idx_shape_0_3[4];
+        uint32_t idx_shape_4_7[4];
+        int32_t in_stride_0_3[4];
+        int32_t in_stride_4_7[4];
     } push_constants;
 
-    push_constants.input_size = static_cast<uint32_t>(input.numel());
     push_constants.output_size = static_cast<uint32_t>(output.numel());
+    push_constants.input_size = static_cast<uint32_t>(input.numel());
+    push_constants.ndim = static_cast<uint32_t>(ndim);
     push_constants.dim = static_cast<uint32_t>(dim);
-    push_constants.dim_size = dim_size;
-    push_constants.inner_size = inner_size;
-    push_constants.outer_size = outer_size;
     push_constants.input_dim_size = input_dim_size;
+    push_constants._pad0 = 0;
+    push_constants._pad1 = 0;
+    push_constants._pad2 = 0;
+    for (int i = 0; i < 4; ++i) {
+        push_constants.idx_shape_0_3[i] = 1;
+        push_constants.idx_shape_4_7[i] = 1;
+        push_constants.in_stride_0_3[i] = 0;
+        push_constants.in_stride_4_7[i] = 0;
+    }
+    for (int64_t d = 0; d < ndim && d < 4; ++d) {
+        push_constants.idx_shape_0_3[d] = static_cast<uint32_t>(indices_shape[d]);
+        push_constants.in_stride_0_3[d] = static_cast<int32_t>(in_strides[d]);
+    }
+    for (int64_t d = 4; d < ndim && d < 8; ++d) {
+        push_constants.idx_shape_4_7[d - 4] = static_cast<uint32_t>(indices_shape[d]);
+        push_constants.in_stride_4_7[d - 4] = static_cast<int32_t>(in_strides[d]);
+    }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -321,6 +340,25 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
 
 auto VulkanBackend::dispatchScatter(const Tensor& input_raw, int64_t dim, const Tensor& indices_raw,
                                     const Tensor& values_raw, int64_t reduction) -> Tensor {
+    // Shape contract (PyTorch): index.size(d) <= src.size(d) for every axis, and
+    // index.size(d) <= self.size(d) for d != dim. An index exceeding the input
+    // on a non-scatter axis is out of bounds; reject it here (the CPU backend
+    // throws) so Vulkan does not index OOB / silently corrupt the output.
+    {
+        auto ish = indices_raw.shape();
+        auto ssh = input_raw.shape();
+        auto vsh = values_raw.shape();
+        const int64_t nd = static_cast<int64_t>(ssh.size());
+        const int64_t d = dim < 0 ? dim + nd : dim;
+        if (static_cast<int64_t>(ish.size()) != nd)
+            throw std::runtime_error("VulkanBackend::dispatchScatter: index rank must match self rank");
+        for (int64_t k = 0; k < nd; ++k) {
+            if (k < static_cast<int64_t>(vsh.size()) && ish[k] > vsh[k])
+                throw std::runtime_error("VulkanBackend::dispatchScatter: index size exceeds src on axis " + std::to_string(k));
+            if (k != d && ish[k] > ssh[k])
+                throw std::runtime_error("VulkanBackend::dispatchScatter: index size exceeds input on non-scatter axis " + std::to_string(k));
+        }
+    }
     // audit-2026-05-03 bug #15 mirror: ensure all inputs are contiguous before
     // SSBO upload. Non-contiguous slice/expand views skip logical elements.
     // Use dispatchContiguous (not .contiguous()): a stride-contiguous offset

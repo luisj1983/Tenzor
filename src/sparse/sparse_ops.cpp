@@ -473,13 +473,33 @@ void fallback_coo_spmv(const int64_t* idx_ptr, const T* vals, const T* x, T* y,
             y[row] += vals[i] * x[col];
         }
     } else {
+        // Accumulate each output cell in a wide float accumulator and narrow to
+        // T exactly once, so multiple contributions to the same row are not
+        // summed through half-precision storage via read-modify-write (which
+        // loses precision). Mirrors the CSR half path above. Row count comes
+        // from M; for the legacy M==0 caller, infer it from the largest
+        // in-range row index. The accumulator is seeded from the existing y so
+        // the "+=" onto the output contract matches the T==Acc branch.
+        int64_t rows = M;
+        if (rows <= 0) {
+            for (int64_t i = 0; i < nnz; ++i) {
+                if (idx_ptr[i] + 1 > rows) rows = idx_ptr[i] + 1;
+            }
+        }
+        std::vector<Acc> acc(static_cast<size_t>(rows < 0 ? 0 : rows));
+        for (int64_t r = 0; r < rows; ++r) {
+            acc[static_cast<size_t>(r)] = static_cast<Acc>(y[r]);
+        }
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
             if (M > 0 && (row < 0 || row >= M)) continue;
+            if (row < 0 || row >= rows) continue;
             int64_t col = idx_ptr[nnz + i];
-            Acc cur = static_cast<Acc>(y[row]);
-            cur += static_cast<Acc>(vals[i]) * static_cast<Acc>(x[col]);
-            y[row] = static_cast<T>(cur);
+            acc[static_cast<size_t>(row)] +=
+                static_cast<Acc>(vals[i]) * static_cast<Acc>(x[col]);
+        }
+        for (int64_t r = 0; r < rows; ++r) {
+            y[r] = static_cast<T>(acc[static_cast<size_t>(r)]);
         }
     }
 }
@@ -565,16 +585,39 @@ void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
             }
         }
     } else {
+        // Accumulate each output cell C[row, n] in a wide float accumulator and
+        // narrow to T exactly once, so multiple row contributions are not
+        // summed through half-precision storage via read-modify-write (which
+        // loses precision). Mirrors the CSR half path / the parallel per-row
+        // scratch above. Row count comes from M; for the legacy M==0 caller,
+        // infer it from the largest in-range row index. The accumulator is
+        // seeded from the existing C so the "+=" onto the output contract
+        // matches the T==Acc branch.
+        int64_t rows = M;
+        if (rows <= 0) {
+            for (int64_t i = 0; i < nnz; ++i) {
+                if (idx_ptr[i] + 1 > rows) rows = idx_ptr[i] + 1;
+            }
+        }
+        size_t nrows = static_cast<size_t>(rows < 0 ? 0 : rows);
+        std::vector<Acc> acc(nrows * static_cast<size_t>(N));
+        for (size_t k = 0; k < acc.size(); ++k) {
+            acc[k] = static_cast<Acc>(C[k]);
+        }
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
             if (M > 0 && (row < 0 || row >= M)) continue;
+            if (row < 0 || row >= rows) continue;
             int64_t col = idx_ptr[nnz + i];
             Acc val = static_cast<Acc>(vals[i]);
+            Acc* arow = acc.data() + static_cast<size_t>(row) * static_cast<size_t>(N);
+            const T* brow = B + col * N;
             for (int64_t n = 0; n < N; ++n) {
-                Acc cur = static_cast<Acc>(C[row * N + n]);
-                cur += val * static_cast<Acc>(B[col * N + n]);
-                C[row * N + n] = static_cast<T>(cur);
+                arow[static_cast<size_t>(n)] += val * static_cast<Acc>(brow[n]);
             }
+        }
+        for (size_t k = 0; k < acc.size(); ++k) {
+            C[k] = static_cast<T>(acc[k]);
         }
     }
 }
@@ -1802,6 +1845,14 @@ auto sddmm(const SparseTensor& mask, const Tensor& A, const Tensor& B) -> Sparse
         values_cpu = cpu_sddmm_csr<float>(crow_cpu, col_cpu, A_cpu, B_cpu, M, N, K);
     } else if (A.dtype() == DType::Float64) {
         values_cpu = cpu_sddmm_csr<double>(crow_cpu, col_cpu, A_cpu, B_cpu, M, N, K);
+    } else if (A.dtype() == DType::Complex64) {
+        // Plain (non-conjugated) dot product, consistent with the sibling
+        // complex spmm/spmv paths. The kernel template body is dtype-generic.
+        values_cpu = cpu_sddmm_csr<std::complex<float>>(
+            crow_cpu, col_cpu, A_cpu, B_cpu, M, N, K);
+    } else if (A.dtype() == DType::Complex128) {
+        values_cpu = cpu_sddmm_csr<std::complex<double>>(
+            crow_cpu, col_cpu, A_cpu, B_cpu, M, N, K);
     } else {
         throw std::runtime_error("sddmm: unsupported dtype " +
                                  std::string(dtype_name(A.dtype())));

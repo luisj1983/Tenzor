@@ -55,9 +55,13 @@ void batchnorm_mean_var_f32(
     // merged at the end using the parallel combination formula.
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        __m512 vmean = _mm512_setzero_ps();
-        __m512 vm2 = _mm512_setzero_ps();
-        int64_t lane_count = 0;
+        // Accumulate per lane in DOUBLE (a float mean/count stalls past 2^24
+        // per-channel elements). 16 float lanes -> two __m512d halves.
+        __m512d vmean_lo = _mm512_setzero_pd();
+        __m512d vmean_hi = _mm512_setzero_pd();
+        __m512d vm2_lo = _mm512_setzero_pd();
+        __m512d vm2_hi = _mm512_setzero_pd();
+        double lane_count = 0.0;
 
         // Single scalar Welford state for the (spatial_size % 16) tail of every
         // batch, accumulated in the SAME n-loop so the input is streamed once.
@@ -70,12 +74,18 @@ void batchnorm_mean_var_f32(
 
             for (; i + 16 <= spatial_size; i += 16) {
                 __m512 v = _mm512_loadu_ps(ch_ptr + i);
-                lane_count++;
-                __m512 vcount = _mm512_set1_ps(static_cast<float>(lane_count));
-                __m512 delta = _mm512_sub_ps(v, vmean);
-                vmean = _mm512_add_ps(vmean, _mm512_div_ps(delta, vcount));
-                __m512 delta2 = _mm512_sub_ps(v, vmean);
-                vm2 = _mm512_fmadd_ps(delta, delta2, vm2);
+                __m512d v_lo = _mm512_cvtps_pd(_mm512_castps512_ps256(v));
+                __m512d v_hi = _mm512_cvtps_pd(_mm512_extractf32x8_ps(v, 1));
+                lane_count += 1.0;
+                __m512d vcount = _mm512_set1_pd(lane_count);
+                __m512d delta_lo = _mm512_sub_pd(v_lo, vmean_lo);
+                __m512d delta_hi = _mm512_sub_pd(v_hi, vmean_hi);
+                vmean_lo = _mm512_add_pd(vmean_lo, _mm512_div_pd(delta_lo, vcount));
+                vmean_hi = _mm512_add_pd(vmean_hi, _mm512_div_pd(delta_hi, vcount));
+                __m512d delta2_lo = _mm512_sub_pd(v_lo, vmean_lo);
+                __m512d delta2_hi = _mm512_sub_pd(v_hi, vmean_hi);
+                vm2_lo = _mm512_fmadd_pd(delta_lo, delta2_lo, vm2_lo);
+                vm2_hi = _mm512_fmadd_pd(delta_hi, delta2_hi, vm2_hi);
             }
 
             // Fold this batch's tail into the running scalar state (single pass).
@@ -89,10 +99,12 @@ void batchnorm_mean_var_f32(
         }
 
         // Horizontally merge the 16 SIMD lanes using parallel Welford merge
-        alignas(64) float lane_means[16];
-        alignas(64) float lane_m2s[16];
-        _mm512_store_ps(lane_means, vmean);
-        _mm512_store_ps(lane_m2s, vm2);
+        alignas(64) double lane_means[16];
+        alignas(64) double lane_m2s[16];
+        _mm512_store_pd(lane_means, vmean_lo);
+        _mm512_store_pd(lane_means + 8, vmean_hi);
+        _mm512_store_pd(lane_m2s, vm2_lo);
+        _mm512_store_pd(lane_m2s + 8, vm2_hi);
 
         // The horizontal merge and final division run once per channel, so
         // accumulate in double: float combined_n would round once the

@@ -149,6 +149,30 @@ TEST_P(GradCheckPhase7, Conv2d_Float64) {
     EXPECT_TRUE(ok) << "Conv2d gradcheck failed";
 }
 
+// Regression: a plain sum() reduction yields a UNIFORM upstream gradient, which
+// masks how conv2d_backward_input packs grad_output (channel-major vs the
+// position-major layout the GEMM reads). Weight the output by a fixed
+// non-uniform tensor so the analytic input-grad must transpose grad_output
+// correctly to match finite differences. C_out=3>1 and out spatial=2x2>1 so the
+// scrambling is observable.
+TEST_P(GradCheckPhase7, Conv2d_NonUniformGrad_Float64) {
+    Variable input(randn({1, 2, 4, 4}, DType::Float64, device), true);
+    Variable weight(randn({3, 2, 3, 3}, DType::Float64, device) * 0.3, false);
+    Variable proj(randn({1, 3, 2, 2}, DType::Float64, device), false);
+    auto f = [&weight, &proj](const Variable& x) -> Variable {
+        auto y = nn::functional::conv2d(
+            x, weight, std::nullopt,
+            std::pair<int64_t,int64_t>{1,1},  // stride
+            std::pair<int64_t,int64_t>{0,0},  // padding
+            std::pair<int64_t,int64_t>{1,1},  // dilation
+            1);
+        return tenzor::sum(y * proj);
+    };
+    auto r = gradcheck_detailed(f, input, 1e-6, 1e-7, 1e-6);
+    EXPECT_TRUE(r.passed) << "Conv2d non-uniform-grad gradcheck failed: "
+                          << r.error_message;
+}
+
 TEST_P(GradCheckPhase7, Conv3d_Float64) {
     Variable input(randn({1, 2, 3, 3, 3}, DType::Float64, device), true);
     Variable weight(randn({2, 2, 2, 2, 2}, DType::Float64, device) * 0.3, false);

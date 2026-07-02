@@ -122,7 +122,10 @@ auto remote(int32_t dst, const std::string& func_name,
     Tensor value = results.empty()
         ? Tensor({}, DType::Float32, Device::cpu())
         : std::move(results[0]);
-    int64_t rref_id = RRefStore::instance().store(std::move(value));
+    // Tag the entry with this worker as owner so a remote RREF_FETCH/RREF_DELETE
+    // (whose ids are predictable) is only honored for the legitimate owner.
+    int64_t rref_id =
+        RRefStore::instance().store(std::move(value), agent->self().id);
     return RRef(agent->self().id, rref_id, agent);
 }
 

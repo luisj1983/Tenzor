@@ -10,6 +10,7 @@
 #endif
 #include <cuda_runtime.h>
 #include "cuda_stream_pool.hpp"
+#include "cuda_error.hpp"
 #include <array>
 #include <stdexcept>
 #include <limits>
@@ -283,7 +284,15 @@ public:
 
     auto device_count() const -> int32_t override {
         int count = 0;
-        cudaGetDeviceCount(&count);
+        // A discarded return here silently yields count=0 (looks like "no CUDA
+        // device") when the real cause is e.g. a driver/runtime mismatch.
+        cudaError_t err = cudaGetDeviceCount(&count);
+        if (err != cudaSuccess) {
+            // No usable CUDA device: clear the sticky error and report zero so
+            // is_available() degrades cleanly rather than throwing at load time.
+            cudaGetLastError();
+            return 0;
+        }
         return count;
     }
 
@@ -314,7 +323,9 @@ public:
         }
 
         cudaDeviceProp props;
-        cudaGetDeviceProperties(&props, device_id);
+        // Unchecked, a failure leaves props uninitialized => garbage name/vendor
+        // and bogus memory/capability info downstream.
+        CUDA_CHECK(cudaGetDeviceProperties(&props, device_id));
 
         DeviceInfo info;
         info.name = props.name;
@@ -560,7 +571,7 @@ public:
         // cudaSetDevice would silently leak the device switch into the
         // calling thread (see allocate()/copy()).
         DeviceGuard guard(Device::cuda(device_id));
-        cudaDeviceSynchronize();
+        CUDA_CHECK(cudaDeviceSynchronize());
         // Surface any deferred index-out-of-range error now that all device
         // work (incl. the embedding OOB flag copy) has completed.
         cuda::cuda_drain_index_errors();
@@ -580,7 +591,7 @@ public:
     }
 
     auto synchronize_stream(StreamHandle stream) -> void override {
-        cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+        CUDA_CHECK(cudaStreamSynchronize(static_cast<cudaStream_t>(stream)));
         cuda::cuda_drain_index_errors();
     }
 

@@ -697,23 +697,26 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
             return out;
         }
 
-        // For "mean" we need total_target_len (a scalar) — derive it on
-        // host by reading the small (N,) target_lengths Int32 tensor. This
-        // is a 4*N-byte transfer at most, not the algorithmic DP working
-        // set, and is functionally identical to PyTorch's behaviour.
+        // PyTorch reduction="mean" is mean_n( loss_n / max(target_len_n, 1) ),
+        // NOT sum(loss)/sum(target_len). Divide each sample's loss by its OWN
+        // target length, then average over N. The per-sample 1/len_n factor is
+        // baked into the gradient rows (a single scalar scale_ can't express a
+        // per-sample divisor); scale_ then carries only the uniform 1/N factor.
         float scale = 1.0f;
+        Tensor scaled_losses = losses_dev;
         if (reduction_ == "mean") {
-            Tensor tl_cpu_small = (target_lengths.device() == Device::cpu())
-                                  ? target_lengths.to(DType::Int32).contiguous()
-                                  : target_lengths.to(Device::cpu()).to(DType::Int32).contiguous();
-            const int32_t* tl_ptr = tl_cpu_small.data<int32_t>();
-            float total_target_len = 0.0f;
-            for (int64_t n = 0; n < N; ++n) total_target_len += static_cast<float>(tl_ptr[n]);
-            if (total_target_len > 0.0f) scale = 1.0f / total_target_len;
+            Tensor len_clamped = tenzor::clamp_min(tl_dev.to(DType::Float32), 1.0);  // (N,)
+            Tensor inv_len = tenzor::reciprocal(len_clamped);                        // (N,)
+            scaled_losses = tenzor::mul(losses_dev, inv_len);                        // (N,)
+            // Bake the per-sample factor into the captured gradient: (T,N,C)*(1,N,1).
+            Tensor inv_len_bcast = tenzor::reshape(inv_len, {1, N, 1});
+            raw_grad_dev = tenzor::mul(raw_grad_dev, inv_len_bcast);
+            if (N > 0) scale = 1.0f / static_cast<float>(N);
         }
         // Reduction on the device: sum, then scalar-multiply by `scale`
-        // (which is 1.0 for "sum" and 1/total_target_len for "mean").
-        Tensor total = tenzor::sum(losses_dev);
+        // (1.0 for "sum"; 1/N for "mean" — the per-sample 1/len_n is already
+        // folded into scaled_losses and raw_grad_dev above).
+        Tensor total = tenzor::sum(scaled_losses);
         if (scale != 1.0f) {
             total = tenzor::mul(total, static_cast<double>(scale));
         }
@@ -850,14 +853,30 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
             total_loss += losses[n];
         }
     } else {  // "mean"
-        float total_target_len = 0.0f;
+        // PyTorch reduction="mean" is mean_n( loss_n / max(target_len_n, 1) ),
+        // NOT sum(loss)/sum(target_len). Divide each sample's loss by its OWN
+        // target length, then average over N. The per-sample 1/len_n factor is
+        // baked into the gradient rows below; scale_ carries only the uniform
+        // 1/N mean factor (a single scalar can't express a per-sample divisor).
+        std::vector<float> inv_len(N, 1.0f);
         for (int64_t n = 0; n < N; ++n) {
-            total_loss += losses[n];
-            total_target_len += static_cast<float>(tl_data[n]);
+            const float len_n = std::max(static_cast<float>(tl_data[n]), 1.0f);
+            inv_len[n] = 1.0f / len_n;
+            total_loss += losses[n] * inv_len[n];
         }
-        if (total_target_len > 0.0f) {
-            total_loss /= total_target_len;
-            scale = 1.0f / total_target_len;
+        if (N > 0) {
+            total_loss /= static_cast<float>(N);
+            scale = 1.0f / static_cast<float>(N);
+            // Bake the per-sample 1/len_n into the captured gradient tensor so
+            // the backward's uniform scale_ (=1/N) reproduces
+            // d L / d logits_n = grad_n / (N * len_n).
+            float* gt = grad_tensor.data<float>();
+            for (int64_t t = 0; t < T_max; ++t) {
+                for (int64_t n = 0; n < N; ++n) {
+                    float* row = gt + (t * N + n) * C;
+                    for (int64_t c = 0; c < C; ++c) row[c] *= inv_len[n];
+                }
+            }
         }
     }
 
@@ -976,10 +995,19 @@ auto PoissonNLLLoss::forward(const Variable& input, const Variable& target) -> V
         return d == DType::Float16 || d == DType::BFloat16;
     };
     const bool needs_upcast = is_reduced(input_dtype) || is_reduced(target_dtype);
-    // Pick the cast-back dtype: prefer input's dtype (the user supplied it
-    // for the prediction); only fall back to target's dtype if input is
-    // already higher precision but target was reduced.
-    const DType orig_dtype = is_reduced(input_dtype) ? input_dtype : target_dtype;
+    // Cast the loss back to the WIDER of input/target dtype, preferring input's
+    // dtype on a tie (the user supplied it for the prediction). Previously this
+    // picked target_dtype whenever input was already high precision, so an F32
+    // input with an F16 target narrowed the F32 loss to F16 — a precision loss.
+    auto dtype_width = [](DType d) -> int {
+        switch (d) {
+            case DType::Float64: return 64;
+            case DType::Float32: return 32;
+            default: return 16;  // Float16 / BFloat16
+        }
+    };
+    const DType orig_dtype = (dtype_width(target_dtype) > dtype_width(input_dtype))
+                                 ? target_dtype : input_dtype;
     Variable input_c = (needs_upcast && is_reduced(input_dtype))
         ? tenzor::nn::variable_cast(input, DType::Float32)
         : input;
@@ -1241,6 +1269,10 @@ auto MultiMarginLoss::forward(const Variable& input, const Tensor& target) -> Va
     // loss = 1/C * sum_{j != y} max(0, margin - x[y] + x[j])^p
     // input: (N, C), target: (N,) with class indices
 
+    if (input.tensor().ndim() < 2) {
+        throw std::invalid_argument(
+            "MultiMarginLoss: expects >=2D logits [N, C, ...]");
+    }
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1368,6 +1400,10 @@ auto MultiLabelMarginLoss::forward(const Variable& input, const Tensor& target) 
     //   per_sample[b] = (1/C) * sum_{t: mt[b,t]=1} sum_{k: mt[b,k]=0}
     //                     relu(1 - x[b,t] + x[b,k])
     // Built from differentiable Variable ops, so autograd derives the backward.
+    if (input.tensor().ndim() < 2) {
+        throw std::invalid_argument(
+            "MultiLabelMarginLoss: expects >=2D logits [N, C, ...]");
+    }
     const DType orig_dtype = input.tensor().dtype();
     const Device dev = input.tensor().device();
     const bool needs_upcast = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);

@@ -7,8 +7,10 @@
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/creation.hpp"  // tenzor::get_global_seed (dropout mask reproducibility)
 #include "fp16_saturate.h"
 #include "../rocm_error.hpp"
+#include <atomic>
 #include <stdexcept>
 
 namespace tenzor {
@@ -719,6 +721,19 @@ auto dropout_kernel(const Tensor& input, float p, bool training, hipStream_t str
     HiprandGeneratorGuard gen_guard(HIPRAND_RNG_PSEUDO_DEFAULT);
     hiprandGenerator_t gen = gen_guard.get();
     HIPRAND_CHECK(hiprandSetStream(gen, stream));
+    // Seed from the global generator so dropout masks are reproducible under
+    // manual_seed(). A freshly created generator seeded with the same value on
+    // every call would replay the identical sequence (ignoring manual_seed and
+    // producing the same mask each time), so advance a process-wide offset by
+    // the number of uniforms consumed. This gives successive dropout calls (and
+    // successive layers/timesteps) independent, non-repeating masks while still
+    // being deterministic for a given global seed. Seed first (which resets the
+    // generator state), then position it at the running offset.
+    static std::atomic<unsigned long long> dropout_offset{0};
+    unsigned long long offset = dropout_offset.fetch_add(
+        static_cast<unsigned long long>(n), std::memory_order_relaxed);
+    HIPRAND_CHECK(hiprandSetPseudoRandomGeneratorSeed(gen, ::tenzor::get_global_seed()));
+    HIPRAND_CHECK(hiprandSetGeneratorOffset(gen, offset));
     HIPRAND_CHECK(hiprandGenerateUniform(gen, random_values.data<float>(), n));
 
     float scale = 1.0f / (1.0f - p);

@@ -201,6 +201,10 @@ private:
      * @return Aligned value
      */
     auto align_up(size_t size) const -> size_t {
+        // Adding (alignment_ - 1) can wrap around for a pathologically large
+        // size, yielding a tiny aligned value and a buffer far too small.
+        // Signal the overflow with 0, which callers treat as "don't plan".
+        if (size > std::numeric_limits<size_t>::max() - (alignment_ - 1)) return 0;
         return (size + alignment_ - 1) & ~(alignment_ - 1);
     }
 

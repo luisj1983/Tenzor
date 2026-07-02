@@ -287,7 +287,7 @@ BasicLayer::BasicLayer(int64_t dim,
     }
 }
 
-auto BasicLayer::forward_impl(const Variable& input) -> Variable {
+auto BasicLayer::forward_blocks(const Variable& input) -> Variable {
     auto x = input;
 
     // Apply all blocks with optional gradient checkpointing
@@ -309,12 +309,19 @@ auto BasicLayer::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    // Apply downsampling if exists
-    if (downsample_) {
-        x = downsample_->forward(x);
-    }
-
     return x;
+}
+
+auto BasicLayer::apply_downsample(const Variable& x) -> Variable {
+    if (downsample_) {
+        return downsample_->forward(x);
+    }
+    return x;
+}
+
+auto BasicLayer::forward_impl(const Variable& input) -> Variable {
+    // Blocks first (at the input resolution), then the optional downsample.
+    return apply_downsample(forward_blocks(input));
 }
 
 // ============================================================================
@@ -548,13 +555,18 @@ auto SwinTransformer::forward_features(const Variable& input) -> std::vector<Var
     auto x = patch_embed_->forward(input);
     x = pos_drop_->forward(x);
 
-    // Extract features from each stage
+    // Extract features from each stage. The documented contract is one feature
+    // per stage BEFORE that stage's PatchMerging downsample. Run the stage's
+    // transformer blocks (forward_blocks) to obtain the pre-downsample feature,
+    // capture it at the stage's input resolution/channels, THEN apply the
+    // downsample to produce the input for the next stage. Previously
+    // layers_[i]->forward() folded the downsample in, so the saved feature was
+    // the post-downsample one — contradicting the contract.
     for (size_t i = 0; i < layers_.size(); ++i) {
-        x = layers_[i]->forward(x);
+        auto feat = layers_[i]->forward_blocks(x);
 
-        // Save features before downsampling
-        auto resolution = layers_[i]->output_resolution();
-        auto shape = x.tensor().shape();
+        auto resolution = layers_[i]->input_resolution();
+        auto shape = feat.tensor().shape();
         if (shape.size() != 3) {
             throw std::runtime_error(
                 "Expected 3D tensor from layer (B, L, C), got " +
@@ -563,9 +575,12 @@ auto SwinTransformer::forward_features(const Variable& input) -> std::vector<Var
         int64_t B = shape[0];
         int64_t C = shape[2];
 
-        // Reshape to (B, H, W, C) for compatibility
-        auto feat = x.reshape({B, resolution.first, resolution.second, C});
-        features.push_back(feat);
+        // Reshape to (B, H, W, C) for compatibility (pre-downsample resolution).
+        auto reshaped = feat.reshape({B, resolution.first, resolution.second, C});
+        features.push_back(reshaped);
+
+        // Downsample to feed the next stage.
+        x = layers_[i]->apply_downsample(feat);
     }
 
     return features;

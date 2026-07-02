@@ -386,6 +386,15 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
     auto shape = input.shape();
     int64_t ndim = shape.size();
 
+    // Reject negative repeat counts before computing the output shape: a
+    // negative count has no meaning and would otherwise produce a bogus
+    // (negative) output extent.
+    for (auto r : repeats) {
+        if (r < 0) {
+            throw std::runtime_error("repeat: repeats cannot be negative");
+        }
+    }
+
     // If repeats has more dims than input, unsqueeze leading dimensions
     Tensor padded = input;
     if (repeats.size() > static_cast<size_t>(ndim)) {
@@ -497,6 +506,12 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
     // Validate reps
     if (reps.empty()) {
         throw std::runtime_error("Tile repetitions cannot be empty");
+    }
+    // Reject negative repetition counts before computing the output shape.
+    for (auto r : reps) {
+        if (r < 0) {
+            throw std::runtime_error("tile: reps cannot be negative");
+        }
     }
 
     // Determine output dimensions
@@ -636,6 +651,26 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
                         "leading (new) dimension");
                 }
                 shape[i] = input_shape[input_dim];
+            }
+        }
+    }
+
+    // Validate dimension compatibility for BOTH the CPU fill path and the
+    // non-CPU dispatch path. Each target dimension that maps onto an existing
+    // input dimension must either match it exactly or the input dimension must
+    // be 1 (broadcastable). Doing this above the device branch ensures the GPU
+    // Expand kernel never receives an invalid expansion that would index out
+    // of bounds (previously only the CPU fill loop performed this check).
+    {
+        int dim_offset = static_cast<int>(shape.size()) - static_cast<int>(input_shape.size());
+        for (size_t i = 0; i < shape.size(); ++i) {
+            int input_dim = static_cast<int>(i) - dim_offset;
+            if (input_dim >= 0) {
+                int64_t in_size = input_shape[input_dim];
+                if (in_size != 1 && in_size != shape[i]) {
+                    throw std::runtime_error(
+                        "Cannot expand dimension from non-1 size to different size");
+                }
             }
         }
     }

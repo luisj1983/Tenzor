@@ -733,20 +733,25 @@ auto index_select_kernel(const Tensor& input_in, int64_t dim, const Tensor& inde
 }
 
 // Masked fill - fill elements where mask is true with value
-auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, double value, sycl::queue& queue) -> Tensor {
-    auto input_shape = input.shape();
+auto masked_fill_kernel(const Tensor& input_in, const Tensor& mask_in, double value, sycl::queue& queue) -> Tensor {
+    auto input_shape = input_in.shape();
     auto mask_shape = mask_in.shape();
     if (!std::equal(input_shape.begin(), input_shape.end(), mask_shape.begin(), mask_shape.end())) {
         throw std::invalid_argument("MaskedFill: input and mask must have same shape");
     }
 
+    // Flat-indexed element access below requires a contiguous input (mirror masked_select).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+
     // Accept non-Bool masks (e.g. a Float32 attention mask) like the CPU
     // backend: any non-zero element is true. Normalize to Bool once so the
     // branches below (which read `const bool*`) don't reinterpret float/int
-    // mask bytes as bool (which silently selects the wrong elements).
+    // mask bytes as bool (which silently selects the wrong elements). An
+    // already-Bool but strided mask view must also be made contiguous, else it
+    // would be read at the wrong physical offsets.
     Tensor mask_storage;
     const Tensor& mask = (mask_in.dtype() == DType::Bool)
-        ? mask_in
+        ? (mask_in.is_contiguous() ? mask_in : (mask_storage = mask_in.contiguous()))
         : (mask_storage = mask_in.to(DType::Bool));
 
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
@@ -2409,8 +2414,11 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
 // ============================================================================
 
 auto masked_scatter_kernel(const Tensor& input, const Tensor& mask_in,
-                           const Tensor& source, sycl::queue& queue) -> Tensor {
+                           const Tensor& source_in, sycl::queue& queue) -> Tensor {
     int64_t numel = input.numel();
+
+    // Flat-indexed source access below requires a contiguous source.
+    Tensor source = source_in.is_contiguous() ? source_in : source_in.contiguous();
     int64_t src_numel = source.numel();
 
     // Clone input to output (preserves values where mask is false)
@@ -2418,10 +2426,12 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask_in,
 
     if (numel == 0) return output;
 
-    // Accept non-Bool masks (nonzero = true), matching the CPU backend.
+    // Accept non-Bool masks (nonzero = true), matching the CPU backend. An
+    // already-Bool but strided mask view must also be made contiguous, else the
+    // flat-indexed reads below would hit the wrong physical offsets.
     Tensor mask_storage;
     const Tensor& mask = (mask_in.dtype() == DType::Bool)
-        ? mask_in
+        ? (mask_in.is_contiguous() ? mask_in : (mask_storage = mask_in.contiguous()))
         : (mask_storage = mask_in.to(DType::Bool));
     const bool* mask_ptr = get_data_ptr<const bool>(mask);
 

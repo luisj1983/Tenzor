@@ -257,7 +257,11 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
 
     // Helper lambda: quantize a single float value
     auto quantize_val = [&](float val, float inv_scale, int32_t zero_point) -> int32_t {
-        int32_t qval = static_cast<int32_t>(std::round(val * inv_scale)) + zero_point;
+        // Round-half-to-even (banker's rounding) to match PyTorch/ONNX, which
+        // resolve .5 ties to the nearest even integer. std::nearbyint uses the
+        // current rounding mode (default FE_TONEAREST = round-half-to-even);
+        // std::round is half-away-from-zero and would bias ties by one step.
+        int32_t qval = static_cast<int32_t>(std::nearbyint(val * inv_scale)) + zero_point;
         return std::clamp(qval, quant_min, quant_max);
     };
 

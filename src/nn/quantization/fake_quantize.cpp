@@ -369,6 +369,31 @@ Tensor broadcast_channel_param(const Tensor& p, int64_t ndim, int64_t axis,
     }
     return q.reshape(view_shape);
 }
+
+// Round-half-to-even (banker's rounding), matching std::nearbyint under the
+// default FE_TONEAREST mode used by the REAL quantizer in quantize.cpp. QAT
+// fake-quant MUST round identically to deployment so training and inference
+// agree at .5 boundaries; tenzor::round() is half-away-from-zero and would
+// diverge by one quantization step on exact ties. Both fake-quant forwards
+// (FakeQuantizeFunction and LSQFakeQuantizeFunction) route through this helper.
+//
+// Base = floor(x + 0.5) (half-up). This overshoots by exactly 1 only when x is
+// an exact half-integer whose rounded value is odd; subtracting 1 there lands
+// on the even neighbour (verified for both signs, e.g. 0.5->0, 2.5->2,
+// -1.5->-2, -2.5->-2).
+Tensor round_half_to_even(const Tensor& x) {
+    Tensor r = tenzor::floor(tenzor::add(x, 0.5));
+    // Tie mask: exactly halfway means (r - x) == 0.5.
+    Tensor is_tie = tenzor::eq(tenzor::sub(r, x),
+                               full({1}, 0.5, x.dtype(), x.device()));
+    // Odd mask: r is odd iff r - 2*floor(r/2) != 0.
+    Tensor r_is_odd = tenzor::ne(
+        tenzor::sub(r, tenzor::mul(tenzor::floor(tenzor::mul(r, 0.5)), 2.0)),
+        full({1}, 0.0, x.dtype(), x.device()));
+    // On an odd tie, step down by one to reach the even neighbour.
+    Tensor even_on_tie = tenzor::where(r_is_odd, tenzor::sub(r, 1.0), r);
+    return tenzor::where(is_tie, even_on_tie, r);
+}
 }  // namespace
 
 FakeQuantizeFunction::FakeQuantizeFunction(float scale, float zero_point,
@@ -412,7 +437,7 @@ auto FakeQuantizeFunction::forward(std::vector<Variable> inputs) -> std::vector<
         scaled = x * inv_scale + zp_use;
     }
 
-    Tensor rounded = tenzor::round(scaled);
+    Tensor rounded = round_half_to_even(scaled);
     Tensor clamped = tenzor::clamp(rounded, quant_min_, quant_max_);
     Tensor output = (clamped - zp_use) * scale_use;
 
@@ -564,7 +589,7 @@ auto LSQFakeQuantizeFunction::forward(std::vector<Variable> inputs)
 
     // Fake quantize: x_hat = (clamp(round(x/s + z), qmin, qmax) - z) * s
     Tensor v = x / s_bc + z_bc;
-    Tensor q = tenzor::clamp(tenzor::round(v), quant_min_, quant_max_);
+    Tensor q = tenzor::clamp(round_half_to_even(v), quant_min_, quant_max_);
     Tensor output = (q - z_bc) * s_bc;
 
     // Save raw x and s; z is a constant member captured at construction.

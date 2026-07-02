@@ -177,6 +177,12 @@ CrossEntropyLoss::CrossEntropyLoss(Reduction reduction, float label_smoothing,
       ignore_index_(ignore_index) {}
 
 auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> Variable {
+    // Logits must be at least 2-D [N, C, ...]; num_classes is read from dim 1.
+    // A 1-D [C] input would index shape()[1] out of bounds below.
+    if (input.tensor().ndim() < 2) {
+        throw std::invalid_argument(
+            "CrossEntropyLoss: expects >=2D logits [N, C, ...]");
+    }
     // KK.19: log_softmax in F16/BF16 + label_smoothing/num_classes collapses
     // to zero for large vocab (label_smoothing=0.1 / 32k ≈ 3.05e-6, below
     // F16's smallest normal ~6.1e-5).  Widen the entire forward to Float32
@@ -365,6 +371,12 @@ NLLLoss::NLLLoss(Reduction reduction, int64_t ignore_index)
     : reduction_(reduction), ignore_index_(ignore_index) {}
 
 auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
+    // Log-probabilities must be at least 2-D [N, C, ...]; num_classes is read
+    // from dim 1. A 1-D [C] input would index shape()[1] out of bounds below.
+    if (input.tensor().ndim() < 2) {
+        throw std::invalid_argument(
+            "NLLLoss: expects >=2D log-probabilities [N, C, ...]");
+    }
     // Negative log likelihood from log-probabilities.
     //
     // Accept both forms of target, matching CrossEntropyLoss::forward:

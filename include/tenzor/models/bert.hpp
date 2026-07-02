@@ -104,11 +104,30 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Access the word (token) embedding table.
+    auto word_embeddings() const -> std::shared_ptr<nn::Embedding> { return word_embeddings_; }
+
+    /**
+     * @brief Replace the word embedding table with an externally-owned shared
+     *        one (e.g. for ELECTRA generator/discriminator embedding tying).
+     *
+     * The shared table is intentionally NOT registered as a submodule here so
+     * the owner can register it exactly once (avoiding double-counting in
+     * parameters()). If `shared_dim` differs from this module's hidden size, a
+     * linear projection is added so the summed embeddings stay at hidden_size.
+     *
+     * @param shared     Shared embedding table [vocab, shared_dim]
+     * @param shared_dim Embedding dimension of `shared`
+     */
+    auto set_shared_word_embeddings(std::shared_ptr<nn::Embedding> shared,
+                                    int64_t shared_dim) -> void;
+
 private:
     BertConfig config_;
     std::shared_ptr<nn::Embedding> word_embeddings_;
     std::shared_ptr<nn::Embedding> position_embeddings_;
     std::shared_ptr<nn::Embedding> token_type_embeddings_;
+    std::shared_ptr<nn::Linear> word_embeddings_project_;  ///< Optional embed_dim -> hidden_size projection (shared/factorized embeddings)
     std::shared_ptr<nn::LayerNorm> layer_norm_;
     std::shared_ptr<nn::Dropout> dropout_;
 
@@ -243,6 +262,9 @@ public:
      * @brief Get model configuration
      */
     auto config() const -> const BertConfig& { return config_; }
+
+    /// @brief Access the embeddings submodule (used for ELECTRA embedding tying).
+    auto embeddings() const -> std::shared_ptr<BertEmbeddings> { return embeddings_; }
 
 private:
     BertConfig config_;

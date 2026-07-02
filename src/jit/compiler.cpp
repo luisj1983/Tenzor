@@ -1726,6 +1726,22 @@ static auto get_scalar_float(const Node& node) -> std::optional<float> {
     }
 }
 
+/// Like get_scalar_float but preserves full double precision for Float64
+/// constants (used when computing a reciprocal that will be baked back into a
+/// Float64 tensor — narrowing to float first would lose precision).
+static auto get_scalar_double(const Node& node) -> std::optional<double> {
+    if (node.op_type() != OpType::Constant) return std::nullopt;
+    try {
+        const Tensor& t = node.get_tensor_attr("value");
+        if (t.numel() != 1) return std::nullopt;
+        if (t.dtype() == DType::Float32) return static_cast<double>(t.item<float>());
+        if (t.dtype() == DType::Float64) return t.item<double>();
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 auto StrengthReductionPass::run(Graph& graph) -> bool {
     bool modified = false;
     std::vector<std::shared_ptr<Node>> nodes(graph.nodes().begin(), graph.nodes().end());
@@ -1753,12 +1769,16 @@ auto StrengthReductionPass::reduce_node(std::shared_ptr<Node> node, Graph& graph
     auto producer1 = input1->node();
 
     // ---- Div(x, const) -> Mul(x, 1/const) ----
-    if (node->op_type() == OpType::Div && producer1 &&
+    // Multiplying by a precomputed reciprocal is not bit-identical to division,
+    // so this rewrite only fires under fast-math (allow_unsafe_algebra_).
+    if (allow_unsafe_algebra_ && node->op_type() == OpType::Div && producer1 &&
         producer1->op_type() == OpType::Constant) {
-        auto val = get_scalar_float(*producer1);
-        if (val && *val != 0.0f) {
-            // Create reciprocal constant
-            float reciprocal = 1.0f / *val;
+        auto val = get_scalar_double(*producer1);
+        if (val && *val != 0.0) {
+            // Compute the reciprocal in the operand's precision (double for
+            // Float64) so a Float64 divisor keeps its full mantissa. full()
+            // narrows to Float32 once if that is the operand dtype.
+            double reciprocal = 1.0 / *val;
             Tensor recip_tensor = tenzor::full({1}, reciprocal,
                 input1->dtype(), input1->device());
 
@@ -2354,7 +2374,11 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
                 break;
         }
 
-        // Replace first matched node with fused node, remove the rest
+        // Replace first matched node with fused node, remove the rest.
+        // Graph::replace_node only rewires values/consumers; it does not insert
+        // the new node into nodes_. Register it first (mirrors the other fusion
+        // passes, e.g. FlashAttention/GEMM) so it survives topo-sort/execution.
+        graph.add_node(fused_node);
         graph.replace_node(match.nodes[0], fused_node);
         for (size_t i = 1; i < match.nodes.size(); ++i) {
             graph.remove_node(match.nodes[i]);
@@ -2881,6 +2905,12 @@ auto Compiler::optimize(Graph& graph, int max_iterations) -> int {
             break;
         }
     }
+
+    // Passes that append nodes (ConstantFolding, StrengthReduction, fusion,
+    // LoopUnroll) push them onto the end of nodes_ without restoring dependency
+    // order. Graph::forward executes nodes_ in stored order, so a newly appended
+    // producer could run after its consumer. Re-sort once here after all passes.
+    graph.topological_sort();
 
     // Determine whether to run memory planning:
     // - If the user explicitly set it via set_memory_planning(), use that setting.

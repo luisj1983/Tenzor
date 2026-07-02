@@ -213,6 +213,9 @@ auto MemoryPlanner::greedy_assign(std::vector<LiveRange>& live_ranges)
 
     for (const auto& lr : live_ranges) {
         size_t aligned_size = align_up(lr.size);
+        // align_up returns 0 on overflow (or for a genuinely zero-size value);
+        // in either case there is nothing to place, so skip planning it.
+        if (aligned_size == 0) continue;
 
         // Try to find an existing slot that:
         //   1. Has no overlapping live range

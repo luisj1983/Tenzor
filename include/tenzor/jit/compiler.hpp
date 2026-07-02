@@ -640,10 +640,19 @@ private:
  */
 class StrengthReductionPass : public Pass {
 public:
+    /// @param allow_unsafe_algebra Enable the Div(x,c)->Mul(x,1/c) rewrite.
+    /// Multiplying by a precomputed reciprocal is NOT bit-identical to division
+    /// (1/c is generally not exactly representable), so it is gated OFF by
+    /// default and only applied under fast-math, mirroring
+    /// AlgebraicSimplificationPass. The value-preserving rewrites (Pow(x,2),
+    /// Pow(x,0.5), Mul(x,2)) are always applied.
+    explicit StrengthReductionPass(bool allow_unsafe_algebra = false)
+        : allow_unsafe_algebra_(allow_unsafe_algebra) {}
     auto run(Graph& graph) -> bool override;
     auto name() const -> std::string override { return "StrengthReduction"; }
 
 private:
+    bool allow_unsafe_algebra_ = false;
     auto reduce_node(std::shared_ptr<Node> node, Graph& graph) -> bool;
 };
 

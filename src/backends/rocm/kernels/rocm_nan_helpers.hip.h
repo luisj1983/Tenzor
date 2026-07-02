@@ -66,6 +66,22 @@ __device__ __host__ inline bool is_nan_bits(hip_bfloat16 x) {
     return (exp == 0xFFu) && (mant != 0u);
 }
 
+// ----------------------------------------------------------------------------
+// Negative-infinity bit-pattern tests. Under -ffast-math/-ffinite-math-only the
+// `isinf()` intrinsic folds to a compile-time `false`, so guards like
+// `isinf(x) && x < 0` become dead code. Inspect the IEEE-754 bits directly:
+// exp all-ones, mantissa zero, sign set.
+__device__ __host__ inline bool is_neg_inf_bits(float x) {
+    union { float f; uint32_t u; } pun;
+    pun.f = x;
+    return pun.u == 0xFF800000u;
+}
+__device__ __host__ inline bool is_neg_inf_bits(double x) {
+    union { double d; uint64_t u; } pun;
+    pun.d = x;
+    return pun.u == 0xFFF0000000000000ull;
+}
+
 // ============================================================================
 // Typed quiet-NaN constructors. Build the qNaN directly in T's native bit
 // width instead of casting a float32 NaN through the (distrusted) float->T

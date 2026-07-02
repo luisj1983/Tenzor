@@ -467,13 +467,16 @@ template<> __device__ inline uint64_t DivOp::operator()(uint64_t a, uint64_t b) 
 }
 
 // Generic in-place broadcast kernel - works for all in-place binary operations
-// Reads from a (target) and b (other), writes result back to a
+// Reads from a (target) and b (other), writes result back to a. Uses meta.strides_a
+// for the in-place target so a non-contiguous (transposed/sliced) inout view is
+// read and written at the correct physical elements; meta.strides_b broadcasts b.
 template<typename T, typename Op>
 __global__ void broadcast_inplace_kernel(
     T* a, const T* b,
     BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
     TENZOR_CUDA_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0;
         int64_t idx_b = 0;
         int64_t tmp = out_idx;
 
@@ -482,10 +485,11 @@ __global__ void broadcast_inplace_kernel(
         for (int64_t i = ndim - 1; i >= 0; --i) {
             int64_t coord = tmp % meta.output_shape[i];
             tmp /= meta.output_shape[i];
+            idx_a += coord * meta.strides_a[i];
             idx_b += coord * meta.strides_b[i];
         }
 
-        a[out_idx] = op(a[out_idx], b[idx_b]);
+        a[idx_a] = op(a[idx_a], b[idx_b]);
     }
 }
 
@@ -2857,15 +2861,23 @@ __global__ void add_inplace_kernel_f64_vec2(double2* data, const double2* other,
     }
 }
 
-auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+auto add_inplace_kernel(Tensor& inout, const Tensor& other_in, cudaStream_t stream) -> Tensor {
+    if (inout.dtype() != other_in.dtype()) {
+        throw std::runtime_error("In-place add: tensors must have the same dtype");
+    }
+    // 'other' is read-only: contiguify a non-contiguous view so linear and
+    // broadcast indexing hit the right physical elements. 'inout' must stay in
+    // place, so its real strides are threaded through the stride-aware kernel.
+    Tensor other = other_in.is_contiguous() ? other_in : other_in.contiguous();
+
     int64_t n = inout.numel();
     bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (same_shape) {
-        // Fast path: same shape, element-wise operation
+    if (same_shape && inout.is_contiguous()) {
+        // Fast path: same shape, both contiguous, element-wise operation
         if (inout.dtype() == DType::Float32) {
             float* dp = inout.data<float>(); const float* op = other.data<float>();
             if ((n & 3) == 0 && tz_is_aligned16(dp) && tz_is_aligned16(op)) {
@@ -2931,8 +2943,11 @@ auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
         int64_t ndim = inout_shape_vec.size();
-        std::vector<int64_t> strides_a_zeros(ndim, 0);
-        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
+        // In-place target keeps its real (possibly non-contiguous) layout, so
+        // thread its actual strides through the stride-aware kernel above.
+        auto inout_strides = inout.strides();
+        std::vector<int64_t> strides_a(inout_strides.begin(), inout_strides.end());
+        BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
@@ -2982,14 +2997,22 @@ auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     return inout;
 }
 
-auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+auto sub_inplace_kernel(Tensor& inout, const Tensor& other_in, cudaStream_t stream) -> Tensor {
+    if (inout.dtype() != other_in.dtype()) {
+        throw std::runtime_error("In-place sub: tensors must have the same dtype");
+    }
+    // 'other' is read-only: contiguify a non-contiguous view so linear and
+    // broadcast indexing hit the right physical elements. 'inout' must stay in
+    // place, so its real strides are threaded through the stride-aware kernel.
+    Tensor other = other_in.is_contiguous() ? other_in : other_in.contiguous();
+
     int64_t n = inout.numel();
     bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (same_shape) {
+    if (same_shape && inout.is_contiguous()) {
         if (inout.dtype() == DType::Float32) {
             sub_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
             CUDA_CHECK(cudaGetLastError());
@@ -3039,8 +3062,11 @@ auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
         int64_t ndim = inout_shape_vec.size();
-        std::vector<int64_t> strides_a_zeros(ndim, 0);
-        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
+        // In-place target keeps its real (possibly non-contiguous) layout, so
+        // thread its actual strides through the stride-aware kernel above.
+        auto inout_strides = inout.strides();
+        std::vector<int64_t> strides_a(inout_strides.begin(), inout_strides.end());
+        BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
@@ -3090,14 +3116,22 @@ auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     return inout;
 }
 
-auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+auto mul_inplace_kernel(Tensor& inout, const Tensor& other_in, cudaStream_t stream) -> Tensor {
+    if (inout.dtype() != other_in.dtype()) {
+        throw std::runtime_error("In-place mul: tensors must have the same dtype");
+    }
+    // 'other' is read-only: contiguify a non-contiguous view so linear and
+    // broadcast indexing hit the right physical elements. 'inout' must stay in
+    // place, so its real strides are threaded through the stride-aware kernel.
+    Tensor other = other_in.is_contiguous() ? other_in : other_in.contiguous();
+
     int64_t n = inout.numel();
     bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (same_shape) {
+    if (same_shape && inout.is_contiguous()) {
         if (inout.dtype() == DType::Float32) {
             mul_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
             CUDA_CHECK(cudaGetLastError());
@@ -3147,8 +3181,11 @@ auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
         int64_t ndim = inout_shape_vec.size();
-        std::vector<int64_t> strides_a_zeros(ndim, 0);
-        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
+        // In-place target keeps its real (possibly non-contiguous) layout, so
+        // thread its actual strides through the stride-aware kernel above.
+        auto inout_strides = inout.strides();
+        std::vector<int64_t> strides_a(inout_strides.begin(), inout_strides.end());
+        BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
@@ -3198,14 +3235,22 @@ auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     return inout;
 }
 
-auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+auto div_inplace_kernel(Tensor& inout, const Tensor& other_in, cudaStream_t stream) -> Tensor {
+    if (inout.dtype() != other_in.dtype()) {
+        throw std::runtime_error("In-place div: tensors must have the same dtype");
+    }
+    // 'other' is read-only: contiguify a non-contiguous view so linear and
+    // broadcast indexing hit the right physical elements. 'inout' must stay in
+    // place, so its real strides are threaded through the stride-aware kernel.
+    Tensor other = other_in.is_contiguous() ? other_in : other_in.contiguous();
+
     int64_t n = inout.numel();
     bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (same_shape) {
+    if (same_shape && inout.is_contiguous()) {
         if (inout.dtype() == DType::Float32) {
             div_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
             CUDA_CHECK(cudaGetLastError());
@@ -3255,8 +3300,11 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
         int64_t ndim = inout_shape_vec.size();
-        std::vector<int64_t> strides_a_zeros(ndim, 0);
-        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
+        // In-place target keeps its real (possibly non-contiguous) layout, so
+        // thread its actual strides through the stride-aware kernel above.
+        auto inout_strides = inout.strides();
+        std::vector<int64_t> strides_a(inout_strides.begin(), inout_strides.end());
+        BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(

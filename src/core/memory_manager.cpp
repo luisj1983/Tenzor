@@ -5,6 +5,7 @@
 
 #include "tenzor/core/memory_manager.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/core/checked_math.hpp"
 #include <stdexcept>
 #include <algorithm>
 
@@ -30,6 +31,12 @@ MemoryManager::MemoryManager(const Config& config)
     stats_ = MemoryStats{};
 }
 
+// Special members are defined out-of-line here (rather than defaulted in the
+// header) because tensors_ holds intrusive_ptr<TensorImpl> values whose
+// destructor requires the complete TensorImpl type, available via tensor.hpp
+// in this translation unit.
+MemoryManager::~MemoryManager() = default;
+
 // ============================================================================
 // Tensor Registration and Tracking
 // ============================================================================
@@ -41,8 +48,15 @@ auto MemoryManager::register_tensor(Tensor* tensor) -> void {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Key the registry on the intrusive TensorImpl identity, not the Tensor
+    // wrapper address (which is copyable/movable and would dangle).
+    TensorImpl* key = tensor->impl().get();
+    if (key == nullptr) {
+        throw std::invalid_argument("Cannot register tensor with null implementation");
+    }
+
     // Check if already registered
-    if (tensors_.find(tensor) != tensors_.end()) {
+    if (tensors_.find(key) != tensors_.end()) {
         return;  // Already registered
     }
 
@@ -50,9 +64,11 @@ auto MemoryManager::register_tensor(Tensor* tensor) -> void {
     Device location = tensor->device();
     size_t size_bytes = calculate_tensor_size(tensor);
 
-    // Create tensor info
+    // Create tensor info; hold an owning reference to keep the keyed
+    // TensorImpl alive for as long as it is tracked.
     TensorInfo info(location, size_bytes);
-    tensors_[tensor] = info;
+    info.impl = tensor->impl();
+    tensors_[key] = std::move(info);
 
     // Add to device-specific tracking
     auto& device_mem = get_device_memory(location.type);
@@ -104,7 +120,8 @@ auto MemoryManager::unregister_tensor(Tensor* tensor) -> void {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = tensors_.find(tensor);
+    TensorImpl* key = tensor->impl().get();
+    auto it = tensors_.find(key);
     if (it == tensors_.end()) {
         return;  // Not registered
     }
@@ -166,7 +183,7 @@ auto MemoryManager::get_tensor_location(const Tensor* tensor) -> Device {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = tensors_.find(const_cast<Tensor*>(tensor));
+    auto it = tensors_.find(tensor->impl().get());
     if (it == tensors_.end()) {
         throw std::runtime_error("Tensor not registered with memory manager");
     }
@@ -181,7 +198,7 @@ auto MemoryManager::update_tensor_location(Tensor* tensor, Device new_location) 
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = tensors_.find(tensor);
+    auto it = tensors_.find(tensor->impl().get());
     if (it == tensors_.end()) {
         throw std::runtime_error("Tensor not registered with memory manager");
     }
@@ -287,7 +304,7 @@ auto MemoryManager::is_registered(const Tensor* tensor) const -> bool {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    return tensors_.find(const_cast<Tensor*>(tensor)) != tensors_.end();
+    return tensors_.find(tensor->impl().get()) != tensors_.end();
 }
 
 // ============================================================================
@@ -339,7 +356,7 @@ auto MemoryManager::evict_lru_tensors(Device::Type device, size_t target_bytes) 
          ++it) {
         Tensor* tensor = *it;
 
-        auto tensor_it = tensors_.find(tensor);
+        auto tensor_it = tensors_.find(tensor->impl().get());
         if (tensor_it != tensors_.end()) {
             size_t tensor_size = tensor_it->second.size_bytes;
             eviction_candidates.push_back(tensor);
@@ -362,7 +379,7 @@ auto MemoryManager::mark_tensor_used(Tensor* tensor) -> void {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = tensors_.find(tensor);
+    auto it = tensors_.find(tensor->impl().get());
     if (it == tensors_.end()) {
         return;  // Not registered
     }
@@ -420,7 +437,7 @@ auto MemoryManager::get_tensor_count(Device::Type device) const -> size_t {
     std::lock_guard<std::mutex> lock(mutex_);
 
     size_t count = 0;
-    for (const auto& [tensor, info] : tensors_) {
+    for (const auto& [impl, info] : tensors_) {
         if (info.location.type == device) {
             count++;
         }
@@ -481,11 +498,13 @@ auto MemoryManager::calculate_tensor_size(const Tensor* tensor) const -> size_t 
         return 0;
     }
 
-    // Calculate size = num_elements * element_size
+    // Calculate size = num_elements * element_size, guarding against overflow
+    // the same way the allocating paths (tensor.cpp) do via checked_mul.
     size_t num_elements = tensor->numel();
     size_t element_size = tensor->dtype_size();
 
-    return num_elements * element_size;
+    return static_cast<size_t>(checked_mul(static_cast<int64_t>(num_elements),
+                                           static_cast<int64_t>(element_size)));
 }
 
 auto MemoryManager::update_stats(Device::Type device) -> void {

@@ -1331,6 +1331,16 @@ static auto gru_forward_kernel_impl(
 
     HIP_CHECK(hipGetLastError());
 
+    // All GEMMs, fused-gate kernels, bias adds and per-timestep copies were
+    // enqueued asynchronously on `stream`. The function-local RocBLASHandleGuard
+    // and the device-backed temporaries (gates, rz_gates, h_t) are about to go
+    // out of scope; their destructors free the rocBLAS handle and return the
+    // device buffers to the (non-stream-ordered) ROCm caching allocator, which
+    // can hand them to the next allocation immediately. Synchronize here so all
+    // queued work has finished reading those buffers and using the handle before
+    // they are destroyed, preventing a use-after-free.
+    HIP_CHECK(hipStreamSynchronize(stream));
+
     return {output, h_n};
 }
 

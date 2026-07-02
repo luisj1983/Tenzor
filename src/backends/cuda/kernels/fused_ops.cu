@@ -33,6 +33,24 @@ inline int clamp_blocks(int64_t blocks) {
     return static_cast<int>(clamped > 0 ? clamped : 1);
 }
 
+// One-block-per-row grid (used by the fused layernorm/softmax kernels, mirroring
+// the softmax_grid_blocks helper in activations.cu). `batch_size` is int64_t; a
+// plain `int blocks = batch_size` truncates to a wrong/negative grid extent once
+// the row count exceeds INT_MAX, silently leaving most rows uncomputed. CUDA caps
+// gridDim.x at 2^31-1, so validate (throw, not silently clamp) before launch.
+inline unsigned int softmax_grid_blocks(int64_t batch_size) {
+    if (batch_size < 0) {
+        throw std::runtime_error("fused kernel: negative batch size");
+    }
+    constexpr int64_t kMaxGridDimX = 2147483647LL;  // CUDA gridDim.x limit
+    if (batch_size > kMaxGridDimX) {
+        throw std::runtime_error(
+            "fused kernel: number of rows " + std::to_string(batch_size) +
+            " exceeds maximum CUDA grid dimension " + std::to_string(kMaxGridDimX));
+    }
+    return static_cast<unsigned int>(batch_size);
+}
+
 // Helper to create a zero-initialized CUDA tensor
 inline Tensor create_cuda_zeros(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream = nullptr) {
     Tensor t(shape, dtype, device);

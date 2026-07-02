@@ -1817,22 +1817,51 @@ auto AsStridedBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     return {reshape(result, input_shape_)};
 }
 
-// Audit B.3 closed-form higher-order: AsStrided is a linear gather
-// (strided view) with constant Jacobian, so its backward is a linear
-// scatter-add (above). The backward of *that* is the linear gather
-// itself: pulling the second-order grad (a tensor of input_shape_)
-// through the same stride/size/offset pattern recovers the second-
-// order grad as it would be seen at the AsStrided output. Calling
-// `as_strided` on the Variable preserves the differentiation graph
-// (the as_strided wrapper installs its own grad_fn so a third-order
-// backward, if requested, would scatter-add right back through this
-// same backward()).
+// as_strided is a linear strided GATHER (constant Jacobian), so its adjoint
+// (the backward) is a scatter-add into a zero buffer shaped like the input —
+// identical to the first-order backward() above. The previous implementation
+// re-applied as_strided (the forward gather) to the incoming grad, which is NOT
+// the adjoint: it read grad_outputs[0] (storage of only output_numel) with
+// strides intended for an input_numel buffer (out-of-bounds reads) and returned
+// an output-shaped result instead of input_shape_. Mirror backward() at the
+// Variable level so create_graph / higher-order differentiation is correct;
+// scatter_add installs its own grad_fn, so a further backward gathers straight
+// back through it.
 auto AsStridedBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     -> std::vector<Variable> {
-    return {::tenzor::as_strided(grad_outputs[0],
-                                  std::span<const int64_t>(size_),
-                                  std::span<const int64_t>(stride_),
-                                  storage_offset_)};
+    const Variable& grad = grad_outputs[0];
+
+    int64_t input_numel = 1;
+    for (auto s : input_shape_) input_numel *= s;
+    int64_t output_numel = 1;
+    for (auto s : size_) output_numel *= s;
+    int64_t offset = storage_offset_.value_or(0);
+
+    std::vector<int64_t> indices(output_numel);
+    std::vector<int64_t> coord(size_.size(), 0);
+    for (int64_t i = 0; i < output_numel; ++i) {
+        int64_t linear_idx = offset;
+        for (size_t d = 0; d < size_.size(); ++d) {
+            linear_idx += coord[d] * stride_[d];
+        }
+        indices[i] = linear_idx;
+        for (int d = static_cast<int>(size_.size()) - 1; d >= 0; --d) {
+            coord[d]++;
+            if (coord[d] < size_[d]) break;
+            coord[d] = 0;
+        }
+    }
+
+    auto index_tensor = Tensor::from_blob(
+        indices.data(), {output_numel}, DType::Int64, Device::cpu()).clone();
+    if (grad.device().type != Device::Type::CPU) {
+        index_tensor = index_tensor.to(grad.device());
+    }
+
+    Variable grad_input(zeros({input_numel}, grad.dtype(), grad.device()), false);
+    Variable flat_grad = reshape(grad, {-1});
+    Variable result = scatter_add(grad_input, 0, index_tensor, flat_grad);
+    return {reshape(result, input_shape_)};
 }
 
 // ============================================================================

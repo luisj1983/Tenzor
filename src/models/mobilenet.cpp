@@ -155,8 +155,13 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
 
     // Squeeze-and-Excitation
     if (use_se) {
+        // Canonical MobileNetV3 ALWAYS uses a hard-sigmoid gate in the SE block,
+        // independent of the block's own activation (HardSwish vs ReLU). The gate
+        // must not be coupled to `use_hs`: for the early ReLU blocks that used to
+        // select a plain sigmoid gate, which does not match the reference model
+        // or its pretrained weights.
         auto se = std::make_shared<MobileNetSqueezeExcitation>(
-            hidden_dim, 4, use_hs);  // reduction=4, use hard-sigmoid if use_hs
+            hidden_dim, 4, /*use_hard_sigmoid=*/true);  // reduction=4
         conv_->add_module(se);
     }
 

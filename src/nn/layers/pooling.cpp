@@ -1508,12 +1508,12 @@ auto LPPool1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("LPPool1d expects 3D input [batch, channels, length]");
     }
 
-    // LPPool: (avg_pool(|x|^p))^(1/p) — Variable-level throughout so
-    // backward() actually populates input.grad. The prior implementation
-    // called input.tensor() up front and re-wrapped intermediate Variables
-    // with requires_grad=false, severing the graph.
-    auto x_abs = ::tenzor::abs(input);
-    auto x_pow = ::tenzor::pow(x_abs, static_cast<double>(norm_type_));
+    // LPPool: (sum(x^p))^(1/p) — Variable-level throughout so backward()
+    // actually populates input.grad. PyTorch's LPPool raises the raw input to
+    // the p-th power WITHOUT taking abs first (f(X) = (sum_x x^p)^(1/p),
+    // implemented as avg_pool(x.pow(p)).mul(k).pow(1/p)); an abs on the inner
+    // power diverges from PyTorch for odd norm_type / negative inputs.
+    auto x_pow = ::tenzor::pow(input, static_cast<double>(norm_type_));
 
     AvgPool1d avg_pool(kernel_size_, stride_, /*padding=*/0);
     auto pooled = avg_pool.forward(x_pow);
@@ -1549,9 +1549,9 @@ auto LPPool2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("LPPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    // LPPool: (avg_pool(|x|^p))^(1/p) — Variable-level (see LPPool1d comment).
-    auto x_abs = ::tenzor::abs(input);
-    auto x_pow = ::tenzor::pow(x_abs, static_cast<double>(norm_type_));
+    // LPPool: (sum(x^p))^(1/p) — Variable-level (see LPPool1d comment). PyTorch
+    // raises the raw input to the p-th power WITHOUT abs on the inner power.
+    auto x_pow = ::tenzor::pow(input, static_cast<double>(norm_type_));
 
     AvgPool2d avg_pool(
         std::array<int64_t, 2>{kernel_size_.first, kernel_size_.second},

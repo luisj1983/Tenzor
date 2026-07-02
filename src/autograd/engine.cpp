@@ -319,7 +319,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // paths agree on scalar-implicit-ones and shape-mismatch behaviour.
     Tensor seed = synthesize_or_validate_root_grad(root, std::move(gradient));
 
-    root.set_grad(seed);
+    // PyTorch semantics: a non-leaf root does not retain .grad (it stays None)
+    // unless retain_grad() was requested; only a leaf root's own .grad is the
+    // result. Storing the seed on a non-leaf root polluted loss.grad() with
+    // ones_like(loss) and defeated the retains_grad diagnostic. The backward
+    // traversal is seeded from the local `seed` below, so it is unaffected.
+    if (!root.grad_fn() || root.is_leaf() || root.retains_grad()) {
+        root.set_grad(seed);
+    }
 
     // If no grad_fn, this is a leaf variable, nothing to backprop
     if (!root.grad_fn()) {
@@ -393,7 +400,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
 
     // Seed root gradient into accumulator so the root function is handled
     // uniformly — no fragile "empty accumulators = root" assumption.
-    accumulate_grad(root.grad_fn().get(), root.grad().value());
+    accumulate_grad(root.grad_fn().get(), seed);
     if (create_graph) {
         // Seed the graph-carrying accumulator. requires_grad=true mirrors the
         // legacy `Variable(g, true)` wrap so that downstream
@@ -402,7 +409,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         // order graph). The seed itself is a leaf (no grad_fn), so forward-mode
         // JVP / further differentiation correctly treat it as a constant.
         accumulate_grad_var(root.grad_fn().get(),
-                            Variable(root.grad().value(), /*requires_grad=*/true));
+                            Variable(seed, /*requires_grad=*/true));
     }
 
     {
@@ -954,7 +961,12 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     }
     for (auto* key : root_order) {
         Variable* r = first_root_handle[key];
-        r->set_grad(root_seeds[key]);
+        // Only leaf / retains_grad roots keep .grad (PyTorch semantics; see
+        // execute()); a non-leaf root stays None. Backprop is seeded from
+        // root_seeds below, so gating this does not affect the traversal.
+        if (!r->grad_fn() || r->is_leaf() || r->retains_grad()) {
+            r->set_grad(root_seeds[key]);
+        }
     }
 
     // Build combined topological sort from all roots using iterative DFS

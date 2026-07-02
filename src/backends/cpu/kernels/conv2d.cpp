@@ -1298,18 +1298,29 @@ void conv2d_backward_input_impl(
 
         // Process per-batch to handle correct strides with groups
         int64_t col_per_batch = out_h * out_w * col_cols;
-        int64_t grad_out_per_batch = out_h * out_w * out_channels_per_group;
 
         // Allocate col buffer for all batches
         std::vector<T> grad_col(col_rows * col_cols);
 
-        // Reshape grad_output for this group: extract per-batch, per-group data
-        // and pack into contiguous GEMM input
+        // Pack grad_output into GEMM A-matrix shape (M, K) = (batch*out_h*out_w,
+        // out_channels_per_group). grad_output is NCHW, so its natural per-batch
+        // layout is (out_channels_per_group, out_h*out_w) — the TRANSPOSE of the
+        // position-major (row = b*spatial + s, col = oc) layout gemm_cpu reads.
+        // A direct memcpy of the NCHW slice is only correct when
+        // out_channels_per_group == 1 or out_h*out_w == 1; otherwise it produces
+        // silently-wrong input gradients. Do the transpose explicitly, mirroring
+        // conv2d_backward_weight_impl.
         std::vector<T> grad_out_packed(col_rows * out_channels_per_group);
+        int64_t spatial = out_h * out_w;
+        #pragma omp parallel for collapse(2) if(batch * out_channels_per_group > 64)
         for (int64_t b = 0; b < batch; ++b) {
-            const T* src = grad_output.data<T>() + (b * out_channels + out_start) * out_h * out_w;
-            T* dst = grad_out_packed.data() + b * grad_out_per_batch;
-            std::memcpy(dst, src, grad_out_per_batch * sizeof(T));
+            for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
+                const T* src = grad_output.data<T>() +
+                               (b * out_channels + out_start + oc) * spatial;
+                for (int64_t s = 0; s < spatial; ++s) {
+                    grad_out_packed[(b * spatial + s) * out_channels_per_group + oc] = src[s];
+                }
+            }
         }
 
         int64_t M = col_rows;

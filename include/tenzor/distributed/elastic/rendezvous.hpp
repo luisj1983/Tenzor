@@ -99,6 +99,11 @@ private:
     int32_t rank_{-1};
     int32_t world_size_{0};
     int64_t round_{0};
+    /// Round number of the last successful join(). leave() keys its departure
+    /// marker off this rather than round_, which join() may have advanced past
+    /// (e.g. after a failed re-rendezvous) — writing the marker under the
+    /// advanced round would notify peers in a round this worker never joined.
+    int64_t joined_round_{-1};
 
 public:
     ~C10dRendezvous();

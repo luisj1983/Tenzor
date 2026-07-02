@@ -51,30 +51,35 @@ auto AlexNet::forward_impl(const Variable& x) -> Variable {
 auto AlexNet::make_features() -> void {
     features_ = std::make_shared<nn::Sequential>();
 
-    // Conv1: 3 -> 96, 11x11, stride 4, padding 2
-    auto conv1 = std::make_shared<nn::Conv2d>(3, 96, 11, 4, 2);
+    // Channel widths match torchvision's AlexNet (64/192/384/256/256), which is
+    // the checkpoint the pretrained loader downloads. The original paper used
+    // 96/256/384/384/256; using those widths made the pretrained weights fail to
+    // map onto the layers.
+
+    // Conv1: 3 -> 64, 11x11, stride 4, padding 2
+    auto conv1 = std::make_shared<nn::Conv2d>(3, 64, 11, 4, 2);
     features_->add_module(conv1);
     features_->add_module(std::make_shared<nn::ReLU>());
     features_->add_module(std::make_shared<nn::MaxPool2d>(3, 2));  // 3x3, stride 2
 
-    // Conv2: 96 -> 256, 5x5, stride 1, padding 2
-    auto conv2 = std::make_shared<nn::Conv2d>(96, 256, 5, 1, 2);
+    // Conv2: 64 -> 192, 5x5, stride 1, padding 2
+    auto conv2 = std::make_shared<nn::Conv2d>(64, 192, 5, 1, 2);
     features_->add_module(conv2);
     features_->add_module(std::make_shared<nn::ReLU>());
     features_->add_module(std::make_shared<nn::MaxPool2d>(3, 2));  // 3x3, stride 2
 
-    // Conv3: 256 -> 384, 3x3, stride 1, padding 1
-    auto conv3 = std::make_shared<nn::Conv2d>(256, 384, 3, 1, 1);
+    // Conv3: 192 -> 384, 3x3, stride 1, padding 1
+    auto conv3 = std::make_shared<nn::Conv2d>(192, 384, 3, 1, 1);
     features_->add_module(conv3);
     features_->add_module(std::make_shared<nn::ReLU>());
 
-    // Conv4: 384 -> 384, 3x3, stride 1, padding 1
-    auto conv4 = std::make_shared<nn::Conv2d>(384, 384, 3, 1, 1);
+    // Conv4: 384 -> 256, 3x3, stride 1, padding 1
+    auto conv4 = std::make_shared<nn::Conv2d>(384, 256, 3, 1, 1);
     features_->add_module(conv4);
     features_->add_module(std::make_shared<nn::ReLU>());
 
-    // Conv5: 384 -> 256, 3x3, stride 1, padding 1
-    auto conv5 = std::make_shared<nn::Conv2d>(384, 256, 3, 1, 1);
+    // Conv5: 256 -> 256, 3x3, stride 1, padding 1
+    auto conv5 = std::make_shared<nn::Conv2d>(256, 256, 3, 1, 1);
     features_->add_module(conv5);
     features_->add_module(std::make_shared<nn::ReLU>());
     features_->add_module(std::make_shared<nn::MaxPool2d>(3, 2));  // 3x3, stride 2

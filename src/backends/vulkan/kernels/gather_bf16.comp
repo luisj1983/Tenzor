@@ -24,13 +24,20 @@ layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16 pairs
 layout(binding = 1) buffer Indices { int indices[]; };
 layout(binding = 2) buffer Output { uint output_data[]; };  // Packed BF16 pairs
 
+// See gather.comp for the per-dim decomposition rationale.
 layout(push_constant) uniform PushConstants {
-    uint input_size;       // Total input size (in elements, not words)
-    uint output_size;      // Total output size (in elements)
-    uint dim;              // Dimension to gather along
-    uint dim_size;         // Size of the dimension being gathered
-    uint inner_size;       // Product of dimensions after dim
-    uint outer_size;       // Product of dimensions before dim
+    uint output_size;
+    uint input_size;
+    uint ndim;
+    uint dim;
+    uint input_dim_size;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    uvec4 idx_shape_0_3;
+    uvec4 idx_shape_4_7;
+    ivec4 in_stride_0_3;
+    ivec4 in_stride_4_7;
 } params;
 
 // Read a single BFloat16 element from packed uint32 array
@@ -65,26 +72,50 @@ void main() {
     if (out_idx >= params.output_size) {
         return;
     }
+    if (params.ndim > 8u) {
+        return;
+    }
 
-    // Decompose output index
-    uint outer_idx = out_idx / (params.inner_size * params.dim_size);
-    uint remainder = out_idx % (params.inner_size * params.dim_size);
-    uint dim_idx = remainder / params.inner_size;
-    uint inner_idx = remainder % params.inner_size;
+    uint ish[8];
+    ish[0] = max(params.idx_shape_0_3.x, 1u);
+    ish[1] = max(params.idx_shape_0_3.y, 1u);
+    ish[2] = max(params.idx_shape_0_3.z, 1u);
+    ish[3] = max(params.idx_shape_0_3.w, 1u);
+    ish[4] = max(params.idx_shape_4_7.x, 1u);
+    ish[5] = max(params.idx_shape_4_7.y, 1u);
+    ish[6] = max(params.idx_shape_4_7.z, 1u);
+    ish[7] = max(params.idx_shape_4_7.w, 1u);
+    int ist[8];
+    ist[0] = params.in_stride_0_3.x;
+    ist[1] = params.in_stride_0_3.y;
+    ist[2] = params.in_stride_0_3.z;
+    ist[3] = params.in_stride_0_3.w;
+    ist[4] = params.in_stride_4_7.x;
+    ist[5] = params.in_stride_4_7.y;
+    ist[6] = params.in_stride_4_7.z;
+    ist[7] = params.in_stride_4_7.w;
 
-    // Get the index to gather from
     int gather_idx = indices[out_idx];
+    if (gather_idx < 0) gather_idx += int(params.input_dim_size);
 
-    // Bounds check
-    if (gather_idx < 0 || gather_idx >= int(params.dim_size)) {
+    if (gather_idx < 0 || gather_idx >= int(params.input_dim_size)) {
         writeBF16(out_idx, 0.0);
         return;
     }
 
-    // Compute input index
-    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
-                  uint(gather_idx) * params.inner_size +
-                  inner_idx;
+    uint remaining = out_idx;
+    int in_off = 0;
+    for (int d = int(params.ndim) - 1; d >= 0; --d) {
+        uint coord = remaining % ish[d];
+        remaining /= ish[d];
+        uint c = (uint(d) == params.dim) ? uint(gather_idx) : coord;
+        in_off += int(c) * ist[d];
+    }
 
-    writeBF16(out_idx, readBF16(in_idx));
+    if (in_off < 0 || uint(in_off) >= params.input_size) {
+        writeBF16(out_idx, 0.0);
+        return;
+    }
+
+    writeBF16(out_idx, readBF16(uint(in_off)));
 }

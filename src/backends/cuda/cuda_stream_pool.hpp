@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <unordered_map>
+#include "cuda_error.hpp"
 
 namespace tenzor::cuda {
 
@@ -90,7 +91,9 @@ public:
         auto& pool = device_pools_[device_id];
         if (!pool.streams.empty()) return;  // Already initialized
 
-        cudaSetDevice(device_id);
+        // An unchecked cudaSetDevice failure would create every stream below on
+        // the wrong device, silently corrupting multi-GPU execution.
+        CUDA_CHECK(cudaSetDevice(device_id));
         pool.base_size = pool_size;  // permanent streams [0, base_size) are never reclaimed
         pool.streams.resize(pool_size);
         pool.available.resize(pool_size, true);
@@ -118,7 +121,7 @@ public:
         // after acquire(); without this, work targeting a non-default device
         // would land on whatever device happened to be current on this thread,
         // corrupting multi-GPU execution.
-        cudaSetDevice(device_id);
+        CUDA_CHECK(cudaSetDevice(device_id));
 
         for (size_t i = 0; i < pool.streams.size(); ++i) {
             if (pool.available[i]) {
@@ -130,7 +133,7 @@ public:
 
         // All streams busy — create a temporary one (rare path)
         cudaStream_t stream;
-        cudaSetDevice(device_id);
+        CUDA_CHECK(cudaSetDevice(device_id));
         auto err = cudaStreamCreate(&stream);
         if (err != cudaSuccess) {
             throw std::runtime_error(

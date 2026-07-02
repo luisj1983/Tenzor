@@ -2360,7 +2360,10 @@ template <typename T>
 static inline T saturate_double_to_int(double v) {
     constexpr double lo = static_cast<double>(std::numeric_limits<T>::lowest());
     constexpr double hi = static_cast<double>(std::numeric_limits<T>::max());
-    if (std::isnan(v)) return T(0);
+    // This TU is compiled with -ffast-math/-ffinite-math-only, under which
+    // std::isnan(v) folds to a constant false and NaN bounds would slip through
+    // as truncated garbage. Inspect the IEEE-754 bits directly instead.
+    if (tenzor::rocm::is_nan_bits(v)) return T(0);
     if (v <= lo) return std::numeric_limits<T>::lowest();
     // `hi` is rounded to the nearest double, which for 64-bit types is
     // 2^63 (one past INT64_MAX); >= catches that boundary so we never cast a
@@ -7354,7 +7357,7 @@ __global__ void logcumsumexp_hip_kernel(
             T x = input[offset];
             T new_max = fmax(running_max, x);
 
-            if (isinf(new_max) && new_max < T(0)) {
+            if (tenzor::rocm::is_neg_inf_bits(new_max)) {
                 running_lse = -INFINITY;
             } else {
                 running_lse = new_max + log(exp(running_lse - new_max) + exp(x - new_max));
@@ -9046,7 +9049,9 @@ __global__ void nanquantile_hip_kernel(
         }
 
         if (count == 0) {
-            output[idx] = static_cast<T>(NAN);
+            // All-NaN slice → NaN sentinel. static_cast<T>(NAN) can become a
+            // finite value under -ffast-math, so build the qNaN from bits.
+            output[idx] = tenzor::rocm::make_qnan<T>();
             return;
         }
 

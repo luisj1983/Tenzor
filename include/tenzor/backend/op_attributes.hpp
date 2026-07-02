@@ -493,9 +493,10 @@ public:
         size_t end = str.find(',');
         while (start < str.size()) {
             if (end == std::string::npos) end = str.size();
-            // Skip leading whitespace
+            // Skip leading whitespace (space AND tab, symmetric with the
+            // trailing-whitespace acceptance below).
             size_t trimmed = start;
-            while (trimmed < end && str[trimmed] == ' ') ++trimmed;
+            while (trimmed < end && (str[trimmed] == ' ' || str[trimmed] == '\t')) ++trimmed;
             // An empty field (e.g. '2,,3', leading ',3', or trailing '2,') is
             // malformed: silently dropping it would yield a shorter list than
             // the caller wrote, and downstream per-axis readers would default

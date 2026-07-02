@@ -199,9 +199,11 @@ private:
 };
 
 /**
- * @brief T5 Layer normalization wrapper
+ * @brief T5 Layer normalization (RMSNorm)
  *
- * T5 uses RMSNorm in some variants, but standard LayerNorm in base T5
+ * T5 normalization is RMSNorm: it scales by the root-mean-square of the
+ * activations (no mean subtraction) and applies a learnable per-feature
+ * weight with no bias — matching HuggingFace's T5LayerNorm.
  */
 class T5LayerNorm : public nn::Module {
 public:
@@ -219,7 +221,7 @@ public:
     auto forward_impl(const Variable& input) -> Variable override;
 
 private:
-    std::shared_ptr<nn::LayerNorm> layer_norm_;
+    std::shared_ptr<nn::RMSNorm> layer_norm_;
 };
 
 /**
@@ -243,8 +245,10 @@ public:
 
 private:
     T5Config config_;
-    std::shared_ptr<nn::Linear> wi_;  ///< Input projection
-    std::shared_ptr<nn::Linear> wo_;  ///< Output projection
+    std::shared_ptr<nn::Linear> wi_;    ///< Input projection (non-gated path)
+    std::shared_ptr<nn::Linear> wi_0_;  ///< Gated path: activation projection (T5.1.1)
+    std::shared_ptr<nn::Linear> wi_1_;  ///< Gated path: linear gate projection (T5.1.1)
+    std::shared_ptr<nn::Linear> wo_;    ///< Output projection
     std::shared_ptr<nn::Dropout> dropout_;
 };
 
@@ -450,6 +454,9 @@ public:
      */
     auto encoder() const -> std::shared_ptr<T5Encoder> { return encoder_; }
     auto decoder() const -> std::shared_ptr<T5Decoder> { return decoder_; }
+
+    /// Access the shared token embeddings (used to tie the LM head weight).
+    auto shared_embeddings() const -> std::shared_ptr<nn::Embedding> { return shared_embeddings_; }
 
     /// Load pretrained weights via ModelHub (audit H4). See AlbertModel.
     auto load_pretrained(const std::string& path, bool strict = true) -> void;

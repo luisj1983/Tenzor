@@ -115,9 +115,12 @@ inline __m256 exp_avx2(__m256 x) {
     __m256 exp_overflow_thresh = _mm256_set1_ps(88.72283935546875f);
     __m256 exp_overflow_mask = _mm256_cmp_ps(x, exp_overflow_thresh, _CMP_GT_OQ);
 
-    // Clamp to avoid overflow/underflow
-    __m256 max_val = _mm256_set1_ps(88.3762626647949f);
-    __m256 min_val = _mm256_set1_ps(-88.3762626647949f);
+    // Clamp to the finite range of std::expf. Above ln(FLT_MAX) the overflow
+    // blend below restores +inf; the lower bound reaches into the subnormal
+    // range so small results are not flushed to zero one exponent early (the
+    // two-step 2^k reconstruction below can represent |k| well past 127).
+    __m256 max_val = _mm256_set1_ps(88.72283905206835f);
+    __m256 min_val = _mm256_set1_ps(-103.97208404541016f);
     x = _mm256_min_ps(_mm256_max_ps(x, min_val), max_val);
 
     // Range reduction: k = round(x * log2(e))
@@ -152,11 +155,20 @@ inline __m256 exp_avx2(__m256 x) {
 
     // Reconstruct: exp(x) = 2^k * exp(r)
     // Convert k to integer and add to exponent field
+    // Reconstruct 2^k. k can now reach ~+/-128..150, so a single exponent-field
+    // insert would overflow (k+127 == 255 == the inf/nan exponent) or underflow
+    // to zero one exponent early. Split 2^k = 2^floor(k/2) * 2^ceil(k/2) so each
+    // factor is a representable power of two and the product spans the full
+    // finite range (including subnormals).
     __m256i ki = _mm256_cvtps_epi32(k);
-    ki = _mm256_slli_epi32(ki, 23);  // Shift to exponent position
-    __m256 scale = _mm256_castsi256_ps(_mm256_add_epi32(ki, _mm256_set1_epi32(0x3f800000)));
+    __m256i k_hi = _mm256_srai_epi32(ki, 1);        // floor(k/2)
+    __m256i k_lo = _mm256_sub_epi32(ki, k_hi);      // k - floor(k/2)
+    __m256 scale_hi = _mm256_castsi256_ps(
+        _mm256_slli_epi32(_mm256_add_epi32(k_hi, _mm256_set1_epi32(127)), 23));
+    __m256 scale_lo = _mm256_castsi256_ps(
+        _mm256_slli_epi32(_mm256_add_epi32(k_lo, _mm256_set1_epi32(127)), 23));
 
-    __m256 exp_res = _mm256_mul_ps(p, scale);
+    __m256 exp_res = _mm256_mul_ps(_mm256_mul_ps(p, scale_hi), scale_lo);
     // Blend +inf for the overflow lanes (x > 88.7228), matching std::exp.
     __m256 exp_inf_val = _mm256_set1_ps(std::numeric_limits<float>::infinity());
     exp_res = _mm256_blendv_ps(exp_res, exp_inf_val, exp_overflow_mask);
@@ -340,9 +352,11 @@ inline __m512 exp_avx512(__m512 x) {
     __mmask16 exp_overflow_mask =
         _mm512_cmp_ps_mask(x, _mm512_set1_ps(88.72283935546875f), _CMP_GT_OQ);
 
-    // Clamp
-    __m512 max_val = _mm512_set1_ps(88.3762626647949f);
-    __m512 min_val = _mm512_set1_ps(-88.3762626647949f);
+    // Clamp to the finite range of std::expf (see exp_avx2): +inf blended above
+    // ln(FLT_MAX); lower bound reaches the subnormal range, representable by the
+    // two-step 2^k reconstruction below.
+    __m512 max_val = _mm512_set1_ps(88.72283905206835f);
+    __m512 min_val = _mm512_set1_ps(-103.97208404541016f);
     x = _mm512_min_ps(_mm512_max_ps(x, min_val), max_val);
 
     // Range reduction
@@ -359,12 +373,17 @@ inline __m512 exp_avx512(__m512 x) {
     p = _mm512_fmadd_ps(p, r, c1);
     p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(1.0f));
 
-    // Scale by 2^k
+    // Scale by 2^k using a two-step split (see exp_avx2) so |k| past 127 neither
+    // overflows the exponent field nor flushes to zero prematurely.
     __m512i ki = _mm512_cvtps_epi32(k);
-    ki = _mm512_slli_epi32(ki, 23);
-    __m512 scale = _mm512_castsi512_ps(_mm512_add_epi32(ki, _mm512_set1_epi32(0x3f800000)));
+    __m512i k_hi = _mm512_srai_epi32(ki, 1);        // floor(k/2)
+    __m512i k_lo = _mm512_sub_epi32(ki, k_hi);      // k - floor(k/2)
+    __m512 scale_hi = _mm512_castsi512_ps(
+        _mm512_slli_epi32(_mm512_add_epi32(k_hi, _mm512_set1_epi32(127)), 23));
+    __m512 scale_lo = _mm512_castsi512_ps(
+        _mm512_slli_epi32(_mm512_add_epi32(k_lo, _mm512_set1_epi32(127)), 23));
 
-    __m512 exp_res = _mm512_mul_ps(p, scale);
+    __m512 exp_res = _mm512_mul_ps(_mm512_mul_ps(p, scale_hi), scale_lo);
     // Blend +inf for the overflow lanes (x > 88.7228), matching std::exp.
     exp_res = _mm512_mask_blend_ps(exp_overflow_mask, exp_res,
                                    _mm512_set1_ps(std::numeric_limits<float>::infinity()));

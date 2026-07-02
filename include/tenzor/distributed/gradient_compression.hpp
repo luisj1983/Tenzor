@@ -258,6 +258,16 @@ private:
      */
     auto rekey_residual(const void* old_key, const void* new_key) -> void;
 
+    /**
+     * @brief Re-key the residual without taking residuals_mutex_.
+     *
+     * Body of rekey_residual() minus the lock. The caller MUST already hold
+     * residuals_mutex_. compress() invokes this from within its own locked
+     * region; calling the public (locking) rekey_residual() there would
+     * re-lock the non-recursive mutex and deadlock.
+     */
+    auto rekey_residual_locked(const void* old_key, const void* new_key) -> void;
+
     /** @brief Fraction of gradient values to keep */
     float ratio_;
 

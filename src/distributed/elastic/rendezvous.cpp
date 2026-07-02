@@ -199,6 +199,14 @@ auto C10dRendezvous::join() -> RendezvousResult {
             std::min<int64_t>(count, static_cast<int64_t>(config_.max_workers));
         store.set(world_size_key, std::to_string(frozen));
     }
+    // Give the world_size read its OWN bounded grace window. The barrier
+    // `deadline` above may already be at/past now() (the barrier can break
+    // exactly at the deadline once min_workers is met), so reusing it here would
+    // spuriously fail before the coordinator has a chance to publish. On timeout
+    // we must also drop the just-claimed member slot and advance the shared
+    // round — mirroring the sibling failure paths — so a leaked orphan member
+    // key and a stuck round don't accumulate across retries.
+    const auto ws_deadline = std::chrono::steady_clock::now() + config_.timeout;
     int64_t world_size = 0;
     for (;;) {
         std::string ws;
@@ -206,10 +214,15 @@ auto C10dRendezvous::join() -> RendezvousResult {
         if (!ws.empty()) {
             try { world_size = std::stoll(ws); break; } catch (...) { /* retry */ }
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (std::chrono::steady_clock::now() >= ws_deadline) {
+            try { store.delete_key(member_key); } catch (...) { /* best-effort */ }
+            const int64_t stuck_round = round_;
+            round_ = advance_current_round(store, config_.run_id, stuck_round);
             throw std::runtime_error(
                 "C10dRendezvous::join: coordinator failed to publish world_size "
-                "for run_id='" + config_.run_id + "' round " + std::to_string(round_));
+                "for run_id='" + config_.run_id + "' round " +
+                std::to_string(stuck_round) + "; retry to enter round " +
+                std::to_string(round_));
         }
         std::this_thread::sleep_for(kPollInterval);
     }
@@ -232,6 +245,9 @@ auto C10dRendezvous::join() -> RendezvousResult {
 
     rank_ = static_cast<int32_t>(slot);
     world_size_ = static_cast<int32_t>(world_size);
+    // Remember the round we actually joined so leave() marks departure under it,
+    // even if a later join() advances round_ past this value.
+    joined_round_ = round_;
 
     RendezvousResult result;
     result.rank = rank_;
@@ -242,9 +258,14 @@ auto C10dRendezvous::join() -> RendezvousResult {
 
 auto C10dRendezvous::leave() -> void {
     // Best-effort departure marker so peers can detect the change next round.
-    if (rank_ >= 0 && store_) {
+    // Key it off the round this worker actually joined (joined_round_), NOT the
+    // current round_ — a failed re-join may have advanced round_ to a round this
+    // worker was never a member of, and writing the marker there would mislead
+    // that round's peers while leaving the real round's marker unset.
+    if (rank_ >= 0 && store_ && joined_round_ >= 0) {
         try {
-            store_->set(config_.run_id + "/round_" + std::to_string(round_) +
+            store_->set(config_.run_id + "/round_" +
+                            std::to_string(joined_round_) +
                             "/leave_" + std::to_string(rank_),
                         "1");
         } catch (...) {
@@ -253,6 +274,7 @@ auto C10dRendezvous::leave() -> void {
     }
     rank_ = -1;
     world_size_ = 0;
+    joined_round_ = -1;
 }
 
 } // namespace elastic

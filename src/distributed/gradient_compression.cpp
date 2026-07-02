@@ -208,16 +208,22 @@ auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
                 // identity; otherwise the next call's lookup misses and the
                 // accumulated error-feedback residual is silently dropped.
                 gradient = compressed_reshaped;
-                rekey_residual(grad_key,
-                               static_cast<const void*>(gradient.storage().get()));
+                // Already holding residuals_mutex_ here — use the _locked variant
+                // to avoid re-locking the non-recursive mutex (deadlock).
+                rekey_residual_locked(
+                    grad_key,
+                    static_cast<const void*>(gradient.storage().get()));
             }
         } else {
             // Shape/dtype/device mismatch — assignment rebinds gradient to a new
             // Storage, so re-key the residual under the new Storage identity to
             // preserve error feedback across iterations.
             gradient = compressed_reshaped;
-            rekey_residual(grad_key,
-                           static_cast<const void*>(gradient.storage().get()));
+            // Already holding residuals_mutex_ here — use the _locked variant
+            // to avoid re-locking the non-recursive mutex (deadlock).
+            rekey_residual_locked(
+                grad_key,
+                static_cast<const void*>(gradient.storage().get()));
         }
     }
     result.data = gradient;
@@ -252,12 +258,15 @@ auto TopKCompressor::decompress(CompressedGradient& compressed) -> Tensor {
     return result;
 }
 
-auto TopKCompressor::rekey_residual(const void* old_key,
-                                    const void* new_key) -> void {
+auto TopKCompressor::rekey_residual_locked(const void* old_key,
+                                           const void* new_key) -> void {
+    // Precondition: the caller already holds residuals_mutex_. This does the
+    // actual re-keying without touching the mutex, so it is safe to call from
+    // compress() (which holds the lock for its whole body). The public
+    // rekey_residual() wraps this with the lock for standalone callers.
     if (old_key == new_key) {
         return;
     }
-    std::lock_guard<std::mutex> lock(residuals_mutex_);
     auto it = residuals_.find(old_key);
     if (it == residuals_.end()) {
         return;
@@ -265,6 +274,12 @@ auto TopKCompressor::rekey_residual(const void* old_key,
     Tensor residual = std::move(it->second);
     residuals_.erase(it);
     residuals_[new_key] = std::move(residual);
+}
+
+auto TopKCompressor::rekey_residual(const void* old_key,
+                                    const void* new_key) -> void {
+    std::lock_guard<std::mutex> lock(residuals_mutex_);
+    rekey_residual_locked(old_key, new_key);
 }
 
 auto TopKCompressor::reset() -> void {

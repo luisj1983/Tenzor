@@ -188,6 +188,9 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Access the token embedding submodule (used to tie the LM head).
+    auto token_embedding() const -> std::shared_ptr<nn::Embedding> { return token_embedding_; }
+
 private:
     std::shared_ptr<nn::Embedding> token_embedding_;      ///< Token embeddings
     std::shared_ptr<nn::Embedding> position_embedding_;   ///< Position embeddings (learned)

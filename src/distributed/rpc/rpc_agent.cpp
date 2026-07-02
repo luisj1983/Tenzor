@@ -12,7 +12,8 @@
  *     receive thread running for that peer.
  *   - Framing: [uint32 payload_len][uint8 type][int32 src][int32 dst]
  *     [int64 request_id][uint32 func_name_len][func_name bytes]
- *     [uint32 extra_bytes_len][extra_bytes][uint32 tensor_count]
+ *     [uint32 extra_bytes_len][extra_bytes]
+ *     [uint32 auth_token_len][auth_token bytes][uint32 tensor_count]
  *     [per-tensor: uint32 dtype][uint32 ndim][int64 shape[ndim]]
  *     [uint64 nbytes][nbytes of raw data]
  *
@@ -22,6 +23,7 @@
 
 #include "tenzor/distributed/rpc/rpc_agent.hpp"
 #include "tenzor/distributed/rpc/rref.hpp"
+#include "tenzor/serving/auth.hpp"  // tenzor::serving::ct_eq (constant-time token compare)
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/utils/log.hpp"
@@ -31,6 +33,7 @@
 #include <optional>
 #include <vector>
 #include <thread>
+#include <algorithm>
 
 // Cross-platform socket support. socket_compat.hpp pulls in POSIX socket
 // headers on Linux/macOS and winsock2 on Windows, and exposes socket_t,
@@ -171,6 +174,9 @@ void serialize_message(std::vector<uint8_t>& out, const Message& m) {
     uint32_t extra_len = static_cast<uint32_t>(m.payload.bytes.size());
     put_u32(out, extra_len);
     out.insert(out.end(), m.payload.bytes.begin(), m.payload.bytes.end());
+    uint32_t tok_len = static_cast<uint32_t>(m.payload.auth_token.size());
+    put_u32(out, tok_len);
+    out.insert(out.end(), m.payload.auth_token.begin(), m.payload.auth_token.end());
     uint32_t nt = static_cast<uint32_t>(m.payload.tensors.size());
     put_u32(out, nt);
     for (const auto& t : m.payload.tensors) append_tensor(out, t);
@@ -181,14 +187,35 @@ void serialize_message(std::vector<uint8_t>& out, const Message& m) {
 // trigger an OOM by claiming multi-gigabyte payloads.
 constexpr uint32_t kMaxPayloadBytes = 1u << 30;  // 1 GiB
 
+// Cap the number of distinct inbound peer connections the accept loop will
+// track at once. Without a bound, a hostile client can open connections without
+// limit (each spawns a receive_loop thread and holds an fd), exhausting fds /
+// threads. Generous for real full-mesh topologies (one inbound fd per peer).
+constexpr size_t kMaxInboundConnections = 1024;
+
 std::optional<Message> deserialize_message(int fd) {
     uint32_t payload_len = 0;
     if (!read_exact(fd, &payload_len, sizeof(payload_len))) return std::nullopt;
     payload_len = bswap_if_le32(payload_len);  // wire is big-endian
     if (payload_len > kMaxPayloadBytes) return std::nullopt;
 
-    std::vector<uint8_t> buf(payload_len);
-    if (payload_len > 0 && !read_exact(fd, buf.data(), payload_len)) return std::nullopt;
+    // Read the body in bounded chunks, growing the buffer only as bytes actually
+    // arrive. Pre-sizing to the peer-claimed payload_len would let a hostile peer
+    // force an eager allocation of up to kMaxPayloadBytes per connection just by
+    // sending the length prefix; appending caps memory at what was truly received.
+    std::vector<uint8_t> buf;
+    buf.reserve(std::min<uint32_t>(payload_len, 64u * 1024u));
+    {
+        uint8_t chunk[64 * 1024];
+        uint32_t remaining = payload_len;
+        while (remaining > 0) {
+            const size_t want =
+                std::min<size_t>(remaining, sizeof(chunk));
+            if (!read_exact(fd, chunk, want)) return std::nullopt;
+            buf.insert(buf.end(), chunk, chunk + want);
+            remaining -= static_cast<uint32_t>(want);
+        }
+    }
 
     // Parse from in-memory buffer — no network reads beyond this point.
     size_t off = 0;
@@ -242,6 +269,15 @@ std::optional<Message> deserialize_message(int fd) {
     if (extra_len > buf.size() - off) return std::nullopt;
     m.payload.bytes.assign(buf.data() + off, buf.data() + off + extra_len);
     off += extra_len;
+
+    uint32_t tok_len;
+    if (!take_u32(tok_len)) return std::nullopt;
+    // Bound against the remaining buffer (subtraction form avoids overflow).
+    if (tok_len > buf.size() - off) return std::nullopt;
+    m.payload.auth_token.assign(
+        reinterpret_cast<const char*>(buf.data() + off),
+        reinterpret_cast<const char*>(buf.data() + off + tok_len));
+    off += tok_len;
 
     uint32_t nt;
     if (!take_u32(nt)) return std::nullopt;
@@ -329,6 +365,7 @@ TcpRpcAgent::~TcpRpcAgent() {
 
 auto TcpRpcAgent::init(const std::vector<WorkerInfo>& all_workers) -> void {
     workers_ = all_workers;
+    auth_token_ = config_.auth_token;
     running_.store(true, std::memory_order_release);
 
     register_handler(MessageType::RPC_CALL,
@@ -356,6 +393,12 @@ auto TcpRpcAgent::init(const std::vector<WorkerInfo>& all_workers) -> void {
             response.src_worker = self_.id;
             response.dst_worker = msg.src_worker;
             response.payload.request_id = msg.payload.request_id;
+            if (!authorize(msg)) {
+                response.type = MessageType::RPC_ERROR;
+                response.payload.function_name =
+                    "RREF_FETCH: authentication required";
+                return response;
+            }
             if (msg.payload.bytes.size() != sizeof(int64_t)) {
                 response.type = MessageType::RPC_ERROR;
                 response.payload.function_name = "RREF_FETCH: malformed rref id";
@@ -364,7 +407,10 @@ auto TcpRpcAgent::init(const std::vector<WorkerInfo>& all_workers) -> void {
             int64_t rref_id = 0;
             std::memcpy(&rref_id, msg.payload.bytes.data(), sizeof(int64_t));
             try {
-                response.payload.tensors.push_back(RRefStore::instance().fetch(rref_id));
+                // Enforce ownership: only the worker that owns the entry may
+                // fetch it (ids are predictable, so guard against id guessing).
+                response.payload.tensors.push_back(
+                    RRefStore::instance().fetch(rref_id, msg.src_worker));
             } catch (const std::exception& e) {
                 response.type = MessageType::RPC_ERROR;
                 response.payload.function_name = e.what();
@@ -380,10 +426,23 @@ auto TcpRpcAgent::init(const std::vector<WorkerInfo>& all_workers) -> void {
             response.src_worker = self_.id;
             response.dst_worker = msg.src_worker;
             response.payload.request_id = msg.payload.request_id;
+            if (!authorize(msg)) {
+                response.type = MessageType::RPC_ERROR;
+                response.payload.function_name =
+                    "RREF_DELETE: authentication required";
+                return response;
+            }
             if (msg.payload.bytes.size() == sizeof(int64_t)) {
                 int64_t rref_id = 0;
                 std::memcpy(&rref_id, msg.payload.bytes.data(), sizeof(int64_t));
-                RRefStore::instance().remove(rref_id);
+                try {
+                    // Ownership-checked GC: reject a delete from a non-owner
+                    // rather than destroying another party's entry.
+                    RRefStore::instance().remove(rref_id, msg.src_worker);
+                } catch (const std::exception& e) {
+                    response.type = MessageType::RPC_ERROR;
+                    response.payload.function_name = e.what();
+                }
             }
             return response;
         });
@@ -426,6 +485,9 @@ auto TcpRpcAgent::send(Message msg) -> Message {
     auto request_id = next_request_id_.fetch_add(1, std::memory_order_relaxed);
     msg.payload.request_id = request_id;
     msg.src_worker = self_.id;
+    // Attach the shared secret so the peer can authenticate this request when it
+    // is listening on a non-loopback interface. Harmless when unused (loopback).
+    msg.payload.auth_token = auth_token_;
     int32_t dst_worker = msg.dst_worker;
 
     std::promise<Message> promise;
@@ -511,11 +573,15 @@ auto TcpRpcAgent::shutdown() -> void {
     running_.store(false, std::memory_order_release);
 
 #if defined(__linux__) || defined(__APPLE__)
-    // Shut down listener if present (accept thread will exit).
-    if (listen_fd_ >= 0) {
-        ::shutdown(listen_fd_, SHUT_RDWR);
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+    // Shut down listener if present (accept thread will exit). Exchange to -1
+    // exactly once so a concurrent accept_loop observes the close as an
+    // ::accept() error and we never double-close a reused fd.
+    {
+        int lfd = listen_fd_.exchange(-1, std::memory_order_acq_rel);
+        if (lfd >= 0) {
+            ::shutdown(lfd, SHUT_RDWR);
+            ::close(lfd);
+        }
     }
     {
         // Collect all fds and their per-fd write-mutexes, then erase the maps,
@@ -697,14 +763,22 @@ auto TcpRpcAgent::dispatch_message(Message msg, int inbound_fd) -> void {
 }
 
 auto TcpRpcAgent::handle_rpc_call(const Message& msg) -> Message {
-    auto fn = FunctionRegistry::instance().get_function(msg.payload.function_name);
-
     Message response;
     response.type = MessageType::RPC_RESPONSE;
     response.src_worker = self_.id;
     response.dst_worker = msg.src_worker;
     response.payload.request_id = msg.payload.request_id;
 
+    // Reject unauthenticated remote invocation before touching the function
+    // registry or executing any attacker-supplied tensors. Loopback-only
+    // listeners bypass this (see authorize()).
+    if (!authorize(msg)) {
+        response.type = MessageType::RPC_ERROR;
+        response.payload.function_name = "RPC_CALL: authentication required";
+        return response;
+    }
+
+    auto fn = FunctionRegistry::instance().get_function(msg.payload.function_name);
     if (!fn) {
         response.type = MessageType::RPC_ERROR;
         response.payload.function_name = "Function not found: " + msg.payload.function_name;
@@ -726,6 +800,22 @@ auto TcpRpcAgent::handle_rpc_call(const Message& msg) -> Message {
         response.payload.function_name = "RPC function threw a non-standard exception";
     }
     return response;
+}
+
+auto TcpRpcAgent::authorize(const Message& msg) const -> bool {
+    // Loopback-only listeners are only reachable from the local host; the
+    // intra-host topology init_rpc() targets runs unauthenticated there.
+    if (loopback_only_.load(std::memory_order_acquire)) {
+        return true;
+    }
+    // Non-loopback listener: a token is mandatory. Fail closed if the operator
+    // bound a public interface without configuring one.
+    if (auth_token_.empty()) {
+        return false;
+    }
+    // Constant-time compare (HMAC-SHA256 digests when OpenSSL is available) so a
+    // matching prefix / token length is not observable via timing.
+    return tenzor::serving::ct_eq(msg.payload.auth_token, auth_token_);
 }
 
 bool TcpRpcAgent::send_framed_locked(int fd, const Message& msg) {
@@ -875,6 +965,10 @@ void TcpRpcAgent::accept_loop() {
         bind_addr.s_addr = htonl(INADDR_LOOPBACK);
     }
     addr.sin_addr = bind_addr;
+    // Record whether we bound loopback-only. authorize() uses this to decide
+    // whether inbound RPC_CALL/RREF_* requests must present a valid auth token.
+    loopback_only_.store(bind_addr.s_addr == htonl(INADDR_LOOPBACK),
+                         std::memory_order_release);
     if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         ::close(listen_fd_); listen_fd_ = -1;
         try { listen_ready_.set_value(false); } catch (...) {}
@@ -924,6 +1018,7 @@ void TcpRpcAgent::accept_loop() {
             ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv0, sizeof(tv0));
         }
 
+        bool at_capacity = false;
         {
             std::lock_guard<std::mutex> lock(connections_mutex_);
             // Keep inbound sockets in a separate map so accept never
@@ -931,27 +1026,45 @@ void TcpRpcAgent::accept_loop() {
             // strand that fd's write-mutex and receive_loop). If an old
             // inbound fd was already here, close it first.
             auto it = inbound_connections_.find(peer_id);
-            if (it != inbound_connections_.end()) {
-                int old_fd = it->second;
-                // A receive_loop on old_fd may be inside send_framed_locked,
-                // holding only the per-fd write mutex (it drops
-                // connections_mutex_ before sending). Acquire that write mutex
-                // before ::close so we never close the fd / erase its mutex
-                // mid-write (fd reuse / use-after-close). Matches shutdown().
-                auto mit = fd_write_mutexes_.find(old_fd);
-                if (mit != fd_write_mutexes_.end()) {
-                    std::shared_ptr<std::mutex> mtx = mit->second;
-                    {
-                        std::lock_guard<std::mutex> wlock(*mtx);
+            if (it == inbound_connections_.end() &&
+                inbound_connections_.size() >= kMaxInboundConnections) {
+                // At capacity and this is a brand-new peer — refuse it rather
+                // than growing the connection/thread set without bound. An
+                // existing peer reconnecting (found above) is always allowed to
+                // supersede its own stale fd.
+                at_capacity = true;
+            } else {
+                if (it != inbound_connections_.end()) {
+                    int old_fd = it->second;
+                    // A receive_loop on old_fd may be inside send_framed_locked,
+                    // holding only the per-fd write mutex (it drops
+                    // connections_mutex_ before sending). Acquire that write
+                    // mutex before ::close so we never close the fd / erase its
+                    // mutex mid-write (fd reuse / use-after-close). Matches
+                    // shutdown(). Shut the fd down first so a blocked peer read
+                    // unblocks promptly.
+                    auto mit = fd_write_mutexes_.find(old_fd);
+                    if (mit != fd_write_mutexes_.end()) {
+                        std::shared_ptr<std::mutex> mtx = mit->second;
+                        {
+                            std::lock_guard<std::mutex> wlock(*mtx);
+                            ::shutdown(old_fd, SHUT_RDWR);
+                            ::close(old_fd);
+                        }
+                        fd_write_mutexes_.erase(mit);
+                    } else {
+                        ::shutdown(old_fd, SHUT_RDWR);
                         ::close(old_fd);
                     }
-                    fd_write_mutexes_.erase(mit);
-                } else {
-                    ::close(old_fd);
                 }
+                inbound_connections_[peer_id] = cfd;
+                fd_write_mutexes_[cfd] = std::make_shared<std::mutex>();
             }
-            inbound_connections_[peer_id] = cfd;
-            fd_write_mutexes_[cfd] = std::make_shared<std::mutex>();
+        }
+        if (at_capacity) {
+            ::shutdown(cfd, SHUT_RDWR);
+            ::close(cfd);
+            continue;
         }
         {
             std::lock_guard<std::mutex> lock(threads_mutex_);
@@ -961,7 +1074,6 @@ void TcpRpcAgent::accept_loop() {
 }
 
 void TcpRpcAgent::receive_loop(int fd, int32_t peer_id) {
-    (void)peer_id;
     while (running_.load(std::memory_order_acquire)) {
         auto msg = deserialize_message(fd);
         if (!msg) break;
@@ -970,6 +1082,48 @@ void TcpRpcAgent::receive_loop(int fd, int32_t peer_id) {
         // Pass the inbound fd so dispatch_message can reply on this same
         // connection rather than dialing a fresh outbound one.
         dispatch_message(std::move(*msg), fd);
+    }
+
+    // The peer disconnected (or shutdown is tearing us down). Reclaim the fd and
+    // its bookkeeping so the integer is not left in connections_/inbound_
+    // connections_/fd_write_mutexes_ as a dead entry (which a later fd reuse
+    // could then alias) and so the descriptor is actually closed.
+    //
+    // Ownership rule: whoever erases this fd's write-mutex owns the close.
+    // shutdown() and accept_loop()'s supersede path also erase it under
+    // connections_mutex_ and close there; if one of them got here first, we find
+    // the entry already gone and must NOT double-close a possibly-reused fd.
+    std::shared_ptr<std::mutex> mtx;
+    bool owns_close = false;
+    {
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        auto in_it = inbound_connections_.find(peer_id);
+        if (in_it != inbound_connections_.end() && in_it->second == fd) {
+            inbound_connections_.erase(in_it);
+        }
+        auto out_it = connections_.find(peer_id);
+        if (out_it != connections_.end() && out_it->second == fd) {
+            connections_.erase(out_it);
+        }
+        auto mit = fd_write_mutexes_.find(fd);
+        if (mit != fd_write_mutexes_.end()) {
+            mtx = mit->second;
+            fd_write_mutexes_.erase(mit);
+            owns_close = true;
+        }
+    }
+    if (owns_close) {
+        // Serialize with any in-flight writer on this fd (send_framed_locked
+        // holds the per-fd write mutex, then re-checks the map — which we have
+        // just cleared — so it aborts before writing to the closing fd).
+        if (mtx) {
+            std::lock_guard<std::mutex> wlock(*mtx);
+            ::shutdown(fd, SHUT_RDWR);
+            ::close(fd);
+        } else {
+            ::shutdown(fd, SHUT_RDWR);
+            ::close(fd);
+        }
     }
 }
 

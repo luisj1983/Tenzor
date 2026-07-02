@@ -17,6 +17,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/vision.hpp"
+#include "tenzor/ops/advanced.hpp"  // topk for the per-image detection cap
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/loss/losses.hpp"
 #include "tenzor/nn/functional.hpp"
@@ -171,31 +172,60 @@ auto assign_anchors_to_targets(
     // Compute IoU matrix: (N, M)
     auto iou_matrix = ops::box_iou(anchors, gt_boxes);
 
-    // For each anchor, find best matching GT box
-    auto max_iou = tenzor::max(iou_matrix, 1);  // (N,)
-    auto matched_idx = tenzor::argmax(iou_matrix, 1);  // (N,)
+    // Pull the full IoU matrix to CPU (Float32) so we can do both the per-anchor
+    // thresholding and the per-GT allow-low-quality matching from one buffer.
+    auto iou_cpu = iou_matrix.to(Device::cpu()).to(DType::Float32);
+    const float* iou_data = iou_cpu.data<const float>();
 
-    // Create labels on CPU for data access, then move to device
     auto labels_cpu = Tensor({N}, DType::Int64, Device::cpu());
     auto* labels_data = labels_cpu.data<int64_t>();
-    // Convert max_iou to Float32 on CPU for data access
-    auto max_iou_f32 = max_iou.to(Device::cpu()).to(DType::Float32);
-    auto* max_iou_data = max_iou_f32.data<float>();
+    auto matched_idx_cpu = Tensor({N}, DType::Int64, Device::cpu());
+    auto* matched_idx_data = matched_idx_cpu.data<int64_t>();
 
+    // For each anchor, find its best matching GT box and label it by IoU.
     for (int64_t i = 0; i < N; ++i) {
-        if (max_iou_data[i] >= pos_threshold) {
-            labels_data[i] = 1;  // Positive
-        } else if (max_iou_data[i] < neg_threshold) {
-            labels_data[i] = 0;  // Negative
+        int64_t best_m = 0;
+        float best = iou_data[i * M + 0];
+        for (int64_t m = 1; m < M; ++m) {
+            float v = iou_data[i * M + m];
+            if (v > best) { best = v; best_m = m; }
+        }
+        matched_idx_data[i] = best_m;
+        if (best >= pos_threshold) {
+            labels_data[i] = 1;   // Positive
+        } else if (best < neg_threshold) {
+            labels_data[i] = 0;   // Negative
         } else {
             labels_data[i] = -1;  // Ignore (between thresholds)
+        }
+    }
+
+    // Allow-low-quality matching: guarantee every GT has at least one positive
+    // anchor. For each GT, find its highest IoU over all anchors, then force
+    // every anchor that achieves that maximum to positive and match it to that
+    // GT. This rescues GTs whose best anchor still falls below pos_threshold
+    // (which would otherwise provide no positive training signal). Mirrors
+    // torchvision's Matcher(allow_low_quality_matches=True).
+    for (int64_t m = 0; m < M; ++m) {
+        float gt_best = iou_data[0 * M + m];
+        for (int64_t i = 1; i < N; ++i) {
+            float v = iou_data[i * M + m];
+            if (v > gt_best) gt_best = v;
+        }
+        if (gt_best <= 0.0f) continue;  // GT with no anchor overlap at all
+        for (int64_t i = 0; i < N; ++i) {
+            if (iou_data[i * M + m] == gt_best) {
+                labels_data[i] = 1;
+                matched_idx_data[i] = m;
+            }
         }
     }
 
     // Move labels to target device
     auto labels = labels_cpu.to(device);
 
-    // Gather matched GT boxes
+    // Gather matched GT boxes using the (possibly low-quality-corrected) matches.
+    auto matched_idx = matched_idx_cpu.to(device);
     auto matched_boxes = tenzor::index_select(gt_boxes, 0, matched_idx);
 
     return std::make_tuple(labels, matched_boxes);
@@ -325,9 +355,15 @@ auto ROIHead::forward_multi(const Variable& roi_features)
     -> std::tuple<Variable, Variable> {
     // roi_features: (num_rois, C, roi_size, roi_size)
 
-    // Flatten
-    auto N = roi_features.tensor().shape()[0];
-    auto x = roi_features.reshape(std::vector<int64_t>{N, -1});
+    // Flatten. Use an explicit trailing dim (not -1): with N==0 the input has 0
+    // elements and reshape({0, -1}) cannot infer the -1 ("product of known
+    // dimensions is zero"). Computing C*roi_size*roi_size keeps an empty
+    // proposal set from crashing here.
+    auto rf_shape = roi_features.tensor().shape();
+    auto N = rf_shape[0];
+    int64_t flat = 1;
+    for (size_t i = 1; i < rf_shape.size(); ++i) flat *= rf_shape[i];
+    auto x = roi_features.reshape(std::vector<int64_t>{N, flat});
 
     // FC layers with ReLU
     x = nn::relu(fc1_->forward(x));
@@ -847,24 +883,75 @@ auto MaskRCNN::forward_test(const Variable& images)
     auto boxes = decode_boxes(deltas_t, props_t);
     if (half_boxes) boxes = boxes.to(box_dtype);
 
-    // 6. ROI Align for masks (only for detected objects)
-    auto roi_features_mask = roi_align_mask_->forward(features, proposals);
+    // 6. Post-process detections: score-threshold + per-class NMS + top-k cap.
+    // Previously forward_test returned every proposal's argmax box with no
+    // filtering at all. torchvision applies box_score_thresh, then per-class NMS
+    // at box_nms_thresh, then keeps the top box_detections_per_img detections.
+    //
+    // `boxes` are class-specific (decoded for each detection's argmax label) and
+    // `labels`/`scores` are that label and its probability. Build a sparse
+    // (N, num_classes) score matrix that holds the detection score at its
+    // predicted class and 0 elsewhere, so batched_nms lets each box compete only
+    // within its own class (consistent with the single decoded box geometry).
+    Tensor scores_f32 = scores.to(DType::Float32);
+    Tensor onehot = tenzor::one_hot(labels.to(DType::Int64), num_classes_).to(DType::Float32);
+    Tensor score_matrix = onehot * tenzor::reshape(scores_f32, {num_boxes, 1});  // (N, num_classes)
 
-    // 7. Mask prediction
+    Tensor boxes_f32 = (boxes.dtype() == DType::Float32) ? boxes : boxes.to(DType::Float32);
+    auto [det_boxes, det_scores, det_labels] = tenzor::ops::batched_nms(
+        boxes_f32, score_matrix, box_nms_thresh_, box_score_thresh_,
+        box_detections_per_img_);
+
+    // batched_nms caps boxes per class; enforce the global per-image cap by
+    // keeping only the top box_detections_per_img_ detections overall.
+    if (det_scores.shape()[0] > box_detections_per_img_) {
+        auto [top_scores, top_idx] =
+            tenzor::topk(det_scores, box_detections_per_img_, 0, true, true);
+        det_boxes = tenzor::index_select(det_boxes, 0, top_idx);
+        det_labels = tenzor::index_select(det_labels, 0, top_idx);
+        det_scores = top_scores;
+    }
+
+    const int64_t num_dets = det_boxes.shape()[0];
+
+    // No detections survived score-threshold + NMS (common with untrained
+    // weights). Running ROI-align / the mask head on an empty ROI set trips a
+    // reshape(-1) over a zero element count; return empty results directly,
+    // matching process_masks' [0, 1, H, W] empty-mask convention.
+    if (num_dets == 0) {
+        auto img_h0 = images.tensor().shape()[2];
+        auto img_w0 = images.tensor().shape()[3];
+        Tensor empty_masks(std::vector<int64_t>{0, 1, img_h0, img_w0},
+                           images.tensor().dtype(), det_boxes.device());
+        return std::make_tuple(det_boxes, det_labels, det_scores, empty_masks);
+    }
+
+    // 7. ROI Align for masks — align on the REFINED, post-NMS detection boxes
+    //    (with a leading batch-index column), NOT the raw proposals. The mask
+    //    head output is pasted onto these refined boxes, so aligning it from the
+    //    raw proposals (the previous behavior) misplaced every predicted mask.
+    Tensor batch_index = tenzor::zeros({num_dets, 1}, det_boxes.dtype(), det_boxes.device());
+    Tensor mask_rois = tenzor::cat({batch_index, det_boxes}, 1);  // (num_dets, 5)
+    if (mask_rois.dtype() != proposals.dtype()) {
+        mask_rois = mask_rois.to(proposals.dtype());
+    }
+    auto roi_features_mask = roi_align_mask_->forward(features, mask_rois);
+
+    // 8. Mask prediction
     auto mask_logits = mask_head_->forward(roi_features_mask);
 
-    // 8. Post-process masks
+    // 9. Post-process masks onto the refined detection boxes.
     auto image_h = images.tensor().shape()[2];
     auto image_w = images.tensor().shape()[3];
     auto masks = nn::detection::process_masks(
         mask_logits.tensor(),
-        boxes,
-        labels,
+        det_boxes,
+        det_labels,
         image_h,
         image_w
     );
 
-    return std::make_tuple(boxes, labels, scores, masks);
+    return std::make_tuple(det_boxes, det_labels, det_scores, masks);
 }
 
 auto compute_rpn_loss(
@@ -1296,8 +1383,18 @@ auto MaskRCNN::generate_proposals(const Variable& features) -> Tensor {
         // 6. Drop too-small boxes.
         Tensor keep = tenzor::ops::remove_small_boxes(proposals, scores, /*min_size=*/0.001);
         if (keep.numel() == 0) {
-            per_image_proposals.push_back(Tensor({0, 5}, dtype, device));
-            continue;
+            // Every decoded box collapsed to zero area after clipping. This
+            // happens when the box centres are driven far off-image — e.g. an
+            // untrained deep backbone in eval mode, whose unnormalised features
+            // explode over many random layers and produce enormous RPN deltas.
+            // Yielding zero proposals would leave the detector with nothing to
+            // score (and previously crashed the RoI head's `reshape({N,-1})`);
+            // fall back to the top proposals by objectness so downstream still
+            // receives candidates. A trained model never reaches this branch.
+            keep = tenzor::ops::argsort(scores, 0, /*descending=*/true);
+            if (keep.shape()[0] > post_n) {
+                keep = keep.slice(0, 0, post_n);
+            }
         }
         proposals = tenzor::ops::index_select(proposals, 0, keep);
         scores    = tenzor::ops::index_select(scores,    0, keep);

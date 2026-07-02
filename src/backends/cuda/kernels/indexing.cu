@@ -340,6 +340,28 @@ auto gather_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_or
         throw std::invalid_argument("gather: tensor rank exceeds supported maximum");
     }
 
+    // PyTorch gather requires index to match input's rank and, on every axis
+    // other than `dim`, index.size(d) <= input.size(d). The kernel maps the
+    // output (== index) coordinate on those axes straight into input's strides,
+    // so an over-large index extent (or a mismatched rank, which would read
+    // meta.idx_shape[d] out of range) indexes the input device buffer OOB.
+    {
+        auto in_shape = input.shape();
+        auto idx_shape = index.shape();
+        if (static_cast<int64_t>(idx_shape.size()) != ndim) {
+            throw std::invalid_argument(
+                "gather: index must have the same number of dimensions as input");
+        }
+        for (int64_t d = 0; d < ndim; ++d) {
+            if (d != dim && idx_shape[d] > in_shape[d]) {
+                throw std::invalid_argument(
+                    "gather: index size (" + std::to_string(idx_shape[d]) +
+                    ") at dim " + std::to_string(d) + " exceeds input size (" +
+                    std::to_string(in_shape[d]) + ")");
+            }
+        }
+    }
+
     // Output has the same shape as index
     std::vector<int64_t> output_shape(index.shape().begin(), index.shape().end());
     Tensor output(output_shape, input.dtype(), input.device());
@@ -1545,24 +1567,32 @@ __global__ void where_kernel_impl(
 
 auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
                   cudaStream_t stream) -> Tensor {
-    int64_t n = condition.numel();
+    // PyTorch where() broadcasts condition, x and y to a common shape. The kernel
+    // reads all three as flat arrays of length n, so a broadcastable-but-smaller
+    // operand (scalar y, a (1,S) mask, ...) would read past the end of its buffer
+    // (OOB). Broadcast every operand to the common shape before launch — mirrors
+    // the mask broadcast in masked_fill_kernel above.
+    std::vector<int64_t> output_shape = tenzor::broadcast_shapes(
+        tenzor::broadcast_shapes(condition.shape(), x.shape()), y.shape());
 
-    // Output shape matches condition (assume all same shape)
-    std::vector<int64_t> output_shape(condition.shape().begin(), condition.shape().end());
+    int64_t n = 1;
+    for (auto s : output_shape) n *= s;
+
     Tensor output(output_shape, x.dtype(), x.device());
 
     if (n == 0) return output;
 
     // CPU semantics allow a non-bool condition (any nonzero is true). Reinterpreting
-    // a non-bool buffer as bool* reads garbage, so cast to Bool first. The kernel
-    // reads condition/x/y as flat arrays, so all three must be contiguous — a
-    // Bool-but-non-contiguous condition (or a transposed x/y) would otherwise be
-    // gated/copied from the wrong physical elements.
-    Tensor cond_bool = (condition.dtype() == DType::Bool)
-        ? condition.contiguous() : condition.to(DType::Bool).contiguous();
+    // a non-bool buffer as bool* reads garbage, so cast to Bool first. Broadcast +
+    // contiguify all operands so the flat 1:1 indexing the kernel does is valid
+    // (a Bool-but-non-contiguous condition or a transposed x/y would otherwise be
+    // gated/copied from the wrong physical elements).
+    Tensor cond_b = tenzor::broadcast_to(condition, output_shape);
+    Tensor cond_bool = (cond_b.dtype() == DType::Bool)
+        ? cond_b.contiguous() : cond_b.to(DType::Bool).contiguous();
     const bool* cond_ptr = reinterpret_cast<const bool*>(cond_bool.data_ptr());
-    Tensor x_c = x.is_contiguous() ? x : x.contiguous();
-    Tensor y_c = y.is_contiguous() ? y : y.contiguous();
+    Tensor x_c = tenzor::broadcast_to(x, output_shape).contiguous();
+    Tensor y_c = tenzor::broadcast_to(y, output_shape).contiguous();
 
     #define LAUNCH_WHERE(T) do { \
         auto [grid_size, block_size] = optimal_launch_config( \
@@ -3348,8 +3378,22 @@ auto masked_scatter_kernel(const Tensor& input_orig, const Tensor& mask_orig,
     // source is read in flat order, so it must be contiguous too; input is read
     // flat as the passthrough, so contiguify it as well.
     Tensor input = input_orig.contiguous();
-    Tensor mask = (mask_orig.dtype() == DType::Bool && mask_orig.is_contiguous())
-        ? mask_orig : mask_orig.to(DType::Bool).contiguous();
+    // The mask is read as a flat bool* of length numel(input); a broadcastable-
+    // but-smaller mask (e.g. (1, S) against (B, S)) would be read past its end
+    // (OOB). Broadcast it to input's shape first, mirroring masked_fill_kernel.
+    std::vector<int64_t> input_shape_vec(input.shape().begin(), input.shape().end());
+    Tensor mask_b = mask_orig;
+    std::vector<int64_t> mask_shape_vec(mask_orig.shape().begin(), mask_orig.shape().end());
+    if (mask_shape_vec != input_shape_vec) {
+        auto broadcast_shape = tenzor::broadcast_shapes(mask_orig.shape(), input.shape());
+        if (broadcast_shape != input_shape_vec) {
+            throw std::invalid_argument(
+                "masked_scatter: mask shape is not broadcast-compatible with input shape");
+        }
+        mask_b = tenzor::broadcast_to(mask_orig, input_shape_vec);
+    }
+    Tensor mask = (mask_b.dtype() == DType::Bool && mask_b.is_contiguous())
+        ? mask_b : mask_b.to(DType::Bool).contiguous();
     Tensor source = source_orig.contiguous();
 
     int64_t numel = input.numel();

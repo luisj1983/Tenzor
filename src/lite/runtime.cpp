@@ -450,6 +450,58 @@ auto LiteRuntime::forward(const std::vector<LiteTensor>& inputs) -> std::vector<
             "real .tzlite file with at least one node.");
     }
 
+    // Validate each caller-supplied input against its declared TVAL Input spec
+    // (dtype + shape). Previously only the input COUNT was checked (in
+    // LiteGraph::execute), so a wrong-dtype or wrong-shape tensor flowed into
+    // the kernels and produced silently-wrong results or an out-of-bounds read.
+    // Skipped for hand-built graphs (no TVAL table) and for any dim the model
+    // declares dynamic (negative extent).
+    const auto& in_ids = impl_->graph.input_ids();
+    if (!impl_->tensor_values_by_id.empty()) {
+        if (inputs.size() != in_ids.size()) {
+            throw std::runtime_error(
+                "LiteRuntime::forward: input count (" +
+                std::to_string(inputs.size()) +
+                ") does not match model's declared inputs (" +
+                std::to_string(in_ids.size()) + ")");
+        }
+        for (size_t i = 0; i < in_ids.size(); ++i) {
+            const int16_t tid = in_ids[i];
+            if (tid < 0 ||
+                static_cast<size_t>(tid) >= impl_->tensor_values_by_id.size()) {
+                continue;  // no spec available for this input id
+            }
+            const auto& spec =
+                impl_->tensor_values_by_id[static_cast<size_t>(tid)];
+            if (spec.source != TensorSource::Input) continue;  // no input spec
+            const auto& in = inputs[i];
+            if (in.dtype != spec.dtype) {
+                throw std::runtime_error(
+                    "LiteRuntime::forward: input " + std::to_string(i) +
+                    " dtype mismatch (got " +
+                    std::string(dtype_name(in.dtype)) + ", expected " +
+                    std::string(dtype_name(spec.dtype)) + ")");
+            }
+            if (static_cast<size_t>(in.ndim) != spec.shape.size()) {
+                throw std::runtime_error(
+                    "LiteRuntime::forward: input " + std::to_string(i) +
+                    " rank mismatch (got " + std::to_string(in.ndim) +
+                    ", expected " + std::to_string(spec.shape.size()) + ")");
+            }
+            for (size_t d = 0; d < spec.shape.size(); ++d) {
+                const int64_t want = spec.shape[d];
+                if (want < 0) continue;  // dynamic dim — any extent accepted
+                if (in.shape[d] != want) {
+                    throw std::runtime_error(
+                        "LiteRuntime::forward: input " + std::to_string(i) +
+                        " shape mismatch at dim " + std::to_string(d) +
+                        " (got " + std::to_string(in.shape[d]) +
+                        ", expected " + std::to_string(want) + ")");
+                }
+            }
+        }
+    }
+
     // Build non-owning Tensor views over the weight blob for every tensor_id
     // marked as a Weight in the TVAL table. The Tensor's Storage references
     // weight_blob with a no-op deleter, so the LiteRuntime's owned bytes

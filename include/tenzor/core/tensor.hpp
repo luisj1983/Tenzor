@@ -1143,9 +1143,10 @@ public:
      * @return true for Float16, BFloat16, Float32, Float64
      */
     auto is_floating_point() const noexcept -> bool {
-        auto dt = dtype();
-        return dt == DType::Float16 || dt == DType::BFloat16 ||
-               dt == DType::Float32 || dt == DType::Float64;
+        // Delegate to the canonical predicate in dtype.hpp so the member helper
+        // and the free function always agree (the free function also counts the
+        // FP8 formats as floating-point).
+        return tenzor::is_floating_type(dtype());
     }
 
     /**
@@ -1164,10 +1165,14 @@ public:
      * @return true for all floating-point, complex, and signed integer types
      */
     auto is_signed() const noexcept -> bool {
+        // Compose from the canonical dtype.hpp predicates so signedness is
+        // decided consistently: floating-point (incl. FP8), complex, and
+        // signed integer types are signed, as are the signed quantized types
+        // (QInt8, QInt4x2). Unsigned integers, Bool, and QUInt8 are not.
         auto dt = dtype();
-        return dt != DType::UInt8 && dt != DType::UInt16 &&
-               dt != DType::UInt32 && dt != DType::UInt64 && dt != DType::Bool &&
-               dt != DType::QUInt8;
+        return tenzor::is_floating_type(dt) || tenzor::is_complex_type(dt) ||
+               tenzor::is_signed_integer_type(dt) ||
+               dt == DType::QInt8 || dt == DType::QInt4x2;
     }
 
     /**

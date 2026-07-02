@@ -171,12 +171,25 @@ auto Dropout2d::forward_impl(const Variable& input) -> Variable {
         return input;  // No dropout
     }
 
-    // Special case: p=1.0 means drop all channels, return zeros
+    // Special case: p=1.0 means drop all channels. Route through the normal
+    // DropoutBackward with an all-zero mask so the autograd graph stays
+    // connected — a bare Variable(zeros, ...) would sever grad_fn (mirrors how
+    // AlphaDropout keeps its graph). scale is irrelevant since the mask is 0.
     if (p_ == 1.0) {
         auto shape = input.tensor().shape();
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
-        return Variable(output_tensor, input.requires_grad());
+        auto zero_mask = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        auto output_tensor = mul(input.tensor(), zero_mask);
+        Variable output(output_tensor, input.requires_grad());
+        if (input.requires_grad()) {
+            auto dropout_fn = std::make_shared<DropoutBackward>(zero_mask, 1.0);
+            dropout_fn->set_input_variables({input});
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+            dropout_fn->set_next_functions(next_funcs);
+            output.set_grad_fn(dropout_fn);
+        }
+        return output;
     }
 
     // Input shape: [N, C, H, W] or [C, H, W]
@@ -277,8 +290,20 @@ auto Dropout3d::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
     if (p_ == 1.0) {
-        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
-        return Variable(output_tensor, input.requires_grad());
+        // Route through DropoutBackward with an all-zero mask so the graph stays
+        // connected (a bare Variable(zeros, ...) would sever grad_fn).
+        auto zero_mask = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        auto output_tensor = mul(input.tensor(), zero_mask);
+        Variable output(output_tensor, input.requires_grad());
+        if (input.requires_grad()) {
+            auto dropout_fn = std::make_shared<DropoutBackward>(zero_mask, 1.0);
+            dropout_fn->set_input_variables({input});
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+            dropout_fn->set_next_functions(next_funcs);
+            output.set_grad_fn(dropout_fn);
+        }
+        return output;
     }
 
     if (shape.size() < 3) {
@@ -525,8 +550,20 @@ auto VariationalDropout::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
 
     if (p_ == 1.0) {
-        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
-        return Variable(output_tensor, input.requires_grad());
+        // Route through DropoutBackward with an all-zero mask so the graph stays
+        // connected (a bare Variable(zeros, ...) would sever grad_fn).
+        auto zero_mask = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        auto output_tensor = mul(input.tensor(), zero_mask);
+        Variable output(output_tensor, input.requires_grad());
+        if (input.requires_grad()) {
+            auto dropout_fn = std::make_shared<DropoutBackward>(zero_mask, 1.0);
+            dropout_fn->set_input_variables({input});
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+            dropout_fn->set_next_functions(next_funcs);
+            output.set_grad_fn(dropout_fn);
+        }
+        return output;
     }
 
     if (p_ == 0.0) {

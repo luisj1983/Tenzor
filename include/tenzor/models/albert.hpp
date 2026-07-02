@@ -180,6 +180,15 @@ public:
 private:
     AlbertConfig config_;
     std::shared_ptr<nn::TransformerEncoderLayer> shared_layer_;  ///< Single shared layer
+
+    /**
+     * @brief Convert a [batch, seq_len] binary padding mask into the additive
+     * [batch, 1, 1, seq_len] attention mask expected as `src_mask`.
+     *
+     * Mirrors BertEncoder::prepare_attention_mask.
+     */
+    auto prepare_attention_mask(const Tensor& mask, int64_t seq_len,
+                                DType compute_dtype = DType::Float32) -> Tensor;
 };
 
 /**

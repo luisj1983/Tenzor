@@ -159,7 +159,7 @@ void adaptive_avgpool2d_forward_f32(
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 int64_t h_start = (oh * H) / H_out;
-                int64_t h_end = ((oh + 1) * H) / H_out;
+                int64_t h_end = ((oh + 1) * H + H_out - 1) / H_out;  // ceil: PyTorch adaptive-pool window end
                 int64_t kh_size = h_end - h_start;
 
                 const float* base_ptr = in_data + (n * C + c) * H * W;
@@ -167,7 +167,7 @@ void adaptive_avgpool2d_forward_f32(
 
                 for (int64_t ow = 0; ow < W_out; ++ow) {
                     int64_t w_start = (ow * W) / W_out;
-                    int64_t w_end = ((ow + 1) * W) / W_out;
+                    int64_t w_end = ((ow + 1) * W + W_out - 1) / W_out;  // ceil: PyTorch adaptive-pool window end
                     int64_t kw_size = w_end - w_start;
                     int64_t count = kh_size * kw_size;
 

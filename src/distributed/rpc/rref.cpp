@@ -116,10 +116,10 @@ auto RRefStore::instance() -> RRefStore& {
     return store;
 }
 
-auto RRefStore::store(Tensor tensor) -> int64_t {
+auto RRefStore::store(Tensor tensor, int32_t owner_worker) -> int64_t {
     auto id = next_id_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(mutex_);
-    store_[id] = std::move(tensor);
+    store_[id] = Entry{std::move(tensor), owner_worker};
     return id;
 }
 
@@ -129,12 +129,42 @@ auto RRefStore::fetch(int64_t rref_id) -> Tensor {
     if (it == store_.end()) {
         throw std::runtime_error("RRef not found: " + std::to_string(rref_id));
     }
-    return it->second;
+    return it->second.tensor;
+}
+
+auto RRefStore::fetch(int64_t rref_id, int32_t requester) -> Tensor {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = store_.find(rref_id);
+    if (it == store_.end()) {
+        throw std::runtime_error("RRef not found: " + std::to_string(rref_id));
+    }
+    // Enforce ownership: ids are sequential/predictable, so a remote worker
+    // could otherwise fetch another party's entry by guessing the id.
+    if (it->second.owner != requester) {
+        throw std::runtime_error(
+            "RRef access denied: worker " + std::to_string(requester) +
+            " is not the owner of rref " + std::to_string(rref_id));
+    }
+    return it->second.tensor;
 }
 
 auto RRefStore::remove(int64_t rref_id) -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     store_.erase(rref_id);
+}
+
+auto RRefStore::remove(int64_t rref_id, int32_t requester) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = store_.find(rref_id);
+    if (it == store_.end()) {
+        return;  // idempotent GC: unknown id is not an error
+    }
+    if (it->second.owner != requester) {
+        throw std::runtime_error(
+            "RRef delete denied: worker " + std::to_string(requester) +
+            " is not the owner of rref " + std::to_string(rref_id));
+    }
+    store_.erase(it);
 }
 
 } // namespace rpc

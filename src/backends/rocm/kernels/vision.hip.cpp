@@ -229,23 +229,23 @@ __global__ void interpolate_bilinear_kernel_hip(
         int64_t c = temp % channels; temp /= channels;
         int64_t b = temp;
 
-        // Calculate source position (floating point)
-        float y, x;
+        // Calculate source position (floating point, native dtype precision)
+        T y, x;
         if (align_corners) {
             // Align corners: map [0, out-1] to [0, in-1]
-            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+            y = (out_h > 1) ? oh * static_cast<T>(in_h - 1) / (out_h - 1) : T(0);
+            x = (out_w > 1) ? ow * static_cast<T>(in_w - 1) / (out_w - 1) : T(0);
         } else {
             // Half-pixel centers: pixels are unit squares
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            T scale_h = static_cast<T>(in_h) / out_h;
+            T scale_w = static_cast<T>(in_w) / out_w;
+            y = (oh + T(0.5)) * scale_h - T(0.5);
+            x = (ow + T(0.5)) * scale_w - T(0.5);
         }
 
         // Clamp to valid range
-        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
-        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+        y = fmax(T(0), fmin(y, static_cast<T>(in_h - 1)));
+        x = fmax(T(0), fmin(x, static_cast<T>(in_w - 1)));
 
         // Get integer and fractional parts
         int64_t y0 = static_cast<int64_t>(y);
@@ -253,14 +253,14 @@ __global__ void interpolate_bilinear_kernel_hip(
         int64_t y1 = min(y0 + 1, in_h - 1);
         int64_t x1 = min(x0 + 1, in_w - 1);
 
-        float fy = y - y0;
-        float fx = x - x0;
+        T fy = y - static_cast<T>(y0);
+        T fx = x - static_cast<T>(x0);
 
         // Bilinear interpolation weights
-        float w00 = (1.0f - fy) * (1.0f - fx);
-        float w01 = (1.0f - fy) * fx;
-        float w10 = fy * (1.0f - fx);
-        float w11 = fy * fx;
+        T w00 = (T(1) - fy) * (T(1) - fx);
+        T w01 = (T(1) - fy) * fx;
+        T w10 = fy * (T(1) - fx);
+        T w11 = fy * fx;
 
         // Get pixel values
         int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
@@ -270,7 +270,7 @@ __global__ void interpolate_bilinear_kernel_hip(
         T v11 = input[base_idx + y1 * in_w + x1];
 
         // Interpolate
-        output[idx] = static_cast<T>(w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11);
+        output[idx] = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
     }
 }
 
@@ -369,19 +369,21 @@ __global__ void interpolate_nearest_backward_kernel_hip(
     }
 }
 
-// Bicubic interpolation helper function
-__device__ inline float cubic_interp1d(float x) {
+// Bicubic interpolation helper function (templated so Float64 keeps full
+// precision instead of collapsing the weights to Float32).
+template<typename T>
+__device__ inline T cubic_interp1d(T x) {
     // Cubic-convolution weight with a=-0.75, matching CPU cubic_interp_coeff,
     // PyTorch upsample_bicubic2d, and this file's own backward tz_bicubic_coeff_hip.
     // (The previous a=-0.5 Catmull-Rom coefficients diverged from every other
     // backend and from this op's own gradient.)
-    float abs_x = fabsf(x);
-    if (abs_x <= 1.0f) {
-        return 1.25f * abs_x * abs_x * abs_x - 2.25f * abs_x * abs_x + 1.0f;
-    } else if (abs_x < 2.0f) {
-        return -0.75f * abs_x * abs_x * abs_x + 3.75f * abs_x * abs_x - 6.0f * abs_x + 3.0f;
+    T abs_x = fabs(x);
+    if (abs_x <= T(1)) {
+        return T(1.25) * abs_x * abs_x * abs_x - T(2.25) * abs_x * abs_x + T(1);
+    } else if (abs_x < T(2)) {
+        return T(-0.75) * abs_x * abs_x * abs_x + T(3.75) * abs_x * abs_x - T(6) * abs_x + T(3);
     }
-    return 0.0f;
+    return T(0);
 }
 
 // Bicubic interpolation kernel
@@ -407,27 +409,27 @@ __global__ void interpolate_bicubic_kernel_hip(
         int64_t c = temp % channels; temp /= channels;
         int64_t b = temp;
 
-        // Calculate source position (floating point)
-        float y, x;
+        // Calculate source position (floating point, native dtype precision)
+        T y, x;
         if (align_corners) {
-            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+            y = (out_h > 1) ? oh * static_cast<T>(in_h - 1) / (out_h - 1) : T(0);
+            x = (out_w > 1) ? ow * static_cast<T>(in_w - 1) / (out_w - 1) : T(0);
         } else {
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            T scale_h = static_cast<T>(in_h) / out_h;
+            T scale_w = static_cast<T>(in_w) / out_w;
+            y = (oh + T(0.5)) * scale_h - T(0.5);
+            x = (ow + T(0.5)) * scale_w - T(0.5);
         }
 
         // Clamp to valid range
-        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
-        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+        y = fmax(T(0), fmin(y, static_cast<T>(in_h - 1)));
+        x = fmax(T(0), fmin(x, static_cast<T>(in_w - 1)));
 
         int64_t y_int = static_cast<int64_t>(y);
         int64_t x_int = static_cast<int64_t>(x);
 
         // Bicubic interpolation using 4x4 neighborhood
-        float sum = 0.0f;
+        T sum = T(0);
         for (int64_t dy = -1; dy <= 2; ++dy) {
             for (int64_t dx = -1; dx <= 2; ++dx) {
                 int64_t iy = y_int + dy;
@@ -437,19 +439,19 @@ __global__ void interpolate_bicubic_kernel_hip(
                 iy = max(int64_t(0), min(iy, in_h - 1));
                 ix = max(int64_t(0), min(ix, in_w - 1));
 
-                float weight_y = cubic_interp1d(y - (y_int + dy));
-                float weight_x = cubic_interp1d(x - (x_int + dx));
-                float weight = weight_y * weight_x;
+                T weight_y = cubic_interp1d<T>(y - static_cast<T>(y_int + dy));
+                T weight_x = cubic_interp1d<T>(x - static_cast<T>(x_int + dx));
+                T weight = weight_y * weight_x;
 
                 int64_t in_idx = b * (channels * in_h * in_w) +
                                 c * (in_h * in_w) +
                                 iy * in_w + ix;
 
-                sum += weight * static_cast<float>(input[in_idx]);
+                sum += weight * input[in_idx];
             }
         }
 
-        output[idx] = static_cast<T>(sum);
+        output[idx] = sum;
     }
 }
 
@@ -730,11 +732,12 @@ auto interpolate_kernel(const Tensor& input,
 // ============================================================================
 // Cubic convolution weight (a=-0.75); matches CPU cubic_interp_coeff and
 // PyTorch upsample_bicubic2d.
-__device__ __forceinline__ float tz_bicubic_coeff_hip(float x) {
-    float a = fabsf(x);
-    if (a <= 1.0f) return 1.25f * a * a * a - 2.25f * a * a + 1.0f;
-    if (a < 2.0f)  return -0.75f * a * a * a + 3.75f * a * a - 6.0f * a + 3.0f;
-    return 0.0f;
+template<typename T>
+__device__ __forceinline__ T tz_bicubic_coeff_hip(T x) {
+    T a = fabs(x);
+    if (a <= T(1)) return T(1.25) * a * a * a - T(2.25) * a * a + T(1);
+    if (a < T(2))  return T(-0.75) * a * a * a + T(3.75) * a * a - T(6) * a + T(3);
+    return T(0);
 }
 
 // Bicubic backward (4D): scatter each output gradient to its 4x4 neighborhood (clamped).
@@ -751,27 +754,27 @@ __global__ void interpolate_bicubic_backward_kernel_hip(
         int64_t oh = temp % out_h; temp /= out_h;
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
-        float scale_h = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1) : static_cast<float>(in_h) / out_h;
-        float scale_w = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1) : static_cast<float>(in_w) / out_w;
-        float src_h = align_corners ? oh * scale_h : (oh + 0.5f) * scale_h - 0.5f;
-        float src_w = align_corners ? ow * scale_w : (ow + 0.5f) * scale_w - 0.5f;
+        T scale_h = (align_corners && out_h > 1) ? static_cast<T>(in_h - 1) / (out_h - 1) : static_cast<T>(in_h) / out_h;
+        T scale_w = (align_corners && out_w > 1) ? static_cast<T>(in_w - 1) / (out_w - 1) : static_cast<T>(in_w) / out_w;
+        T src_h = align_corners ? oh * scale_h : (oh + T(0.5)) * scale_h - T(0.5);
+        T src_w = align_corners ? ow * scale_w : (ow + T(0.5)) * scale_w - T(0.5);
         // Mirror the forward kernel EXACTLY: clamp the continuous source coord to
         // [0,in-1] BEFORE taking the integer base, so the 4x4 neighborhood and
         // fractional offsets match the forward (and CPU reference) at the borders.
         // Without this clamp, non-align_corners border pixels (src<0) floor to -1
         // and scatter to a different neighborhood -> parity divergence at edges.
-        src_h = fmaxf(0.0f, fminf(src_h, static_cast<float>(in_h - 1)));
-        src_w = fmaxf(0.0f, fminf(src_w, static_cast<float>(in_w - 1)));
-        int64_t hi = static_cast<int64_t>(floorf(src_h));
-        int64_t wi = static_cast<int64_t>(floorf(src_w));
-        float g = static_cast<float>(grad_out[idx]);
+        src_h = fmax(T(0), fmin(src_h, static_cast<T>(in_h - 1)));
+        src_w = fmax(T(0), fmin(src_w, static_cast<T>(in_w - 1)));
+        int64_t hi = static_cast<int64_t>(floor(src_h));
+        int64_t wi = static_cast<int64_t>(floor(src_w));
+        T g = grad_out[idx];
         int64_t base = b * (channels * in_h * in_w) + c * (in_h * in_w);
         for (int dy = -1; dy <= 2; ++dy) {
             int64_t iy = min(max(static_cast<int64_t>(0), hi + dy), in_h - 1);
-            float wy = tz_bicubic_coeff_hip(src_h - static_cast<float>(hi + dy));
+            T wy = tz_bicubic_coeff_hip<T>(src_h - static_cast<T>(hi + dy));
             for (int dx = -1; dx <= 2; ++dx) {
                 int64_t ix = min(max(static_cast<int64_t>(0), wi + dx), in_w - 1);
-                float wx = tz_bicubic_coeff_hip(src_w - static_cast<float>(wi + dx));
+                T wx = tz_bicubic_coeff_hip<T>(src_w - static_cast<T>(wi + dx));
                 atomicAdd(&grad_in[base + iy * in_w + ix], static_cast<T>(wy * wx * g));
             }
         }
@@ -793,37 +796,37 @@ __global__ void interpolate_trilinear_backward_kernel_hip(
         int64_t od = temp % out_d; temp /= out_d;
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
-        float scd = (align_corners && out_d > 1) ? static_cast<float>(in_d - 1) / (out_d - 1) : static_cast<float>(in_d) / out_d;
-        float sch = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1) : static_cast<float>(in_h) / out_h;
-        float scw = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1) : static_cast<float>(in_w) / out_w;
-        float sd = align_corners ? od * scd : (od + 0.5f) * scd - 0.5f;
-        float sh = align_corners ? oh * sch : (oh + 0.5f) * sch - 0.5f;
-        float sw = align_corners ? ow * scw : (ow + 0.5f) * scw - 0.5f;
+        T scd = (align_corners && out_d > 1) ? static_cast<T>(in_d - 1) / (out_d - 1) : static_cast<T>(in_d) / out_d;
+        T sch = (align_corners && out_h > 1) ? static_cast<T>(in_h - 1) / (out_h - 1) : static_cast<T>(in_h) / out_h;
+        T scw = (align_corners && out_w > 1) ? static_cast<T>(in_w - 1) / (out_w - 1) : static_cast<T>(in_w) / out_w;
+        T sd = align_corners ? od * scd : (od + T(0.5)) * scd - T(0.5);
+        T sh = align_corners ? oh * sch : (oh + T(0.5)) * sch - T(0.5);
+        T sw = align_corners ? ow * scw : (ow + T(0.5)) * scw - T(0.5);
         // Clamp the source coord to [0, in-1] BEFORE flooring so the backward is
         // the exact transpose of the (clamping) forward at the borders; otherwise
         // a negative src floors to -1, its (1-f) tap is dropped, and the border
         // plane loses gradient mass (CPU parity — see cpu/kernels/vision.cpp).
-        sd = fminf(fmaxf(sd, 0.0f), static_cast<float>(in_d - 1));
-        sh = fminf(fmaxf(sh, 0.0f), static_cast<float>(in_h - 1));
-        sw = fminf(fmaxf(sw, 0.0f), static_cast<float>(in_w - 1));
-        int64_t d0 = static_cast<int64_t>(floorf(sd)), h0 = static_cast<int64_t>(floorf(sh)), w0 = static_cast<int64_t>(floorf(sw));
+        sd = fmin(fmax(sd, T(0)), static_cast<T>(in_d - 1));
+        sh = fmin(fmax(sh, T(0)), static_cast<T>(in_h - 1));
+        sw = fmin(fmax(sw, T(0)), static_cast<T>(in_w - 1));
+        int64_t d0 = static_cast<int64_t>(floor(sd)), h0 = static_cast<int64_t>(floor(sh)), w0 = static_cast<int64_t>(floor(sw));
         int64_t d1 = (d0 + 1 < in_d) ? d0 + 1 : in_d - 1;
         int64_t h1 = (h0 + 1 < in_h) ? h0 + 1 : in_h - 1;
         int64_t w1 = (w0 + 1 < in_w) ? w0 + 1 : in_w - 1;
-        float fd = sd - d0, fh = sh - h0, fw = sw - w0;
-        float g = static_cast<float>(grad_out[idx]);
+        T fd = sd - static_cast<T>(d0), fh = sh - static_cast<T>(h0), fw = sw - static_cast<T>(w0);
+        T g = grad_out[idx];
         int64_t base = b * (channels * in_d * in_h * in_w) + c * (in_d * in_h * in_w);
 #define TZ_TRI_ADD_HIP(dd, hh, ww, wgt) do { \
         if ((dd) >= 0 && (dd) < in_d && (hh) >= 0 && (hh) < in_h && (ww) >= 0 && (ww) < in_w) \
             atomicAdd(&grad_in[base + (dd) * in_h * in_w + (hh) * in_w + (ww)], static_cast<T>((wgt) * g)); \
     } while (0)
-        TZ_TRI_ADD_HIP(d0, h0, w0, (1.0f - fd) * (1.0f - fh) * (1.0f - fw));
-        TZ_TRI_ADD_HIP(d0, h0, w1, (1.0f - fd) * (1.0f - fh) * fw);
-        TZ_TRI_ADD_HIP(d0, h1, w0, (1.0f - fd) * fh * (1.0f - fw));
-        TZ_TRI_ADD_HIP(d0, h1, w1, (1.0f - fd) * fh * fw);
-        TZ_TRI_ADD_HIP(d1, h0, w0, fd * (1.0f - fh) * (1.0f - fw));
-        TZ_TRI_ADD_HIP(d1, h0, w1, fd * (1.0f - fh) * fw);
-        TZ_TRI_ADD_HIP(d1, h1, w0, fd * fh * (1.0f - fw));
+        TZ_TRI_ADD_HIP(d0, h0, w0, (T(1) - fd) * (T(1) - fh) * (T(1) - fw));
+        TZ_TRI_ADD_HIP(d0, h0, w1, (T(1) - fd) * (T(1) - fh) * fw);
+        TZ_TRI_ADD_HIP(d0, h1, w0, (T(1) - fd) * fh * (T(1) - fw));
+        TZ_TRI_ADD_HIP(d0, h1, w1, (T(1) - fd) * fh * fw);
+        TZ_TRI_ADD_HIP(d1, h0, w0, fd * (T(1) - fh) * (T(1) - fw));
+        TZ_TRI_ADD_HIP(d1, h0, w1, fd * (T(1) - fh) * fw);
+        TZ_TRI_ADD_HIP(d1, h1, w0, fd * fh * (T(1) - fw));
         TZ_TRI_ADD_HIP(d1, h1, w1, fd * fh * fw);
 #undef TZ_TRI_ADD_HIP
     }

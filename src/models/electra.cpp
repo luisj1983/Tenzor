@@ -119,6 +119,24 @@ ElectraForPreTraining::ElectraForPreTraining(const ElectraConfig& config)
 
     register_module("generator", generator_);
     register_module("discriminator", discriminator_);
+
+    // ELECTRA ties the token (word) embeddings between the generator and the
+    // discriminator (previously config.tie_embeddings was never honored). Build
+    // ONE shared embedding table at the generator hidden size and inject it into
+    // both towers. The discriminator uses a larger hidden size, so its embeddings
+    // module projects the shared table up to its hidden size (see
+    // BertEmbeddings::set_shared_word_embeddings). The shared table is registered
+    // exactly once here so its parameters are not double-counted.
+    if (config.tie_embeddings) {
+        shared_embeddings_ = std::make_shared<nn::Embedding>(
+            config.vocab_size, config.generator_hidden_size);
+        register_module("shared_embeddings", shared_embeddings_);
+
+        generator_->get_bert_model()->embeddings()->set_shared_word_embeddings(
+            shared_embeddings_, config.generator_hidden_size);
+        discriminator_->get_bert_model()->embeddings()->set_shared_word_embeddings(
+            shared_embeddings_, config.generator_hidden_size);
+    }
 }
 
 auto ElectraForPreTraining::sample_from_distribution(const float* probs, int64_t size) -> int64_t {

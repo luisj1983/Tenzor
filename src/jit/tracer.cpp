@@ -646,8 +646,17 @@ TracingGuard::TracingGuard() : tracer_(Tracer::get_instance()) {
     // "CompiledModule produced no outputs" symptom observed in
     // Phase 6.5. The mirror pattern in compile.cpp's
     // CompiledFunction::trace_and_compile does this correctly.
+    // Route unmappable ops through record_graph_break so they are counted (and
+    // throw in strict mode) instead of being silently dropped — which would
+    // otherwise bake the unmapped op's output into the graph as a constant.
     auto interceptor = make_tracing_interceptor(
-        tracer_, /*on_graph_break=*/nullptr);
+        tracer_,
+        [this](OpId op) {
+            tracer_.record_graph_break(
+                "unmapped operation (OpId=" +
+                std::to_string(static_cast<int>(op)) +
+                ") has no IR OpType mapping");
+        });
     DispatchInterceptorStack::push(std::move(interceptor));
     interceptor_installed_ = true;
 

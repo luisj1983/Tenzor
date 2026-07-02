@@ -33,17 +33,21 @@ namespace {
 
 constexpr int CTC_THREADS_PER_BLOCK = 128;
 
-inline float ctc_log_add(float a, float b) {
-    constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
+template <typename S>
+inline S ctc_log_add(S a, S b) {
+    constexpr S NEG_INF = -std::numeric_limits<S>::infinity();
     if (a == NEG_INF) return b;
     if (b == NEG_INF) return a;
-    float m = sycl::fmax(a, b);
+    S m = sycl::fmax(a, b);
     return m + sycl::log1p(sycl::exp(-sycl::fabs(a - b)));
 }
 
-} // anonymous namespace
-
-auto ctc_loss_forward_kernel(
+// Scalar-generic CTC forward-backward implementation. Float32 instantiates as
+// float, Float64 natively as double (so precision is preserved rather than
+// narrowed through Float32). Half formats are widened to Float32 by the public
+// dispatcher below before reaching here.
+template <typename Scalar>
+std::vector<Tensor> ctc_loss_forward_impl(
     const Tensor& log_probs,
     const Tensor& targets,
     const Tensor& input_lengths,
@@ -51,23 +55,9 @@ auto ctc_loss_forward_kernel(
     int64_t blank,
     bool zero_infinity,
     sycl::queue& queue
-) -> std::vector<Tensor> {
-    // The CTC kernel computes in Float32. For Float64/Float16/BFloat16 inputs,
-    // widen to Float32, run, then narrow BOTH outputs (loss + raw_grad) back to
-    // the original dtype so the op preserves precision metadata (matches CPU).
-    if (log_probs.dtype() == DType::Float64 || log_probs.dtype() == DType::Float16 ||
-        log_probs.dtype() == DType::BFloat16) {
-        const DType orig = log_probs.dtype();
-        auto out = ctc_loss_forward_kernel(log_probs.to(DType::Float32), targets,
-                                           input_lengths, target_lengths, blank,
-                                           zero_infinity, queue);
-        for (auto& t : out) t = t.to(orig);
-        return out;
-    }
-    if (log_probs.dtype() != DType::Float32) {
-        throw std::invalid_argument(
-            "ctc_loss_forward (OneAPI): log_probs must be Float32");
-    }
+) {
+    constexpr DType SCALAR_DTYPE =
+        std::is_same_v<Scalar, double> ? DType::Float64 : DType::Float32;
     if (targets.dtype() != DType::Int32 ||
         input_lengths.dtype() != DType::Int32 ||
         target_lengths.dtype() != DType::Int32) {
@@ -89,25 +79,25 @@ auto ctc_loss_forward_kernel(
                   : (tgt_shape.size() == 1) ? tgt_shape[0] : 0;
     int64_t L_max = 2 * S_max + 1;
 
-    Tensor loss_out({N}, DType::Float32, log_probs.device());
-    Tensor grad_out({T_max, N, C}, DType::Float32, log_probs.device());
+    Tensor loss_out({N}, SCALAR_DTYPE, log_probs.device());
+    Tensor grad_out({T_max, N, C}, SCALAR_DTYPE, log_probs.device());
 
     int64_t alpha_elems = N * T_max * L_max;
-    Tensor alpha_buf({alpha_elems}, DType::Float32, log_probs.device());
-    Tensor beta_buf({alpha_elems}, DType::Float32, log_probs.device());
+    Tensor alpha_buf({alpha_elems}, SCALAR_DTYPE, log_probs.device());
+    Tensor beta_buf({alpha_elems}, SCALAR_DTYPE, log_probs.device());
     // AA.10: per-block (T_max, C) scratch for log-space posterior
     // accumulation — must not alias grad_out, or partial writes leak
     // across iterations and produce +inf grads.
     int64_t post_elems = N * T_max * C;
-    Tensor post_scratch({post_elems}, DType::Float32, log_probs.device());
+    Tensor post_scratch({post_elems}, SCALAR_DTYPE, log_probs.device());
 
     if (N == 0 || T_max == 0 || C == 0) {
         if (loss_out.numel() > 0) {
-            queue.fill<float>(static_cast<float*>(loss_out.data_ptr()), 0.0f,
+            queue.fill<Scalar>(static_cast<Scalar*>(loss_out.data_ptr()), Scalar(0),
                               static_cast<size_t>(loss_out.numel())).wait();
         }
         if (grad_out.numel() > 0) {
-            queue.fill<float>(static_cast<float*>(grad_out.data_ptr()), 0.0f,
+            queue.fill<Scalar>(static_cast<Scalar*>(grad_out.data_ptr()), Scalar(0),
                               static_cast<size_t>(grad_out.numel())).wait();
         }
         return {loss_out, grad_out};
@@ -122,15 +112,15 @@ auto ctc_loss_forward_kernel(
     Tensor input_lengths_c = input_lengths.is_contiguous() ? input_lengths : input_lengths.contiguous();
     Tensor target_lengths_c = target_lengths.is_contiguous() ? target_lengths : target_lengths.contiguous();
 
-    const float* lp_data = static_cast<const float*>(log_probs_c.data_ptr());
+    const Scalar* lp_data = static_cast<const Scalar*>(log_probs_c.data_ptr());
     const int32_t* tgt_data = static_cast<const int32_t*>(targets_c.data_ptr());
     const int32_t* il_data = static_cast<const int32_t*>(input_lengths_c.data_ptr());
     const int32_t* tl_data = static_cast<const int32_t*>(target_lengths_c.data_ptr());
-    float* alpha_data = static_cast<float*>(alpha_buf.data_ptr());
-    float* beta_data = static_cast<float*>(beta_buf.data_ptr());
-    float* post_data = static_cast<float*>(post_scratch.data_ptr());
-    float* loss_data = static_cast<float*>(loss_out.data_ptr());
-    float* grad_data = static_cast<float*>(grad_out.data_ptr());
+    Scalar* alpha_data = static_cast<Scalar*>(alpha_buf.data_ptr());
+    Scalar* beta_data = static_cast<Scalar*>(beta_buf.data_ptr());
+    Scalar* post_data = static_cast<Scalar*>(post_scratch.data_ptr());
+    Scalar* loss_data = static_cast<Scalar*>(loss_out.data_ptr());
+    Scalar* grad_data = static_cast<Scalar*>(grad_out.data_ptr());
 
     // Validate blank and target labels host-side before they are used (unguarded)
     // as channel indices into lp_data/grad_data on the device. An out-of-range
@@ -153,11 +143,17 @@ auto ctc_loss_forward_kernel(
         }
         queue.memcpy(host_tl.data(), tl_data,
                      static_cast<size_t>(N) * sizeof(int32_t)).wait();
+        // Targets may be either 2D padded (N, S_max) — sample n at row offset
+        // n*S_max — or 1D concatenated (sum of target_lengths) — sample n at the
+        // running prefix-sum offset. Derive the per-sample base identically to the
+        // device kernel so validation and computation address the same elements.
         const bool targets_2d = (targets_c.shape().size() == 2);
+        int64_t concat_off = 0;  // running offset for 1D concatenated targets
         for (int64_t n = 0; n < N; ++n) {
             int64_t len = host_tl[n];
+            int64_t base = targets_2d ? (n * S_max) : concat_off;
             for (int64_t s = 0; s < len; ++s) {
-                int64_t off = targets_2d ? (n * S_max + s) : s;  // 2D padded vs 1D
+                int64_t off = base + s;
                 if (off < 0 || off >= tgt_numel) continue;
                 int32_t lbl = host_tgt[off];
                 if (lbl < 0 || lbl >= C) {
@@ -165,10 +161,11 @@ auto ctc_loss_forward_kernel(
                         " out of range [0, " + std::to_string(C) + ")");
                 }
             }
+            concat_off += len;
         }
     }
 
-    constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
+    constexpr Scalar NEG_INF = -std::numeric_limits<Scalar>::infinity();
     const int local_size = CTC_THREADS_PER_BLOCK;
     const int global_size = static_cast<int>(N) * local_size;
 
@@ -176,7 +173,7 @@ auto ctc_loss_forward_kernel(
 
     auto event = queue.submit([&](sycl::handler& h) {
         // Local accessor for s_logZ.
-        sycl::local_accessor<float, 1> s_logZ_local(sycl::range<1>(1), h);
+        sycl::local_accessor<Scalar, 1> s_logZ_local(sycl::range<1>(1), h);
 
         const int64_t T_max_c = T_max;
         const int64_t N_c = N;
@@ -185,6 +182,7 @@ auto ctc_loss_forward_kernel(
         const int64_t L_max_c = L_max;
         const int64_t blank_c = blank;
         const bool zero_infinity_c = zero_infinity;
+        const bool targets_2d_c = (targets_c.shape().size() == 2);
 
         h.parallel_for(launch_range, [=](sycl::nd_item<1> item) {
             const int n = static_cast<int>(item.get_group(0));
@@ -196,20 +194,29 @@ auto ctc_loss_forward_kernel(
             const int32_t S_n = tl_data[n];
             const int64_t L_n = 2 * S_n + 1;
 
-            float* alpha = alpha_data + n * T_max_c * L_max_c;
-            float* beta  = beta_data  + n * T_max_c * L_max_c;
-            const int32_t* tgt_n = tgt_data + n * S_max_c;
+            Scalar* alpha = alpha_data + n * T_max_c * L_max_c;
+            Scalar* beta  = beta_data  + n * T_max_c * L_max_c;
+            // Per-sample target base: 2D padded uses row offset n*S_max; 1D
+            // concatenated uses the prefix sum of target_lengths (matches the
+            // host validator). Deriving both here keeps 1D targets with N>1 in
+            // bounds instead of always assuming the 2D-padded layout.
+            int64_t tgt_off = n * S_max_c;
+            if (!targets_2d_c) {
+                tgt_off = 0;
+                for (int k = 0; k < n; ++k) tgt_off += tl_data[k];
+            }
+            const int32_t* tgt_n = tgt_data + tgt_off;
 
             auto ext_label = [&](int64_t s) -> int32_t {
                 return (s % 2 == 0) ? static_cast<int32_t>(blank_c) : tgt_n[s / 2];
             };
 
             if (T_n <= 0 || S_n <= 0 || T_n > T_max_c || L_n > L_max_c) {
-                if (tid == 0) loss_data[n] = 0.0f;
+                if (tid == 0) loss_data[n] = Scalar(0);
                 for (int64_t idx = tid; idx < T_max_c * C_c; idx += nthreads) {
                     int64_t t = idx / C_c;
                     int64_t c = idx % C_c;
-                    grad_data[t * N_c * C_c + n * C_c + c] = 0.0f;
+                    grad_data[t * N_c * C_c + n * C_c + c] = Scalar(0);
                 }
                 return;
             }
@@ -228,7 +235,7 @@ auto ctc_loss_forward_kernel(
 
             for (int64_t t = 1; t < T_n; ++t) {
                 for (int64_t s = tid; s < L_n; s += nthreads) {
-                    float a = alpha[(t - 1) * L_max_c + s];
+                    Scalar a = alpha[(t - 1) * L_max_c + s];
                     if (s > 0) {
                         a = ctc_log_add(a, alpha[(t - 1) * L_max_c + (s - 1)]);
                     }
@@ -242,17 +249,17 @@ auto ctc_loss_forward_kernel(
             }
 
             if (tid == 0) {
-                float term1 = alpha[(T_n - 1) * L_max_c + (L_n - 1)];
-                float term2 = (L_n > 1) ? alpha[(T_n - 1) * L_max_c + (L_n - 2)] : NEG_INF;
+                Scalar term1 = alpha[(T_n - 1) * L_max_c + (L_n - 1)];
+                Scalar term2 = (L_n > 1) ? alpha[(T_n - 1) * L_max_c + (L_n - 2)] : NEG_INF;
                 s_logZ_local[0] = ctc_log_add(term1, term2);
             }
             item.barrier(sycl::access::fence_space::local_space);
-            float logZ = s_logZ_local[0];
+            Scalar logZ = s_logZ_local[0];
 
             // Backward DP initialisation at t = T_n - 1.
             for (int64_t s = tid; s < L_n; s += nthreads) {
                 if (s == L_n - 1 || (s == L_n - 2 && L_n > 1)) {
-                    beta[(T_n - 1) * L_max_c + s] = 0.0f;
+                    beta[(T_n - 1) * L_max_c + s] = Scalar(0);
                 } else {
                     beta[(T_n - 1) * L_max_c + s] = NEG_INF;
                 }
@@ -262,16 +269,16 @@ auto ctc_loss_forward_kernel(
             for (int64_t t = T_n - 2; t >= 0; --t) {
                 for (int64_t s = tid; s < L_n; s += nthreads) {
                     int32_t c_s = ext_label(s);
-                    float b = beta[(t + 1) * L_max_c + s] + lp_data[(t + 1) * N_c * C_c + n * C_c + c_s];
+                    Scalar b = beta[(t + 1) * L_max_c + s] + lp_data[(t + 1) * N_c * C_c + n * C_c + c_s];
                     if (s < L_n - 1) {
                         int32_t c_s1 = ext_label(s + 1);
-                        float term = beta[(t + 1) * L_max_c + (s + 1)]
+                        Scalar term = beta[(t + 1) * L_max_c + (s + 1)]
                                    + lp_data[(t + 1) * N_c * C_c + n * C_c + c_s1];
                         b = ctc_log_add(b, term);
                     }
                     if (s < L_n - 2 && c_s != blank_c && c_s != ext_label(s + 2)) {
                         int32_t c_s2 = ext_label(s + 2);
-                        float term = beta[(t + 1) * L_max_c + (s + 2)]
+                        Scalar term = beta[(t + 1) * L_max_c + (s + 2)]
                                    + lp_data[(t + 1) * N_c * C_c + n * C_c + c_s2];
                         b = ctc_log_add(b, term);
                     }
@@ -280,10 +287,10 @@ auto ctc_loss_forward_kernel(
                 item.barrier(sycl::access::fence_space::global_space);
             }
 
-            float per_sample_loss = -logZ;
+            Scalar per_sample_loss = -logZ;
             bool is_inf = !sycl::isfinite(per_sample_loss);
             if (zero_infinity_c && is_inf) {
-                per_sample_loss = 0.0f;
+                per_sample_loss = Scalar(0);
             }
             if (tid == 0) {
                 loss_data[n] = per_sample_loss;
@@ -305,7 +312,7 @@ auto ctc_loss_forward_kernel(
             // version aliased the global grad cell as both log-space
             // accumulator and final exp-space gradient — partial writes
             // leaked across iterations, producing +inf grads.
-            float* post_n = post_data + n * T_max_c * C_c;
+            Scalar* post_n = post_data + n * T_max_c * C_c;
 
             for (int64_t idx = tid; idx < T_max_c * C_c; idx += nthreads) {
                 int64_t t = idx / C_c;
@@ -323,8 +330,8 @@ auto ctc_loss_forward_kernel(
             for (int64_t t = tid; t < T_n; t += nthreads) {
                 for (int64_t s = 0; s < L_n; ++s) {
                     int32_t c = ext_label(s);
-                    float posterior = alpha[t * L_max_c + s] + beta[t * L_max_c + s];
-                    float& slot = post_n[t * C_c + c];
+                    Scalar posterior = alpha[t * L_max_c + s] + beta[t * L_max_c + s];
+                    Scalar& slot = post_n[t * C_c + c];
                     slot = ctc_log_add(slot, posterior);
                 }
             }
@@ -333,10 +340,10 @@ auto ctc_loss_forward_kernel(
             for (int64_t idx = tid; idx < T_n * C_c; idx += nthreads) {
                 int64_t t = idx / C_c;
                 int64_t c = idx % C_c;
-                float lp = lp_data[t * N_c * C_c + n * C_c + c];
-                float post = post_n[t * C_c + c];
-                float prob = sycl::exp(lp);
-                float post_prob = (post == NEG_INF) ? 0.0f : sycl::exp(post - logZ);
+                Scalar lp = lp_data[t * N_c * C_c + n * C_c + c];
+                Scalar post = post_n[t * C_c + c];
+                Scalar prob = sycl::exp(lp);
+                Scalar post_prob = (post == NEG_INF) ? Scalar(0) : sycl::exp(post - logZ);
                 grad_data[t * N_c * C_c + n * C_c + c] = prob - post_prob;
             }
         });
@@ -344,6 +351,41 @@ auto ctc_loss_forward_kernel(
     event.wait_and_throw();
 
     return {loss_out, grad_out};
+}
+
+} // anonymous namespace
+
+// Public entry point: dispatch on dtype. Float32/Float64 run natively (double
+// preserves precision instead of narrowing through Float32); Float16/BFloat16
+// widen to Float32, run, then narrow both outputs (loss + raw grad) back so the
+// op preserves precision metadata (matches the CPU backend).
+auto ctc_loss_forward_kernel(
+    const Tensor& log_probs,
+    const Tensor& targets,
+    const Tensor& input_lengths,
+    const Tensor& target_lengths,
+    int64_t blank,
+    bool zero_infinity,
+    sycl::queue& queue
+) -> std::vector<Tensor> {
+    const DType dt = log_probs.dtype();
+    if (dt == DType::Float32) {
+        return ctc_loss_forward_impl<float>(log_probs, targets, input_lengths,
+                                            target_lengths, blank, zero_infinity, queue);
+    }
+    if (dt == DType::Float64) {
+        return ctc_loss_forward_impl<double>(log_probs, targets, input_lengths,
+                                             target_lengths, blank, zero_infinity, queue);
+    }
+    if (dt == DType::Float16 || dt == DType::BFloat16) {
+        auto out = ctc_loss_forward_impl<float>(log_probs.to(DType::Float32), targets,
+                                                input_lengths, target_lengths, blank,
+                                                zero_infinity, queue);
+        for (auto& t : out) t = t.to(dt);
+        return out;
+    }
+    throw std::invalid_argument(
+        "ctc_loss_forward (OneAPI): log_probs must be Float16/BFloat16/Float32/Float64");
 }
 
 } // namespace oneapi

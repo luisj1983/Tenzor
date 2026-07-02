@@ -5,6 +5,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include <cstdint>
@@ -673,6 +674,25 @@ auto one_hot(const Tensor& input, int64_t num_classes) -> Tensor {
         num_classes = max_val + 1;
     }
 
+    // Validate index range before dispatch: one_hot requires every index to be
+    // in [0, num_classes). A raw out-of-range or negative index would index out
+    // of bounds inside the backend OneHot kernel. Use max/min reductions so the
+    // check runs on-device (only the two scalar results cross to the host).
+    if (input.numel() > 0) {
+        auto idx64 = input.to(DType::Int64);
+        int64_t lo = tenzor::min(idx64).item<int64_t>();
+        int64_t hi = tenzor::max(idx64).item<int64_t>();
+        if (lo < 0) {
+            throw std::out_of_range(
+                "one_hot: index values must be non-negative (got " + std::to_string(lo) + ")");
+        }
+        if (hi >= num_classes) {
+            throw std::out_of_range(
+                "one_hot: index value " + std::to_string(hi) +
+                " is out of range for num_classes=" + std::to_string(num_classes));
+        }
+    }
+
     NewOpAttributes attrs;
     attrs.set(AttrKey::NumClasses, num_classes);
     std::vector<Tensor> inputs = {input};
@@ -741,6 +761,17 @@ auto bincount(const Tensor& input,
         throw std::runtime_error("bincount: minlength must be non-negative");
     }
 
+    // bincount counts occurrences of non-negative integers; a negative value
+    // would index a negative bin in the backend kernel. Check the minimum via
+    // an on-device reduction (only the scalar result reaches the host).
+    if (input.numel() > 0) {
+        int64_t lo = tenzor::min(input.to(DType::Int64)).item<int64_t>();
+        if (lo < 0) {
+            throw std::runtime_error(
+                "bincount: input values must be non-negative (got " + std::to_string(lo) + ")");
+        }
+    }
+
     NewOpAttributes attrs;
     attrs.set(AttrKey::Minlength, minlength);
 
@@ -783,7 +814,20 @@ auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> 
 }
 
 auto masked_scatter(const Tensor& input, const Tensor& mask, const Tensor& source) -> Tensor {
-    std::vector<Tensor> inputs = {input.contiguous(), mask.contiguous(), source.contiguous()};
+    // PyTorch broadcasts `mask` to the shape of `input` (input's shape is the
+    // output shape; source supplies the replacement values in order). Do the
+    // broadcast at the op layer so every backend kernel receives a mask that
+    // matches `input` element-for-element (the kernels assume matching shapes),
+    // mirroring masked_select / where / masked_fill.
+    std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+    std::vector<int64_t> mask_shape(mask.shape().begin(), mask.shape().end());
+
+    Tensor mask_b = mask;
+    if (input_shape != mask_shape) {
+        mask_b = broadcast_to(mask, input_shape);
+    }
+
+    std::vector<Tensor> inputs = {input.contiguous(), mask_b.contiguous(), source.contiguous()};
     return dispatch(OpId::MaskedScatter, inputs)[0];
 }
 

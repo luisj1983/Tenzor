@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <type_traits>
+#include <limits>
 
 namespace tenzor {
 namespace cuda {
@@ -315,12 +316,18 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
     Tensor result;
     CUDAKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*CUDAKernelAccess::get_impl(input));
 
-    if (dim >= 0) {
-        // Squeeze specific dimension. Validate the range: an out-of-range dim
-        // (e.g. a stale/garbage AttrKey::Dim) would erase past the end of the
-        // shape/stride vectors (UB). PyTorch also treats squeezing a dim whose
-        // size != 1 as a no-op rather than removing it.
-        if (dim >= input.ndim()) {
+    // A negative dim is a valid axis (e.g. -1 = last), NOT the squeeze-all
+    // request. Squeeze-all is signalled only by the sentinel that the dispatch
+    // layer supplies when the no-arg squeeze() was called (AttrKey::Dim unset).
+    const int64_t ndim = input.ndim();
+    if (dim != std::numeric_limits<int64_t>::min()) {
+        // Squeeze specific dimension. Normalize a negative dim first, then
+        // validate the range: an out-of-range dim (e.g. a stale/garbage
+        // AttrKey::Dim) would erase past the end of the shape/stride vectors
+        // (UB). PyTorch also treats squeezing a dim whose size != 1 as a no-op
+        // rather than removing it.
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
             throw std::out_of_range("squeeze: dimension out of range");
         }
         if (input.shape()[dim] == 1) {
@@ -2297,6 +2304,12 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     auto cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
 
     int64_t ndim = shape.size();
+    // Normalize/range-check dim before indexing shape[dim] (mirror flip/roll/split):
+    // a negative or out-of-range dim would otherwise index the shape vector OOB.
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("repeat_interleave: dimension out of range");
+    }
     int64_t in_dim_size = shape[dim];
     int64_t out_dim_size = in_dim_size * repeats;
 
@@ -2367,6 +2380,12 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     auto cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
 
     int64_t ndim = shape.size();
+    // Normalize/range-check dim before indexing shape[dim] (mirror flip/roll/split):
+    // a negative or out-of-range dim would otherwise index the shape vector OOB.
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("repeat_interleave: dimension out of range");
+    }
     int64_t in_dim_size = shape[dim];
 
     // Empty input along `dim`: the output is empty too. Returning here avoids the

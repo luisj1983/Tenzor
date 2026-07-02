@@ -68,6 +68,14 @@ auto BertEmbeddings::forward(const Variable& input_ids,
     // Get word embeddings
     auto embeddings = word_embeddings_->forward(input_ids);
 
+    // Optional projection from the (shared/factorized) embedding dimension up to
+    // hidden_size. Null for standard BERT; used when a smaller shared embedding
+    // table is injected (e.g. ELECTRA generator embeddings shared into the
+    // larger discriminator).
+    if (word_embeddings_project_) {
+        embeddings = word_embeddings_project_->forward(embeddings);
+    }
+
     // Get position embeddings
     Variable pos_ids = position_ids;
     if (!position_ids.is_initialized() || position_ids.tensor().numel() == 0) {
@@ -104,6 +112,24 @@ auto BertEmbeddings::forward(const Variable& input_ids,
 
 auto BertEmbeddings::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{}, Variable{});
+}
+
+auto BertEmbeddings::set_shared_word_embeddings(std::shared_ptr<nn::Embedding> shared,
+                                                int64_t shared_dim) -> void {
+    // Drop this module's own word-embedding submodule and point at the shared
+    // table instead. It is deliberately left UNregistered here: the owner
+    // (e.g. ElectraForPreTraining) registers the shared table exactly once so
+    // its parameters are not double-counted by parameters()/the optimizer.
+    unregister_module("word_embeddings");
+    word_embeddings_ = std::move(shared);
+
+    // If the shared embedding dimension differs from this model's hidden size,
+    // insert a linear projection so the summed embeddings remain at hidden_size.
+    if (shared_dim != config_.hidden_size) {
+        word_embeddings_project_ =
+            std::make_shared<nn::Linear>(shared_dim, config_.hidden_size, false);
+        register_module("word_embeddings_project", word_embeddings_project_);
+    }
 }
 
 // ============================================================================

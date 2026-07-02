@@ -369,7 +369,8 @@ public:
     }
 
     // Get cache file path for model
-    std::string get_cache_path(const std::string& model_name) const {
+    std::string get_cache_path(const std::string& model_name,
+                               const std::string& url = "") const {
         // Sanitize: a model_name like "../../.bashrc" or an absolute path would
         // escape cache_dir, turning download_weights' write/rename/remove into an
         // arbitrary-file primitive. Allow only a conservative charset (no path
@@ -388,7 +389,32 @@ public:
             }
         }
         fs::path cache_root = fs::weakly_canonical(fs::path(config.cache_dir));
-        fs::path resolved = fs::weakly_canonical(cache_root / (model_name + ".pt"));
+        // Derive the cache file extension from the source URL so the on-disk
+        // format is preserved. Previously ".pt" was hardcoded, so a SafeTensors
+        // download was cached as "<name>.pt" and load_pretrained_weights routed
+        // it to the pickle loader (garbage / hard failure). SafeTensors keep
+        // ".safetensors"; pickle checkpoints keep ".pt"/".pth"/".bin". When no
+        // URL is supplied (cache lookups), prefer an already-cached
+        // ".safetensors" file, else fall back to ".pt".
+        std::string ext = ".pt";
+        {
+            std::string clean = url;
+            auto qpos = clean.find_first_of("?#");  // strip query/fragment
+            if (qpos != std::string::npos) clean = clean.substr(0, qpos);
+            auto ends_with = [](const std::string& s, const std::string& suf) {
+                return s.size() >= suf.size() &&
+                       s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+            };
+            if (!clean.empty()) {
+                if (ends_with(clean, ".safetensors")) ext = ".safetensors";
+                else if (ends_with(clean, ".pth"))    ext = ".pth";
+                else if (ends_with(clean, ".bin"))    ext = ".bin";
+                else if (ends_with(clean, ".pt"))     ext = ".pt";
+            } else if (fs::exists(cache_root / (model_name + ".safetensors"))) {
+                ext = ".safetensors";
+            }
+        }
+        fs::path resolved = fs::weakly_canonical(cache_root / (model_name + ext));
         // Containment check with a real path-component boundary: a raw string
         // prefix compare would also accept a sibling like "<root>-evil/..."
         // (no separator after the prefix). lexically_relative yields a path that
@@ -521,8 +547,10 @@ std::string ModelHub::download_weights(
         }
     }
 
-    // Check if already cached
-    std::string cache_path = impl_->get_cache_path(model_name);
+    // Check if already cached. Pass the source URL so the cache file keeps the
+    // correct extension (.safetensors vs .pt) and load_pretrained_weights picks
+    // the matching loader.
+    std::string cache_path = impl_->get_cache_path(model_name, url);
 
     if (fs::exists(cache_path)) {
         // Verify checksum if provided

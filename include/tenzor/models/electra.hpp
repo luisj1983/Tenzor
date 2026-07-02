@@ -178,6 +178,11 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /**
+     * @brief Get the underlying BERT model (for embedding tying).
+     */
+    auto get_bert_model() -> std::shared_ptr<BertModel> { return generator_; }
+
 private:
     ElectraConfig config_;
     std::shared_ptr<BertModel> generator_;
@@ -328,6 +333,7 @@ private:
     ElectraConfig config_;
     std::shared_ptr<ElectraGenerator> generator_;
     std::shared_ptr<ElectraDiscriminator> discriminator_;
+    std::shared_ptr<nn::Embedding> shared_embeddings_;  ///< Token embeddings shared between generator/discriminator (tie_embeddings)
 
     /**
      * @brief Sample token from probability distribution

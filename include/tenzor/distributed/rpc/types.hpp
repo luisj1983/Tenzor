@@ -52,6 +52,10 @@ struct SerializedPayload {
     std::vector<uint8_t> bytes;      ///< Serialized non-tensor arguments
     std::vector<Tensor> tensors;     ///< Tensor arguments (zero-copy potential)
     int64_t request_id{0};           ///< Correlation ID for request/response matching
+    /// Shared-secret authentication token. Populated on outbound requests when
+    /// the agent is configured with an auth token; verified on the receiving
+    /// side for RPC_CALL/RREF_* ops when the listener is bound non-loopback.
+    std::string auth_token;
 };
 
 /**

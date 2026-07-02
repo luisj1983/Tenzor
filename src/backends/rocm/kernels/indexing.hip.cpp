@@ -1898,6 +1898,24 @@ auto scatter_hip(
         auto r = scatter_hip(input.to(DType::Int32), dim, indices, src.to(DType::Int32), stream);
         return r.to(input.dtype());
     }
+    // Shape contract (PyTorch): index.size(d) <= src.size(d) for every axis, and
+    // index.size(d) <= self.size(d) for d != dim. Reject an out-of-bounds index
+    // rather than reading past the input / src on the device.
+    {
+        const int64_t nd = input.ndim();
+        const int64_t d = dim < 0 ? dim + nd : dim;
+        if (indices.ndim() != nd) {
+            throw std::invalid_argument("scatter: index rank must match self rank");
+        }
+        for (int64_t k = 0; k < nd; ++k) {
+            if (k < src.ndim() && indices.shape()[k] > src.shape()[k]) {
+                throw std::invalid_argument("scatter: index size exceeds src on axis " + std::to_string(k));
+            }
+            if (k != d && indices.shape()[k] > input.shape()[k]) {
+                throw std::invalid_argument("scatter: index size exceeds input on non-scatter axis " + std::to_string(k));
+            }
+        }
+    }
     // input.clone() yields a contiguous destination. The kernel decodes
     // index/src positions linearly, so both must be contiguous too.
     Tensor output = input.clone();
@@ -2582,6 +2600,21 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
         throw std::invalid_argument("scatter_add: dimension out of range");
+    }
+
+    // Shape contract (PyTorch): index.size(d) <= src.size(d) for every axis, and
+    // index.size(d) <= self.size(d) for d != dim. Reject an out-of-bounds index
+    // rather than reading past the input / src on the device.
+    if (index.ndim() != ndim) {
+        throw std::invalid_argument("scatter_add: index rank must match self rank");
+    }
+    for (int64_t k = 0; k < ndim; ++k) {
+        if (k < src.ndim() && index.shape()[k] > src.shape()[k]) {
+            throw std::invalid_argument("scatter_add: index size exceeds src on axis " + std::to_string(k));
+        }
+        if (k != dim && index.shape()[k] > input.shape()[k]) {
+            throw std::invalid_argument("scatter_add: index size exceeds input on non-scatter axis " + std::to_string(k));
+        }
     }
 
     std::vector<int64_t> output_shape(input.shape().begin(), input.shape().end());

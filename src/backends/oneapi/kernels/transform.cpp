@@ -557,10 +557,14 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
         out_shape.push_back(1);
     }
 
-    // Squeeze is just a view change, copy data - works for all dtypes
+    // Squeeze is just a view change, copy data - works for all dtypes.
+    // The flat memcpy assumes a contiguous source, so a non-contiguous input view
+    // would be read at the wrong physical offsets — materialize contiguous first
+    // (mirrors unsqueeze_kernel/clone_kernel).
+    Tensor src = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     Tensor output(out_shape, input.dtype(), input.device());
-    const size_t bytes = input.numel() * input.dtype_size();
-    const void* in_ptr = input.data_ptr();
+    const size_t bytes = src.numel() * src.dtype_size();
+    const void* in_ptr = src.data_ptr();
     void* out_ptr = const_cast<void*>(output.data_ptr());
     queue.memcpy(out_ptr, in_ptr, bytes).wait();
 

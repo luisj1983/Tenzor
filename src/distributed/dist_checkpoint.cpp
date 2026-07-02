@@ -18,6 +18,10 @@
 #include <algorithm>
 #include <numeric>
 #include <limits>
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 
 namespace tenzor::distributed {
 
@@ -122,19 +126,58 @@ auto DistributedCheckpoint::save_async(
             // Create parent directories
             std::filesystem::create_directories(file_path.parent_path());
 
-            std::ofstream ofs(file_path, std::ios::binary);
-            if (!ofs.is_open()) {
-                throw std::runtime_error(
-                    "DistributedCheckpoint: failed to open file for writing: " +
-                    file_path.string());
+            // Write to a temporary sibling first, flush + fsync it to durable
+            // storage, then atomically rename it over the final path. A crash or
+            // concurrent reader therefore never observes a half-written shard:
+            // either the old file (or nothing) or the complete new one.
+            auto tmp_path = file_path;
+            tmp_path += ".tmp";
+
+            {
+                std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
+                if (!ofs.is_open()) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: failed to open file for writing: " +
+                        tmp_path.string());
+                }
+                ofs.write(reinterpret_cast<const char*>(data.data()),
+                          static_cast<std::streamsize>(data.size()));
+                if (!ofs.good()) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: write error to: " +
+                        tmp_path.string());
+                }
+                ofs.flush();
+                if (!ofs.good()) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: flush error to: " +
+                        tmp_path.string());
+                }
+            }  // stream closed here (bytes handed to the OS)
+
+#if defined(__unix__) || defined(__APPLE__)
+            // Force the temp file's data to durable storage before the rename,
+            // so a power loss immediately after rename cannot leave a named-but-
+            // empty checkpoint. fsync() flushes the underlying file regardless of
+            // the fd's open mode, so a read-only fd is sufficient.
+            {
+                int fd = ::open(tmp_path.c_str(), O_RDONLY);
+                if (fd < 0) {
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: failed to reopen for fsync: " +
+                        tmp_path.string());
+                }
+                if (::fsync(fd) != 0) {
+                    ::close(fd);
+                    throw std::runtime_error(
+                        "DistributedCheckpoint: fsync failed for: " +
+                        tmp_path.string());
+                }
+                ::close(fd);
             }
-            ofs.write(reinterpret_cast<const char*>(data.data()),
-                      static_cast<std::streamsize>(data.size()));
-            if (!ofs.good()) {
-                throw std::runtime_error(
-                    "DistributedCheckpoint: write error to: " +
-                    file_path.string());
-            }
+#endif
+
+            std::filesystem::rename(tmp_path, file_path);
         });
 }
 
@@ -180,10 +223,20 @@ auto DistributedCheckpoint::load(
         }
 
         auto file_size = ifs.tellg();
+        if (file_size < 0) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: failed to size shard: " +
+                own_shard.string());
+        }
         ifs.seekg(0);
         std::vector<uint8_t> data(static_cast<size_t>(file_size));
         ifs.read(reinterpret_cast<char*>(data.data()),
                  static_cast<std::streamsize>(file_size));
+        if (!ifs || ifs.gcount() != static_cast<std::streamsize>(file_size)) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: short read on shard: " +
+                own_shard.string());
+        }
 
         auto contents = deserialize_state(data);
 
@@ -253,10 +306,18 @@ auto DistributedCheckpoint::load(
                 "DistributedCheckpoint: failed to open: " + sp.string());
         }
         auto file_size = ifs.tellg();
+        if (file_size < 0) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: failed to size: " + sp.string());
+        }
         ifs.seekg(0);
         std::vector<uint8_t> data(static_cast<size_t>(file_size));
         ifs.read(reinterpret_cast<char*>(data.data()),
                  static_cast<std::streamsize>(file_size));
+        if (!ifs || ifs.gcount() != static_cast<std::streamsize>(file_size)) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: short read on: " + sp.string());
+        }
         return deserialize_state(data);
     };
 
@@ -604,8 +665,19 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
         // exactly match the destination tensor's capacity; otherwise the file is
         // malformed and copying could overflow the heap allocation.
         auto tensor = empty(shape, dtype, Device::cpu());
-        auto expected_bytes = static_cast<int64_t>(
-            tensor.numel() * dtype_size(tensor.dtype()));
+        // Checked multiply: numel * elem_size can overflow int64 for a crafted
+        // shape/dtype combination, wrapping to a small value that would
+        // spuriously match a small data_bytes. Mirror the per-dim numel guard
+        // above and reject before comparing against the on-disk byte count.
+        const int64_t elem_size = static_cast<int64_t>(dtype_size(tensor.dtype()));
+        const int64_t numel_bytes = tensor.numel();
+        if (elem_size != 0 &&
+            numel_bytes > std::numeric_limits<int64_t>::max() / elem_size) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: tensor byte size overflow for '" +
+                name + "'");
+        }
+        auto expected_bytes = numel_bytes * elem_size;
         if (data_bytes != expected_bytes) {
             throw std::runtime_error(
                 "DistributedCheckpoint: data size mismatch for '" + name +

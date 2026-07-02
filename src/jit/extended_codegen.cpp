@@ -755,9 +755,36 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     // first; norms take outer/norm_size+eps; reduction takes outer/reduce/inner;
     // MLP takes weights/biases + four dims) and a distinct launch shape. Build
     // the exact argument list and grid/block for each FusionKind.
-    auto in_shape = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+    // These extended kernels launch on a GPU via launch_raw and index every
+    // operand as contiguous row-major memory. Validate that all operands live
+    // on the same GPU device (reading a CPU or non-contiguous tensor's raw
+    // data_ptr() as if it were contiguous GPU memory would silently corrupt the
+    // result) and make contiguous copies. The copies are kept alive in these
+    // vectors so the pointers taken from them below remain valid until launch
+    // (mirrors KernelCodegen::execute_fused).
+    const Device dev = inputs[0].device();
+    if (dev.type == Device::Type::CPU) {
+        throw std::runtime_error(
+            "execute_extended_fused: inputs must reside on a GPU device; got "
+            "CPU — route this dtype/op through the eager fallback");
+    }
+    auto require_dev = [&](const Tensor& t, const char* what) {
+        if (t.device() != dev) {
+            throw std::runtime_error(
+                std::string("execute_extended_fused: all ") + what +
+                " must be on the same device as inputs[0]");
+        }
+    };
+    std::vector<Tensor> c_inputs;
+    c_inputs.reserve(inputs.size());
+    for (const auto& t : inputs) { require_dev(t, "inputs"); c_inputs.push_back(t.contiguous()); }
+    std::vector<Tensor> c_params;
+    c_params.reserve(params.size());
+    for (const auto& t : params) { require_dev(t, "params"); c_params.push_back(t.contiguous()); }
+
+    auto in_shape = std::vector<int64_t>(c_inputs[0].shape().begin(), c_inputs[0].shape().end());
     const int64_t ndim = static_cast<int64_t>(in_shape.size());
-    const int64_t total = inputs[0].numel();
+    const int64_t total = c_inputs[0].numel();
     auto axis_norm = [&](int axis) -> int64_t {
         int64_t a = axis;
         if (a < 0) a += ndim;
@@ -794,10 +821,23 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
 
     switch (group.kind) {
         case FusionKind::Softmax: {
-            int64_t cols = std::max<int64_t>(1, suffix_prod(axis_norm(group.softmax_dim)));
+            // The kernel does a per-row reduction over `cols` CONTIGUOUS
+            // elements, i.e. it can only normalize the last axis. Using
+            // suffix_prod() here would fold every trailing dim into `cols` and
+            // normalize over a superset of the intended axis for a non-last-dim
+            // softmax. That layout can't be expressed by this (rows, cols)
+            // kernel, so reject it rather than silently miscompute.
+            int64_t axis = axis_norm(group.softmax_dim);
+            if (ndim == 0 || axis != ndim - 1) {
+                throw std::runtime_error(
+                    "execute_extended_fused: fused Softmax kernel only supports "
+                    "normalization over the last dimension (softmax_dim must be "
+                    "ndim-1)");
+            }
+            int64_t cols = std::max<int64_t>(1, in_shape[axis]);
             int64_t rows = total / cols;
-            output = Tensor(in_shape, group.dtype, inputs[0].device());
-            ptrs = {inputs[0].data_ptr(), output.data_ptr()};
+            output = Tensor(in_shape, group.dtype, dev);
+            ptrs = {c_inputs[0].data_ptr(), output.data_ptr()};
             ivals = {rows, cols};
             grid = grid_to_int(rows, "Softmax");
             break;
@@ -806,12 +846,12 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
         case FusionKind::RMSNorm: {
             int64_t norm_size = std::max<int64_t>(1, suffix_prod(axis_norm(group.norm_axis)));
             int64_t outer = total / norm_size;
-            output = Tensor(in_shape, group.dtype, inputs[0].device());
-            ptrs = {inputs[0].data_ptr(), output.data_ptr()};
+            output = Tensor(in_shape, group.dtype, dev);
+            ptrs = {c_inputs[0].data_ptr(), output.data_ptr()};
             if (group.has_affine) {
-                ptrs.push_back(params.at(0).data_ptr());           // gamma
+                ptrs.push_back(c_params.at(0).data_ptr());         // gamma
                 if (group.kind == FusionKind::LayerNorm) {
-                    ptrs.push_back(params.at(1).data_ptr());       // beta
+                    ptrs.push_back(c_params.at(1).data_ptr());     // beta
                 }
             }
             ivals = {outer, norm_size};
@@ -829,8 +869,8 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
                 if (d == a) { if (group.keepdim) out_shape.push_back(1); }
                 else out_shape.push_back(in_shape[d]);
             }
-            output = Tensor(out_shape, group.dtype, inputs[0].device());
-            ptrs = {inputs[0].data_ptr(), output.data_ptr()};
+            output = Tensor(out_shape, group.dtype, dev);
+            ptrs = {c_inputs[0].data_ptr(), output.data_ptr()};
             ivals = {outer, reduce_size, inner};
             grid = grid_to_int(outer * inner, "Reduction");
             break;
@@ -841,11 +881,11 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             // must compute A @ B here and hand the product to the kernel as the
             // output buffer; the kernel then fuses bias/activation in place.
             // inputs[0] = A (lhs), inputs[1] = B (rhs); bias (if any) is a param.
-            if (inputs.size() < 2) {
+            if (c_inputs.size() < 2) {
                 throw std::runtime_error(
                     "execute_extended_fused: GemmEpilogue requires two matmul inputs (A, B)");
             }
-            output = tenzor::matmul(inputs[0], inputs[1]);
+            output = tenzor::matmul(c_inputs[0], c_inputs[1]);
             // Geometry is derived from the GEMM RESULT, not from inputs[0]:
             // the kernel grids over rows*cols of the product and indexes bias by
             // the last (column) dimension.
@@ -855,7 +895,7 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             int64_t cols = std::max<int64_t>(1, out_ndim > 0 ? out_shape[out_ndim - 1] : out_total);
             int64_t rows = out_total / cols;
             ptrs = {output.data_ptr()};                            // output FIRST
-            if (group.has_bias) ptrs.push_back(params.at(0).data_ptr());
+            if (group.has_bias) ptrs.push_back(c_params.at(0).data_ptr());
             ivals = {rows, cols};
             grid = grid_to_int((rows * cols + kBlock - 1) / kBlock, "GemmEpilogue");
             break;
@@ -865,13 +905,13 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             int64_t in_dim = std::max<int64_t>(1, ndim > 0 ? in_shape[ndim - 1] : total);
             int64_t batch = total / in_dim;
             int64_t hidden_dim = group.hidden_dim;
-            int64_t out_dim = static_cast<int64_t>(params.at(3).numel());  // b2 = [out_dim]
-            output = Tensor({batch, out_dim}, group.dtype, inputs[0].device());
-            ptrs = {inputs[0].data_ptr(), params.at(0).data_ptr(), params.at(1).data_ptr(),
-                    params.at(2).data_ptr(), params.at(3).data_ptr(), output.data_ptr()};
+            int64_t out_dim = static_cast<int64_t>(c_params.at(3).numel());  // b2 = [out_dim]
+            output = Tensor({batch, out_dim}, group.dtype, dev);
+            ptrs = {c_inputs[0].data_ptr(), c_params.at(0).data_ptr(), c_params.at(1).data_ptr(),
+                    c_params.at(2).data_ptr(), c_params.at(3).data_ptr(), output.data_ptr()};
             ivals = {batch, in_dim, hidden_dim, out_dim};
             grid = grid_to_int(batch, "SmallMLP");
-            shared = static_cast<unsigned>(hidden_dim * static_cast<int64_t>(inputs[0].dtype_size()));
+            shared = static_cast<unsigned>(hidden_dim * static_cast<int64_t>(c_inputs[0].dtype_size()));
             break;
         }
         default:

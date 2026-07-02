@@ -15,11 +15,13 @@
 #include <vector>
 #include <chrono>
 #include "device.hpp"
+#include "intrusive_ptr.hpp"
 
 namespace tenzor {
 
-// Forward declaration
+// Forward declarations
 class Tensor;
+class TensorImpl;
 
 namespace core {
 
@@ -114,14 +116,20 @@ public:
 
     /**
      * @brief Destructor.
+     *
+     * Defined out-of-line in the .cpp: the tracking map holds
+     * intrusive_ptr<TensorImpl> values whose destructor requires the complete
+     * TensorImpl type, which is only available in the translation unit.
      */
-    ~MemoryManager() = default;
+    ~MemoryManager();
 
-    // Disable copy, allow move
+    // Disable copy, allow move (move ops defined out-of-line, see destructor).
     MemoryManager(const MemoryManager&) = delete;
     MemoryManager& operator=(const MemoryManager&) = delete;
-    MemoryManager(MemoryManager&&) noexcept = default;
-    MemoryManager& operator=(MemoryManager&&) noexcept = default;
+    // Non-movable: holds a std::mutex (and is only ever heap-allocated via
+    // make_unique/make_shared, never moved by value).
+    MemoryManager(MemoryManager&&) = delete;
+    MemoryManager& operator=(MemoryManager&&) = delete;
 
     // ========================================================================
     // Tensor Registration and Tracking
@@ -288,6 +296,11 @@ private:
         Device location;                           ///< Current device location
         size_t size_bytes{0};                      ///< Tensor size in bytes
         std::chrono::steady_clock::time_point last_access;  ///< Last access time
+        /// Owning reference to the tracked TensorImpl. Keeps the intrusive
+        /// identity alive for as long as it is tracked, so the registry key
+        /// (a TensorImpl*) can never dangle and its address can never be
+        /// recycled by a different tensor while still registered.
+        intrusive_ptr<TensorImpl> impl;
 
         TensorInfo() : location(Device::cpu()), last_access(std::chrono::steady_clock::now()) {}
         TensorInfo(Device loc, size_t size)
@@ -313,8 +326,12 @@ private:
     Config config_;                                ///< Configuration
     mutable std::mutex mutex_;                     ///< Thread safety
 
-    // Tensor tracking
-    std::unordered_map<Tensor*, TensorInfo> tensors_;  ///< All tracked tensors
+    // Tensor tracking. Keyed on the intrusive TensorImpl identity (not the
+    // Tensor wrapper address): Tensor is a copyable/movable value type, so
+    // keying on Tensor* produced dangling keys after a move/destroy and
+    // double-counted copies that share one TensorImpl. TensorInfo::impl holds
+    // an owning reference so the keyed object stays alive while tracked.
+    std::unordered_map<TensorImpl*, TensorInfo> tensors_;  ///< All tracked tensors
     // Note: LRU lookups use the per-device DeviceMemory::lru_map (authoritative);
     // there is intentionally no global tensor->LRU-iterator map.
 

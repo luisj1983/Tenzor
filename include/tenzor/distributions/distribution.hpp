@@ -295,6 +295,19 @@ public:
             static_cast<int64_t>(lp_shape.size()) - 1;  // dims before K
 
         auto idx_i64 = value.to(DType::Int64);
+        // Validate that every index lies in [0, K) before gather(): an
+        // out-of-range class index would otherwise read out of bounds (or
+        // silently produce a wrong log-prob) in the gather kernel.
+        if (idx_i64.numel() > 0) {
+            auto idx_cpu = idx_i64.to(Device::cpu()).contiguous();
+            auto min_idx = tenzor::min(idx_cpu).item<int64_t>();
+            auto max_idx = tenzor::max(idx_cpu).item<int64_t>();
+            if (min_idx < 0 || max_idx >= K) {
+                throw std::runtime_error(
+                    "Categorical::log_prob: value index out of range [0, " +
+                    std::to_string(K) + ")");
+            }
+        }
         const auto val_shape = idx_i64.shape();
         const int64_t val_rank = static_cast<int64_t>(val_shape.size());
 
@@ -840,13 +853,16 @@ public:
         return result.to(concentration_.device());
     }
 
-    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
-        // Gamma is reparameterizable in theory via implicit reparam (Figurnov
-        // et al. 2018), but for this P1 pass we expose sample() as rsample()
-        // and note that the graph is detached. Downstream users that need
-        // backprop-through-Gamma should use the implicit-reparam path via
-        // Kingma's trick externally.
-        return sample(std::move(sample_shape));
+    [[noreturn]] auto rsample(std::vector<int64_t> /*sample_shape*/ = {})
+        -> Tensor override {
+        // sample() fills via raw pointers and returns a detached tensor, so
+        // forwarding to it would silently break reparameterization (zero
+        // gradients). A correct reparameterized gradient for Gamma requires
+        // implicit reparameterization (Figurnov et al. 2018), whose
+        // implicit-derivative kernel is not available here. Refuse rather than
+        // return silently-wrong gradients.
+        throw std::logic_error(
+            "rsample not implemented with correct gradients for Gamma");
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
@@ -856,7 +872,12 @@ public:
         // the existing math ops. For the common case we just use the
         // canonical closed form with existing primitives.
         auto log_rate = tenzor::log(rate_);
-        auto log_val = tenzor::log(value);
+        // Gamma is supported on (0, inf); clamp only the lower bound so a
+        // boundary sample x == 0 does not yield log(0) == -inf. The support is
+        // unbounded above, so no upper clamp is applied.
+        auto v = tenzor::clamp(value, 1e-7f,
+                               std::numeric_limits<float>::infinity());
+        auto log_val = tenzor::log(v);
         auto minus_lgamma = tenzor::neg(tenzor::lgamma(concentration_));
         auto term1 = concentration_ * log_rate;
         auto term2 = (concentration_ - 1.0f) * log_val;
@@ -959,15 +980,25 @@ public:
         return result.to(c1_.device());
     }
 
-    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
-        return sample(std::move(sample_shape));
+    [[noreturn]] auto rsample(std::vector<int64_t> /*sample_shape*/ = {})
+        -> Tensor override {
+        // sample() draws via detached Gamma fills, so forwarding would return a
+        // detached tensor and silently zero the reparameterization gradient. A
+        // correct reparameterized gradient for Beta requires implicit
+        // reparameterization (Figurnov et al. 2018), which is not available
+        // here. Refuse rather than return silently-wrong gradients.
+        throw std::logic_error(
+            "rsample not implemented with correct gradients for Beta");
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
         // log Beta(x; a, b) = (a-1) log x + (b-1) log(1-x) - logB(a,b)
         // logB(a, b) = lgamma(a) + lgamma(b) - lgamma(a + b)
-        auto log_x = tenzor::log(value);
-        auto log_1mx = tenzor::log(1.0f - value);
+        // Clamp into (eps, 1-eps) so boundary samples (x == 0 or x == 1) do not
+        // produce -inf/NaN from log(x) / log(1-x).
+        auto v = tenzor::clamp(value, 1e-7f, 1.0f - 1e-7f);
+        auto log_x = tenzor::log(v);
+        auto log_1mx = tenzor::log(1.0f - v);
         auto log_B = tenzor::lgamma(c1_) + tenzor::lgamma(c0_) - tenzor::lgamma(c1_ + c0_);
         return (c1_ - 1.0f) * log_x + (c0_ - 1.0f) * log_1mx - log_B;
     }
@@ -1075,17 +1106,31 @@ public:
         return result.to(concentration_.device());
     }
 
-    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
-        return sample(std::move(sample_shape));
+    [[noreturn]] auto rsample(std::vector<int64_t> /*sample_shape*/ = {})
+        -> Tensor override {
+        // sample() normalizes detached Gamma fills, so forwarding would return
+        // a detached tensor and silently zero the reparameterization gradient.
+        // A correct reparameterized gradient for Dirichlet requires implicit
+        // reparameterization (Figurnov et al. 2018), which is not available
+        // here. Refuse rather than return silently-wrong gradients.
+        throw std::logic_error(
+            "rsample not implemented with correct gradients for Dirichlet");
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
         // log p(x | alpha) = lgamma(sum alpha) - sum lgamma(alpha) + sum (alpha - 1) * log x
-        auto log_x = tenzor::log(value);
-        auto sum_alpha = tenzor::sum(concentration_, -1, true);
+        // Clamp the sample into the open simplex interior so log(x) stays finite
+        // for boundary samples (x_k == 0 would otherwise give -inf/NaN).
+        auto v = tenzor::clamp(value, 1e-7f, 1.0f - 1e-7f);
+        auto log_x = tenzor::log(v);
+        // Reduce the event (last) dim away so a (..., K) Dirichlet returns
+        // batch shape (...) rather than (..., 1).
+        auto sum_alpha = tenzor::sum(concentration_, -1, /*keepdim=*/false);
         auto lgamma_sum = tenzor::lgamma(sum_alpha);
-        auto sum_lgamma = tenzor::sum(tenzor::lgamma(concentration_), -1, true);
-        auto log_term = tenzor::sum((concentration_ - 1.0f) * log_x, -1, true);
+        auto sum_lgamma =
+            tenzor::sum(tenzor::lgamma(concentration_), -1, /*keepdim=*/false);
+        auto log_term =
+            tenzor::sum((concentration_ - 1.0f) * log_x, -1, /*keepdim=*/false);
         return lgamma_sum - sum_lgamma + log_term;
     }
 
@@ -1183,7 +1228,33 @@ public:
     }
 
     auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
-        return sample(std::move(sample_shape));
+        // Location-scale reparameterization: X = loc + scale * T, where T is a
+        // standard Student-t(df) variate treated as fixed reparameterization
+        // noise. Building X with autograd ops (instead of a raw fill) lets the
+        // gradient flow to loc_ and scale_. df enters only through the noise T;
+        // a correct df-gradient would require implicit reparameterization of
+        // the underlying chi-squared (Figurnov et al. 2018), which is not
+        // available here, so df is treated as a fixed shape parameter and the
+        // noise T is detached from it.
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(df_.shape().begin(), df_.shape().end())
+            : sample_shape;
+
+        auto df_cpu = df_.detach().to(Device::cpu());
+        // T = Z / sqrt(ChiSq(df)/df), Z ~ N(0,1), ChiSq(df) = Gamma(df/2, 1/2).
+        // Every ingredient below is a detached constant, so T carries no graph.
+        auto z = randn(shape, df_.dtype(), Device::cpu());
+        auto half = full({1}, 0.5, df_.dtype(), Device::cpu());
+        auto alpha = df_cpu * half;
+        auto rate = half;
+        auto chi2 = detail::fill_gamma_cpu(alpha, rate, shape,
+                                           detail::rng_for(generator_));
+        auto t_noise = z / tenzor::sqrt(chi2 / df_cpu);
+
+        // Reattach to the learnable parameters so gradients flow to loc_/scale_.
+        auto result =
+            loc_.to(Device::cpu()) + scale_.to(Device::cpu()) * t_noise;
+        return result.to(df_.device());
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
@@ -3745,9 +3816,21 @@ public:
     }
 
     auto mean() -> Tensor override {
+        // E[X] = lambda/(2*lambda-1) + 1/(2*atanh(1-2*lambda)); both singular
+        // terms diverge at lambda == 0.5 but cancel to the finite limit 1/2.
+        // Guard the singular denominators and select the limit near 0.5.
+        constexpr float kEps = 1e-4f;
         auto p = tenzor::clamp(probs_, 1e-6f, 1.0f - 1e-6f);
         auto two_p_minus_1 = 2.0f * p - 1.0f;
-        return p / two_p_minus_1 + 1.0f / (2.0f * tenzor::atanh(1.0f - 2.0f * p));
+        auto near_half =
+            tenzor::lt(tenzor::abs(two_p_minus_1), tenzor::full_like(p, kEps));
+        auto safe_den =
+            tenzor::where(near_half, tenzor::ones_like(p), two_p_minus_1);
+        auto atanh_term = tenzor::atanh(1.0f - 2.0f * p);
+        auto safe_atanh =
+            tenzor::where(near_half, tenzor::ones_like(p), atanh_term);
+        auto closed_form = p / safe_den + 1.0f / (2.0f * safe_atanh);
+        return tenzor::where(near_half, tenzor::full_like(p, 0.5f), closed_form);
     }
 
     auto variance() -> Tensor override {
@@ -3761,10 +3844,21 @@ public:
 
 private:
     static auto log_normalizing_constant(const Tensor& p) -> Tensor {
-        // C(lambda) = 2 * atanh(1 - 2*lambda) / (1 - 2*lambda)
+        // C(lambda) = 2 * atanh(1 - 2*lambda) / (1 - 2*lambda).
+        // At lambda == 0.5 this is 0/0; its finite limit is 2 because
+        // atanh(x)/x -> 1 as x -> 0. Guard the denominator so the closed
+        // form never evaluates 0/0 (which would also poison the gradient),
+        // then select the Taylor limit near lambda == 0.5.
+        constexpr float kEps = 1e-4f;
         auto two_p_minus_1 = 2.0f * p - 1.0f;
         auto abs_diff = tenzor::abs(two_p_minus_1);
-        return tenzor::log(2.0f * tenzor::atanh(abs_diff) / abs_diff);
+        auto near_half = tenzor::lt(abs_diff, tenzor::full_like(abs_diff, kEps));
+        auto safe_diff =
+            tenzor::where(near_half, tenzor::ones_like(abs_diff), abs_diff);
+        auto closed_form = 2.0f * tenzor::atanh(abs_diff) / safe_diff;
+        auto C = tenzor::where(near_half, tenzor::full_like(abs_diff, 2.0f),
+                               closed_form);
+        return tenzor::log(C);
     }
 
     Tensor probs_;
@@ -3848,10 +3942,21 @@ public:
         return sample(std::move(sample_shape));  // Normal rsample + softmax is differentiable
     }
 
-    auto log_prob(const Tensor& value) -> Tensor override {
-        auto log_x = tenzor::log(tenzor::clamp(value, 1e-7f, 1.0f));
-        auto normal_lp = normal_.log_prob(log_x);
-        return tenzor::sum(normal_lp, -1) - tenzor::sum(log_x, -1);
+    [[noreturn]] auto log_prob(const Tensor& /*value*/) -> Tensor override {
+        // sample() maps K i.i.d. normals through softmax, which is NOT
+        // injective (it collapses one degree of freedom), so this
+        // parameterization has no valid density on its K-dimensional image:
+        // the previous `sum(normal_lp(log x)) - sum(log x)` was not a
+        // change-of-variables density. A correct closed form needs the
+        // bijective additive-log-ratio (stick-breaking) transform over d-1
+        // normals, which is not implemented here. Refuse — consistent with
+        // SoftmaxTransform::inv / log_abs_det_jacobian in transforms.hpp —
+        // rather than return a silently-wrong log-probability.
+        throw std::logic_error(
+            "LogisticNormal::log_prob is not implemented: softmax over K "
+            "normals is not injective, so there is no valid density on the "
+            "simplex for this parameterization; use a StickBreakingTransform "
+            "over d-1 normals for a proper simplex density");
     }
 
 

@@ -1265,19 +1265,29 @@ auto YOLOv5::decode_predictions(const std::vector<Variable>& predictions, int64_
                         float tw = pred_data[pred_offset + 2];
                         float th = pred_data[pred_offset + 3];
 
-                        // YOLOv5 uses sigmoid for tx, ty
+                        // YOLOv5 decode (differs from the YOLOv3 formula):
+                        //   xy = (2*sigmoid(t_xy) - 0.5 + grid) * stride
+                        //   wh = (2*sigmoid(t_wh))^2 * anchor
+                        // The center offset spans [-0.5, 1.5] (vs v3's [0, 1])
+                        // and the size uses a bounded squared-sigmoid instead of
+                        // exp(), which stabilizes training and matches the
+                        // pretrained YOLOv5 head.
                         float sigmoid_tx = 1.0f / (1.0f + std::exp(-tx));
                         float sigmoid_ty = 1.0f / (1.0f + std::exp(-ty));
+                        float sigmoid_tw = 1.0f / (1.0f + std::exp(-tw));
+                        float sigmoid_th = 1.0f / (1.0f + std::exp(-th));
 
                         // Compute box center
-                        float bx = (gx + sigmoid_tx) * stride;
-                        float by = (gy + sigmoid_ty) * stride;
+                        float bx = (gx + 2.0f * sigmoid_tx - 0.5f) * stride;
+                        float by = (gy + 2.0f * sigmoid_ty - 0.5f) * stride;
 
                         // Compute box size using anchor dimensions
                         float anchor_w = anchors[a].first;
                         float anchor_h = anchors[a].second;
-                        float bw = anchor_w * std::exp(tw);
-                        float bh = anchor_h * std::exp(th);
+                        float scale_w = 2.0f * sigmoid_tw;
+                        float scale_h = 2.0f * sigmoid_th;
+                        float bw = anchor_w * scale_w * scale_w;
+                        float bh = anchor_h * scale_h * scale_h;
 
                         // Convert to (x1, y1, x2, y2) format
                         float x1 = bx - bw / 2.0f;

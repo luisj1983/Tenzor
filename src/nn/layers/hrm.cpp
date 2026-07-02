@@ -159,7 +159,8 @@ Variable stablemax_cross_entropy(const Variable& input, const Variable& target,
     const bool is_float_target =
         (target_tensor_raw.dtype() == DType::Float32 ||
          target_tensor_raw.dtype() == DType::Float64 ||
-         target_tensor_raw.dtype() == DType::Float16) &&
+         target_tensor_raw.dtype() == DType::Float16 ||
+         target_tensor_raw.dtype() == DType::BFloat16) &&
         target_tensor_raw.ndim() == 2;
 
     Variable one_hot_var;

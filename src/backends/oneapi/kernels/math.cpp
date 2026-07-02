@@ -3791,10 +3791,15 @@ auto clamp_max_kernel(const Tensor& input, double max_val, sycl::queue& queue) -
 }
 
 // Where kernel (conditional selection)
-auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, sycl::queue& queue) -> Tensor {
-    if (x.dtype() != y.dtype()) {
+auto where_kernel(const Tensor& condition_in, const Tensor& x_in, const Tensor& y_in, sycl::queue& queue) -> Tensor {
+    if (x_in.dtype() != y_in.dtype()) {
         throw std::invalid_argument("where: x and y must have the same dtype");
     }
+
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor condition = condition_in.is_contiguous() ? condition_in : contiguous_kernel(condition_in, queue);
+    Tensor x = x_in.is_contiguous() ? x_in : contiguous_kernel(x_in, queue);
+    Tensor y = y_in.is_contiguous() ? y_in : contiguous_kernel(y_in, queue);
 
     Tensor output(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
                   x.dtype(), x.device());
@@ -5286,7 +5291,10 @@ auto lerp_kernel(const Tensor& start, const Tensor& end, const Tensor& weight, s
 // Logical Operations
 // ============================================================================
 
-auto logical_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto logical_and_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   DType::Bool, a.device());
     const int64_t numel = a.numel();
@@ -5340,7 +5348,10 @@ auto logical_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) ->
     return output;
 }
 
-auto logical_or_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto logical_or_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   DType::Bool, a.device());
     const int64_t numel = a.numel();
@@ -5441,7 +5452,10 @@ auto logical_not_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto logical_xor_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto logical_xor_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   DType::Bool, a.device());
     const int64_t numel = a.numel();
@@ -6096,11 +6110,14 @@ auto frac_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 struct HeavisideKernelF32 {};
 struct HeavisideKernelF64 {};
 
-auto heaviside_kernel(const Tensor& input, const Tensor& values, sycl::queue& queue) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32_in = input.to(DType::Float32); auto f32_val = values.to(DType::Float32);
-        return heaviside_kernel(f32_in, f32_val, queue).to(input.dtype());
+auto heaviside_kernel(const Tensor& input_in, const Tensor& values_in, sycl::queue& queue) -> Tensor {
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto f32_in = input_in.to(DType::Float32); auto f32_val = values_in.to(DType::Float32);
+        return heaviside_kernel(f32_in, f32_val, queue).to(input_in.dtype());
     }
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    Tensor values = values_in.is_contiguous() ? values_in : contiguous_kernel(values_in, queue);
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -6209,7 +6226,10 @@ struct BitwiseNotI8 {}; struct BitwiseNotI16 {}; struct BitwiseNotI64 {};
 struct BitwiseLShiftI8 {}; struct BitwiseLShiftI16 {}; struct BitwiseLShiftI64 {};
 struct BitwiseRShiftI8 {}; struct BitwiseRShiftI16 {}; struct BitwiseRShiftI64 {};
 
-auto bitwise_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto bitwise_and_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
     if (n == 0) return result;
@@ -6228,7 +6248,10 @@ auto bitwise_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) ->
     } else { throw std::runtime_error("bitwise_and: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
-auto bitwise_or_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto bitwise_or_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
     if (n == 0) return result;
@@ -6247,7 +6270,10 @@ auto bitwise_or_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> 
     } else { throw std::runtime_error("bitwise_or: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
-auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+auto bitwise_xor_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
     if (n == 0) return result;
@@ -6932,8 +6958,11 @@ auto nextafter_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> T
 // Gcd kernel (integer types only)
 // ============================================================================
 
-auto gcd_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    if (a.dtype() != b.dtype()) throw std::invalid_argument("gcd: input dtypes must match");
+auto gcd_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) throw std::invalid_argument("gcd: input dtypes must match");
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   a.dtype(), a.device());
     const int64_t numel = a.numel();
@@ -6968,8 +6997,11 @@ auto gcd_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 // Lcm kernel (integer types only)
 // ============================================================================
 
-auto lcm_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    if (a.dtype() != b.dtype()) throw std::invalid_argument("lcm: input dtypes must match");
+auto lcm_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) throw std::invalid_argument("lcm: input dtypes must match");
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   a.dtype(), a.device());
     const int64_t numel = a.numel();
@@ -7006,8 +7038,11 @@ auto lcm_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 // Igamma kernel (lower regularized incomplete gamma)
 // ============================================================================
 
-auto igamma_kernel(const Tensor& a, const Tensor& x, sycl::queue& queue) -> Tensor {
-    if (a.dtype() != x.dtype()) throw std::invalid_argument("igamma: input dtypes must match");
+auto igamma_kernel(const Tensor& a_in, const Tensor& x_in, sycl::queue& queue) -> Tensor {
+    if (a_in.dtype() != x_in.dtype()) throw std::invalid_argument("igamma: input dtypes must match");
+    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
+    Tensor x = x_in.is_contiguous() ? x_in : contiguous_kernel(x_in, queue);
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   a.dtype(), a.device());
     const int64_t numel = a.numel();

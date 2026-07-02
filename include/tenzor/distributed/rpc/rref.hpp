@@ -109,23 +109,55 @@ public:
 
     /**
      * @brief Store a tensor and get a unique RRef ID.
+     *
+     * @param tensor       Value to store.
+     * @param owner_worker Worker id permitted to fetch/delete this entry over
+     *                     the network. RRef ids are sequential and therefore
+     *                     predictable, so remote RREF_FETCH/RREF_DELETE requests
+     *                     are only served when their src_worker matches this id.
+     *                     The default (-1) marks a purely-local entry that no
+     *                     remote worker may access.
      */
-    auto store(Tensor tensor) -> int64_t;
+    auto store(Tensor tensor, int32_t owner_worker = -1) -> int64_t;
 
     /**
-     * @brief Fetch a stored tensor by RRef ID.
+     * @brief Fetch a stored tensor by RRef ID (local, unchecked).
+     *
+     * Used by the owning worker for in-process access. Network requests must
+     * use the requester-checked overload.
      */
     auto fetch(int64_t rref_id) -> Tensor;
 
     /**
-     * @brief Delete a stored tensor (remote GC).
+     * @brief Fetch a stored tensor, enforcing ownership.
+     *
+     * @throws std::runtime_error if the id is unknown or @p requester is not the
+     *         worker that owns the entry.
+     */
+    auto fetch(int64_t rref_id, int32_t requester) -> Tensor;
+
+    /**
+     * @brief Delete a stored tensor (local, unchecked).
      */
     auto remove(int64_t rref_id) -> void;
 
+    /**
+     * @brief Delete a stored tensor, enforcing ownership (remote GC).
+     *
+     * A no-op if the id is unknown (idempotent GC).
+     * @throws std::runtime_error if the entry exists but @p requester is not its
+     *         owner.
+     */
+    auto remove(int64_t rref_id, int32_t requester) -> void;
+
 private:
     RRefStore() = default;
+    struct Entry {
+        Tensor tensor;
+        int32_t owner{-1};  ///< Worker id permitted to fetch/delete over the wire.
+    };
     std::mutex mutex_;
-    std::unordered_map<int64_t, Tensor> store_;
+    std::unordered_map<int64_t, Entry> store_;
     std::atomic<int64_t> next_id_{0};
 };
 

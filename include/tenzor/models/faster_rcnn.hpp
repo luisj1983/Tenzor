@@ -90,7 +90,8 @@ public:
      * @param rpn_post_nms_top_n Post-NMS proposals (default: 1000)
      * @param rpn_nms_thresh RPN NMS threshold (default: 0.7)
      * @param roi_output_size ROI Align output size (default: 7)
-     * @param roi_spatial_scale Feature map scale (default: 1/16)
+     * @param roi_spatial_scale Feature map scale (default: 1/32, matching the
+     *        stride-32 ResNet C5 map returned by ResNet::forward_features)
      * @param roi_sampling_ratio ROI Align sampling ratio (default: 2)
      * @param roi_fg_iou_thresh ROI foreground IoU threshold (default: 0.5)
      * @param roi_bg_iou_thresh ROI background IoU threshold (default: 0.5)
@@ -116,7 +117,7 @@ public:
                int64_t rpn_post_nms_top_n = 1000,
                double rpn_nms_thresh = 0.7,
                int64_t roi_output_size = 7,
-               double roi_spatial_scale = 1.0 / 16.0,
+               double roi_spatial_scale = 1.0 / 32.0,
                int64_t roi_sampling_ratio = 2,
                double roi_fg_iou_thresh = 0.5,
                double roi_bg_iou_thresh = 0.5,

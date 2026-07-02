@@ -1515,7 +1515,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::permute_kernel(inputs[0], dims, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        // INT64_MIN sentinel = no dim supplied (no-arg squeeze => squeeze all).
+        // A real dim (including negative like -1) is normalized in the kernel;
+        // the old -1 default collided with "squeeze the last axis".
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
         return cuda::squeeze_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

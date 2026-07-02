@@ -7,14 +7,25 @@ layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Indices { int indices[]; };
 layout(binding = 2) buffer Output { float output_data[]; };
 
+// Per-dim decomposition: the index/output tensor may be smaller than the input
+// in every non-gather dimension (PyTorch allows index.size(d) <= input.size(d)
+// for d != dim), so a single flattened inner/outer stride is wrong. We decompose
+// the output index into per-dim coordinates using the index shape, then recompose
+// the input offset using the input's contiguous strides (dim coord replaced by the
+// gathered index). uvec4/ivec4 packing keeps the block std140-aligned.
 layout(push_constant) uniform PushConstants {
-    uint input_size;       // Total input size
-    uint output_size;      // Total output size
-    uint dim;              // Dimension to gather along
-    uint dim_size;         // Size of gather dim in indices/output (for decomposition)
-    uint inner_size;       // Product of dimensions after dim
-    uint outer_size;       // Product of dimensions before dim
-    uint input_dim_size;   // Size of gather dim in input (for bounds check + indexing)
+    uint output_size;      // total output/index elements (loop bound)
+    uint input_size;       // total input elements (OOB read guard)
+    uint ndim;             // number of dimensions (<= 8)
+    uint dim;              // dimension to gather along
+    uint input_dim_size;   // size of gather dim in input (bounds check + stride)
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    uvec4 idx_shape_0_3;   // index/output shape [0..3]
+    uvec4 idx_shape_4_7;   // index/output shape [4..7]
+    ivec4 in_stride_0_3;   // input contiguous strides [0..3]
+    ivec4 in_stride_4_7;   // input contiguous strides [4..7]
 } params;
 
 void main() {
@@ -23,12 +34,28 @@ void main() {
     if (out_idx >= params.output_size) {
         return;
     }
+    if (params.ndim > 8u) {
+        return;
+    }
 
-    // Decompose output index
-    uint outer_idx = out_idx / (params.inner_size * params.dim_size);
-    uint remainder = out_idx % (params.inner_size * params.dim_size);
-    uint dim_idx = remainder / params.inner_size;
-    uint inner_idx = remainder % params.inner_size;
+    uint ish[8];
+    ish[0] = max(params.idx_shape_0_3.x, 1u);
+    ish[1] = max(params.idx_shape_0_3.y, 1u);
+    ish[2] = max(params.idx_shape_0_3.z, 1u);
+    ish[3] = max(params.idx_shape_0_3.w, 1u);
+    ish[4] = max(params.idx_shape_4_7.x, 1u);
+    ish[5] = max(params.idx_shape_4_7.y, 1u);
+    ish[6] = max(params.idx_shape_4_7.z, 1u);
+    ish[7] = max(params.idx_shape_4_7.w, 1u);
+    int ist[8];
+    ist[0] = params.in_stride_0_3.x;
+    ist[1] = params.in_stride_0_3.y;
+    ist[2] = params.in_stride_0_3.z;
+    ist[3] = params.in_stride_0_3.w;
+    ist[4] = params.in_stride_4_7.x;
+    ist[5] = params.in_stride_4_7.y;
+    ist[6] = params.in_stride_4_7.z;
+    ist[7] = params.in_stride_4_7.w;
 
     // Get the index to gather from
     int gather_idx = indices[out_idx];
@@ -42,10 +69,21 @@ void main() {
         return;
     }
 
-    // Compute input index using input_dim_size for the gather dimension stride
-    uint in_idx = outer_idx * (params.input_dim_size * params.inner_size) +
-                  uint(gather_idx) * params.inner_size +
-                  inner_idx;
+    // Decompose the output/index linear position into per-dim coordinates
+    // (row-major), then recompose the input offset using the input strides.
+    uint remaining = out_idx;
+    int in_off = 0;
+    for (int d = int(params.ndim) - 1; d >= 0; --d) {
+        uint coord = remaining % ish[d];
+        remaining /= ish[d];
+        uint c = (uint(d) == params.dim) ? uint(gather_idx) : coord;
+        in_off += int(c) * ist[d];
+    }
 
-    output_data[out_idx] = input_data[in_idx];
+    if (in_off < 0 || uint(in_off) >= params.input_size) {
+        output_data[out_idx] = 0.0;
+        return;
+    }
+
+    output_data[out_idx] = input_data[uint(in_off)];
 }

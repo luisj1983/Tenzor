@@ -165,17 +165,13 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Key: (batch, num_heads, seq_len_k, head_dim)
     // Value: (batch, num_heads, seq_len_k, head_dim)
 
-    // Per docs/internals/attention-contract.md: passing both is_causal and an
-    // explicit attn_mask is ambiguous (PyTorch errors here). Reject early so
-    // the manual BMM path's additive double-masking can't silently produce
-    // half-correct results that disagree with the fused/cuDNN paths.
-    if (is_causal_ && attn_mask.is_valid() && attn_mask.shape().size() > 0) {
-        throw std::invalid_argument(
-            "MultiheadAttention: is_causal=true and attn_mask are mutually exclusive. "
-            "Pass exactly one. (Use is_causal for triangular masking; use attn_mask "
-            "for arbitrary additive masks.)");
-    }
-
+    // NOTE: The is_causal / explicit-attn_mask mutual-exclusion check lives in
+    // MultiheadAttention::forward(), gated on the USER-supplied attn_mask
+    // argument. It cannot live here: `attn_mask` at this level is the COMBINED
+    // mask, which legitimately carries a folded key_padding_mask alongside
+    // is_causal. The manual BMM path below applies the causal triangular mask
+    // and this additive mask together (both additive), so a padding-only mask
+    // coexists correctly with causal masking.
     auto q_shape = query.shape();
     int64_t batch_size = q_shape[0];
     int64_t num_heads = q_shape[1];
@@ -254,9 +250,10 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // unmasked / unbiased result. Exclude those calls here (mirroring the
     // fused-CPU gate at ~202 and the flash gate at ~324, which carve themselves
     // out when a mask is present) so they fall through to the manual BMM path
-    // below, which applies position_bias (~413) and attn_mask (~441). Note
-    // is_causal_ and attn_mask are mutually exclusive (rejected at ~172) and
-    // cuDNN handles causal natively, so only the bias/mask presence matters.
+    // below, which applies position_bias (~413) and attn_mask (~441). A
+    // user-supplied attn_mask is rejected together with is_causal in forward();
+    // a folded padding-only mask may still reach here with is_causal, so gating
+    // this fast path on mask/bias presence (below) keeps it correct.
     bool has_attn_mask = attn_mask.is_valid() && attn_mask.shape().size() > 0;
     bool has_position_bias = position_bias.is_valid() && position_bias.shape().size() > 0;
     bool can_use_cudnn_sdpa = !need_weights &&
@@ -588,6 +585,20 @@ auto MultiheadAttention::forward(const Variable& query,
         throw std::invalid_argument("MultiheadAttention: query embed_dim (" +
             std::to_string(q_shape[2]) + ") != expected (" + std::to_string(embed_dim_) + ")");
     }
+    // Per docs/internals/attention-contract.md: passing both is_causal and an
+    // explicit USER attn_mask is ambiguous (PyTorch errors here). Reject it at
+    // this level, where the user's attn_mask argument is distinguishable from a
+    // key_padding_mask. A key_padding_mask MAY be combined with is_causal — it
+    // is folded into a padding-only additive mask below and applied alongside
+    // the causal triangular mask in the manual BMM path.
+    if (is_causal_ && attn_mask.is_valid() && attn_mask.shape().size() > 0) {
+        throw std::invalid_argument(
+            "MultiheadAttention: is_causal=true and an explicit attn_mask are "
+            "mutually exclusive. Pass exactly one. (Use is_causal for triangular "
+            "masking; use attn_mask for arbitrary additive masks. A "
+            "key_padding_mask may be combined with is_causal.)");
+    }
+
     int64_t batch_size = q_shape[0];
     int64_t seq_len_q = q_shape[1];
     int64_t seq_len_k = k_shape[1];

@@ -613,18 +613,25 @@ auto LogSumExpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
-    // Determine dim from saved_tensors_[2]
-    int64_t dim = saved_tensors_[2].data<int64_t>()[0];
-    if (dim < 0) dim += input.shape().size();
-
-    bool keepdim = (lse_out.ndim() == input.ndim());
-
     // softmax(input, dim) = exp(input - logsumexp(input, dim))
     auto lse_expanded = lse_out;
     auto grad_expanded = grad;
-    if (!keepdim) {
-        lse_expanded = unsqueeze(lse_out, dim);
-        grad_expanded = unsqueeze(grad, dim);
+    if (saved_tensors_.size() > 2) {
+        // Reduction along a specific dim (dim saved as saved_tensors_[2]).
+        int64_t dim = saved_tensors_[2].data<int64_t>()[0];
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+        bool keepdim = (lse_out.ndim() == input.ndim());
+        if (!keepdim) {
+            lse_expanded = unsqueeze(lse_out, dim);
+            grad_expanded = unsqueeze(grad, dim);
+        }
+    } else {
+        // Global (no-dim) reduction: lse and grad are scalars. Reshape to a
+        // rank-matching all-ones shape before broadcasting to the input,
+        // instead of reading a non-existent saved dim (OOB).
+        std::vector<int64_t> ones(input.ndim(), 1);
+        lse_expanded = reshape(lse_out, ones);
+        grad_expanded = reshape(grad, ones);
     }
     lse_expanded = expand(lse_expanded, input_shape_vec);
     grad_expanded = expand(grad_expanded, input_shape_vec);
@@ -646,12 +653,20 @@ auto LogSumExpBackward::backward_with_variables(std::vector<Variable> grad_outpu
     const auto& lse_out = saved_tensors_[1];
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
-    int64_t dim = saved_tensors_[2].data<int64_t>()[0];
-    if (dim < 0) dim += input.shape().size();
+    // saved_tensors_[2] holds the reduction dim only for the per-dim case;
+    // a global (no-dim) logsumexp saves just {input, lse_out}. Guard the read
+    // (the sibling reductions do) and broadcast scalars for the global case.
+    const bool has_dim = saved_tensors_.size() > 2;
+    int64_t dim = 0;
+    if (has_dim) {
+        dim = saved_tensors_[2].data<int64_t>()[0];
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+    }
     bool keepdim = (lse_out.ndim() == input.ndim());
+    std::vector<int64_t> ones(input.ndim(), 1);
 
     Variable softmax_var;
-    if (has_saved_variables()) {
+    if (has_saved_variables() && has_dim) {
         // Variable-level: lse = logsumexp(input, dim, keepdim); softmax =
         // exp(input - expand(lse)). grad_fn chains back through input.
         auto lse_v = tenzor::logsumexp(saved_variables_[0], dim, keepdim);
@@ -662,8 +677,10 @@ auto LogSumExpBackward::backward_with_variables(std::vector<Variable> grad_outpu
         softmax_var = tenzor::exp(saved_variables_[0] - lse_v);
     } else {
         auto lse_expanded = lse_out;
-        if (!keepdim) {
-            lse_expanded = unsqueeze(lse_out, dim);
+        if (has_dim) {
+            if (!keepdim) lse_expanded = unsqueeze(lse_out, dim);
+        } else {
+            lse_expanded = reshape(lse_out, ones);
         }
         lse_expanded = expand(lse_expanded, input_shape_vec);
         auto softmax_val = exp(sub(input, lse_expanded));
@@ -672,8 +689,10 @@ auto LogSumExpBackward::backward_with_variables(std::vector<Variable> grad_outpu
 
     // Expand grad at Variable level
     auto grad_var = grad_outputs[0];
-    if (!keepdim) {
-        grad_var = tenzor::unsqueeze(grad_var, dim);
+    if (has_dim) {
+        if (!keepdim) grad_var = tenzor::unsqueeze(grad_var, dim);
+    } else {
+        grad_var = tenzor::reshape(grad_var, ones);
     }
     grad_var = tenzor::expand(grad_var, input_shape_vec);
 

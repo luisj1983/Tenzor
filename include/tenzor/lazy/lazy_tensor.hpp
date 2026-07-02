@@ -251,26 +251,44 @@ private:
     /// expired (a chain of merges collapses to the final base). Returns `this`
     /// when there is no live canonical override.
     auto canonical() const -> const LazyGraph* {
-        const LazyGraph* g = this;
-        // Bounded by merge depth; each hop strictly advances to the absorbing
-        // base, and bases never point back, so this terminates.
-        while (auto next = g->canonical_.lock()) {
-            if (next.get() == g) break;  // defensive: self-reference
-            g = next.get();
+        // Follow canonical_ to the absorbing base. A well-formed merge chain is
+        // acyclic, but guard against a corrupted multi-node cycle (A->B->A)
+        // with Floyd's slow/fast walk so a bad chain terminates instead of
+        // spinning forever. Allocation-free (this can be on a hot path).
+        const LazyGraph* slow = this;
+        const LazyGraph* fast = this;
+        while (true) {
+            auto n1 = fast->canonical_.lock();
+            if (!n1 || n1.get() == fast) return fast;  // reached base
+            fast = n1.get();
+            auto n2 = fast->canonical_.lock();
+            if (!n2 || n2.get() == fast) return fast;
+            fast = n2.get();
+            auto sn = slow->canonical_.lock();
+            slow = sn ? sn.get() : slow;
+            if (slow == fast) return fast;  // cycle detected; stop
         }
-        return g;
     }
 
     /// Mutable canonical resolver. New nodes must be appended to the canonical
     /// graph (the one flush()/nodes() follow); appending to a stale, absorbed
     /// operand's nodes_ would strand the node so it is never materialised.
     auto canonical_mut() -> LazyGraph* {
-        LazyGraph* g = this;
-        while (auto next = g->canonical_.lock()) {
-            if (next.get() == g) break;
-            g = next.get();
+        // See canonical(): Floyd's slow/fast walk terminates even on a
+        // corrupted multi-node cycle.
+        LazyGraph* slow = this;
+        LazyGraph* fast = this;
+        while (true) {
+            auto n1 = fast->canonical_.lock();
+            if (!n1 || n1.get() == fast) return fast;
+            fast = n1.get();
+            auto n2 = fast->canonical_.lock();
+            if (!n2 || n2.get() == fast) return fast;
+            fast = n2.get();
+            auto sn = slow->canonical_.lock();
+            slow = sn ? sn.get() : slow;
+            if (slow == fast) return fast;
         }
-        return g;
     }
 
     /// Execute a single node given materialized inputs.

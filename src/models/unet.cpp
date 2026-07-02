@@ -132,6 +132,20 @@ auto Up::forward(const Variable& input, const Variable& skip) -> Variable
         x = up_->forward(input);
     }
 
+    // Reconcile spatial dims with the skip connection before concatenation.
+    // The transposed-conv upsample doubles H,W exactly, but when the encoder
+    // downsampled an odd dimension the decoder feature ends up off by a pixel
+    // from the skip tensor, which makes the channel-dim cat fail. Resize x to
+    // the skip's H,W (autograd-aware bilinear), mirroring the bilinear branch
+    // which already targets the skip resolution. No-op when already equal.
+    {
+        auto skip_shape = skip.tensor().shape();
+        auto x_shape = x.tensor().shape();
+        if (x_shape[2] != skip_shape[2] || x_shape[3] != skip_shape[3]) {
+            x = nn::upsample_bilinear(x, skip_shape[2], skip_shape[3]);
+        }
+    }
+
     // Concatenate with skip connection along channel dimension (dim=1)
     // Input: x [N, C1, H, W], skip [N, C2, H, W]
     // Output: [N, C1+C2, H, W]

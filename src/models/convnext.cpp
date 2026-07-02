@@ -67,9 +67,14 @@ ConvNeXtBlock::ConvNeXtBlock(int64_t dim,
         hidden_dim, dim, 1, 1, 0, 1, 1, true);  // with bias
     register_module("pwconv2", pwconv2_);
 
-    // Layer Scale
-    gamma_ = std::make_shared<LayerScale>(dim, layer_scale_init_value);
-    register_module("gamma", gamma_);
+    // Layer Scale. Register `gamma` as a parameter directly on the block with
+    // the flat shape [dim] so its state-dict key is "...gamma" (matching timm),
+    // rather than the nested "...gamma.gamma" produced by a LayerScale
+    // submodule. It is reshaped to [dim, 1, 1] at use to broadcast over NCHW.
+    auto gamma_tensor = Tensor({dim}, DType::Float32, Device::cpu());
+    gamma_tensor.fill_(static_cast<float>(layer_scale_init_value));
+    gamma_ = Variable(gamma_tensor, true);  // requires_grad=true
+    register_parameter("gamma", gamma_);
 
     // Stochastic depth (drop path). Use the shared nn::DropPath module for
     // per-sample, train/eval-gated, seedable masking (matches EfficientNet/Swin).
@@ -106,8 +111,15 @@ auto ConvNeXtBlock::forward_impl(const Variable& input) -> Variable {
     // Pointwise projection
     x = pwconv2_->forward(x);
 
-    // Layer Scale
-    x = gamma_->forward(x);
+    // Layer Scale. gamma_ is stored flat as [dim]; reshape to [dim, 1, 1] so it
+    // broadcasts over the NCHW activation. Cast/move via autograd-aware helpers
+    // so the gradient flows back to the registered leaf parameter (rewrapping a
+    // raw tensor would sever the grad chain and gamma would never train).
+    Variable g = gamma_;
+    if (g.device() != x.device()) g = tenzor::to_device(g, x.device());
+    if (g.dtype() != x.dtype()) g = nn::variable_cast(g, x.dtype());
+    g = tenzor::reshape(g, std::vector<int64_t>{x.shape()[1], 1, 1});
+    x = x * g;
 
     // Stochastic depth (drop path) applied to the residual branch.
     // nn::DropPath handles train/eval gating internally (identity in eval) and

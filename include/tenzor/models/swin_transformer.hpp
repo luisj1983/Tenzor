@@ -211,11 +211,38 @@ public:
     auto forward_impl(const Variable& input) -> Variable override;
 
     /**
+     * @brief Run only the transformer blocks of this stage (no downsampling).
+     *
+     * Returns the per-stage feature at the stage's INPUT resolution / channel
+     * count, i.e. the feature BEFORE the optional PatchMerging downsample. Used
+     * by SwinTransformer::forward_features to honor the documented pre-downsample
+     * per-stage feature contract.
+     */
+    auto forward_blocks(const Variable& input) -> Variable;
+
+    /**
+     * @brief Apply this stage's downsample (PatchMerging) if present, else identity.
+     */
+    auto apply_downsample(const Variable& x) -> Variable;
+
+    /**
      * @brief Get output resolution after this stage.
      */
     auto output_resolution() const -> std::pair<int64_t, int64_t> {
         return output_resolution_;
     }
+
+    /**
+     * @brief Get input resolution (before this stage's downsample).
+     */
+    auto input_resolution() const -> std::pair<int64_t, int64_t> {
+        return input_resolution_;
+    }
+
+    /**
+     * @brief Get input channel count (before this stage's downsample).
+     */
+    auto dim() const -> int64_t { return dim_; }
 
     /**
      * @brief Enable or disable gradient checkpointing.

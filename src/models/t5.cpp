@@ -255,8 +255,9 @@ auto T5Attention::forward_impl(const Variable& input) -> Variable {
 // ============================================================================
 
 T5LayerNorm::T5LayerNorm(int64_t d_model, double eps) {
-    layer_norm_ = std::make_shared<nn::LayerNorm>(
-        std::vector<int64_t>{d_model}, eps);
+    // T5 uses RMSNorm (root-mean-square normalization with a learnable scale and
+    // no bias / no mean subtraction), NOT standard LayerNorm.
+    layer_norm_ = std::make_shared<nn::RMSNorm>(d_model, eps);
     register_module("layer_norm", layer_norm_);
 }
 
@@ -270,25 +271,47 @@ auto T5LayerNorm::forward_impl(const Variable& input) -> Variable {
 
 T5DenseActDense::T5DenseActDense(const T5Config& config)
     : config_(config) {
-    wi_ = std::make_shared<nn::Linear>(config.d_model, config.d_ff, false);
+    // T5.1.1 uses a gated FFN with two separate input projections (wi_0, wi_1);
+    // standard T5 uses a single input projection (wi). Only construct/register
+    // the projections that the selected variant actually uses so the loaded
+    // checkpoint's key set matches.
+    if (config.is_gated_act) {
+        wi_0_ = std::make_shared<nn::Linear>(config.d_model, config.d_ff, false);
+        wi_1_ = std::make_shared<nn::Linear>(config.d_model, config.d_ff, false);
+        register_module("wi_0", wi_0_);
+        register_module("wi_1", wi_1_);
+    } else {
+        wi_ = std::make_shared<nn::Linear>(config.d_model, config.d_ff, false);
+        register_module("wi", wi_);
+    }
     wo_ = std::make_shared<nn::Linear>(config.d_ff, config.d_model, false);
     dropout_ = std::make_shared<nn::Dropout>(config.dropout_rate);
 
-    register_module("wi", wi_);
     register_module("wo", wo_);
     register_module("dropout", dropout_);
 }
 
 auto T5DenseActDense::forward_impl(const Variable& input) -> Variable {
-    auto h = wi_->forward(input);
+    // Select the activation used by both the gated and non-gated paths.
+    auto activate = [this](const Variable& x) -> Variable {
+        if (config_.dense_act_fn == "gelu" ||
+            config_.dense_act_fn == "gelu_new" ||
+            config_.dense_act_fn == "gated-gelu") {
+            return nn::gelu(x);
+        }
+        // Default (standard T5) is ReLU.
+        return nn::relu(x);
+    };
 
-    // Apply activation (ReLU for standard T5)
-    if (config_.dense_act_fn == "relu") {
-        h = nn::relu(h);
-    } else if (config_.dense_act_fn == "gelu") {
-        h = nn::gelu(h);
+    Variable h;
+    if (config_.is_gated_act) {
+        // T5.1.1 gated FFN: wo(act(wi_0(x)) * wi_1(x)).
+        auto gate = activate(wi_0_->forward(input));
+        auto linear = wi_1_->forward(input);
+        h = gate * linear;
     } else {
-        h = nn::relu(h);  // Default to ReLU
+        // Standard T5 FFN: wo(act(wi(x))).
+        h = activate(wi_->forward(input));
     }
 
     h = dropout_->forward(h);
@@ -416,13 +439,28 @@ auto T5Encoder::forward(const Variable& input_ids,
     auto hidden_states = shared_embeddings_->forward(input_ids);
     hidden_states = dropout_->forward(hidden_states);
 
+    // T5 attention adds the mask additively to the raw Q·Kᵀ scores. The
+    // incoming attention_mask follows the HuggingFace convention: shape
+    // (B, src_len), 1=keep, 0=mask. Convert binary → {0, -1e9} via
+    // (mask - 1) * 1e9 and reshape to (B, 1, 1, src_len) so it broadcasts over
+    // the head and query dims of the (B, num_heads, src_len, src_len) scores.
+    // Adding the raw (B, src_len) mask directly would broadcast incorrectly.
+    Tensor additive_mask = attention_mask;
+    if (attention_mask.is_valid() && attention_mask.numel() > 0) {
+        const int64_t B = attention_mask.shape()[0];
+        const int64_t S = attention_mask.shape()[1];
+        const DType dtype = hidden_states.tensor().dtype();
+        Tensor pad = attention_mask.to(dtype).to(hidden_states.tensor().device());
+        additive_mask = ((pad - 1.0) * 1e9).reshape({B, 1, 1, S});
+    }
+
     // Pass through encoder blocks. position_bias is computed (grad-tracked) in
     // the first layer and threaded as a Variable into every later layer so all
     // layers' gradients accumulate into the layer-0 relative bias embedding.
     Variable position_bias;  // Computed in first layer, reused in rest
     for (size_t i = 0; i < blocks_.size(); ++i) {
         auto [output, self_bias, cross_bias] = blocks_[i]->forward(
-            hidden_states, Variable{}, attention_mask, Tensor{}, position_bias, Variable{}
+            hidden_states, Variable{}, additive_mask, Tensor{}, position_bias, Variable{}
         );
         hidden_states = output;
         if (i == 0) {
@@ -555,6 +593,20 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
         combined_mask = causal_4d + pad_additive;  // (B, 1, T, T) via broadcast
     }
 
+    // Cross-attention mask: the encoder_attention_mask is the HuggingFace
+    // binary (B, src_len) padding mask over the encoder memory. Convert it to
+    // the same additive (B, 1, 1, src_len) form as the encoder self-attention
+    // mask so it broadcasts over the (B, num_heads, tgt_len, src_len)
+    // cross-attention scores instead of being added as a raw 2D tensor.
+    Tensor encoder_additive_mask = encoder_attention_mask;
+    if (encoder_attention_mask.is_valid() && encoder_attention_mask.numel() > 0) {
+        const int64_t B = encoder_attention_mask.shape()[0];
+        const int64_t S = encoder_attention_mask.shape()[1];
+        const DType dtype = hidden_states.tensor().dtype();
+        Tensor pad = encoder_attention_mask.to(dtype).to(hidden_states.tensor().device());
+        encoder_additive_mask = ((pad - 1.0) * 1e9).reshape({B, 1, 1, S});
+    }
+
     // Pass through decoder blocks. Both biases are grad-tracked Variables
     // threaded from layer 0 so every layer's gradient reaches the layer-0
     // relative bias embedding (self-attention bias; cross-attention has no
@@ -564,7 +616,7 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
     for (size_t i = 0; i < blocks_.size(); ++i) {
         auto [output, self_bias, cross_bias] = blocks_[i]->forward(
             hidden_states, encoder_hidden_states, combined_mask,
-            encoder_attention_mask, position_bias, encoder_position_bias
+            encoder_additive_mask, position_bias, encoder_position_bias
         );
         hidden_states = output;
         if (i == 0) {
@@ -650,6 +702,13 @@ T5ForConditionalGeneration::T5ForConditionalGeneration(const T5Config& config)
 
     register_module("t5", t5_);
     register_module("lm_head", lm_head_);
+
+    // Tie the LM head weight to the shared token embedding (HuggingFace T5
+    // shares these by default). The embedding weight is [vocab, d_model] and
+    // the Linear(d_model, vocab) weight is [vocab, d_model], so the exact same
+    // parameter shared_ptr can back both — gradients accumulate into one tensor.
+    lm_head_->register_parameter_shared(
+        "weight", t5_->shared_embeddings()->get_parameter("weight"));
 }
 
 auto T5ForConditionalGeneration::forward(const Variable& input_ids,
@@ -662,7 +721,11 @@ auto T5ForConditionalGeneration::forward(const Variable& input_ids,
 
     auto outputs = t5_->forward(input_ids, decoder_input_ids,
                                 attention_mask, decoder_attention_mask);
-    auto logits = lm_head_->forward(outputs.decoder_output);
+    // T5 rescales the decoder output by d_model^-0.5 before the LM head. This
+    // compensates for the shared-embedding scale when the head weight is tied
+    // to the token embeddings (HuggingFace T5 applies this whenever tied).
+    const double head_scale = std::pow(static_cast<double>(config_.d_model), -0.5);
+    auto logits = lm_head_->forward(outputs.decoder_output * head_scale);
 
     // Call forward post-hooks (enables CPU-start offloading)
     call_forward_post_hooks();
@@ -722,7 +785,9 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
         // Decode against the cached encoder memory, then project with the LM
         // head — equivalent to the combined forward() but without re-encoding.
         auto decoder_output = decoder->forward(decoder_ids, encoder_output, Tensor{}, attention_mask);
-        auto logits = lm_head_->forward(decoder_output);
+        // Match forward(): rescale by d_model^-0.5 before the tied LM head.
+        const double head_scale = std::pow(static_cast<double>(config_.d_model), -0.5);
+        auto logits = lm_head_->forward(decoder_output * head_scale);
 
         // Get logits for last position
         auto last_logits_shape = logits.shape();

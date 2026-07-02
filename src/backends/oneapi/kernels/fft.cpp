@@ -293,6 +293,12 @@ auto fft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
             std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
+            // In-place C2C output shares the input's contiguous-per-transform
+            // layout. BWD_DISTANCE defaults to 1, which for batch_size > 1 would
+            // overwrite every transform after the first; mirror the FWD layout.
+            std::vector<std::int64_t> bwd_strides = {0, 1};
+            desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
+            desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
             desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 
@@ -379,6 +385,12 @@ auto fft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
             std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
+            // In-place C2C output shares the input's contiguous-per-transform
+            // layout. BWD_DISTANCE defaults to 1, which for batch_size > 1 would
+            // overwrite every transform after the first; mirror the FWD layout.
+            std::vector<std::int64_t> bwd_strides = {0, 1};
+            desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
+            desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
             desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 

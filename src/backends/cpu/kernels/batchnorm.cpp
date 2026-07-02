@@ -73,9 +73,14 @@ static void batchnorm_mean_var_simd_f32(
     for (int64_t c = 0; c < C; c++) {
         // Welford accumulators: each SIMD lane tracks its own (mean, m2, count).
         // All 8 lanes share the same count since they advance in lockstep.
-        __m256 vmean = _mm256_setzero_ps();
-        __m256 vm2 = _mm256_setzero_ps();
-        int64_t lane_count = 0;
+        // Accumulate per lane in DOUBLE: a float mean and a float lane count
+        // both stall once the per-channel element count exceeds 2^24, diverging
+        // from the scalar/double reference. 8 float lanes -> two __m256d halves.
+        __m256d vmean_lo = _mm256_setzero_pd();
+        __m256d vmean_hi = _mm256_setzero_pd();
+        __m256d vm2_lo = _mm256_setzero_pd();
+        __m256d vm2_hi = _mm256_setzero_pd();
+        double lane_count = 0.0;
 
         // Single scalar Welford state for the (spatial_size % 8) tail of every
         // batch, accumulated in the SAME n-loop as the SIMD body so the input is
@@ -87,15 +92,22 @@ static void batchnorm_mean_var_simd_f32(
             const float* ch_ptr = input + (n * C + c) * spatial_size;
             int64_t i = 0;
 
-            // Process 8 consecutive floats at a time with Welford's update
+            // Process 8 consecutive floats at a time with Welford's update,
+            // widening to double for the two 4-lane halves.
             for (; i + 8 <= spatial_size; i += 8) {
                 __m256 v = _mm256_loadu_ps(ch_ptr + i);
-                lane_count++;
-                __m256 vcount = _mm256_set1_ps(static_cast<float>(lane_count));
-                __m256 delta = _mm256_sub_ps(v, vmean);
-                vmean = _mm256_add_ps(vmean, _mm256_div_ps(delta, vcount));
-                __m256 delta2 = _mm256_sub_ps(v, vmean);
-                vm2 = _mm256_fmadd_ps(delta, delta2, vm2);
+                __m256d v_lo = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
+                __m256d v_hi = _mm256_cvtps_pd(_mm256_extractf128_ps(v, 1));
+                lane_count += 1.0;
+                __m256d vcount = _mm256_set1_pd(lane_count);
+                __m256d delta_lo = _mm256_sub_pd(v_lo, vmean_lo);
+                __m256d delta_hi = _mm256_sub_pd(v_hi, vmean_hi);
+                vmean_lo = _mm256_add_pd(vmean_lo, _mm256_div_pd(delta_lo, vcount));
+                vmean_hi = _mm256_add_pd(vmean_hi, _mm256_div_pd(delta_hi, vcount));
+                __m256d delta2_lo = _mm256_sub_pd(v_lo, vmean_lo);
+                __m256d delta2_hi = _mm256_sub_pd(v_hi, vmean_hi);
+                vm2_lo = _mm256_fmadd_pd(delta_lo, delta2_lo, vm2_lo);
+                vm2_hi = _mm256_fmadd_pd(delta_hi, delta2_hi, vm2_hi);
             }
 
             // Fold this batch's tail elements into the running scalar Welford
@@ -113,10 +125,12 @@ static void batchnorm_mean_var_simd_f32(
         //   combined_mean = (mean_a * n_a + mean_b * n_b) / (n_a + n_b)
         //   combined_m2 = m2_a + m2_b + delta^2 * n_a * n_b / (n_a + n_b)
         // All lanes have the same count (lane_count).
-        alignas(32) float lane_means[8];
-        alignas(32) float lane_m2s[8];
-        _mm256_store_ps(lane_means, vmean);
-        _mm256_store_ps(lane_m2s, vm2);
+        alignas(32) double lane_means[8];
+        alignas(32) double lane_m2s[8];
+        _mm256_store_pd(lane_means, vmean_lo);
+        _mm256_store_pd(lane_means + 4, vmean_hi);
+        _mm256_store_pd(lane_m2s, vm2_lo);
+        _mm256_store_pd(lane_m2s + 4, vm2_hi);
 
         // The horizontal merge and the final division run once per channel, so
         // accumulate them in double: float combined_n would round once the

@@ -262,6 +262,27 @@ auto histogram(const Tensor& input, int64_t bins, double min_val, double max_val
     }
 
     auto inp = input.contiguous();
+
+    // Resolve the range. Per the documented contract, min == max means "use the
+    // data range"; compute it here so the range is concrete before we can guard
+    // against a degenerate (zero-width) range, which would otherwise produce a
+    // div-by-zero bin width in the backend Histogram kernel.
+    if (min_val == max_val) {
+        if (inp.numel() == 0) {
+            min_val = 0.0;
+            max_val = 1.0;
+        } else {
+            min_val = tenzor::min(inp).to(DType::Float64).item<double>();
+            max_val = tenzor::max(inp).to(DType::Float64).item<double>();
+        }
+    }
+    // Degenerate range (all values equal, or the resolved data range has zero
+    // width): widen by 0.5 on each side, matching torch.histogram.
+    if (min_val == max_val) {
+        min_val -= 0.5;
+        max_val += 0.5;
+    }
+
     std::array<Tensor, 1> inputs = {inp};
     NewOpAttributes attrs;
     attrs.set(AttrKey::NumBins, bins);
@@ -721,10 +742,10 @@ auto corrcoef(const Tensor& input) -> Tensor {
     auto c = tenzor::cov(work);
 
     if (work.ndim() == 1) {
-        // cov(1D) is (1,1); correlation of a single variable with itself
-        // is 1. Preserve that shape so the result is parallel to the
-        // 2D case (N×N) with N=1.
-        auto r = tenzor::full({1, 1}, 1.0, work.dtype(), work.device());
+        // Correlation of a single variable with itself is 1. torch.corrcoef
+        // returns a 0-dim scalar (not a (1,1) matrix) for 1-D input, so emit a
+        // scalar to match.
+        auto r = tenzor::full({}, 1.0, work.dtype(), work.device());
         return needs_widen ? r.to(src_dtype) : r;
     }
 

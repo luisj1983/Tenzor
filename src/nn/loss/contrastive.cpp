@@ -154,6 +154,10 @@ auto InfoNCELoss::forward(const Variable& queries, const Variable& keys) -> Vari
     // Negative pairs: all other combinations
 
     auto batch_shape = queries.shape();
+    if (batch_shape.size() < 2 || batch_shape[0] <= 0) {
+        throw std::invalid_argument(
+            "InfoNCELoss: expects 2D [N, D] embeddings with N > 0");
+    }
     int64_t batch_size = batch_shape[0];
 
     // Compute cosine similarity matrix: (N, N)
@@ -193,6 +197,10 @@ auto NTXentLoss::forward(const Variable& z_i, const Variable& z_j) -> Variable {
     // Positive pairs: (z_i[k], z_j[k]) and (z_j[k], z_i[k]) for all k
 
     auto batch_shape = z_i.shape();
+    if (batch_shape.size() < 2 || batch_shape[0] <= 0) {
+        throw std::invalid_argument(
+            "NTXentLoss: expects 2D [N, D] embeddings with N > 0");
+    }
     int64_t batch_size = batch_shape[0];
 
     // Concatenate both views

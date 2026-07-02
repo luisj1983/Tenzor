@@ -618,9 +618,9 @@ void adaptive_avgpool2d_impl(const T* in_data, T* out_data,
             for (int64_t oh = 0; oh < output_h; ++oh) {
                 for (int64_t ow = 0; ow < output_w; ++ow) {
                     int64_t h_start = (oh * H) / output_h;
-                    int64_t h_end = ((oh + 1) * H) / output_h;
+                    int64_t h_end = ((oh + 1) * H + output_h - 1) / output_h;  // ceil: PyTorch adaptive-pool window end
                     int64_t w_start = (ow * W) / output_w;
-                    int64_t w_end = ((ow + 1) * W) / output_w;
+                    int64_t w_end = ((ow + 1) * W + output_w - 1) / output_w;  // ceil: PyTorch adaptive-pool window end
 
                     Compute sum = Compute(0);
                     int64_t count = 0;
@@ -683,9 +683,9 @@ void adaptive_avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
             for (int64_t oh = 0; oh < output_h; ++oh) {
                 for (int64_t ow = 0; ow < output_w; ++ow) {
                     int64_t h_start = (oh * H) / output_h;
-                    int64_t h_end = ((oh + 1) * H) / output_h;
+                    int64_t h_end = ((oh + 1) * H + output_h - 1) / output_h;  // ceil: PyTorch adaptive-pool window end
                     int64_t w_start = (ow * W) / output_w;
-                    int64_t w_end = ((ow + 1) * W) / output_w;
+                    int64_t w_end = ((ow + 1) * W + output_w - 1) / output_w;  // ceil: PyTorch adaptive-pool window end
 
                     int64_t count = (h_end - h_start) * (w_end - w_start);
                     if (count <= 0) continue;
@@ -748,9 +748,9 @@ void adaptive_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
             for (int64_t oh = 0; oh < output_h; ++oh) {
                 for (int64_t ow = 0; ow < output_w; ++ow) {
                     int64_t h_start = (oh * H) / output_h;
-                    int64_t h_end = ((oh + 1) * H) / output_h;
+                    int64_t h_end = ((oh + 1) * H + output_h - 1) / output_h;  // ceil: PyTorch adaptive-pool window end
                     int64_t w_start = (ow * W) / output_w;
-                    int64_t w_end = ((ow + 1) * W) / output_w;
+                    int64_t w_end = ((ow + 1) * W + output_w - 1) / output_w;  // ceil: PyTorch adaptive-pool window end
 
                     Compute max_val = -std::numeric_limits<Compute>::infinity();
                     int64_t max_idx = 0;
@@ -912,6 +912,20 @@ auto maxpool1d_forward_kernel(const Tensor& input_orig, int64_t kernel_size,
     int64_t N = shape[0];
     int64_t C = shape[1];
     int64_t L = shape[2];
+
+    // PyTorch semantics: padding must not exceed half the effective kernel size,
+    // else a window can lie entirely in the padded region, leaving max_val=-inf
+    // and max_idx=0 which corrupts the backward scatter into input element 0.
+    // maxpool2d validates this; mirror it here.
+    {
+        int64_t effective_kernel = dilation * (kernel_size - 1) + 1;
+        if (2 * padding > effective_kernel) {
+            throw std::runtime_error(
+                "maxpool1d: padding (" + std::to_string(padding) +
+                ") should be at most half of the effective kernel size (" +
+                std::to_string(effective_kernel) + ")");
+        }
+    }
 
     int64_t L_out = (L + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
@@ -1149,7 +1163,7 @@ void adaptive_avgpool1d_impl(const T* in_data, T* out_data,
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t ol = 0; ol < L_out; ++ol) {
                 int64_t l_start = (ol * L) / L_out;
-                int64_t l_end = ((ol + 1) * L) / L_out;
+                int64_t l_end = ((ol + 1) * L + L_out - 1) / L_out;  // ceil: PyTorch adaptive-pool window end
 
                 Compute sum = Compute(0);
                 int64_t count = l_end - l_start;
@@ -1199,7 +1213,7 @@ void adaptive_avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t ol = 0; ol < L_out; ++ol) {
                 int64_t l_start = (ol * L) / L_out;
-                int64_t l_end = ((ol + 1) * L) / L_out;
+                int64_t l_end = ((ol + 1) * L + L_out - 1) / L_out;  // ceil: PyTorch adaptive-pool window end
 
                 int64_t count = l_end - l_start;
                 if (count <= 0) continue;
@@ -1256,7 +1270,7 @@ void adaptive_maxpool1d_impl(const T* in_data, T* out_data, int64_t* idx_data,
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t ol = 0; ol < L_out; ++ol) {
                 int64_t l_start = (ol * L) / L_out;
-                int64_t l_end = ((ol + 1) * L) / L_out;
+                int64_t l_end = ((ol + 1) * L + L_out - 1) / L_out;  // ceil: PyTorch adaptive-pool window end
 
                 Compute max_val = -std::numeric_limits<Compute>::infinity();
                 int64_t max_idx = 0;
@@ -1429,6 +1443,21 @@ auto maxpool3d_forward_kernel(const Tensor& input_orig,
     int64_t D = shape[2];
     int64_t H = shape[3];
     int64_t W = shape[4];
+
+    // PyTorch semantics: padding must not exceed half the effective kernel size
+    // on each axis, else a window can lie entirely in padding, leaving
+    // max_val=-inf / max_idx=0 and corrupting the backward scatter. Mirror the
+    // maxpool2d validation.
+    for (int i = 0; i < 3; ++i) {
+        int64_t effective_kernel = dilation[i] * (kernel_size[i] - 1) + 1;
+        if (2 * padding[i] > effective_kernel) {
+            throw std::runtime_error(
+                "maxpool3d: padding (" + std::to_string(padding[i]) +
+                ") should be at most half of the effective kernel size (" +
+                std::to_string(effective_kernel) + ") on axis " +
+                std::to_string(i));
+        }
+    }
 
     int64_t D_out = (D + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) / stride[0] + 1;
     int64_t H_out = (H + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) / stride[1] + 1;
@@ -1734,13 +1763,13 @@ void adaptive_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t od = 0; od < D_out; ++od) {
                 int64_t d_start = (od * D) / D_out;
-                int64_t d_end = ((od + 1) * D) / D_out;
+                int64_t d_end = ((od + 1) * D + D_out - 1) / D_out;  // ceil: PyTorch adaptive-pool window end
                 for (int64_t oh = 0; oh < H_out; ++oh) {
                     int64_t h_start = (oh * H) / H_out;
-                    int64_t h_end = ((oh + 1) * H) / H_out;
+                    int64_t h_end = ((oh + 1) * H + H_out - 1) / H_out;  // ceil: PyTorch adaptive-pool window end
                     for (int64_t ow = 0; ow < W_out; ++ow) {
                         int64_t w_start = (ow * W) / W_out;
-                        int64_t w_end = ((ow + 1) * W) / W_out;
+                        int64_t w_end = ((ow + 1) * W + W_out - 1) / W_out;  // ceil: PyTorch adaptive-pool window end
 
                         Compute max_val = -std::numeric_limits<Compute>::infinity();
                         int64_t max_idx = 0;
@@ -1874,13 +1903,13 @@ void adaptive_avgpool3d_impl(const T* in_data, T* out_data,
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t od = 0; od < D_out; ++od) {
                 int64_t d_start = (od * D) / D_out;
-                int64_t d_end = ((od + 1) * D) / D_out;
+                int64_t d_end = ((od + 1) * D + D_out - 1) / D_out;  // ceil: PyTorch adaptive-pool window end
                 for (int64_t oh = 0; oh < H_out; ++oh) {
                     int64_t h_start = (oh * H) / H_out;
-                    int64_t h_end = ((oh + 1) * H) / H_out;
+                    int64_t h_end = ((oh + 1) * H + H_out - 1) / H_out;  // ceil: PyTorch adaptive-pool window end
                     for (int64_t ow = 0; ow < W_out; ++ow) {
                         int64_t w_start = (ow * W) / W_out;
-                        int64_t w_end = ((ow + 1) * W) / W_out;
+                        int64_t w_end = ((ow + 1) * W + W_out - 1) / W_out;  // ceil: PyTorch adaptive-pool window end
 
                         Compute sum = Compute(0);
                         int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
@@ -1944,13 +1973,13 @@ void adaptive_avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t od = 0; od < D_out; ++od) {
                 int64_t d_start = (od * D) / D_out;
-                int64_t d_end = ((od + 1) * D) / D_out;
+                int64_t d_end = ((od + 1) * D + D_out - 1) / D_out;  // ceil: PyTorch adaptive-pool window end
                 for (int64_t oh = 0; oh < H_out; ++oh) {
                     int64_t h_start = (oh * H) / H_out;
-                    int64_t h_end = ((oh + 1) * H) / H_out;
+                    int64_t h_end = ((oh + 1) * H + H_out - 1) / H_out;  // ceil: PyTorch adaptive-pool window end
                     for (int64_t ow = 0; ow < W_out; ++ow) {
                         int64_t w_start = (ow * W) / W_out;
-                        int64_t w_end = ((ow + 1) * W) / W_out;
+                        int64_t w_end = ((ow + 1) * W + W_out - 1) / W_out;  // ceil: PyTorch adaptive-pool window end
 
                         int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
                         if (count <= 0) continue;
