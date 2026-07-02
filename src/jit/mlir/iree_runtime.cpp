@@ -728,6 +728,9 @@ auto invoke_subprocess(IreeInvoker& self,
 
 auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
     -> std::vector<::tenzor::Tensor> {
+    // Serialize: the IREE runtime session is not concurrency-safe and this
+    // invoker is shared across callers via the compile cache.
+    std::lock_guard<std::mutex> lock(invoke_mutex_);
     if (mode_ == Mode::Subprocess) {
         return invoke_subprocess(*this, inputs, vmfb_path_, device_,
                                  iree_run_module_);
@@ -744,6 +747,16 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
             session, iree_make_cstring_view("module.main"), &call),
         "iree_runtime_call_initialize_by_name(module.main)");
 
+    // RAII: deinitialize the call on EVERY exit path, including a C++ exception
+    // thrown by marshalling (marshal::tensor_to_buffer_view -> dtype_to_iree
+    // throws std::invalid_argument for an unsupported dtype). The manual
+    // deinitialize calls in the status-error paths below are removed in favor of
+    // this guard so the call state + any pushed buffer_views are never leaked.
+    struct CallGuard {
+        iree_runtime_call_t* c;
+        ~CallGuard() { iree_runtime_call_deinitialize(c); }
+    } call_guard{&call};
+
     // Push each input as a buffer_view ref.
     for (const auto& t : inputs) {
         iree_hal_buffer_view_t* bv = nullptr;
@@ -754,7 +767,6 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
             iree_runtime_call_inputs_push_back_buffer_view(&call, bv);
         iree_hal_buffer_view_release(bv);
         if (!iree_status_is_ok(s)) {
-            iree_runtime_call_deinitialize(&call);
             throw JitInvokeError(
                 "iree_runtime_call_inputs_push_back_buffer_view: " +
                 status_to_string(s));
@@ -764,7 +776,6 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
     // Run.
     iree_status_t invoke_s = iree_runtime_call_invoke(&call, 0);
     if (!iree_status_is_ok(invoke_s)) {
-        iree_runtime_call_deinitialize(&call);
         throw JitInvokeError("iree_runtime_call_invoke: " +
                              status_to_string(invoke_s));
     }
@@ -780,7 +791,6 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
             break;
         }
         if (!iree_status_is_ok(pop_s)) {
-            iree_runtime_call_deinitialize(&call);
             throw JitInvokeError(
                 "iree_runtime_call_outputs_pop_front_buffer_view: " +
                 status_to_string(pop_s));
@@ -789,14 +799,12 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
             out_tensors.push_back(marshal::buffer_view_to_tensor(bv));
         } catch (...) {
             iree_hal_buffer_view_release(bv);
-            iree_runtime_call_deinitialize(&call);
             throw;
         }
         iree_hal_buffer_view_release(bv);
     }
 
-    iree_runtime_call_deinitialize(&call);
-
+    // call is deinitialized by call_guard on return.
     if (out_tensors.empty()) {
         throw JitInvokeError(
             "in-process IREE invoke produced no outputs from @main");

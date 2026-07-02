@@ -35,6 +35,7 @@
 #include "tenzor/jit/mlir/iree_compile.hpp"
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -96,6 +97,11 @@ private:
     void* device_handle_  = nullptr;  ///< iree_hal_device_t*
     void* session_        = nullptr;  ///< iree_runtime_session_t*
     void* plugin_module_  = nullptr;  ///< iree_vm_module_t* (tenzor_plugin)
+
+    // An IreeInvoker is cached and shared across callers, but an IREE
+    // runtime session is NOT concurrency-safe. Serialize invoke() so
+    // concurrent calls on the same cached invoker can't race the session.
+    std::mutex invoke_mutex_;
 };
 
 /// Probe whether the IREE runtime can create a default device for the

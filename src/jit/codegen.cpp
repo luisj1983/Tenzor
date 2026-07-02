@@ -180,7 +180,9 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         case ElemOp::Cosh:       return vp + "val = cosh(" + a + ");";
         case ElemOp::Tanh:       return vp + "val = tanh(" + a + ");";
         case ElemOp::Sigmoid:    return vp + "val = " + ONE + " / (" + ONE + " + exp(-" + a + "));";
-        case ElemOp::Relu:       return vp + "val = fmax(" + a + ", " + ZERO + ");";
+        // Match the CPU fallback (clamp_min(x, 0) == `x < 0 ? 0 : x`), which
+        // propagates NaN; fmax(NaN, 0) returns 0 and diverged from CPU/eager.
+        case ElemOp::Relu:       return vp + "val = (" + a + " < " + ZERO + ") ? " + ZERO + " : " + a + ";";
         case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(0.01) + F + " * " + a + ";";
         case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(1.0) + F + " * (exp(" + a + ") - " + ONE + ");";
         case ElemOp::Selu: {
@@ -197,7 +199,15 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
             return vp + "val = 0.5" + F + " * " + a + " * (" + ONE + " + erf(" + a + " * 0.7071067811865476" + F + "));";
         case ElemOp::Mish:
             return vp + "val = " + a + " * tanh(log(" + ONE + " + exp(" + a + ")));";
-        case ElemOp::Softplus:   return vp + "val = log(" + ONE + " + exp(" + a + "));";
+        case ElemOp::Softplus: {
+            // Match the CPU fallback (OpId::Softplus, beta from scalar/default 1,
+            // threshold 20): softplus_beta(x) = (1/beta)*log1p(exp(beta*x)), but
+            // return x once beta*x > threshold. The old plain log(1+exp(x))
+            // overflowed to +inf for large x (CPU returns x).
+            std::string beta = activation_scalar(1.0);
+            return vp + "val = (" + beta + F + " * " + a + " > 20.0" + F + ") ? " +
+                   a + " : log1p(exp(" + beta + F + " * " + a + ")) / (" + beta + F + ");";
+        }
         case ElemOp::Erf:        return vp + "val = erf(" + a + ");";
         case ElemOp::Erfc:       return vp + "val = erfc(" + a + ");";
         case ElemOp::Log2:       return vp + "val = log2(" + a + ");";
@@ -296,8 +306,14 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
     else if (numel <= 65536) block_size = 256;
     else block_size = 512;
 
-    int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
-    if (grid_size > 65535) grid_size = 65535;
+    // Compute in int64 and clamp BEFORE narrowing to int. Casting the raw
+    // (numel + block - 1)/block to int first overflows for numel > ~2^31*block
+    // (possibly negative), and a negative value slips past the 65535 clamp.
+    // The kernel uses a grid-stride loop, so clamping the grid is safe.
+    int64_t grid_blocks = (numel + block_size - 1) / block_size;
+    if (grid_blocks > 65535) grid_blocks = 65535;
+    if (grid_blocks < 1) grid_blocks = 1;
+    int grid_size = static_cast<int>(grid_blocks);
 
     // Build kernel arguments: input pointers + output pointer + numel
     std::vector<void*> args;
@@ -409,7 +425,8 @@ auto KernelCache::get_or_compile(const FusionGroup& group) -> std::shared_ptr<Co
 
 auto KernelCache::get_or_compile_source(const std::string& signature,
                                         const std::string& source,
-                                        const std::string& kernel_name)
+                                        const std::string& kernel_name,
+                                        int device_index)
     -> std::shared_ptr<CompiledKernel> {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -419,7 +436,10 @@ auto KernelCache::get_or_compile_source(const std::string& signature,
         return it->second;
     }
 
-    auto kernel = compile(source, kernel_name);
+    // Compile for the requesting device's context/compute arch, not a hardcoded
+    // device 0. The caller must also fold the device into `signature` so a
+    // kernel built for one device is never served to another.
+    auto kernel = compile(source, kernel_name, device_index);
     if (kernel) {
         kernel->source = source;
         cache_[signature] = kernel;
@@ -809,9 +829,12 @@ auto execute_fused_cpu(const FusionGroup& group,
             // ----- Scalar binary ops -------------------------------------
             case ElemOp::AddScalar: result = tenzor::add(a, s); break;
             case ElemOp::MulScalar: result = tenzor::mul(a, s); break;
-            case ElemOp::PowScalar: result = tenzor::pow(a, static_cast<float>(s)); break;
-            case ElemOp::ClampMin:  result = tenzor::clamp_min(a, static_cast<float>(s)); break;
-            case ElemOp::ClampMax:  result = tenzor::clamp_max(a, static_cast<float>(s)); break;
+            // Keep full double precision (these ops take a double scalar and the
+            // GPU kernel bakes the scalar at double precision via fmt_double);
+            // the old static_cast<float> truncated it and diverged for Float64.
+            case ElemOp::PowScalar: result = tenzor::pow(a, s); break;
+            case ElemOp::ClampMin:  result = tenzor::clamp_min(a, s); break;
+            case ElemOp::ClampMax:  result = tenzor::clamp_max(a, s); break;
         }
         // No `default:` — every ElemOp value must have a `case` arm above.
         // If the enum grows and a new value lands without being handled

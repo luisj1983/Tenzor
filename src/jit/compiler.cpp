@@ -366,30 +366,42 @@ auto ConstantFoldingPass::run(Graph& graph) -> bool {
         try {
             Tensor result = evaluate_constant(*node);
 
+            if (node->outputs().empty()) continue;
+            auto old_output = node->outputs()[0];
+
+            // Keep the folded constant on the device the original output lived
+            // on so downstream consumers see the expected device.
+            if (result.device() != old_output->device()) {
+                result = result.to(old_output->device());
+            }
+
             // Create constant node with the folded result
             auto const_node = graph.create_node(OpType::Constant);
             const_node->set_tensor_attr("value", result);
 
-            // Create output value for the constant node
-            if (!node->outputs().empty()) {
-                auto old_output = node->outputs()[0];
-                std::string const_val_id = const_node->name() + "_out";
-                auto const_val = graph.create_value(
-                    const_val_id, old_output->shape(), old_output->dtype(), old_output->device());
-                const_val->set_node(const_node);
-                const_node->add_output(const_val);
+            std::string const_val_id = const_node->name() + "_out";
+            // Label the new Value with the RESULT's actual dtype/shape, not the
+            // old output's. An op like Mean/Div can promote int->float (or change
+            // rank), so stamping the stale label would desync the Value from its
+            // real payload and mis-size downstream buffers in every backend.
+            std::vector<int64_t> result_shape(result.shape().begin(),
+                                               result.shape().end());
+            auto const_val = graph.create_value(
+                const_val_id, result_shape, result.dtype(),
+                old_output->device());
+            const_val->set_node(const_node);
+            const_node->add_output(const_val);
 
-                // Add the constant node to the graph
-                graph.add_node(const_node);
+            // Add the constant node to the graph
+            graph.add_node(const_node);
 
-                // Redirect all consumers of the original node to use the constant
-                graph.replace_value(old_output->id(), const_val_id);
+            // Redirect all consumers of the original node to use the constant
+            graph.replace_value(old_output->id(), const_val_id);
 
-                // Remove the original node
-                graph.remove_node(node);
+            // Remove the original node
+            graph.remove_node(node);
 
-                modified = true;
-            }
+            modified = true;
         } catch (...) {
             // Failed to fold - continue
         }
@@ -1070,6 +1082,20 @@ auto FuseAttentionPass::run(Graph& graph) -> bool {
         auto softmax_node = nodes[i];
         if (softmax_node->inputs().empty()) continue;
 
+        // FlashAttention hardwires the softmax over the LAST (key) axis. Only
+        // fuse when the traced softmax actually normalizes the last dim; over any
+        // other axis the fused kernel would compute different probabilities.
+        // (No "dim" attr == default -1 == last axis, which is fine.)
+        {
+            int64_t srank = static_cast<int64_t>(
+                softmax_node->inputs()[0]->shape().size());
+            int64_t sdim = softmax_node->has_int_attr("dim")
+                               ? softmax_node->get_int_attr("dim")
+                               : -1;
+            if (sdim < 0) sdim += srank;
+            if (srank > 0 && sdim != srank - 1) continue;
+        }
+
         // Trace backward from Softmax: expect Scale (Mul) or Add (mask) then Mul
         auto softmax_input = softmax_node->inputs()[0];
         auto pre_softmax = softmax_input->node();
@@ -1213,13 +1239,17 @@ auto FuseAttentionPass::fuse_attention(
     flash_node->add_input(k_value);
     flash_node->add_input(v_value);
 
-    // Extract scale factor from the Mul node
+    // Extract scale factor from the Mul node. The scale constant may be traced
+    // in any float precision (Float16/BFloat16/Float64), so convert to Float32
+    // before item<float>() — a bare item<float>() throws DTypeException on a
+    // non-Float32 tensor, aborting the whole compile for e.g. an fp16 attention.
     for (const auto& inp : scale_node->inputs()) {
         auto producer = inp->node();
         if (producer && producer->op_type() == OpType::Constant) {
             Tensor scale_tensor = producer->get_tensor_attr("value");
             if (scale_tensor.numel() == 1) {
-                flash_node->set_attr("scale", scale_tensor.item<float>());
+                flash_node->set_attr(
+                    "scale", scale_tensor.to(DType::Float32).item<float>());
             }
             break;
         }
@@ -2256,6 +2286,21 @@ auto MemoryPlanningPass::run(Graph& graph) -> bool {
 // ============================================================================
 
 auto ExtendedFusionPass::run(Graph& graph) -> bool {
+    // Extended fusions are lowered to NVRTC/HIPRTC GPU kernels
+    // (execute_extended_fused), which run ONLY on CUDA/ROCm. Never form them for
+    // a non-GPU graph: the fused node would throw at execution time (there is no
+    // — and must not be a — CPU kernel masquerading as the GPU fusion). A CPU
+    // graph simply runs the ops eagerly/unfused, which is correct. The cost
+    // model's device is not reliably set here, so gate on the graph's own device.
+    {
+        Device::Type dev = Device::Type::CPU;
+        const auto& gin = graph.inputs();
+        if (!gin.empty()) dev = gin[0]->device().type;
+        if (dev != Device::Type::CUDA && dev != Device::Type::ROCm) {
+            return false;
+        }
+    }
+
     PatternMatcher matcher;
     matcher.set_max_mlp_hidden_dim(max_mlp_hidden_);
 

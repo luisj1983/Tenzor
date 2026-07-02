@@ -99,6 +99,29 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
             "Variable, got zero");
     }
 
+    // Re-entrancy guard: if a trace is already active on this thread, this
+    // compiled function is being invoked from *inside* another function that is
+    // currently being traced. Starting our own trace here would clear() the
+    // shared thread-local Tracer and silently drop the outer trace's ops. Run
+    // eagerly instead so our ops are recorded by the outer trace's interceptor
+    // and inlined into the outer graph (both nvrtc and mlir trace paths set the
+    // tracer's tracing_ flag around fn_).
+    if (Tracer::get_instance().is_tracing()) {
+        return fn_(inputs);
+    }
+
+    // Autograd guard: the compiled-graph / CUDA-graph executors replay raw
+    // tensor ops and do NOT rebuild an autograd graph. A cache HIT would return
+    // a non-differentiable result while a cache MISS (eager fn_) returns a
+    // differentiable one — inconsistent, and .backward() would silently yield no
+    // input grads after warmup. When any input requires grad, run eagerly so the
+    // result is always differentiable (the JIT fast-path is inference-only).
+    for (const auto& v : inputs) {
+        if (v.requires_grad()) {
+            return fn_(inputs);
+        }
+    }
+
     if (config_.backend == "mlir") {
         return mlir_invoke(inputs);
     }
@@ -120,7 +143,14 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
     if (compiled_module) {
             // reduce-overhead mode: capture and replay CUDA graphs. This path
             // mutates shared CUDA-graph state and warmup_count_; serialize it.
-            if (config_.mode == "reduce-overhead") {
+            // CUDA-graph capture only applies to CUDA/ROCm; for CPU/Vulkan/OneAPI
+            // fall through to normal compiled execution on that same backend
+            // (running an empty CUDA graph would return stale results / crash).
+            const bool graph_capable =
+                !inputs.empty() &&
+                (inputs[0].tensor().device().type == Device::Type::CUDA ||
+                 inputs[0].tensor().device().type == Device::Type::ROCm);
+            if (config_.mode == "reduce-overhead" && graph_capable) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 std::vector<Tensor> input_tensors;
                 input_tensors.reserve(inputs.size());
@@ -254,6 +284,10 @@ auto CompiledFunction::shape_key(std::span<const Variable> inputs) -> std::strin
         // whose NVRTC module / CUDA-graph capture / cached device pointers are
         // bound to GPU 0, causing an illegal cross-device access on GPU 1.
         ss << "_" << inputs[i].tensor().device().to_string();
+        // Differentiability is part of the contract: a requires_grad input takes
+        // the eager (differentiable) path, a non-grad input the compiled path.
+        // Keep them in separate cache entries so one never serves the other.
+        ss << (inputs[i].requires_grad() ? "_g1" : "_g0");
     }
     return ss.str();
 }
@@ -447,7 +481,12 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
                     "@main, got " +
                     std::to_string(outs.size()));
             }
-            return Variable(std::move(outs[0]), any_requires_grad);
+            // Place the host-staged output on the input's device (see the
+            // cache-miss path below for rationale).
+            ::tenzor::Tensor out0 = std::move(outs[0]);
+            const auto out_dev = inputs[0].tensor().device();
+            if (out0.device() != out_dev) out0 = out0.to(out_dev);
+            return Variable(std::move(out0), any_requires_grad);
         }
         // Miss. If we've already compiled something else for a different
         // shape, this counts as a retrace (a new shape forces a fresh trace).
@@ -511,7 +550,22 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
         const std::string what = e.what();
         if (what.find("NOT_FOUND") != std::string::npos &&
             what.find("driver") != std::string::npos) {
-            invoker = mj::IreeInvoker::load(artifact,
+            // The in-process HAL driver for this target isn't linked, so we must
+            // run via the iree-run-module subprocess. That subprocess canNOT
+            // register the tenzor_plugin VM native module, so any
+            // `call @tenzor_plugin.<op>` import in the plugin-form vmfb would
+            // fail to load (this made flash_attention/rope/rms_norm/gqa
+            // effectively CPU-only). Re-lower WITHOUT the plugin — expanding
+            // those custom ops to pure StableHLO — and recompile so the
+            // subprocess vmfb is fully self-contained. (Plugin-free graphs are
+            // unaffected: the expanded form is identical for them.)
+            mj::GraphToMLIR sh_lowerer;
+            sh_lowerer.set_plugin_enabled(false);
+            const std::string sh_text = sh_lowerer.lower(*graph);
+            mj::CompileOptions sh_opts = opts;
+            sh_opts.plugin_enabled = false;
+            auto sh_artifact = mj::compile_mlir(sh_text, sh_opts);
+            invoker = mj::IreeInvoker::load(sh_artifact,
                                             mj::IreeInvoker::Mode::Subprocess);
         } else {
             throw;
@@ -607,7 +661,14 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
             "MLIR backend: expected exactly 1 output tensor from @main, got " +
             std::to_string(outs.size()));
     }
-    Variable result(std::move(outs[0]), any_requires_grad);
+    // IREE marshalling host-stages I/O, so the output comes back on CPU
+    // regardless of input device. Place it on the input's device (type AND
+    // ordinal) so the JIT output's placement matches eager — a GPU model yields
+    // a GPU output on the same GPU, not silently on CPU / device 0.
+    ::tenzor::Tensor out0 = std::move(outs[0]);
+    const auto out_dev = inputs[0].tensor().device();
+    if (out0.device() != out_dev) out0 = out0.to(out_dev);
+    Variable result(std::move(out0), any_requires_grad);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

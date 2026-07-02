@@ -45,6 +45,9 @@ struct LiveRange {
     size_t end;          ///< Node index where value is last consumed
     std::string value_id; ///< ID of the corresponding Value
     size_t size;         ///< Size in bytes
+    Device device{};     ///< Device the value lives on; buffers are never shared
+                         ///< across devices (a CPU value must not alias a GPU
+                         ///< pool slot, and vice versa).
 };
 
 /**

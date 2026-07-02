@@ -532,33 +532,39 @@ auto Tracer::record_op(TracedOp op) -> void {
     }
 }
 
-auto Tracer::register_tensor(const Tensor& tensor) -> std::string {
-    void* ptr = const_cast<void*>(tensor.data_ptr());
+// Identity of a *logical* tensor view. The same storage viewed with different
+// shape/strides (e.g. a square-matrix transpose, which keeps the same data_ptr
+// AND shape but flips strides) is a DISTINCT value and must get its own id;
+// keying on data_ptr alone silently aliased them and dropped the view op.
+static auto tensor_fingerprint(const Tensor& tensor) -> std::string {
+    std::ostringstream ss;
+    ss << const_cast<void*>(tensor.data_ptr());
+    ss << '#' << static_cast<int>(tensor.dtype()) << '#';
+    for (auto s : tensor.shape())   ss << s << ',';
+    ss << '#';
+    for (auto s : tensor.strides()) ss << s << ',';
+    return ss.str();
+}
 
-    // Build the current logical view fingerprint up front so we can
-    // re-use a cached id only when shape/dtype match.
+auto Tracer::register_tensor(const Tensor& tensor) -> std::string {
+    // Reuse an id only when the FULL logical view matches (ptr + dtype + shape +
+    // strides). Two views sharing storage but differing in strides now get
+    // distinct ids, and each stays stable across re-uses (the fingerprint, not a
+    // single ptr slot, is the key).
+    const std::string fp = tensor_fingerprint(tensor);
+    auto it = tensor_id_map_.find(fp);
+    if (it != tensor_id_map_.end()) {
+        return it->second;
+    }
+
     std::vector<int64_t> shape;
     shape.reserve(tensor.shape().size());
     for (auto s : tensor.shape()) {
         shape.push_back(s);
     }
 
-    auto it = tensor_id_map_.find(ptr);
-    if (it != tensor_id_map_.end()) {
-        const auto& info = tensor_info_[it->second];
-        if (info.shape == shape && info.dtype == tensor.dtype()) {
-            return it->second;
-        }
-        // data_ptr collision — the storage was reused (or this is a
-        // different logical view of the same buffer). Fall through and
-        // allocate a fresh id; we deliberately do NOT return the old id
-        // because the consumer's TensorInfo would otherwise carry the
-        // wrong shape, leading to "use of value expects different type
-        // than prior uses" errors at the MLIR lowering boundary.
-    }
-
     auto id = generate_tensor_id();
-    tensor_id_map_[ptr] = id;
+    tensor_id_map_[fp] = id;
     tensor_info_[id] = TensorInfo(shape, tensor.dtype(), tensor.device());
     // Phase 6.4: retain the full Tensor so end_trace() can later decide
     // which tensors are parameters (constants) vs intermediates vs
@@ -573,11 +579,12 @@ auto Tracer::register_tensor(const Variable& var) -> std::string {
 }
 
 auto Tracer::register_new_tensor(const Tensor& tensor) -> std::string {
-    // Always allocate a fresh ID — view-creating ops (reshape, transpose,
-    // permute, slice, cat-with-aliasing) produce results that share
-    // `data_ptr()` with one of the inputs but have different logical
-    // shape/strides; `register_tensor`'s dedup-by-data_ptr would alias
-    // them and silently lose the shape change.
+    // Always allocate a fresh ID even if this exact logical view was seen
+    // before — used by view/layer ops that must materialize a distinct graph
+    // value. Map this view's fingerprint to the new id so later consumers of
+    // the SAME logical view resolve to it. Because the fingerprint includes
+    // strides, a view no longer collides with its base (different strides), so
+    // this does not disturb the base tensor's mapping.
     auto id = generate_tensor_id();
     std::vector<int64_t> shape;
     for (auto s : tensor.shape()) {
@@ -585,15 +592,7 @@ auto Tracer::register_new_tensor(const Tensor& tensor) -> std::string {
     }
     tensor_info_[id] = TensorInfo(shape, tensor.dtype(), tensor.device());
     tensor_storage_[id] = tensor;
-    // Overwrite the data_ptr → id mapping so downstream ops that look up
-    // by data_ptr (e.g. the dispatch interceptor's
-    // `register_tensor(input)`) see the *new* id corresponding to this
-    // view's logical shape, not the original tensor's. This is the only
-    // place we intentionally clobber `tensor_id_map_`.
-    void* ptr = const_cast<void*>(tensor.data_ptr());
-    if (ptr != nullptr) {
-        tensor_id_map_[ptr] = id;
-    }
+    tensor_id_map_[tensor_fingerprint(tensor)] = id;
     return id;
 }
 

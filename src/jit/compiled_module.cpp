@@ -204,9 +204,21 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     // graph and hitting a device-mismatch error at dispatch. Keyed off
     // inputs[0] (the example_input used for tracing); cached by shape-key
     // (which encodes device+dtype).
-    if (source_module_ && !inputs.empty() &&
-        (inputs[0].tensor().device() != traced_device_ ||
-         inputs[0].tensor().dtype()  != traced_dtype_)) {
+    auto any_input_mismatch = [&]() {
+        // Scan ALL inputs, not just inputs[0]: a device/dtype change confined to
+        // a later input still requires a retrace, otherwise the stale (wrong
+        // device/precision) graph replays and hits a dispatch mismatch. The
+        // cache key (compute_shape_key) already encodes every input's
+        // device+dtype, so keying was correct — only the trigger was too narrow.
+        for (const auto& in : inputs) {
+            if (in.tensor().device() != traced_device_ ||
+                in.tensor().dtype()  != traced_dtype_) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (source_module_ && !inputs.empty() && any_input_mismatch()) {
         auto key = compute_shape_key(inputs);
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
@@ -401,7 +413,17 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
     } else
 #endif
     {
-        // CUDA path (or fallback)
+        // CUDA path. Only a CUDA device is valid here (ROCm is handled above
+        // when compiled in). Any other device type (CPU/Vulkan/OneAPI) must be
+        // refused: CUDA-graph capture is a CUDA/ROCm-only optimization, and
+        // capturing here would record an empty CUDA graph over that backend's
+        // (non-CUDA) work, then silently replay stale results forever.
+        if (device_type != Device::Type::CUDA) {
+            throw std::runtime_error(
+                "capture_cuda_graph: CUDA-graph capture is only supported on "
+                "CUDA/ROCm devices; got " +
+                Device{device_type, device_id}.to_string());
+        }
         cuda_graph_ = CUDAGraph::create(device_id);
         if (!cuda_graph_) {
             throw std::runtime_error(
@@ -525,6 +547,18 @@ auto CompiledModule::replay_cuda_graph(std::vector<Tensor>& inputs) -> bool {
             std::to_string(captured_inputs_.size()) +
             ") does not match replay input count (" +
             std::to_string(inputs.size()) + ")");
+    }
+
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        // The captured graph hard-codes the device (type + ordinal) and dtype of
+        // its buffers. A replay input on a different device ordinal or dtype must
+        // NOT be silently moved onto the captured device — that would migrate the
+        // caller's data across GPUs and run on the wrong one. Refuse replay so
+        // the caller falls back to a normal forward on the input's own device.
+        if (inputs[i].device() != captured_inputs_[i].device() ||
+            inputs[i].dtype() != captured_inputs_[i].dtype()) {
+            return false;
+        }
     }
 
     for (size_t i = 0; i < inputs.size(); ++i) {

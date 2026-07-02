@@ -430,7 +430,11 @@ private:
     int64_t graph_break_count_{0};                              ///< Diagnostic counter
     std::vector<TracedOp> ops_;                                 ///< Recorded operations
     std::unordered_map<std::string, TensorInfo> tensor_info_;   ///< Tensor metadata
-    std::unordered_map<void*, std::string> tensor_id_map_;      ///< Pointer to ID mapping
+    /// Logical-view fingerprint (data_ptr + dtype + shape + strides) -> ID.
+    /// Keying on data_ptr alone aliased distinct views that share storage but
+    /// differ only in strides (e.g. a square-matrix transpose), silently
+    /// dropping the view op from the dataflow.
+    std::unordered_map<std::string, std::string> tensor_id_map_;
     /// Phase 6.4: retain the actual Tensor (not just metadata) for
     /// every tensor seen during tracing. end_trace() uses this to
     /// capture module parameters as graph constants that live inside

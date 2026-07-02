@@ -11,6 +11,7 @@
 #include "../../include/tenzor/core/dtype.hpp"
 #include <algorithm>
 #include <cassert>
+#include <functional>
 #include <numeric>
 #include <unordered_set>
 
@@ -143,6 +144,30 @@ auto MemoryPlanner::compute_live_ranges(const Graph& graph) -> std::vector<LiveR
                 it->second.end = std::max(it->second.end, i);
             }
         }
+
+        // Control-flow nodes (If/Loop) execute their subgraph bodies at this
+        // node's position. Any OUTER value referenced inside a body must stay
+        // live through this node; the top-level input scan above misses those
+        // (they are not threaded as this node's direct inputs), which would let
+        // the planner free their buffer while the body still reads it.
+        std::function<void(const std::shared_ptr<Graph>&)> extend_for_subgraph =
+            [&](const std::shared_ptr<Graph>& sub) {
+                if (!sub) return;
+                for (const auto& sn : sub->nodes()) {
+                    for (const auto& sin : sn->inputs()) {
+                        auto it = range_map.find(sin->id());
+                        if (it != range_map.end()) {
+                            it->second.end = std::max(it->second.end, i);
+                        }
+                    }
+                    extend_for_subgraph(sn->then_branch());
+                    extend_for_subgraph(sn->else_branch());
+                    extend_for_subgraph(sn->body());
+                }
+            };
+        extend_for_subgraph(node->then_branch());
+        extend_for_subgraph(node->else_branch());
+        extend_for_subgraph(node->body());
     }
 
     // Convert to LiveRange structs with sizes computed
@@ -159,6 +184,7 @@ auto MemoryPlanner::compute_live_ranges(const Graph& graph) -> std::vector<LiveR
         lr.end = info.end;
         lr.value_id = info.value_id;
         lr.size = size;
+        lr.device = value->device();
         ranges.push_back(std::move(lr));
     }
 
@@ -207,6 +233,7 @@ auto MemoryPlanner::greedy_assign(std::vector<LiveRange>& live_ranges)
     struct BufferSlot {
         size_t high_water_mark{0};  ///< Maximum allocation size in this buffer
         std::vector<std::pair<size_t, size_t>> intervals;  ///< Occupied time intervals
+        Device device{};            ///< Device this pool buffer lives on
     };
 
     std::vector<BufferSlot> slots;
@@ -238,6 +265,11 @@ auto MemoryPlanner::greedy_assign(std::vector<LiveRange>& live_ranges)
         size_t best_grow_hwm = 0;
 
         for (size_t s = 0; s < slots.size(); ++s) {
+            // A pool buffer is a single device allocation; never let a value on
+            // one device reuse a slot backing another device (that would alias a
+            // CPU buffer with a GPU buffer -> data corruption / invalid pointer).
+            if (slots[s].device != lr.device) continue;
+
             // Check for time overlap with any interval in this slot
             bool overlaps = false;
             for (const auto& [ib, ie] : slots[s].intervals) {
@@ -286,6 +318,7 @@ auto MemoryPlanner::greedy_assign(std::vector<LiveRange>& live_ranges)
             BufferSlot new_slot;
             new_slot.high_water_mark = aligned_size;
             new_slot.intervals.push_back({lr.begin, lr.end});
+            new_slot.device = lr.device;
             slots.push_back(std::move(new_slot));
 
             BufferAllocation alloc;

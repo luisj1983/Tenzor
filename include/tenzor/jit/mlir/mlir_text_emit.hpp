@@ -63,6 +63,14 @@ auto emit_stablehlo_unary(std::ostream& os, const std::string& mnemonic,
                           const std::vector<int64_t>& shape,
                           ::tenzor::DType d) -> void;
 
+/// Emit `%result = chlo.<mnemonic> %a : tensor<...> -> tensor<...>` to `os`.
+/// CHLO unary ops (e.g. erf) use the `->` result-type arrow, unlike the
+/// StableHLO same-type unary form.
+auto emit_chlo_unary(std::ostream& os, const std::string& mnemonic,
+                     const std::string& result, const std::string& a,
+                     const std::vector<int64_t>& shape,
+                     ::tenzor::DType d) -> void;
+
 /// Emit `%result = stablehlo.<mnemonic> %a, %b, %c : tensor<...>` to `os`.
 /// Used for ternary ops like `select` (cond, on_true, on_false) and
 /// `clamp` (min, x, max). All three operands and the result share the

@@ -220,14 +220,18 @@ public:
      * which regenerates an unrelated element-wise kernel and discards the
      * provided source.
      *
-     * @param signature  Cache key uniquely identifying this kernel
+     * @param signature  Cache key uniquely identifying this kernel. MUST encode
+     *                   the target device (type + ordinal) so a kernel compiled
+     *                   for one device is never served to another.
      * @param source     Complete kernel source to compile
      * @param kernel_name Entry-point (extern "C" __global__) symbol name
+     * @param device_index Ordinal of the GPU to compile for (its context/arch)
      * @return Shared pointer to the compiled kernel
      */
     auto get_or_compile_source(const std::string& signature,
                                const std::string& source,
-                               const std::string& kernel_name)
+                               const std::string& kernel_name,
+                               int device_index = 0)
         -> std::shared_ptr<CompiledKernel>;
 
     /**

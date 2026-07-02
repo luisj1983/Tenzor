@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/jit/compile.hpp>
 #include "../backend_parity/parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -464,6 +465,56 @@ TEST(JITBackendParity, ConvPool) {
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "ConvPool failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
+
+// ============================================================================
+// JIT-COMPILED parity — actually drives the jit::CompiledFunction compile path
+// (trace -> graph IR -> execute) on each backend and compares to the eager CPU
+// reference. Every test ABOVE runs eager .forward() only; this one exercises
+// the JIT compiler itself, which is the whole point of this file. It also
+// re-invokes the compiled function so the cache-hit execution path is covered.
+// ============================================================================
+
+TEST(JITBackendParity, JITCompiledMLP) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled MLP parity");
+
+    nn::Linear l1(32, 16);
+    nn::Linear l2(16, 8);
+    auto input = randn({4, 32}, DType::Float32, Device::cpu());
+
+    // Eager CPU reference.
+    auto ref = l2.forward(nn::relu(l1.forward(Variable(input, false)))).tensor();
+
+    // Include CPU (index 0): a JIT-vs-eager mismatch on CPU is itself a bug.
+    for (size_t i = 0; i < backends.size(); ++i) {
+        try {
+            nn::Linear l1_dev(32, 16);
+            nn::Linear l2_dev(16, 8);
+            copy_params(l1, l1_dev);
+            copy_params(l2, l2_dev);
+            l1_dev.to(backends[i]);
+            l2_dev.to(backends[i]);
+            auto in_dev = input.to(backends[i]);
+
+            auto fn = [&l1_dev, &l2_dev](const Variable& x) -> Variable {
+                return l2_dev.forward(nn::relu(l1_dev.forward(x)));
+            };
+            jit::CompiledFunction compiled(fn, {});  // default "nvrtc" backend
+
+            // First call traces + compiles; second exercises the cache-hit
+            // execution path. Both must match the eager reference.
+            auto out0 = compiled(Variable(in_dev, false)).tensor();
+            auto out1 = compiled(Variable(in_dev, false)).tensor();
+            backends[i].synchronize();
+            SCOPED_TRACE("JIT parity on " + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, out0, 1e-3f, 1e-3f);  // compile+run path
+            EXPECT_TENSORS_CLOSE(ref, out1, 1e-3f, 1e-3f);  // cache-hit path
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "JITCompiledMLP failed on "
                           << backend_name(backends[i]) << ": " << e.what();
         }
     }

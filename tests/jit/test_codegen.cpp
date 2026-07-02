@@ -59,7 +59,10 @@ TEST(Codegen, GenerateSimpleKernel) {
 
     // Should contain key elements
     EXPECT_NE(source.find("__global__"), std::string::npos);
-    EXPECT_NE(source.find("fmax"), std::string::npos);  // relu uses fmax
+    // relu is emitted as a NaN-propagating `x < 0 ? 0 : x` select. It used to
+    // use fmax, but fmax(NaN, 0) returns 0 and diverged from the CPU clamp_min
+    // fallback (which propagates NaN); the select matches CPU/eager semantics.
+    EXPECT_NE(source.find("? 0.0f :"), std::string::npos);
     EXPECT_NE(source.find("blockIdx"), std::string::npos);
     EXPECT_NE(source.find("threadIdx"), std::string::npos);
 }

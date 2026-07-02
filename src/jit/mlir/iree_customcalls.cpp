@@ -116,10 +116,14 @@ auto dispatch_flash_attention(const std::vector<::tenzor::Tensor>& inputs,
                                     false);
     float      scale  = 0.0f;
     if (kv.count("scale")) {
-        // Caller supplied an explicit scale (including a legitimate 0).
         scale = parse_float(kv.at("scale"), 0.0f);
-    } else {
-        // Not supplied: default to 1/sqrt(D) over the last (head) dim.
+    }
+    // scale == 0 is the SENTINEL for "use the implicit default" 1/sqrt(D) — both
+    // when unsupplied and when supplied as exactly 0 (this is how the traced
+    // FuseAttention path signals an implicit scale, and what the eager op does).
+    // A literal scale of 0 (all scores 0 -> uniform attention) is not a
+    // meaningful config, so overloading 0 as the sentinel is safe.
+    if (scale == 0.0f) {
         const auto& q     = inputs[0];
         const auto rank   = q.shape().size();
         if (rank >= 1) {

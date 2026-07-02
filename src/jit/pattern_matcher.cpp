@@ -299,6 +299,29 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     if (n3->op_type() != OpType::Mean || used.count(n3.get())) return std::nullopt;
     if (!consumes_output(n2, n3)) return std::nullopt;
 
+    // Both Means must reduce the SAME axis. The canonical fused LayerNorm kernel
+    // normalizes over a single axis; a structurally similar chain whose mean and
+    // variance reductions are over DIFFERENT axes is not a LayerNorm and must
+    // not be silently replaced by the hardcoded kernel. Normalize negative dims
+    // before comparing so dim=-1 and dim=rank-1 count as the same axis.
+    {
+        int64_t rank = static_cast<int64_t>(
+            n0->inputs().empty() ? 0 : n0->inputs()[0]->shape().size());
+        auto mean_axis = [rank](const std::shared_ptr<Node>& n)
+                -> std::optional<int64_t> {
+            std::optional<int64_t> a;
+            if (n->has_int_attr("dim")) a = n->get_int_attr("dim");
+            else if (n->has_vec_attr("dim")) {
+                auto v = n->get_vec_attr("dim");
+                if (v.size() == 1) a = v[0];
+                else return std::nullopt;  // multi-axis mean: handled below
+            }
+            if (a && *a < 0) a = *a + rank;
+            return a;
+        };
+        if (mean_axis(n0) != mean_axis(n3)) return std::nullopt;
+    }
+
     // Look for the remaining chain: could be Add(eps) -> Sqrt -> Div -> Mul(gamma) -> Add(beta)
     // or variations. Collect contiguous matching nodes.
     std::vector<std::shared_ptr<Node>> matched = {n0, n1, n2, n3};

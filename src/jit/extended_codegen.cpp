@@ -78,8 +78,21 @@ auto ExtendedKernelCodegen::dtype_to_cuda_type(DType dtype) -> std::string {
         case DType::Float32:  return "float";
         case DType::Float64:  return "double";
         case DType::Float16:  return "__half";
-        case DType::BFloat16: return "__nv_bfloat16";
-        default:              return "float";
+        case DType::BFloat16:
+            // CUDA and HIP spell bfloat16 differently. Both provide implicit
+            // float conversions, so only the type name/header differ.
+#if defined(TENZOR_USE_ROCM)
+            return "__hip_bfloat16";
+#else
+            return "__nv_bfloat16";
+#endif
+        default:
+            // Never silently fall back to "float": for Int*/Complex the element
+            // size differs, so reinterpreting the buffer as float yields garbage
+            // / out-of-bounds reads. Fail loudly instead.
+            throw std::runtime_error(
+                "Extended codegen: unsupported element dtype for fused GPU "
+                "kernel: " + std::string(dtype_name(dtype)));
     }
 }
 
@@ -155,17 +168,28 @@ auto ExtendedKernelCodegen::generate(const ExtendedFusionGroup& group) -> std::s
     static const char* kPreamble =
         "typedef long long int64_t;\n"
         "typedef unsigned long long uint64_t;\n";
-    // Float16/BFloat16 kernels reference __half / __nv_bfloat16 (see
+    // Float16/BFloat16 kernels reference __half / bfloat16 (see
     // dtype_to_cuda_type) which are not built-in; pull in the corresponding
-    // NVRTC/hiprtc device headers when those types appear, otherwise the
-    // runtime compile fails with "identifier __half is undefined".
+    // device headers when those types appear, otherwise the runtime compile
+    // fails with "identifier __half is undefined". CUDA and HIP use different
+    // header names, so select by the active codegen backend rather than always
+    // emitting the CUDA headers (which do not exist under HIPRTC).
     std::string includes;
+#if defined(TENZOR_USE_ROCM)
+    if (body.find("__hip_bfloat16") != std::string::npos) {
+        includes += "#include <hip/hip_bf16.h>\n";
+    }
+    if (body.find("__half") != std::string::npos) {
+        includes += "#include <hip/hip_fp16.h>\n";
+    }
+#else
     if (body.find("__nv_bfloat16") != std::string::npos) {
         includes += "#include <cuda_bf16.h>\n";
     }
     if (body.find("__half") != std::string::npos) {
         includes += "#include <cuda_fp16.h>\n";
     }
+#endif
     return includes + std::string(kPreamble) + body;
 }
 
@@ -731,22 +755,46 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     // element-wise kernel and discards `source` entirely.
     auto& cache = KernelCache::instance();
 
-    std::string signature = group.signature.empty()
+    if (inputs.empty()) {
+        throw std::runtime_error("Extended codegen: no inputs provided");
+    }
+    // The compiled kernel is bound to one device's context and compute arch, so
+    // the cache key MUST encode the device (type + ordinal) and compilation must
+    // target that device. Otherwise a kernel built for e.g. cuda:0 is silently
+    // served to a cuda:1 input -> illegal cross-device access / corruption.
+    // This codegen path emits NVRTC/HIPRTC device kernels, so only CUDA and ROCm
+    // are valid launch targets; a Vulkan/OneAPI (or CPU) tensor must be rejected
+    // rather than have a CUDA/HIP kernel launched over its foreign pointers.
+    const Device dev = inputs[0].device();
+    if (dev.type != Device::Type::CUDA && dev.type != Device::Type::ROCm) {
+        throw std::runtime_error(
+            "execute_extended_fused: fused GPU codegen supports only CUDA and "
+            "ROCm devices; got " + dev.to_string());
+    }
+    // The extended kernels compute in float/double and load/store f16/bf16 via
+    // implicit conversion; any other dtype (Int*/Complex) would be reinterpreted
+    // as the wrong element type. Reject up front, before compile/transfer.
+    if (group.dtype != DType::Float32 && group.dtype != DType::Float64 &&
+        group.dtype != DType::Float16 && group.dtype != DType::BFloat16) {
+        throw std::runtime_error(
+            "execute_extended_fused: fused GPU codegen only supports "
+            "Float32/Float64/Float16/BFloat16; got " +
+            std::string(dtype_name(group.dtype)));
+    }
+
+    std::string base_sig = group.signature.empty()
         ? const_cast<ExtendedFusionGroup&>(group).compute_signature()
         : group.signature;
+    std::string signature = base_sig + "_dev" + dev.to_string();
     std::string kernel_name = extended_kernel_name(group.kind);
     if (kernel_name.empty()) {
         throw std::runtime_error("Extended codegen: unsupported fusion kind");
     }
 
-    auto kernel = cache.get_or_compile_source(signature, source, kernel_name);
+    auto kernel = cache.get_or_compile_source(signature, source, kernel_name,
+                                              dev.index);
     if (!kernel) {
         throw std::runtime_error("Extended codegen: failed to compile kernel: " + signature);
-    }
-
-    // Determine output shape based on fusion kind
-    if (inputs.empty()) {
-        throw std::runtime_error("Extended codegen: no inputs provided");
     }
 
     // ---- Per-kind output shape, launch geometry, and argument layout ----
@@ -762,12 +810,7 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     // result) and make contiguous copies. The copies are kept alive in these
     // vectors so the pointers taken from them below remain valid until launch
     // (mirrors KernelCodegen::execute_fused).
-    const Device dev = inputs[0].device();
-    if (dev.type == Device::Type::CPU) {
-        throw std::runtime_error(
-            "execute_extended_fused: inputs must reside on a GPU device; got "
-            "CPU — route this dtype/op through the eager fallback");
-    }
+    // `dev` was validated above (CUDA/ROCm only) and folded into the cache key.
     auto require_dev = [&](const Tensor& t, const char* what) {
         if (t.device() != dev) {
             throw std::runtime_error(

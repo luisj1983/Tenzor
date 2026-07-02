@@ -178,6 +178,29 @@ auto make_tracing_interceptor(
             }
         }
 
+        // Skip pure identity/no-op ops: a view op that returns its input
+        // unchanged (e.g. expand/reshape/squeeze to the SAME shape+strides, which
+        // share the input's tensor id) produces no new value. Recording it would
+        // create a self-referential node AND a duplicate graph value id (two
+        // Values both named e.g. "t2"), which DCE/topological-sort then
+        // mishandle — pruning the real producer and leaving a dangling output.
+        // This is exactly how a batched matmul (which decomposes into identity
+        // expand/reshape around a bmm) lost its bmm node. The output tensor id
+        // still resolves to the real producer, so dropping the no-op is correct.
+        if (!output_ids.empty()) {
+            bool all_identity = true;
+            for (const auto& oid : output_ids) {
+                bool is_input = false;
+                for (const auto& iid : input_ids) {
+                    if (iid == oid) { is_input = true; break; }
+                }
+                if (!is_input) { all_identity = false; break; }
+            }
+            if (all_identity) {
+                return results;
+            }
+        }
+
         // Record the operation
         TracedOp traced(*op_type, std::move(input_ids), std::move(output_ids));
 

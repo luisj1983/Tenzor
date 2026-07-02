@@ -95,3 +95,43 @@ TEST(OpReductions, SoftmaxLastDim) {
         return ::tenzor::softmax(x, /*dim=*/-1);
     }, {4, 8}, 5e-5F);
 }
+
+TEST(OpReductions, SumFloat16WidensAccumulator) {
+    // Sum a long row of 1.0 values in Float16. A half-precision accumulator
+    // stops incrementing near ~2048 (1.0 + small rounds away), so an in-half
+    // reduction diverges badly from the true 4096; the eager kernel and the
+    // (now widened) JIT both accumulate in Float32, so they must agree.
+    ensure_core_init();
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return ::tenzor::sum(x, /*dim=*/1, /*keepdim=*/false);
+    };
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    auto raw = ::tenzor::ones({1, 4096}, ::tenzor::DType::Float16);
+    auto x   = ::tenzor::Variable(raw, /*requires_grad=*/false);
+    auto eager  = fn(x).tensor();
+    auto jitted = compiled(x).tensor();
+    auto diff = ::tenzor::max(::tenzor::abs(eager - jitted))
+                    .to(::tenzor::DType::Float32).template item<float>();
+    EXPECT_LT(diff, 1.0F) << "F16 sum JIT vs eager diff=" << diff;
+}
+
+TEST(OpReductions, MeanFloat16WidensAccumulator) {
+    ensure_core_init();
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return ::tenzor::mean(x, /*dim=*/1, /*keepdim=*/false);
+    };
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    auto raw = ::tenzor::ones({1, 4096}, ::tenzor::DType::Float16);
+    auto x   = ::tenzor::Variable(raw, /*requires_grad=*/false);
+    auto eager  = fn(x).tensor();
+    auto jitted = compiled(x).tensor();
+    auto diff = ::tenzor::max(::tenzor::abs(eager - jitted))
+                    .to(::tenzor::DType::Float32).template item<float>();
+    EXPECT_LT(diff, 1e-2F) << "F16 mean JIT vs eager diff=" << diff;
+}

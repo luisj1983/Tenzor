@@ -751,12 +751,11 @@ auto handle_silu(LoweringContext& ctx,
     body << '\n';
 }
 
-/// GELU via the tanh approximation:
-///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-/// This avoids depending on `stablehlo.erf`, which isn't part of the core
-/// StableHLO op set (it's in CHLO and not always exposed through IREE's
-/// frontend). Numerical error vs the exact erf-based form is < 1e-4 in
-/// F32, well below the typical 1e-3 layer tolerance.
+/// GELU (exact, erf-based): gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2))).
+/// Matches the eager kernel (approximate='none') and the NVRTC codegen path,
+/// so the two JIT backends and eager all agree. Uses `chlo.erf` (verified to
+/// lower through this IREE version); the earlier tanh approximation diverged
+/// from eager by ~1e-4 and disagreed with the nvrtc path's exact-erf GELU.
 auto handle_gelu(LoweringContext& ctx,
                  const ::tenzor::jit::Node& node,
                  std::ostream& body) -> void {
@@ -769,55 +768,36 @@ auto handle_gelu(LoweringContext& ctx,
     const auto d = out->dtype();
     const auto& x = ctx.name_for(node.inputs()[0]->id());
 
-    // Constants.
-    auto c_half      = ctx.fresh_name();
-    auto c_one       = ctx.fresh_name();
-    auto c_three     = ctx.fresh_name();
-    auto c_kappa     = ctx.fresh_name();        // 0.044715
-    auto c_sqrt2pi   = ctx.fresh_name();        // sqrt(2/π) ≈ 0.7978845608
+    // Constants: 0.5, 1.0, 1/sqrt(2).
+    auto c_half     = ctx.fresh_name();
+    auto c_one      = ctx.fresh_name();
+    auto c_invsqrt2 = ctx.fresh_name();         // 1/sqrt(2) ≈ 0.7071067811865476
     emit_stablehlo_splat_constant(body, c_half, scalar_literal(0.5, d),
                                   shape, d); body << '\n';
     emit_stablehlo_splat_constant(body, c_one,  scalar_literal(1.0, d),
                                   shape, d); body << '\n';
-    emit_stablehlo_splat_constant(body, c_three, scalar_literal(3.0, d),
-                                  shape, d); body << '\n';
-    emit_stablehlo_splat_constant(body, c_kappa,
-                                  scalar_literal(0.044715, d), shape, d);
-    body << '\n';
-    emit_stablehlo_splat_constant(body, c_sqrt2pi,
-                                  scalar_literal(0.7978845608028654, d),
+    emit_stablehlo_splat_constant(body, c_invsqrt2,
+                                  scalar_literal(0.7071067811865476, d),
                                   shape, d);
     body << '\n';
 
-    // x_cubed = x^3
-    auto x_cubed = ctx.fresh_name();
-    emit_stablehlo_binary(body, "power", x_cubed, x, c_three, shape, d);
+    // scaled = x / sqrt(2)
+    auto scaled = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", scaled, x, c_invsqrt2, shape, d);
     body << '\n';
-    // x_cubed_scaled = kappa * x^3
-    auto x3s = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", x3s, c_kappa, x_cubed, shape, d);
+    // e = erf(x / sqrt(2))
+    auto eval = ctx.fresh_name();
+    emit_chlo_unary(body, "erf", eval, scaled, shape, d);
     body << '\n';
-    // inner = x + kappa*x^3
-    auto inner = ctx.fresh_name();
-    emit_stablehlo_binary(body, "add", inner, x, x3s, shape, d);
-    body << '\n';
-    // arg = sqrt(2/π) * inner
-    auto arg = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", arg, c_sqrt2pi, inner, shape, d);
-    body << '\n';
-    // t = tanh(arg)
-    auto tval = ctx.fresh_name();
-    emit_stablehlo_unary(body, "tanh", tval, arg, shape, d);
-    body << '\n';
-    // one_plus = 1 + tanh(arg)
+    // one_plus = 1 + erf(...)
     auto one_plus = ctx.fresh_name();
-    emit_stablehlo_binary(body, "add", one_plus, c_one, tval, shape, d);
+    emit_stablehlo_binary(body, "add", one_plus, c_one, eval, shape, d);
     body << '\n';
     // half_x = 0.5 * x
     auto half_x = ctx.fresh_name();
     emit_stablehlo_binary(body, "multiply", half_x, c_half, x, shape, d);
     body << '\n';
-    // out = (0.5 * x) * (1 + tanh(...))
+    // out = (0.5 * x) * (1 + erf(x / sqrt(2)))
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
     emit_stablehlo_binary(body, "multiply", out_name, half_x, one_plus,
@@ -903,10 +883,30 @@ auto handle_sum(LoweringContext& ctx,
     const auto& out_val = node.outputs()[0];
     auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
                                                 out_val->shape());
-    auto out_name = emit_reduce_with_keepdim(
-        ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
+    const auto d = out_val->dtype();
+    // Accumulate F16/BF16 sums in F32 to match the eager kernel's F32
+    // accumulator; reducing in half precision loses accuracy as the reduction
+    // length grows.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string in_name = ctx.name_for(in_val->id());
+    if (widen) {
+        auto conv = ctx.fresh_name();
+        emit_stablehlo_convert(body, conv, in_name, in_val->shape(), d, cd);
+        body << '\n';
+        in_name = conv;
+    }
+    auto reduced = emit_reduce_with_keepdim(
+        ctx, body, in_name, in_val->shape(),
         out_val->shape(), dims, keepdim, "add",
-        scalar_literal(0.0, out_val->dtype()), out_val->dtype());
+        scalar_literal(0.0, cd), cd);
+    std::string out_name = reduced;
+    if (widen) {
+        out_name = ctx.fresh_name();
+        emit_stablehlo_convert(body, out_name, reduced, out_val->shape(), cd, d);
+        body << '\n';
+    }
     ctx.bind(out_val->id(), out_name);
 }
 
@@ -956,10 +956,24 @@ auto handle_mean(LoweringContext& ctx,
     auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
                                                 out_val->shape());
     const auto d = out_val->dtype();
-    // First compute the sum.
+    // Accumulate AND divide in F32 for F16/BF16 (matches eager, which uses an
+    // F32 accumulator and divides before narrowing); doing the division in half
+    // precision would reintroduce the error the F32 accumulator avoids.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string in_name = ctx.name_for(in_val->id());
+    if (widen) {
+        auto conv = ctx.fresh_name();
+        emit_stablehlo_convert(body, conv, in_name, in_val->shape(), d, cd);
+        body << '\n';
+        in_name = conv;
+    }
+
+    // First compute the sum (in compute dtype cd).
     auto sum_name = emit_reduce_with_keepdim(
-        ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
-        out_val->shape(), dims, keepdim, "add", scalar_literal(0.0, d), d);
+        ctx, body, in_name, in_val->shape(),
+        out_val->shape(), dims, keepdim, "add", scalar_literal(0.0, cd), cd);
 
     // N = product of reduced extents.
     int64_t N = 1;
@@ -967,15 +981,22 @@ auto handle_mean(LoweringContext& ctx,
 
     auto n_const = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, n_const,
-                                  scalar_literal(static_cast<double>(N), d),
-                                  out_val->shape(), d);
+                                  scalar_literal(static_cast<double>(N), cd),
+                                  out_val->shape(), cd);
     body << '\n';
 
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out_val->id(), out_name);
-    emit_stablehlo_binary(body, "divide", out_name, sum_name, n_const,
-                          out_val->shape(), d);
+    auto div_name = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", div_name, sum_name, n_const,
+                          out_val->shape(), cd);
     body << '\n';
+
+    std::string out_name = div_name;
+    if (widen) {
+        out_name = ctx.fresh_name();
+        emit_stablehlo_convert(body, out_name, div_name, out_val->shape(), cd, d);
+        body << '\n';
+    }
+    ctx.bind(out_val->id(), out_name);
 }
 
 /// Softmax along a single dim, numerically stable form:
@@ -1543,21 +1564,126 @@ auto handle_conv2d(LoweringContext& ctx,
     auto conv_name = node.inputs().size() >= 3 ? ctx.fresh_name()
                                                : out_name;
 
-    body << '%' << conv_name << " = stablehlo.convolution(%"
-         << ctx.name_for(x->id()) << ", %" << ctx.name_for(w->id()) << ")\n"
-         << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],\n"
-         << "    window = {stride = [" << stride_h << ", " << stride_w
-         << "], pad = [[" << pad_h << ", " << pad_h << "], ["
-         << pad_w << ", " << pad_w << "]], rhs_dilate = ["
-         << dilation_h << ", " << dilation_w << "]} "
-         << "{batch_group_count = 1 : i64, feature_group_count = "
-         << groups << " : i64} : (";
-    write_tensor_type_for_emit(body, x->shape(), d);
-    body << ", ";
-    write_tensor_type_for_emit(body, w->shape(), d);
-    body << ") -> ";
-    write_tensor_type_for_emit(body, out->shape(), d);
-    body << '\n';
+    // IREE's stablehlo.convolution -> linalg conversion mis-lowers a degenerate
+    // geometry: when an output spatial dim is 1 AND the stride skips part of the
+    // padded input (the used extent is smaller than the padded extent), IREE
+    // reduces over the whole padded input instead of the kernel window
+    // ("operand #1 shape dim 4 vs 3"). Lower those cases without trusting IREE's
+    // conv converter. NCHW input, OIHW weight, NCHW output.
+    std::vector<int64_t> xs(x->shape().begin(),   x->shape().end());
+    std::vector<int64_t> ws(w->shape().begin(),   w->shape().end());
+    std::vector<int64_t> os(out->shape().begin(), out->shape().end());
+    bool emitted = false;
+    if (xs.size() == 4 && ws.size() == 4 && os.size() == 4 && groups == 1) {
+        const int64_t N = xs[0], Cin = xs[1], Hin = xs[2], Win = xs[3];
+        const int64_t Cout = ws[0], kh = ws[2], kw = ws[3];
+        const int64_t Hout = os[2], Wout = os[3];
+        const int64_t eff_kh = dilation_h * (kh - 1) + 1;
+        const int64_t eff_kw = dilation_w * (kw - 1) + 1;
+        const int64_t padded_h = Hin + 2 * pad_h, padded_w = Win + 2 * pad_w;
+        const int64_t used_h = (Hout - 1) * stride_h + eff_kh;
+        const int64_t used_w = (Wout - 1) * stride_w + eff_kw;
+        const bool degenerate = (used_h < padded_h) || (used_w < padded_w);
+
+        if (degenerate) {
+            // Explicitly pad the input to [N, Cin, padded_h, padded_w].
+            std::string cur = ctx.name_for(x->id());
+            std::vector<int64_t> cur_shape = xs;
+            if (pad_h > 0 || pad_w > 0) {
+                auto pv = ctx.fresh_name();
+                emit_stablehlo_splat_constant(body, pv, scalar_literal(0.0, d),
+                                              {}, d);
+                body << '\n';
+                std::vector<int64_t> padded = {N, Cin, padded_h, padded_w};
+                auto p = ctx.fresh_name();
+                emit_stablehlo_pad(body, p, cur, pv,
+                                   /*low=*/{0, 0, pad_h, pad_w},
+                                   /*high=*/{0, 0, pad_h, pad_w},
+                                   /*interior=*/{0, 0, 0, 0}, cur_shape, padded,
+                                   d);
+                body << '\n';
+                cur = p;
+                cur_shape = padded;
+            }
+
+            if (Hout == 1 && Wout == 1) {
+                // Single receptive window -> im2col: slice the window, flatten,
+                // and matmul against the flattened kernel. Pure reshape +
+                // dot_general — no stablehlo.convolution at all.
+                std::vector<int64_t> win = {N, Cin, kh, kw};
+                auto wsl = ctx.fresh_name();
+                emit_stablehlo_slice(body, wsl, cur,
+                                     /*starts=*/{0, 0, 0, 0},
+                                     /*limits=*/{N, Cin, eff_kh, eff_kw},
+                                     /*strides=*/{1, 1, dilation_h, dilation_w},
+                                     cur_shape, win, d);
+                body << '\n';
+                const int64_t K = Cin * kh * kw;
+                auto win_flat = ctx.fresh_name();
+                emit_stablehlo_reshape(body, win_flat, wsl, win, {N, K}, d);
+                body << '\n';
+                auto w_flat = ctx.fresh_name();
+                emit_stablehlo_reshape(body, w_flat, ctx.name_for(w->id()), ws,
+                                       {Cout, K}, d);
+                body << '\n';
+                auto mm = ctx.fresh_name();
+                emit_stablehlo_dot_general(body, mm, win_flat, w_flat,
+                                           /*lhs_batch=*/{}, /*rhs_batch=*/{},
+                                           /*lhs_contracting=*/{1},
+                                           /*rhs_contracting=*/{1},
+                                           {N, K}, {Cout, K}, {N, Cout}, d);
+                body << '\n';
+                emit_stablehlo_reshape(body, conv_name, mm, {N, Cout}, os, d);
+                body << '\n';
+            } else {
+                // Partial collapse (e.g. 1xN): trim the never-read padded tail so
+                // the stride divides exactly, then emit an UNPADDED convolution —
+                // the exact geometry IREE converts correctly.
+                std::vector<int64_t> trimmed = {N, Cin, used_h, used_w};
+                auto sl = ctx.fresh_name();
+                emit_stablehlo_slice(body, sl, cur,
+                                     /*starts=*/{0, 0, 0, 0},
+                                     /*limits=*/{N, Cin, used_h, used_w},
+                                     /*strides=*/{1, 1, 1, 1}, cur_shape, trimmed,
+                                     d);
+                body << '\n';
+                body << '%' << conv_name << " = stablehlo.convolution(%" << sl
+                     << ", %" << ctx.name_for(w->id()) << ")\n"
+                     << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, "
+                        "1],\n"
+                     << "    window = {stride = [" << stride_h << ", " << stride_w
+                     << "], pad = [[0, 0], [0, 0]], rhs_dilate = [" << dilation_h
+                     << ", " << dilation_w
+                     << "]} {batch_group_count = 1 : i64, "
+                        "feature_group_count = 1 : i64} : (";
+                write_tensor_type_for_emit(body, trimmed, d);
+                body << ", ";
+                write_tensor_type_for_emit(body, ws, d);
+                body << ") -> ";
+                write_tensor_type_for_emit(body, os, d);
+                body << '\n';
+            }
+            emitted = true;
+        }
+    }
+
+    if (!emitted) {
+        body << '%' << conv_name << " = stablehlo.convolution(%"
+             << ctx.name_for(x->id()) << ", %" << ctx.name_for(w->id()) << ")\n"
+             << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],\n"
+             << "    window = {stride = [" << stride_h << ", " << stride_w
+             << "], pad = [[" << pad_h << ", " << pad_h << "], ["
+             << pad_w << ", " << pad_w << "]], rhs_dilate = ["
+             << dilation_h << ", " << dilation_w << "]} "
+             << "{batch_group_count = 1 : i64, feature_group_count = "
+             << groups << " : i64} : (";
+        write_tensor_type_for_emit(body, x->shape(), d);
+        body << ", ";
+        write_tensor_type_for_emit(body, w->shape(), d);
+        body << ") -> ";
+        write_tensor_type_for_emit(body, out->shape(), d);
+        body << '\n';
+    }
 
     if (node.inputs().size() >= 3) {
         const auto& b_val = node.inputs()[2];
@@ -1862,8 +1988,24 @@ auto handle_padding(LoweringContext& ctx,
     }
     std::vector<int64_t> interior(xs.size(), 0);
 
+    // This handler emits CONSTANT padding. Honor a "value" attr for the fill
+    // (default 0). If a non-constant mode is requested (reflect/replicate), fail
+    // loudly rather than silently emitting zeros. Those modes reach the graph
+    // only via hand-built/ONNX graphs — the traced nn.*Pad layers decompose into
+    // primitive ops (full/cat/reflection-index) that lower directly and never
+    // produce this node — but we must not mis-lower them if they do appear.
+    if (node.has_int_attr("mode") && node.get_int_attr("mode") != 0) {
+        throw std::runtime_error(
+            "GraphToMLIR: Padding handler only supports constant mode; mode=" +
+            std::to_string(node.get_int_attr("mode")) +
+            " (reflect/replicate) is not supported");
+    }
+    const double pad_value = node.has_float_attr("value")
+                                 ? static_cast<double>(node.get_attr("value"))
+                                 : 0.0;
     auto padval = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, padval, scalar_literal(0.0, d), {}, d);
+    emit_stablehlo_splat_constant(body, padval, scalar_literal(pad_value, d),
+                                  {}, d);
     body << '\n';
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
@@ -1896,6 +2038,18 @@ auto handle_interpolate(LoweringContext& ctx,
         // the comparison being false.
         ctx.bind(out_val->id(), ctx.name_for(x_val->id()));
         return;
+    }
+
+    // This handler only implements nearest-neighbor upsampling. If the traced
+    // op requested bilinear/bicubic/trilinear (mode != 0 nearest), fail loudly
+    // rather than silently emitting nearest — which computes visibly wrong
+    // (un-interpolated) pixels identically on every backend. The tracer records
+    // AttrKey::Mode as int "mode" (0=nearest,1=bilinear,2=bicubic,3=trilinear).
+    if (node.has_int_attr("mode") && node.get_int_attr("mode") != 0) {
+        throw std::runtime_error(
+            "GraphToMLIR: Interpolate only implements nearest-neighbor (mode=0);"
+            " mode=" + std::to_string(node.get_int_attr("mode")) +
+            " (bilinear/bicubic/trilinear) is not yet supported");
     }
 
     // Nearest-neighbor 2D over NCHW. We materialize a (H_out, W_out)

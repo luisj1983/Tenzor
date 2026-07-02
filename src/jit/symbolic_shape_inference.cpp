@@ -295,7 +295,13 @@ auto SymbolicShapeInference::infer_reshape(const Node* node) -> std::vector<Symb
         }
     }
 
-    auto wildcard_dim = total_in / known_product;
+    // Guard against a zero known-product (a target dim of 0 alongside a -1
+    // wildcard): dividing total_in by it is undefined. Leave the wildcard at 0
+    // rather than dividing by zero.
+    SymbolicDim wildcard_dim = SymbolicDim::concrete(0);
+    if (!(known_product.is_concrete() && known_product.value() == 0)) {
+        wildcard_dim = total_in / known_product;
+    }
 
     std::vector<SymbolicDim> out_dims;
     out_dims.reserve(target_shape.size());

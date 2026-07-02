@@ -71,6 +71,16 @@ auto emit_stablehlo_unary(std::ostream& os, const std::string& mnemonic,
     write_tensor_type(os, shape, d);
 }
 
+auto emit_chlo_unary(std::ostream& os, const std::string& mnemonic,
+                     const std::string& result, const std::string& a,
+                     const std::vector<int64_t>& shape,
+                     ::tenzor::DType d) -> void {
+    os << '%' << result << " = chlo." << mnemonic << " %" << a << " : ";
+    write_tensor_type(os, shape, d);
+    os << " -> ";
+    write_tensor_type(os, shape, d);
+}
+
 auto emit_stablehlo_ternary(std::ostream& os, const std::string& mnemonic,
                             const std::string& result, const std::string& a,
                             const std::string& b, const std::string& c,

@@ -351,7 +351,10 @@ auto Graph::topological_sort() -> void {
 }
 
 auto Graph::infer_types() -> void {
-    // Type inference pass - propagate shapes through operations
+    // Type inference pass - propagate shapes through operations.
+    // Inference reads each node's producers' shapes, so the node list must be in
+    // dependency order; enforce it rather than relying on insertion order.
+    topological_sort();
     for (const auto& node : nodes_) {
         // Get input shapes
         std::vector<std::vector<int64_t>> input_shapes;
@@ -380,22 +383,34 @@ auto Graph::infer_types() -> void {
             // Matrix operations
             // ================================================================
             case OpType::MatMul:
-                if (input_shapes.size() >= 2 && input_shapes[0].size() >= 2 && input_shapes[1].size() >= 2) {
-                    const auto& a = input_shapes[0];
-                    const auto& b = input_shapes[1];
-                    const int64_t M = a[a.size() - 2];
-                    const int64_t N = b[b.size() - 1];
-                    // Broadcast the leading batch dims (everything but the last
-                    // two) of both operands, mirroring torch.matmul. The naive
-                    // "out = a with last dim replaced" form is wrong when b has
-                    // more batch dims than a (e.g. (M,K) @ (B,K,N) -> (B,M,N)).
-                    std::span<const int64_t> a_batch(a.data(), a.size() - 2);
-                    std::span<const int64_t> b_batch(b.data(), b.size() - 2);
-                    std::vector<int64_t> out_shape =
-                        broadcast_shapes(a_batch, b_batch);
-                    out_shape.push_back(M);
-                    out_shape.push_back(N);
-                    output_shapes.push_back(std::move(out_shape));
+                if (input_shapes.size() >= 2 && !input_shapes[0].empty() &&
+                    !input_shapes[1].empty()) {
+                    auto a = input_shapes[0];
+                    auto b = input_shapes[1];
+                    // torch.matmul 1-D promotion: a 1-D `a` is treated as a row
+                    // (prepend 1), a 1-D `b` as a column (append 1); the added
+                    // dims are stripped from the result. The old code required
+                    // both operands rank>=2 and silently produced no shape for
+                    // vector/dot-product cases.
+                    const bool a_vec = a.size() == 1;
+                    const bool b_vec = b.size() == 1;
+                    if (a_vec) a.insert(a.begin(), 1);
+                    if (b_vec) b.push_back(1);
+                    if (a.size() >= 2 && b.size() >= 2) {
+                        const int64_t M = a[a.size() - 2];
+                        const int64_t N = b[b.size() - 1];
+                        std::span<const int64_t> a_batch(a.data(), a.size() - 2);
+                        std::span<const int64_t> b_batch(b.data(), b.size() - 2);
+                        std::vector<int64_t> out_shape =
+                            broadcast_shapes(a_batch, b_batch);
+                        out_shape.push_back(M);
+                        out_shape.push_back(N);
+                        if (b_vec && !out_shape.empty()) out_shape.pop_back();
+                        if (a_vec && !out_shape.empty()) {
+                            out_shape.erase(out_shape.end() - (b_vec ? 1 : 2));
+                        }
+                        output_shapes.push_back(std::move(out_shape));
+                    }
                 }
                 break;
 
@@ -443,7 +458,29 @@ auto Graph::infer_types() -> void {
             // ================================================================
             case OpType::Reshape:
                 if (node->has_attr("shape")) {
-                    output_shapes.push_back(node->get_vec_attr("shape"));
+                    auto target = node->get_vec_attr("shape");
+                    // Resolve a single -1 "infer this dim" placeholder against
+                    // the input's element count. Leaving -1 in the shape makes
+                    // every backend consume a negative buffer extent.
+                    if (!input_shapes.empty()) {
+                        int64_t in_numel = 1;
+                        for (int64_t d : input_shapes[0]) in_numel *= d;
+                        int64_t known = 1;
+                        int infer_idx = -1;
+                        bool multiple_infer = false;
+                        for (size_t i = 0; i < target.size(); ++i) {
+                            if (target[i] == -1) {
+                                if (infer_idx >= 0) { multiple_infer = true; break; }
+                                infer_idx = static_cast<int>(i);
+                            } else {
+                                known *= target[i];
+                            }
+                        }
+                        if (!multiple_infer && infer_idx >= 0 && known > 0) {
+                            target[infer_idx] = in_numel / known;
+                        }
+                    }
+                    output_shapes.push_back(std::move(target));
                 }
                 break;
 
@@ -470,13 +507,24 @@ auto Graph::infer_types() -> void {
                 if (!input_shapes.empty() && node->has_attr("dims")) {
                     auto dims = node->get_vec_attr("dims");
                     auto& in_shape = input_shapes[0];
+                    int64_t rank = static_cast<int64_t>(in_shape.size());
                     std::vector<int64_t> out_shape(dims.size());
+                    // Normalize negative dims (permute(0,-1,1) is legal) and
+                    // require every index in range; a bare `dim < size` signed
+                    // check passed negatives through to an out-of-bounds read
+                    // and left out-of-range dims as a silent zero extent.
+                    bool valid = true;
                     for (size_t i = 0; i < dims.size(); ++i) {
-                        if (dims[i] < static_cast<int64_t>(in_shape.size())) {
-                            out_shape[i] = in_shape[dims[i]];
+                        int64_t d = dims[i];
+                        if (d < 0) d += rank;
+                        if (d >= 0 && d < rank) {
+                            out_shape[i] = in_shape[d];
+                        } else {
+                            valid = false;
+                            break;
                         }
                     }
-                    output_shapes.push_back(out_shape);
+                    if (valid) output_shapes.push_back(std::move(out_shape));
                 }
                 break;
 
@@ -484,13 +532,34 @@ auto Graph::infer_types() -> void {
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
                     int64_t rank = static_cast<int64_t>(shape.size());
-                    int64_t dim = node->get_int_attr("dim");
-                    // Normalize negative dim before indexing (mirrors Unsqueeze/
-                    // Sum); the previous `dim < size` check passed for negatives
-                    // and read shape[dim] out of bounds.
-                    if (dim < 0) dim += rank;
-                    if (dim >= 0 && dim < rank && shape[dim] == 1) {
-                        shape.erase(shape.begin() + dim);
+                    if (node->has_attr("dims")) {
+                        // Multi-dim squeeze: remove each listed size-1 dim.
+                        auto dims = node->get_vec_attr("dims");
+                        std::vector<bool> drop(shape.size(), false);
+                        for (int64_t d : dims) {
+                            if (d < 0) d += rank;
+                            if (d >= 0 && d < rank && shape[d] == 1) drop[d] = true;
+                        }
+                        std::vector<int64_t> out;
+                        for (size_t i = 0; i < shape.size(); ++i)
+                            if (!drop[i]) out.push_back(shape[i]);
+                        shape = std::move(out);
+                    } else if (node->has_attr("dim")) {
+                        // Single-dim squeeze. Normalize negative dim before
+                        // indexing (the old `dim < size` check passed negatives
+                        // through to an out-of-bounds read).
+                        int64_t dim = node->get_int_attr("dim");
+                        if (dim < 0) dim += rank;
+                        if (dim >= 0 && dim < rank && shape[dim] == 1) {
+                            shape.erase(shape.begin() + dim);
+                        }
+                    } else {
+                        // No dim argument: torch squeeze() removes ALL size-1
+                        // dims. The old code defaulted to dim=0 and dropped only
+                        // the leading dim.
+                        std::vector<int64_t> out;
+                        for (int64_t d : shape) if (d != 1) out.push_back(d);
+                        shape = std::move(out);
                     }
                     output_shapes.push_back(shape);
                 }
@@ -642,11 +711,43 @@ auto Graph::infer_types() -> void {
             case OpType::AvgPool2d:
                 if (!input_shapes.empty() && input_shapes[0].size() == 4) {
                     auto& shape = input_shapes[0];  // [N, C, H, W]
-                    int64_t kernel = node->get_int_attr("kernel_size");
-                    int64_t stride = node->has_attr("stride") ? node->get_int_attr("stride") : kernel;
-                    int64_t padding = node->has_attr("padding") ? node->get_int_attr("padding") : 0;
-                    int64_t H_out = (shape[2] + 2 * padding - kernel) / stride + 1;
-                    int64_t W_out = (shape[3] + 2 * padding - kernel) / stride + 1;
+                    // kernel_size/stride/padding/dilation may be traced either as
+                    // a scalar (square config) or as a [h, w] vec (rectangular);
+                    // the old code only read the scalar and produced a 0 extent
+                    // for rectangular pools. Also honor dilation and ceil_mode.
+                    auto read_pair = [&](const char* name, int64_t dflt,
+                                         bool have) -> std::pair<int64_t,int64_t> {
+                        if (node->has_vec_attr(name)) {
+                            auto v = node->get_vec_attr(name);
+                            if (v.size() >= 2) return {v[0], v[1]};
+                            if (v.size() == 1) return {v[0], v[0]};
+                        }
+                        if (node->has_int_attr(name)) {
+                            int64_t s = node->get_int_attr(name);
+                            return {s, s};
+                        }
+                        return {dflt, dflt};
+                        (void)have;
+                    };
+                    auto [kh, kw] = read_pair("kernel_size", 1, true);
+                    bool has_stride = node->has_int_attr("stride") || node->has_vec_attr("stride");
+                    auto [sh, sw] = has_stride ? read_pair("stride", 1, true)
+                                               : std::pair<int64_t,int64_t>{kh, kw};
+                    auto [ph, pw] = read_pair("padding", 0, true);
+                    auto [dh, dw] = read_pair("dilation", 1, true);
+                    bool ceil_mode = node->has_bool_attr("ceil_mode") &&
+                                     node->get_bool_attr("ceil_mode");
+                    auto out_dim = [&](int64_t in, int64_t k, int64_t s,
+                                       int64_t p, int64_t d) -> int64_t {
+                        int64_t num = in + 2 * p - d * (k - 1) - 1;
+                        int64_t o = ceil_mode ? (num + s - 1) / s + 1 : num / s + 1;
+                        // ceil_mode: the last pooling window must start inside the
+                        // (padded) input, else drop it (matches PyTorch).
+                        if (ceil_mode && (o - 1) * s >= in + p) --o;
+                        return o;
+                    };
+                    int64_t H_out = out_dim(shape[2], kh, sh, ph, dh);
+                    int64_t W_out = out_dim(shape[3], kw, sw, pw, dw);
                     output_shapes.push_back({shape[0], shape[1], H_out, W_out});
                 }
                 break;
@@ -677,8 +778,9 @@ auto Graph::infer_types() -> void {
             case OpType::Linear:
                 if (input_shapes.size() >= 2) {
                     auto out_shape = input_shapes[0];
-                    // Weight shape is [out_features, in_features]
-                    if (!input_shapes[1].empty()) {
+                    // Weight shape is [out_features, in_features]. Guard against a
+                    // rank-0 activation: .back() on an empty shape is UB.
+                    if (!input_shapes[1].empty() && !out_shape.empty()) {
                         out_shape.back() = input_shapes[1][0];
                     }
                     output_shapes.push_back(out_shape);
@@ -798,13 +900,19 @@ auto Graph::infer_types() -> void {
 
             case OpType::Interpolate:
                 if (!input_shapes.empty()) {
-                    auto out_shape = input_shapes[0];
                     auto size = node->get_vec_attr("output_size");
-                    if (!size.empty() && out_shape.size() >= size.size() + 2) {
-                        std::copy(size.begin(), size.end(),
-                                  out_shape.end() - static_cast<std::ptrdiff_t>(size.size()));
+                    if (!size.empty()) {
+                        auto out_shape = input_shapes[0];
+                        if (out_shape.size() >= size.size() + 2) {
+                            std::copy(size.begin(), size.end(),
+                                      out_shape.end() -
+                                          static_cast<std::ptrdiff_t>(size.size()));
+                        }
+                        output_shapes.push_back(std::move(out_shape));
                     }
-                    output_shapes.push_back(std::move(out_shape));
+                    // else: scale_factor form (not captured as output_size) —
+                    // leave the trace-time output shape intact instead of
+                    // emitting the un-scaled input shape.
                 }
                 break;
 
@@ -1064,6 +1172,8 @@ auto Graph::infer_symbolic_types() -> void {
     // Symbolic type inference pass - propagate symbolic shapes through operations.
     // For each node, we gather the symbolic shapes of all inputs and compute
     // the symbolic shape of the outputs using the same rules as infer_types().
+    // Requires dependency order (a node's producers must precede it).
+    topological_sort();
     for (const auto& node : nodes_) {
         // Gather input symbolic shapes. If an input has no symbolic shape set,
         // derive one from its concrete shape.
@@ -1171,9 +1281,34 @@ auto Graph::infer_symbolic_types() -> void {
             // ================================================================
             case OpType::Reshape:
                 if (node->has_attr("shape")) {
-                    // Reshape target is concrete from the vec_attr
+                    auto target = node->get_vec_attr("shape");
+                    // Resolve a single -1 "infer" placeholder when the input is
+                    // fully concrete; otherwise the symbolic shape would carry a
+                    // concrete dim of -1 (worse than a real symbol).
+                    int infer_idx = -1;
+                    int64_t known = 1;
+                    bool multi = false;
+                    for (size_t i = 0; i < target.size(); ++i) {
+                        if (target[i] == -1) {
+                            if (infer_idx >= 0) { multi = true; break; }
+                            infer_idx = static_cast<int>(i);
+                        } else {
+                            known *= target[i];
+                        }
+                    }
+                    if (infer_idx >= 0 && !multi && known > 0 &&
+                        !input_sym_shapes.empty()) {
+                        int64_t numel = 1;
+                        bool concrete = true;
+                        for (size_t i = 0; i < input_sym_shapes[0].rank(); ++i) {
+                            const auto& d = input_sym_shapes[0][i];
+                            if (d.is_concrete()) numel *= d.value();
+                            else { concrete = false; break; }
+                        }
+                        if (concrete) target[infer_idx] = numel / known;
+                    }
                     output_sym_shapes.push_back(
-                        SymbolicShape::from_concrete(node->get_vec_attr("shape")));
+                        SymbolicShape::from_concrete(target));
                 }
                 break;
 
@@ -1201,13 +1336,27 @@ auto Graph::infer_symbolic_types() -> void {
                 if (!input_sym_shapes.empty() && node->has_attr("dims")) {
                     auto dims = node->get_vec_attr("dims");
                     auto& in_shape = input_sym_shapes[0];
+                    int64_t rank = static_cast<int64_t>(in_shape.rank());
                     std::vector<SymbolicDim> out_dims(dims.size());
+                    // Mirror the concrete path: normalize negative dims and
+                    // require every index in range (a bare `< rank` signed check
+                    // let negatives index out of bounds and left out-of-range
+                    // axes as a default-constructed dim).
+                    bool valid = true;
                     for (size_t i = 0; i < dims.size(); ++i) {
-                        if (dims[i] < static_cast<int64_t>(in_shape.rank())) {
-                            out_dims[i] = in_shape[static_cast<size_t>(dims[i])];
+                        int64_t d = dims[i];
+                        if (d < 0) d += rank;
+                        if (d >= 0 && d < rank) {
+                            out_dims[i] = in_shape[static_cast<size_t>(d)];
+                        } else {
+                            valid = false;
+                            break;
                         }
                     }
-                    output_sym_shapes.push_back(SymbolicShape(std::move(out_dims)));
+                    if (valid) {
+                        output_sym_shapes.push_back(
+                            SymbolicShape(std::move(out_dims)));
+                    }
                 }
                 break;
 
@@ -1672,52 +1821,65 @@ auto Graph::infer_symbolic_types() -> void {
                 break;
 
             case OpType::Svd:
-                // (..., M, N) -> U, S, Vt (3 outputs)
+                // (..., M, N) -> U: (..., M, M|K), S: (..., K), Vt: (..., K|N, N)
+                // with K = min(M, N); reduced forms when full_matrices=false.
                 if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
                     auto& s = input_sym_shapes[0];
                     auto M = s[s.rank() - 2];
                     auto N_dim = s[s.rank() - 1];
-                    // For symbolic shapes, use the input dims directly
-                    // Batch dims
+                    // K = min(M, N). Concrete when both dims are concrete; the
+                    // old code hardcoded M, giving wrong S/U/Vt for non-square.
+                    auto min_dim = [](const SymbolicDim& a,
+                                      const SymbolicDim& b) -> SymbolicDim {
+                        if (a.is_concrete() && b.is_concrete())
+                            return SymbolicDim(std::min(a.value(), b.value()));
+                        return a.is_concrete() ? a : b;  // best-effort if dynamic
+                    };
+                    SymbolicDim K = min_dim(M, N_dim);
+                    bool full = node->has_attr("full_matrices")
+                                    ? node->get_bool_attr("full_matrices")
+                                    : true;
                     std::vector<SymbolicDim> batch_dims;
                     for (size_t d = 0; d + 2 < s.rank(); ++d) {
                         batch_dims.push_back(s[d]);
                     }
-                    // U shape: batch + [M, M] (full) or [M, min(M,N)]
                     auto u_dims = batch_dims;
                     u_dims.push_back(M);
-                    u_dims.push_back(M);  // Assume full matrices for symbolic
+                    u_dims.push_back(full ? M : K);
                     output_sym_shapes.push_back(SymbolicShape(std::move(u_dims)));
-                    // S shape: batch + [min(M,N)] - use M as approximation for symbolic
                     auto s_dims = batch_dims;
-                    s_dims.push_back(M);  // Approximation
+                    s_dims.push_back(K);
                     output_sym_shapes.push_back(SymbolicShape(std::move(s_dims)));
-                    // Vt shape: batch + [N, N]
                     auto vt_dims = batch_dims;
-                    vt_dims.push_back(N_dim);
+                    vt_dims.push_back(full ? N_dim : K);
                     vt_dims.push_back(N_dim);
                     output_sym_shapes.push_back(SymbolicShape(std::move(vt_dims)));
                 }
                 break;
 
             case OpType::Qr:
-                // (..., M, N) -> Q: (..., M, K), R: (..., K, N)
+                // (..., M, N) -> Q: (..., M, K), R: (..., K, N), K = min(M, N)
                 if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
                     auto& s = input_sym_shapes[0];
                     auto M = s[s.rank() - 2];
                     auto N_dim = s[s.rank() - 1];
+                    auto min_dim = [](const SymbolicDim& a,
+                                      const SymbolicDim& b) -> SymbolicDim {
+                        if (a.is_concrete() && b.is_concrete())
+                            return SymbolicDim(std::min(a.value(), b.value()));
+                        return a.is_concrete() ? a : b;
+                    };
+                    SymbolicDim K = min_dim(M, N_dim);
                     std::vector<SymbolicDim> batch_dims;
                     for (size_t d = 0; d + 2 < s.rank(); ++d) {
                         batch_dims.push_back(s[d]);
                     }
-                    // Q: batch + [M, K] where K=min(M,N) - use M as approx
                     auto q_dims = batch_dims;
                     q_dims.push_back(M);
-                    q_dims.push_back(M);
+                    q_dims.push_back(K);
                     output_sym_shapes.push_back(SymbolicShape(std::move(q_dims)));
-                    // R: batch + [K, N]
                     auto r_dims = batch_dims;
-                    r_dims.push_back(M);
+                    r_dims.push_back(K);
                     r_dims.push_back(N_dim);
                     output_sym_shapes.push_back(SymbolicShape(std::move(r_dims)));
                 }

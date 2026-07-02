@@ -346,3 +346,39 @@ TEST(OpVision, Conv2dEndToEnd) {
     // compared to oneDNN; widen tolerance slightly.
     tzv_e2e::run_jit_vs_eager(fn, x, 5e-3F);
 }
+
+TEST(OpVision, Conv2dOutput1x1ImcolPath) {
+    ensure_core_init();
+    // input 2x2, kernel 3x3, stride 2, pad 1 -> output 1x1. This strided conv
+    // (non-exact division collapsing the output to size 1) is the geometry
+    // IREE's stablehlo.convolution -> linalg conversion mis-lowers; the handler
+    // must route it through the im2col (reshape + dot_general) path. Verify the
+    // JIT output matches eager.
+    // Fixed weight captured OUTSIDE the lambda so eager and JIT see the SAME
+    // weight (randn inside the lambda would draw a fresh weight per call).
+    ::tenzor::Variable w(::tenzor::randn({8, 4, 3, 3}, ::tenzor::DType::Float32),
+                         false);
+    auto fn = [w](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::conv2d(x, w, std::nullopt,
+                                  /*stride=*/{2, 2}, /*padding=*/{1, 1});
+    };
+    auto x_t = ::tenzor::randn({1, 4, 2, 2}, ::tenzor::DType::Float32);
+    ::tenzor::Variable x(x_t, false);
+    tzv_e2e::run_jit_vs_eager(fn, x, 5e-3F);
+}
+
+TEST(OpVision, Conv2dPartialCollapsePadSlicePath) {
+    ensure_core_init();
+    // input 2x8, kernel 3x3, stride 2, pad 1 -> output 1x4: H collapses to 1
+    // with an unused padded tail (the degenerate case) while W does not. The
+    // handler must trim the tail and emit an exact-division convolution.
+    ::tenzor::Variable w(::tenzor::randn({8, 4, 3, 3}, ::tenzor::DType::Float32),
+                         false);
+    auto fn = [w](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::conv2d(x, w, std::nullopt,
+                                  /*stride=*/{2, 2}, /*padding=*/{1, 1});
+    };
+    auto x_t = ::tenzor::randn({1, 4, 2, 8}, ::tenzor::DType::Float32);
+    ::tenzor::Variable x(x_t, false);
+    tzv_e2e::run_jit_vs_eager(fn, x, 5e-3F);
+}
