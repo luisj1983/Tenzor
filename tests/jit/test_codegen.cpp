@@ -263,6 +263,55 @@ static void run_half_chain(DType dt, double tol) {
 TEST(Codegen, ExecuteFusedFloat16Chain)  { run_half_chain(DType::Float16, 3e-3); }
 TEST(Codegen, ExecuteFusedBFloat16Chain) { run_half_chain(DType::BFloat16, 3e-2); }
 
+// NaN parity: the fused GPU clamp_min/clamp_max/max/min must propagate NaN
+// exactly like the eager ops (clamp_min_kernel blends NaN back; maximum_typed is
+// (a>b)?a:b). The prior fmax/fmin dropped NaN, so CUDA/ROCm returned the clamp
+// bound / other operand where CPU/eager returned NaN — a silent cross-backend
+// divergence. This asserts bit-for-bit NaN agreement on every GPU backend.
+TEST(Codegen, ExecuteFusedNaNPropagationAllBackends) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    std::vector<float> in(256);
+    for (size_t i = 0; i < in.size(); ++i)
+        in[i] = (i % 7 == 0) ? NAN
+                             : (-2.0f + 4.0f * (static_cast<float>(i) / 256.0f));
+    Tensor cpu = from_data(in.data(), {256});
+    std::vector<float> b(256, 0.25f);
+    Tensor bt = from_data(b.data(), {256});
+
+    auto check = [&](const char* tag, const Tensor& ref, const FusionGroup& group,
+                     const std::vector<Tensor>& gpu_inputs, const Device& dev) {
+        auto out = execute_fused(group, gpu_inputs).to(Device::cpu()).contiguous();
+        Tensor refc = ref.contiguous();
+        const float* o = out.data<float>();
+        const float* r = refc.data<float>();
+        for (size_t i = 0; i < 256; ++i) {
+            if (std::isnan(r[i]))
+                EXPECT_TRUE(std::isnan(o[i])) << tag << " " << dev.to_string() << " i=" << i;
+            else
+                EXPECT_NEAR(o[i], r[i], 1e-6f) << tag << " " << dev.to_string() << " i=" << i;
+        }
+    };
+
+    auto g_cmin = build_fusion({{ElemOp::ClampMin, 0, -1, 0.0}}, 1, DType::Float32);
+    auto g_cmax = build_fusion({{ElemOp::ClampMax, 0, -1, 0.0}}, 1, DType::Float32);
+    auto g_max  = build_fusion({{ElemOp::Max, 0, 1, 0.0}}, 2, DType::Float32);
+    auto g_min  = build_fusion({{ElemOp::Min, 0, 1, 0.0}}, 2, DType::Float32);
+    Tensor ref_cmin = tenzor::clamp_min(cpu, 0.0);
+    Tensor ref_cmax = tenzor::clamp_max(cpu, 0.0);
+    Tensor ref_max  = tenzor::maximum(cpu, bt);
+    Tensor ref_min  = tenzor::minimum(cpu, bt);
+
+    for (const auto& dev : devs) {
+        check("ClampMin", ref_cmin, g_cmin, {cpu.to(dev)}, dev);
+        check("ClampMax", ref_cmax, g_cmax, {cpu.to(dev)}, dev);
+        check("Max", ref_max, g_max, {cpu.to(dev), bt.to(dev)}, dev);
+        check("Min", ref_min, g_min, {cpu.to(dev), bt.to(dev)}, dev);
+    }
+}
+
 TEST(Codegen, KernelCacheHit) {
     auto& cache = KernelCache::instance();
     size_t compilations_before = cache.num_compilations();

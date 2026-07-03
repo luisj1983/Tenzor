@@ -156,7 +156,22 @@ enum class OpType {
     GQA,              ///< Grouped-Query Attention — Tenzor dialect op
     RoPE,             ///< Rotary positional embedding — Tenzor dialect op
     Padding,          ///< Constant/reflect/replicate padding
-    Interpolate       ///< Bilinear/nearest spatial resize
+    Interpolate,      ///< Bilinear/nearest spatial resize
+
+    // Comparison (produce Bool) and logical ops. Without these, a data-dependent
+    // control-flow predicate (a > b, a == b, logical_and(...)) dispatched an
+    // unmapped OpId → graph break → the predicate's output had no producer and
+    // was frozen as a trace-time constant, so traced cond()/while_loop() ignored
+    // their actual inputs. Mapping them makes the predicate a real graph node.
+    Eq,               ///< Elementwise a == b  (Bool)
+    Ne,               ///< Elementwise a != b  (Bool)
+    Lt,               ///< Elementwise a <  b  (Bool)
+    Le,               ///< Elementwise a <= b  (Bool)
+    Gt,               ///< Elementwise a >  b  (Bool)
+    Ge,               ///< Elementwise a >= b  (Bool)
+    LogicalAnd,       ///< Elementwise a && b  (Bool)
+    LogicalOr,        ///< Elementwise a || b  (Bool)
+    LogicalNot        ///< Elementwise !a      (Bool)
 };
 
 /**

@@ -130,8 +130,6 @@ auto KernelCodegen::dtype_to_cuda_type(DType dtype) -> std::string {
         // device compiler (__nv_bfloat16 under NVRTC, __hip_bfloat16 under HIPRTC),
         // so the same source compiles on either backend in a combined build.
         case DType::BFloat16: return "tz_bf16";
-        case DType::Int32:    return "int";
-        case DType::Int64:    return "long long";
         default:
             // No lossy "float" default: reinterpreting an Int8/Complex buffer as
             // float reads the wrong element size and yields garbage / OOB. Fail
@@ -150,8 +148,6 @@ auto KernelCodegen::dtype_to_cuda_type(DType dtype) -> std::string {
 static auto elementwise_compute_type(DType dtype) -> std::string {
     switch (dtype) {
         case DType::Float64: return "double";
-        case DType::Int32:   return "int";
-        case DType::Int64:   return "long long";
         default:             return "float";  // Float32/Float16/BFloat16
     }
 }
@@ -279,16 +275,22 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         case ElemOp::Sub:  return vp + "val = " + a + " - " + b + ";";
         case ElemOp::Mul:  return vp + "val = " + a + " * " + b + ";";
         case ElemOp::Div:  return vp + "val = " + a + " / " + b + ";";
-        case ElemOp::Max:  return vp + "val = " + fn("fmax") + "(" + a + ", " + b + ");";
-        case ElemOp::Min:  return vp + "val = " + fn("fmin") + "(" + a + ", " + b + ");";
+        // Match eager maximum_typed/minimum_typed ((float)a>(float)b ? a : b),
+        // which propagate a NaN second operand; fmax/fmin drop NaN and diverge
+        // from CPU/eager (see math.cpp maximum_typed/minimum_typed).
+        case ElemOp::Max:  return vp + "val = (" + a + " > " + b + ") ? " + a + " : " + b + ";";
+        case ElemOp::Min:  return vp + "val = (" + a + " < " + b + ") ? " + a + " : " + b + ";";
         case ElemOp::Fmod: return vp + "val = " + fn("fmod") + "(" + a + ", " + b + ");";
 
         // Scalar ops
         case ElemOp::AddScalar:  return vp + "val = " + a + " + " + s + F + ";";
         case ElemOp::MulScalar:  return vp + "val = " + a + " * " + s + F + ";";
         case ElemOp::PowScalar:  return vp + "val = " + fn("pow") + "(" + a + ", " + s + F + ");";
-        case ElemOp::ClampMin:   return vp + "val = " + fn("fmax") + "(" + a + ", " + s + F + ");";
-        case ElemOp::ClampMax:   return vp + "val = " + fn("fmin") + "(" + a + ", " + s + F + ");";
+        // clamp_min/clamp_max == std::max/std::min(x, s), which propagate NaN
+        // (clamp_min_kernel/clamp_max_kernel blend the NaN back over AVX
+        // max/min); fmax/fmin drop NaN and diverge from CPU/eager.
+        case ElemOp::ClampMin:   return vp + "val = (" + a + " < " + s + F + ") ? " + s + F + " : " + a + ";";
+        case ElemOp::ClampMax:   return vp + "val = (" + a + " > " + s + F + ") ? " + s + F + " : " + a + ";";
     }
     // No `default:` — `-Wswitch` flags any ElemOp without an explicit case above
     // (promoted to an error under the CI/Release warning flags), and the throw is
@@ -882,6 +884,20 @@ auto execute_fused_cpu(const FusionGroup& group,
         if (inputs[i].numel() != numel) {
             throw std::runtime_error("execute_fused_cpu: all inputs must have same numel");
         }
+    }
+
+    // Enforce the SAME dtype contract as execute_fused (the GPU twin): the fused
+    // elementwise codegen supports only Float32/Float64/Float16/BFloat16. Without
+    // this guard a non-float group threw on a CUDA/ROCm build (execute_fused) but
+    // silently computed here on a CPU-only build (the CODEGEN_AVAILABLE #else
+    // routes to this function) — the same group giving an error on one backend
+    // and a result on another. Reject identically so behaviour is backend-agnostic.
+    if (group.dtype != DType::Float32 && group.dtype != DType::Float64 &&
+        group.dtype != DType::Float16 && group.dtype != DType::BFloat16) {
+        throw std::runtime_error(
+            "execute_fused_cpu: fused elementwise codegen only supports "
+            "Float32/Float64/Float16/BFloat16; got " +
+            std::string(dtype_name(group.dtype)));
     }
 
     // Execute operations sequentially using existing eager ops.

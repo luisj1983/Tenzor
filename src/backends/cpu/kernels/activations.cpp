@@ -2300,6 +2300,12 @@ auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw,
 // SELU constants from the original paper
 constexpr float SELU_ALPHA = 1.6732632423543772848170429916717f;
 constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
+// Full double-precision variants for the Float64 path. The `float` constants
+// above are truncated to ~7 significant digits; casting them to double (as the
+// F64 branches previously did) diverged from the JIT/GPU codegen kernel, which
+// bakes full-precision literals — a ~3e-8 relative error that fails f64 gradcheck.
+constexpr double SELU_ALPHA_D = 1.6732632423543772848170429916717;
+constexpr double SELU_SCALE_D = 1.0507009873554804934193349852946;
 
 // Forward: scale * (x if x > 0 else alpha * (exp(x) - 1))
 auto selu_kernel(const Tensor& input_raw) -> Tensor {
@@ -2324,8 +2330,8 @@ auto selu_kernel(const Tensor& input_raw) -> Tensor {
         #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
-            out_data[i] = static_cast<double>(SELU_SCALE) *
-                ((x > 0.0) ? x : static_cast<double>(SELU_ALPHA) * (std::exp(x) - 1.0));
+            out_data[i] = SELU_SCALE_D *
+                ((x > 0.0) ? x : SELU_ALPHA_D * (std::exp(x) - 1.0));
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
@@ -2383,8 +2389,8 @@ auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
-            grad_in_data[i] = grad_out_data[i] * static_cast<double>(SELU_SCALE) *
-                ((x > 0.0) ? 1.0 : static_cast<double>(SELU_ALPHA) * std::exp(x));
+            grad_in_data[i] = grad_out_data[i] * SELU_SCALE_D *
+                ((x > 0.0) ? 1.0 : SELU_ALPHA_D * std::exp(x));
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* grad_out_data = grad_output.data<Float16>();

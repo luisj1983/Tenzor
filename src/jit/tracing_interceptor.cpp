@@ -98,6 +98,21 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         // lowers to stablehlo.broadcast_in_dim).
         case OpId::Expand:     return OpType::Broadcast;
 
+        // Comparison (Bool output) and logical ops. Mapping these makes a
+        // data-dependent predicate (a > b, logical_and(...)) a real graph node
+        // instead of an unmapped op that graph-breaks and gets frozen as a
+        // trace-time constant — the bug that made traced cond()/while_loop()
+        // ignore their runtime inputs.
+        case OpId::Eq:         return OpType::Eq;
+        case OpId::Ne:         return OpType::Ne;
+        case OpId::Lt:         return OpType::Lt;
+        case OpId::Le:         return OpType::Le;
+        case OpId::Gt:         return OpType::Gt;
+        case OpId::Ge:         return OpType::Ge;
+        case OpId::LogicalAnd: return OpType::LogicalAnd;
+        case OpId::LogicalOr:  return OpType::LogicalOr;
+        case OpId::LogicalNot: return OpType::LogicalNot;
+
         // Indexing
         case OpId::Slice:      return OpType::Slice;
         case OpId::Cat:        return OpType::Cat;
@@ -381,6 +396,14 @@ auto make_tracing_interceptor(
         };
         copy_bool(AttrKey::Keepdim, "keepdim");
         copy_bool(AttrKey::AlignCorners, "align_corners");
+        // AvgPool2d's count_include_pad option (default true). Stored by the
+        // pooling layer as an INT (set(AttrKey::CountIncludePad, int64_t{0|1})),
+        // so it must be copied via copy_int — copy_bool/get_bool misreads an
+        // Int64-tagged AttrValue. Without capturing it the traced node dropped
+        // the flag, so both the MLIR lowering and the interpreted executor
+        // silently used count_include_pad=true, diverging from an eager
+        // avg_pool2d(count_include_pad=false) with non-zero padding.
+        copy_int(AttrKey::CountIncludePad, "count_include_pad");
         // Slice indices: Start/End/Step are scalar ints used by Slice and
         // a handful of indexing ops. The MLIR lowerer needs them to
         // emit stablehlo.slice.

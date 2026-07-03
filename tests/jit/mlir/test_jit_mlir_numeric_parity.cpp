@@ -198,6 +198,107 @@ TEST(MlirNumericParity, Float16LayerNormWideAxis) {
         << "F16 LayerNorm diverges from eager (F16 accumulation not widened?)";
 }
 
+// F16 AvgPool2d (my fix): the reduce-window sum must accumulate in F32 to match
+// the eager kernel (float Compute). A 16x16 window sums 256 F16 values, so F16
+// accumulation would diverge; widening keeps compiled == eager.
+TEST(MlirNumericParity, Float16AvgPoolWideWindow) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [](const Variable& x) -> Variable {
+            return nn::functional::avg_pool2d(x, {16, 16}, {16, 16});
+        });
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    Tensor x_t =
+        (::tenzor::randn({1, 4, 32, 32}, DType::Float32, Device::cpu()) * 4.0f)
+            .to(DType::Float16);
+    Variable x(x_t, /*requires_grad=*/false);
+
+    const Variable eager = nn::functional::avg_pool2d(x, {16, 16}, {16, 16});
+    mj::reset_cache_stats();
+    Variable out;
+    ASSERT_NO_THROW({ out = compiled(x); });
+    ASSERT_GE(mj::cache_stats().misses, 1u)
+        << "F16 AvgPool did NOT run through IREE (eager fallback)";
+    double d = max_abs_diff_f64(eager.tensor(), out.tensor());
+    fprintf(stderr, "[parity] F16 AvgPool max_abs_diff = %.6g\n", d);
+    EXPECT_LT(d, 5e-3)
+        << "F16 AvgPool diverges from eager (reduce-window accumulation not "
+           "widened to F32?)";
+}
+
+// F16 scaled-dot-product attention: empirically bounds the divergence of the
+// MLIR flash-attention expand path vs eager (F32 throughout). If this exceeds
+// F16 tolerance, the QK/AV scores need widening in handle_flash_attention_expand.
+TEST(MlirNumericParity, Float16ScaledDotProductAttentionParity) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [](const Variable& x) -> Variable {
+            return nn::functional::scaled_dot_product_attention(x, x, x);
+        });
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    Tensor x_t = ::tenzor::randn({1, 4, 32, 32}, DType::Float32, Device::cpu())
+                     .to(DType::Float16);
+    Variable x(x_t, /*requires_grad=*/false);
+
+    const Variable eager = nn::functional::scaled_dot_product_attention(x, x, x);
+    mj::reset_cache_stats();
+    Variable out;
+    ASSERT_NO_THROW({ out = compiled(x); });
+    ASSERT_GE(mj::cache_stats().misses, 1u)
+        << "F16 SDPA did NOT run through IREE (eager fallback)";
+    double d = max_abs_diff_f64(eager.tensor(), out.tensor());
+    fprintf(stderr, "[parity] F16 SDPA max_abs_diff = %.6g\n", d);
+    EXPECT_LT(d, 2e-2) << "F16 SDPA diverges from eager beyond F16 tolerance";
+}
+
+// F16 Conv2d: empirically bounds MLIR conv (im2col dot_general / convolution in
+// storage dtype) vs eager. If beyond F16 tolerance, the conv accumulation needs
+// widening in handle_conv2d.
+TEST(MlirNumericParity, Float16Conv2dParity) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    Tensor w_t =
+        (::tenzor::randn({8, 4, 3, 3}, DType::Float32, Device::cpu()) * 0.1f)
+            .to(DType::Float16);
+    Variable w(w_t, /*requires_grad=*/false);
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [w](const Variable& x) -> Variable {
+            return nn::functional::conv2d(x, w);
+        });
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    Tensor x_t =
+        (::tenzor::randn({1, 4, 16, 16}, DType::Float32, Device::cpu()) * 2.0f)
+            .to(DType::Float16);
+    Variable x(x_t, /*requires_grad=*/false);
+
+    const Variable eager = nn::functional::conv2d(x, w);
+    mj::reset_cache_stats();
+    Variable out;
+    ASSERT_NO_THROW({ out = compiled(x); });
+    ASSERT_GE(mj::cache_stats().misses, 1u)
+        << "F16 Conv2d did NOT run through IREE (eager fallback)";
+    double d = max_abs_diff_f64(eager.tensor(), out.tensor());
+    fprintf(stderr, "[parity] F16 Conv2d max_abs_diff = %.6g\n", d);
+    EXPECT_LT(d, 2e-2) << "F16 Conv2d diverges from eager beyond F16 tolerance";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

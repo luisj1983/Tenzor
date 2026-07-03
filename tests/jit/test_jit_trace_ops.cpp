@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/compile.hpp>
+#include <tenzor/nn/functional.hpp>
 
 #include "../backend_parity/parity_test_utils.hpp"
 
@@ -213,5 +214,75 @@ TEST(JitTraceOps, RMSNormReplayMatchesEager) {
             ADD_FAILURE() << "RMSNorm threw on " << backend_name(dev)
                           << ": " << e.what();
         }
+    }
+}
+
+// Data-dependent predicate: a comparison (x > threshold) traced into a graph
+// must be a REAL node that re-evaluates at replay, not a constant frozen to the
+// trace-time boolean. Before comparison OpIds were mapped to OpTypes, gt/lt/…
+// graph-broke and their output was baked as a constant, so a compiled predicate
+// ignored its runtime input (breaking data-dependent JIT control flow). Runs on
+// every available backend so the comparison OpId dispatches uniformly.
+TEST(JitComparison, PredicateIsDataDependentAllBackends) {
+    for (const auto& dev : get_available_backends()) {
+        SCOPED_TRACE(backend_name(dev));
+
+        auto fn = [](const Variable& x) -> Variable {
+            Tensor thr = full({4}, 0.5f, DType::Float32, x.tensor().device());
+            return Variable(tenzor::gt(x.tensor(), thr), false);
+        };
+
+        auto compiled = jit::compile(fn);
+
+        // Warm up (cache miss -> eager + graph build) with all-zeros:
+        // pred = (0 > 0.5) = false everywhere.
+        Tensor a = zeros({4}, DType::Float32, dev);
+        (void)compiled(Variable(a, false));
+        dev.synchronize();
+        EXPECT_GE(compiled.num_cached(), 1u)
+            << "comparison did not compile/cache a graph on " << backend_name(dev);
+
+        // Replay (cache hit) with all-ones: pred must now be TRUE everywhere.
+        // A frozen predicate would still yield the trace-time FALSE.
+        Tensor b = ones({4}, DType::Float32, dev);
+        Tensor replay = compiled(Variable(b, false)).tensor()
+                            .to(Device::cpu()).to(DType::Float32).contiguous();
+        dev.synchronize();
+
+        const float* r = replay.data<float>();
+        for (int i = 0; i < 4; ++i) {
+            EXPECT_EQ(r[i], 1.0f)
+                << "predicate frozen to trace-time value on "
+                << backend_name(dev) << " i=" << i;
+        }
+    }
+}
+
+// count_include_pad=false must be captured by the tracer and honored by the
+// interpreted executor at replay. It was previously dropped during tracing, so
+// JIT silently used count_include_pad=true and diverged from eager at the padded
+// border cells (which should divide by the real element count, not the window
+// area). Non-zero padding makes the two modes differ.
+TEST(JitAvgPool, CountIncludePadFalseReplayMatchesEagerAllBackends) {
+    for (const auto& dev : get_available_backends()) {
+        SCOPED_TRACE(backend_name(dev));
+        auto fn = [](const Variable& x) -> Variable {
+            return nn::functional::avg_pool2d(x, {2, 2}, {2, 2}, {1, 1},
+                                              /*count_include_pad=*/false);
+        };
+        auto input = randn({1, 2, 4, 4}, DType::Float32, dev);
+        Tensor eager = fn(Variable(input, false)).tensor().to(Device::cpu());
+
+        auto compiled = jit::compile([&fn](const Variable& x) { return fn(x); });
+        (void)compiled(Variable(input, false));
+        dev.synchronize();
+        EXPECT_GE(compiled.num_cached(), 1u)
+            << "avg_pool2d did not compile/cache a graph on " << backend_name(dev);
+        Tensor replay = compiled(Variable(input, false)).tensor().to(Device::cpu());
+        dev.synchronize();
+
+        EXPECT_TRUE(tensors_close(eager, replay, 1e-4f, 1e-4f))
+            << "avg_pool2d(count_include_pad=false) replay != eager on "
+            << backend_name(dev) << " — the flag was dropped at trace time";
     }
 }

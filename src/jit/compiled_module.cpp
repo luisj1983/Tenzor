@@ -128,10 +128,20 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
             graph_ = it->second;
-        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+        } else {
+            // ALWAYS retrace on a device/dtype miss — never replay a graph built
+            // for the old device/dtype (its frozen constants carry the old dtype;
+            // its fused nodes are pinned to the old device). Cache only while
+            // under the capacity bound; past it, use the fresh graph for this
+            // call without growing the cache. traced_* is advanced below only
+            // because graph_ now provably matches this input (previously it was
+            // advanced even when the cap was hit and the stale graph was kept,
+            // so subsequent same-device calls skipped this check and replayed it).
             auto retraced = CompiledModule::trace(source_module_, input);
             retraced->optimize_for_inference();
-            shape_cache_[key] = retraced->graph_;
+            if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+                shape_cache_[key] = retraced->graph_;
+            }
             graph_ = retraced->graph_;
         }
         traced_device_ = input.tensor().device();
@@ -223,10 +233,16 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
             graph_ = it->second;
-        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+        } else {
+            // ALWAYS retrace on a device/dtype miss (see single-input forward()):
+            // never replay a graph built for the old device/dtype. Cache only
+            // while under the capacity bound; advance traced_* below only because
+            // graph_ now provably matches these inputs.
             auto retraced = CompiledModule::trace(source_module_, inputs[0]);
             retraced->optimize_for_inference();
-            shape_cache_[key] = retraced->graph_;
+            if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+                shape_cache_[key] = retraced->graph_;
+            }
             graph_ = retraced->graph_;
         }
         traced_device_ = inputs[0].tensor().device();

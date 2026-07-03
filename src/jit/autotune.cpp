@@ -246,7 +246,14 @@ auto AutotuneCache::load(const std::string& path) -> void {
 
         expect_char('}');
 
-        cache_[key] = CacheEntry{algo_id, time};
+        // Apply the SAME validity contract as record(): a non-positive/NaN time
+        // (parse_number coerces a malformed/truncated field to 0.0) would install
+        // a permanently-sticky entry that no genuinely-measured positive time can
+        // ever displace, and a negative algorithm_id could index an invalid
+        // candidate list. Skip such entries rather than loading a poisoned cache.
+        if (time > 0.0 && algo_id >= 0) {
+            cache_[key] = CacheEntry{algo_id, time};
+        }
 
         skip_ws();
         if (pos < content.size() && content[pos] == ',') ++pos;

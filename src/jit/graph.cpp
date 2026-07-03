@@ -379,6 +379,17 @@ auto Graph::infer_types() -> void {
             case OpType::Sub:
             case OpType::Mul:
             case OpType::Div:
+            // Comparison/logical binary ops broadcast identically (only the
+            // output dtype differs — Bool — which is preserved from the traced
+            // value, not recomputed here).
+            case OpType::Eq:
+            case OpType::Ne:
+            case OpType::Lt:
+            case OpType::Le:
+            case OpType::Gt:
+            case OpType::Ge:
+            case OpType::LogicalAnd:
+            case OpType::LogicalOr:
                 if (input_shapes.size() >= 2) {
                     output_shapes.push_back(
                         broadcast_shapes(input_shapes[0], input_shapes[1]));
@@ -447,6 +458,7 @@ auto Graph::infer_types() -> void {
             case OpType::SiLU:
             case OpType::RMSNorm:
             case OpType::RoPE:
+            case OpType::LogicalNot:   // unary; Bool output shape == input shape
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
                 }
@@ -1218,6 +1230,15 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Sub:
             case OpType::Mul:
             case OpType::Div:
+            // Comparison / binary-logical ops broadcast identically (Bool output).
+            case OpType::Eq:
+            case OpType::Ne:
+            case OpType::Lt:
+            case OpType::Le:
+            case OpType::Gt:
+            case OpType::Ge:
+            case OpType::LogicalAnd:
+            case OpType::LogicalOr:
                 if (input_sym_shapes.size() >= 2) {
                     output_sym_shapes.push_back(
                         broadcast_symbolic_shapes(input_sym_shapes[0], input_sym_shapes[1]));
@@ -1285,6 +1306,7 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::SiLU:
             case OpType::RMSNorm:
             case OpType::RoPE:
+            case OpType::LogicalNot:   // unary; Bool output shape == input shape
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
                 }
@@ -2460,6 +2482,49 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
 
         // ====================================================================
+        // Comparison / logical ops (Bool output, non-differentiable). Re-dispatch
+        // through the eager Tensor ops so replay is backend-agnostic; wrap as a
+        // non-tracking Variable since a Bool predicate carries no gradient. These
+        // are how data-dependent control-flow predicates execute at replay.
+        // ====================================================================
+        case OpType::Eq:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::eq(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::Ne:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::ne(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::Lt:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::lt(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::Le:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::le(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::Gt:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::gt(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::Ge:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::ge(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::LogicalAnd:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::logical_and(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::LogicalOr:
+            if (input_vars.size() >= 2)
+                outputs.push_back(Variable(tenzor::logical_or(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            break;
+        case OpType::LogicalNot:
+            if (!input_vars.empty())
+                outputs.push_back(Variable(tenzor::logical_not(input_vars[0].tensor()), false));
+            break;
+
+        // ====================================================================
         // Matrix operations
         // ====================================================================
         case OpType::MatMul:
@@ -2580,12 +2645,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh);
                 pool_attrs.set(AttrKey::PaddingW,
                     node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph);
+                // Honor count_include_pad (default true). Previously unset here,
+                // so the backend kernel defaulted to true and JIT ignored an
+                // eager count_include_pad=false request with non-zero padding.
+                const bool count_include_pad =
+                    node->has_int_attr("count_include_pad")
+                        ? node->get_int_attr("count_include_pad") != 0 : true;
+                pool_attrs.set(AttrKey::CountIncludePad,
+                               static_cast<int64_t>(count_include_pad ? 1 : 0));
                 if (grad_mode) {
                     const int64_t kw = node->has_attr("kernel_size_w") ? node->get_int_attr("kernel_size_w") : kh;
                     const int64_t sw = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh;
                     const int64_t pw = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph;
                     outputs.push_back(nn::functional::avg_pool2d(
-                        input_vars[0], {kh, kw}, {sh, sw}, {ph, pw}));
+                        input_vars[0], {kh, kw}, {sh, sw}, {ph, pw}, count_include_pad));
                     break;
                 }
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};

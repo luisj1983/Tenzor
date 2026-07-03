@@ -2311,6 +2311,15 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
         if (dev != Device::Type::CUDA && dev != Device::Type::ROCm) {
             return false;
         }
+        // NOTE: the cost model is intentionally left on its permissive default
+        // (CPU) heuristic rather than being pinned to `dev`. This pass only ever
+        // runs on GPU graphs (gated above), and a fused extended kernel is
+        // numerically identical to the unfused ops — so the fuse/no-fuse choice
+        // is purely a performance decision, never a cross-backend correctness
+        // one. Pinning the GPU heuristic here makes small-tensor patterns decline
+        // to fuse (estimate_speedup < 1.0), which only removes a valid, correct
+        // fusion opportunity; the permissive default fuses readily on GPU, which
+        // is the intended behaviour.
     }
 
     PatternMatcher matcher;

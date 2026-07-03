@@ -264,20 +264,17 @@ TEST(JITBackendParity, SoftmaxCrossEntropy) {
     int64_t batch = 4, num_classes = 10;
     auto logits = randn({batch, num_classes}, DType::Float32, Device::cpu());
 
-    // log_softmax -> negative mean (simulated NLL)
     auto log_probs = nn::log_softmax(Variable(logits, false), -1).tensor();
-    // Use class 0 as target for simplicity: pick log_probs[:, 0]
-    auto target_probs = log_probs.slice(1, 0, 1);  // (batch, 1)
-    auto ref = neg(sum(target_probs) / static_cast<float>(batch));
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
             auto logits_dev = logits.to(backends[i]);
             auto lp_dev = nn::log_softmax(Variable(logits_dev, false), -1).tensor();
-            auto tp_dev = lp_dev.slice(1, 0, 1);
-            auto out = neg(sum(tp_dev) / static_cast<float>(batch));
             backends[i].synchronize();
-            EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
+            // Compare the FULL log_softmax tensor elementwise. The prior scalar
+            // neg(sum(log_probs[:,0])/batch) reduced to one number, hiding any
+            // per-element divergence that cancels in the sum.
+            EXPECT_TENSORS_CLOSE(log_probs, lp_dev, 1e-4f, 1e-4f);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "SoftmaxCrossEntropy failed on "
                           << backend_name(backends[i]) << ": " << e.what();
@@ -351,7 +348,8 @@ TEST(JITBackendParity, EmbeddingLookup) {
 
     auto x = emb.forward(Variable(indices, false));
     x = nn::relu(fc.forward(x));
-    auto ref = sum(x.tensor());
+    // Full tensor (was sum(...), which masked per-element divergence).
+    auto ref = x.tensor();
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -365,9 +363,11 @@ TEST(JITBackendParity, EmbeddingLookup) {
             auto idx_dev = indices.to(backends[i]);
             auto xd = emb_dev.forward(Variable(idx_dev, false));
             xd = nn::relu(fc_dev.forward(xd));
-            auto out = sum(xd.tensor());
+            auto out = xd.tensor();
             backends[i].synchronize();
-            EXPECT_TENSORS_CLOSE(ref, out, 1e-2f, 1e-2f);
+            // Full elementwise compare at a tight bound (was sum(...) at 1e-2,
+            // which both reduced to a scalar and used a loose tolerance).
+            EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "EmbeddingLookup failed on "
                           << backend_name(backends[i]) << ": " << e.what();

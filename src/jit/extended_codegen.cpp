@@ -263,8 +263,17 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
                  std::string("0");
     // combine(acc, x) -> updated acc, for the element loop and the tree steps.
     auto combine = [&](const std::string& acc, const std::string& x) -> std::string {
-        if (is_max) return acc + " = " + max_fn + "(" + acc + ", " + x + ");";
-        if (is_min) return acc + " = " + min_fn + "(" + acc + ", " + x + ");";
+        // Max/Min reductions must propagate NaN: eager returns NaN if ANY element
+        // is NaN (parallel_simd_max/min_f* in reduction.cpp), whereas fmax/fmin
+        // silently drop NaN. Bind x to a temp first — it may be a
+        // __shfl_down_sync collective that must be evaluated exactly once — and
+        // note `acc + _t` is NaN whenever either operand is NaN.
+        if (is_max || is_min) {
+            const std::string& f = is_max ? max_fn : min_fn;
+            return "{ " + C + " _t = " + x + "; " + acc + " = (" + acc + " != " +
+                   acc + " || _t != _t) ? (" + acc + " + _t) : " + f + "(" + acc +
+                   ", _t); }";
+        }
         return acc + " += " + x + ";";
     };
 
@@ -317,8 +326,9 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
             case ElemOp::MulScalar:  out << indent << v << " = " << v << " * " << sc << ";\n"; break;
             case ElemOp::AddScalar:  out << indent << v << " = " << v << " + " << sc << ";\n"; break;
             case ElemOp::PowScalar:  out << indent << v << " = " << pow_fn << "(" << v << ", " << sc << ");\n"; break;
-            case ElemOp::ClampMin:   out << indent << v << " = " << max_fn << "(" << v << ", " << sc << ");\n"; break;
-            case ElemOp::ClampMax:   out << indent << v << " = " << min_fn << "(" << v << ", " << sc << ");\n"; break;
+            // clamp_min/clamp_max propagate NaN (see codegen.cpp emit_op); fmax/fmin drop it.
+            case ElemOp::ClampMin:   out << indent << v << " = (" << v << " < " << sc << ") ? " << sc << " : " << v << ";\n"; break;
+            case ElemOp::ClampMax:   out << indent << v << " = (" << v << " > " << sc << ") ? " << sc << " : " << v << ";\n"; break;
             case ElemOp::Mul:
                 // Only a self-square (x*x, same operand) is representable with a
                 // single input stream — this is RMSNorm's x². A binary Mul(x, y)

@@ -1977,30 +1977,82 @@ auto handle_avg_pool2d(LoweringContext& ctx,
     const auto& out = node.outputs()[0];
     const auto d = out->dtype();
     auto [win, str, plo, phi] = pool_window_for_2d(node, x->shape());
+    // Honor count_include_pad (default true, matching PyTorch/eager). When false,
+    // border cells must divide by the count of REAL (non-padding) elements, not
+    // the full window area (eager: pooling.cpp divisor = count_include_pad ?
+    // kh*kw : valid_count).
+    // Stored as an int attr (see tracing_interceptor copy_int); default true.
+    const bool count_include_pad =
+        node.has_int_attr("count_include_pad")
+            ? node.get_int_attr("count_include_pad") != 0 : true;
+
+    // Accumulate F16/BF16 in F32 to match the eager kernel's float accumulator
+    // (pooling.cpp Compute=float); reduce-window in half precision loses
+    // accuracy. cd == d for F32/F64; narrow back to d at the end.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string x_name = ctx.name_for(x->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x_name, x->shape(), d, cd);
+        body << '\n';
+        x_name = xc;
+    }
 
     auto init_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init_name, scalar_literal(0.0, d), {},
-                                  d);
+    emit_stablehlo_splat_constant(body, init_name, scalar_literal(0.0, cd), {},
+                                  cd);
     body << '\n';
 
     auto sum_name = ctx.fresh_name();
-    emit_reduce_window(body, ctx, sum_name, ctx.name_for(x->id()), init_name,
+    emit_reduce_window(body, ctx, sum_name, x_name, init_name,
                        "add", win, str, plo, phi, x->shape(), out->shape(),
-                       d);
+                       cd);
     body << '\n';
 
-    // Divide by window area kH * kW.
-    const int64_t area = win[2] * win[3];
-    auto area_const = ctx.fresh_name();
-    emit_stablehlo_splat_constant(
-        body, area_const, scalar_literal(static_cast<double>(area), d),
-        out->shape(), d);
-    body << '\n';
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out->id(), out_name);
-    emit_stablehlo_binary(body, "divide", out_name, sum_name, area_const,
-                          out->shape(), d);
-    body << '\n';
+    std::string result_name = ctx.fresh_name();
+    if (count_include_pad) {
+        // Divide by the full window area kH * kW. Padded cells contribute 0 to
+        // the sum (via the 0.0 init) but are still counted in the divisor.
+        const int64_t area = win[2] * win[3];
+        auto area_const = ctx.fresh_name();
+        emit_stablehlo_splat_constant(
+            body, area_const, scalar_literal(static_cast<double>(area), cd),
+            out->shape(), cd);
+        body << '\n';
+        emit_stablehlo_binary(body, "divide", result_name, sum_name, area_const,
+                              out->shape(), cd);
+        body << '\n';
+    } else {
+        // Per-position count of real (non-padding) elements: reduce_window("add")
+        // over an all-ones tensor with the SAME window/stride/padding. Padded
+        // positions are the 0.0 init and contribute 0, so each output holds the
+        // number of in-bounds elements that fell in its window.
+        auto ones_name = ctx.fresh_name();
+        emit_stablehlo_splat_constant(body, ones_name, scalar_literal(1.0, cd),
+                                      x->shape(), cd);
+        body << '\n';
+        auto cnt_init = ctx.fresh_name();
+        emit_stablehlo_splat_constant(body, cnt_init, scalar_literal(0.0, cd),
+                                      {}, cd);
+        body << '\n';
+        auto count_name = ctx.fresh_name();
+        emit_reduce_window(body, ctx, count_name, ones_name, cnt_init, "add",
+                           win, str, plo, phi, x->shape(), out->shape(), cd);
+        body << '\n';
+        emit_stablehlo_binary(body, "divide", result_name, sum_name, count_name,
+                              out->shape(), cd);
+        body << '\n';
+    }
+
+    if (widen) {
+        auto narrowed = ctx.fresh_name();
+        emit_stablehlo_convert(body, narrowed, result_name, out->shape(), cd, d);
+        body << '\n';
+        result_name = narrowed;
+    }
+    ctx.bind(out->id(), result_name);
 }
 
 /// AdaptiveAvgPool2d: compute kernel/stride to bring (H_in, W_in) →
@@ -2053,24 +2105,44 @@ auto handle_adaptive_avg_pool2d(LoweringContext& ctx,
     std::vector<int64_t> plo = {0, 0, 0, 0};
     std::vector<int64_t> phi = {0, 0, 0, 0};
 
+    // Accumulate F16/BF16 in F32 to match the eager float accumulator. Adaptive
+    // pooling has no padding, so count_include_pad is irrelevant here. cd == d
+    // for F32/F64; narrow back to d at the end.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string x_name = ctx.name_for(x_val->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x_name, xs, d, cd);
+        body << '\n';
+        x_name = xc;
+    }
+
     auto init_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init_name, scalar_literal(0.0, d), {},
-                                  d);
+    emit_stablehlo_splat_constant(body, init_name, scalar_literal(0.0, cd), {},
+                                  cd);
     body << '\n';
     auto sum_name = ctx.fresh_name();
-    emit_reduce_window(body, ctx, sum_name, ctx.name_for(x_val->id()),
-                       init_name, "add", win, str, plo, phi, xs, os, d);
+    emit_reduce_window(body, ctx, sum_name, x_name,
+                       init_name, "add", win, str, plo, phi, xs, os, cd);
     body << '\n';
     const int64_t area = kh * kw;
     auto area_const = ctx.fresh_name();
     emit_stablehlo_splat_constant(
-        body, area_const, scalar_literal(static_cast<double>(area), d), os, d);
+        body, area_const, scalar_literal(static_cast<double>(area), cd), os, cd);
     body << '\n';
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out_val->id(), out_name);
+    std::string out_name = ctx.fresh_name();
     emit_stablehlo_binary(body, "divide", out_name, sum_name, area_const, os,
-                          d);
+                          cd);
     body << '\n';
+    if (widen) {
+        auto narrowed = ctx.fresh_name();
+        emit_stablehlo_convert(body, narrowed, out_name, os, cd, d);
+        body << '\n';
+        out_name = narrowed;
+    }
+    ctx.bind(out_val->id(), out_name);
 }
 
 /// Dropout: in inference (training=false) it's the identity. In training
@@ -3497,58 +3569,87 @@ auto handle_rms_norm_expand(LoweringContext& ctx,
     int64_t N = 1;
     for (auto k : norm_dims) N *= shape[k];
 
-    const auto& x = ctx.name_for(x_val->id());
+    // Accumulate the sum-of-squares / mean / rsqrt in F32 for F16/BF16 (cd),
+    // matching the eager RMSNorm kernel (float sum_sq) and the widened
+    // handle_layer_norm/handle_sum/handle_softmax. Reducing in half precision
+    // loses accuracy as the normalized length N grows (every transformer block).
+    // cd == d for F32/F64; the widened result is narrowed back to d at the end.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+
+    std::string x = ctx.name_for(x_val->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x, shape, d, cd);
+        body << '\n';
+        x = xc;
+    }
 
     // sq = x * x
     auto sq = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", sq, x, x, shape, d); body << '\n';
+    emit_stablehlo_binary(body, "multiply", sq, x, x, shape, cd); body << '\n';
     // sum_sq = reduce_sum(sq, norm_dims)
     auto init0 = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, d), {}, d);
+    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, cd), {}, cd);
     body << '\n';
     auto sum_sq = ctx.fresh_name();
     emit_stablehlo_reduce(body, sum_sq, sq, init0, "add", norm_dims, shape,
-                          reduced_shape, d); body << '\n';
+                          reduced_shape, cd); body << '\n';
     // mean = sum_sq / N
     auto n_c = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, n_c,
-                                  scalar_literal(static_cast<double>(N), d),
-                                  reduced_shape, d);
+                                  scalar_literal(static_cast<double>(N), cd),
+                                  reduced_shape, cd);
     body << '\n';
     auto mean_sq = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", mean_sq, sum_sq, n_c, reduced_shape, d);
+    emit_stablehlo_binary(body, "divide", mean_sq, sum_sq, n_c, reduced_shape, cd);
     body << '\n';
     // var_eps = mean_sq + eps
     auto eps_c = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, eps_c,
-                                  scalar_literal(static_cast<double>(eps), d),
-                                  reduced_shape, d);
+                                  scalar_literal(static_cast<double>(eps), cd),
+                                  reduced_shape, cd);
     body << '\n';
     auto var_eps = ctx.fresh_name();
-    emit_stablehlo_binary(body, "add", var_eps, mean_sq, eps_c, reduced_shape, d);
+    emit_stablehlo_binary(body, "add", var_eps, mean_sq, eps_c, reduced_shape, cd);
     body << '\n';
     // rms = sqrt(var_eps)
     auto rms = ctx.fresh_name();
-    emit_stablehlo_unary(body, "sqrt", rms, var_eps, reduced_shape, d);
+    emit_stablehlo_unary(body, "sqrt", rms, var_eps, reduced_shape, cd);
     body << '\n';
     auto rms_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, rms_b, rms, bcast_dims,
-                                    reduced_shape, shape, d);
+                                    reduced_shape, shape, cd);
     body << '\n';
     // xhat = x / rms_b
     auto xhat = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", xhat, x, rms_b, shape, d);
+    emit_stablehlo_binary(body, "divide", xhat, x, rms_b, shape, cd);
     body << '\n';
 
     std::string final_name = xhat;
     if (node.inputs().size() >= 2) {
         const auto& w_val = node.inputs()[1];
-        auto w_b = maybe_broadcast(body, ctx, ctx.name_for(w_val->id()),
-                                   w_val->shape(), shape, d);
+        std::string w_name = ctx.name_for(w_val->id());
+        if (widen) {
+            auto wc = ctx.fresh_name();
+            emit_stablehlo_convert(body, wc, w_name, w_val->shape(), d, cd);
+            body << '\n';
+            w_name = wc;
+        }
+        auto w_b = maybe_broadcast(body, ctx, w_name, w_val->shape(), shape, cd);
         auto scaled = ctx.fresh_name();
-        emit_stablehlo_binary(body, "multiply", scaled, xhat, w_b, shape, d);
+        emit_stablehlo_binary(body, "multiply", scaled, xhat, w_b, shape, cd);
         body << '\n';
         final_name = scaled;
+    }
+
+    // Narrow the widened result back to the storage dtype d.
+    if (widen) {
+        auto narrowed = ctx.fresh_name();
+        emit_stablehlo_convert(body, narrowed, final_name, shape, cd, d);
+        body << '\n';
+        final_name = narrowed;
     }
 
     // Bind the output value's SSA name to `final_name` — the chained

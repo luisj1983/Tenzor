@@ -399,6 +399,13 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
             op.int_attrs["kernel_size_w"] = kernel_size_w_;
             op.int_attrs["stride_w"]      = stride_w_;
             op.int_attrs["padding_w"]     = padding_w_;
+            // count_include_pad: this manual trace path (the layer dispatches
+            // directly via dispatch_to_device, bypassing the tracing
+            // interceptor) must record the flag itself, or replay defaults to
+            // true and diverges from an eager count_include_pad=false pool at
+            // the padded border cells.
+            op.int_attrs["count_include_pad"] =
+                count_include_pad_ ? int64_t{1} : int64_t{0};
             tracer.record_op(std::move(op));
         }
     }

@@ -110,6 +110,15 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::RoPE: return "RoPE";
         case OpType::Padding: return "Padding";
         case OpType::Interpolate: return "Interpolate";
+        case OpType::Eq: return "Eq";
+        case OpType::Ne: return "Ne";
+        case OpType::Lt: return "Lt";
+        case OpType::Le: return "Le";
+        case OpType::Gt: return "Gt";
+        case OpType::Ge: return "Ge";
+        case OpType::LogicalAnd: return "LogicalAnd";
+        case OpType::LogicalOr: return "LogicalOr";
+        case OpType::LogicalNot: return "LogicalNot";
         default: return "Unknown";
     }
 }
@@ -201,6 +210,15 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"RoPE", OpType::RoPE},
         {"Padding", OpType::Padding},
         {"Interpolate", OpType::Interpolate},
+        {"Eq", OpType::Eq},
+        {"Ne", OpType::Ne},
+        {"Lt", OpType::Lt},
+        {"Le", OpType::Le},
+        {"Gt", OpType::Gt},
+        {"Ge", OpType::Ge},
+        {"LogicalAnd", OpType::LogicalAnd},
+        {"LogicalOr", OpType::LogicalOr},
+        {"LogicalNot", OpType::LogicalNot},
     };
 
     auto it = string_to_type.find(str);
