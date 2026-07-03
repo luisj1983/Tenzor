@@ -346,6 +346,22 @@ public:
     auto register_new_tensor(const Tensor& tensor) -> std::string;
 
     /**
+     * @brief Alias a tensor to an already-registered value id.
+     *
+     * Maps `alias`'s fingerprint to `existing_id` so a later consumer that
+     * registers `alias` resolves to the SAME graph value — recording no node and
+     * minting no id. Used for transparent value-identity ops (e.g. Contiguous):
+     * `contiguous(x)` has identical values to `x` but, when `x` was
+     * non-contiguous, a distinct storage/fingerprint, so `register_tensor`
+     * cannot dedup it. Aliasing lets the tracer elide the op instead of treating
+     * it as an unmappable graph break (which would force an eager fallback).
+     *
+     * @param alias        The value-identity op's output tensor.
+     * @param existing_id  The id the op's input was registered under.
+     */
+    auto alias_tensor(const Tensor& alias, const std::string& existing_id) -> void;
+
+    /**
      * @brief Declare the trainable parameters the traced function closes over.
      *
      * Records each parameter's storage identity so end_trace() can classify a

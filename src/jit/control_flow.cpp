@@ -58,8 +58,13 @@ auto cond(const Tensor& condition,
         },
         {input});
 
-    return results.empty() ? Variable(Tensor({}, DType::Float32, Device::cpu()))
-                           : results[0];
+    // A branch that returned nothing yields an empty scalar; inherit the input's
+    // device and dtype so a CUDA/ROCm/Float64 trace doesn't silently degrade to
+    // a CPU Float32 scalar (which would then device-mismatch downstream ops).
+    return results.empty()
+               ? Variable(Tensor({}, input.tensor().dtype(),
+                                  input.tensor().device()))
+               : results[0];
 }
 
 // ============================================================================

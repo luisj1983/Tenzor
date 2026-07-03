@@ -12,6 +12,10 @@ add_executable(test_fusion_passes test_fusion_passes.cpp)
 target_link_libraries(test_fusion_passes PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_fusion_passes LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+add_executable(test_jit_quantization test_jit_quantization.cpp)
+target_link_libraries(test_jit_quantization PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_quantization LABELS "jit" DISCOVERY_TIMEOUT 120)
+
 add_executable(test_control_flow test_control_flow.cpp)
 target_link_libraries(test_control_flow PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_control_flow LABELS "jit" DISCOVERY_TIMEOUT 60)

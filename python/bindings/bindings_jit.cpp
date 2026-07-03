@@ -70,12 +70,52 @@ bool py_tracer_is_installed(tenzor::jit::Tracer* self) {
     return std::find(owners.begin(), owners.end(), self) != owners.end();
 }
 
-// Push a tracing interceptor for `self` if it does not already own one.
+// Point the single-slot, thread-local graph-break and in-place hooks at the
+// tracer owning the TOP of the interceptor stack (the innermost active trace),
+// or clear them when no Python tracer is installed. These hooks are how leaf
+// operations that BYPASS the DispatchInterceptorStack reach the tracer:
+// Tensor::item()/data-dependent paths (graph break) and in-place kernels
+// dispatched through dispatch_inplace (in-place mutation). The C++ TracingGuard
+// installs exactly these; without them the Python `Tracer` silently dropped
+// unmapped ops (they could be baked as constants) and missed in-place mutations
+// (later reads resolved to pre-mutation values) — a real Python-vs-C++ divergence.
+void py_tracer_refresh_hooks() {
+    auto& owners = py_tracer_owner_stack();
+    if (owners.empty()) {
+        tenzor::detail::set_graph_break_hook(nullptr);
+        tenzor::detail::set_inplace_op_hook(nullptr);
+        return;
+    }
+    tenzor::jit::Tracer* top = owners.back();
+    tenzor::detail::set_graph_break_hook(
+        [top](const std::string& reason) { top->record_graph_break(reason); });
+    tenzor::detail::set_inplace_op_hook(
+        [top](tenzor::OpId op, tenzor::Tensor& target,
+              const tenzor::Tensor* others, std::size_t num_others,
+              const tenzor::OpAttributes& attrs) {
+            top->record_inplace(
+                op, target,
+                std::span<const tenzor::Tensor>(others, num_others), attrs);
+        });
+}
+
+// Push a tracing interceptor for `self` if it does not already own one, and
+// (re)point the graph-break / in-place hooks at it. The interceptor's own
+// break callback records unmapped ops into `self` instead of silently skipping
+// them (the previous nullptr callback).
 void py_tracer_install(tenzor::jit::Tracer& self) {
     if (py_tracer_is_installed(&self)) return;
+    tenzor::jit::Tracer* self_ptr = &self;
     DispatchInterceptorStack::push(
-        tenzor::jit::make_tracing_interceptor(self, nullptr));
+        tenzor::jit::make_tracing_interceptor(
+            self, [self_ptr](tenzor::OpId op) {
+                self_ptr->record_graph_break(
+                    "unmapped operation (OpId=" +
+                    std::to_string(static_cast<int>(op)) +
+                    ") has no IR OpType mapping");
+            }));
     py_tracer_owner_stack().push_back(&self);
+    py_tracer_refresh_hooks();
 }
 
 // Remove the tracing interceptor owned by `self`, if any. To keep the LIFO
@@ -93,6 +133,9 @@ bool py_tracer_uninstall(tenzor::jit::Tracer* self) {
         DispatchInterceptorStack::pop();
         owners.pop_back();
     }
+    // Re-point (or clear) the global hooks now that the top owner may have
+    // changed — restores the enclosing trace's hooks under proper nesting.
+    py_tracer_refresh_hooks();
     return true;
 }
 

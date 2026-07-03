@@ -356,9 +356,59 @@ auto QuantizedLinear::from_float(const Linear& fp_linear, const QConfig& qconfig
     return q_layer;
 }
 
+auto quantized_linear_dynamic(const Tensor& input, const Tensor& weight,
+                              const std::optional<Tensor>& bias) -> Tensor {
+    // Dynamic per-tensor symmetric INT8 quantized linear used by the JIT
+    // QuantizationPass interpreter. Mirrors from_float + forward EXACTLY:
+    // quantize the fp32 weight to int8 (symmetric max(|w|)/127, matching the
+    // pass's compute_scale_and_zero), build a QuantizedLinear, and run its
+    // forward — which dynamically quantizes the activation and dispatches the
+    // int8 matmul (OpId::QuantizedLinear, registered on every backend). Sharing
+    // this code path guarantees JIT quantized == eager quantized on all backends.
+    if (weight.shape().size() != 2) {
+        throw std::runtime_error(
+            "quantized_linear_dynamic: weight must be 2D [out_features, in_features]");
+    }
+    const int64_t out_features = weight.shape()[0];
+    const int64_t in_features  = weight.shape()[1];
+    QuantizedTensor q_weight = quantize_per_tensor_symmetric(weight);
+    QuantizedLinear layer(in_features, out_features, q_weight.params());
+    layer.set_weight(q_weight);
+    if (bias.has_value()) {
+        layer.set_bias(*bias);
+    }
+    return layer.forward(Variable(input, /*requires_grad=*/false)).tensor();
+}
+
 // ============================================================================
 // QuantizedConv2d
 // ============================================================================
+
+auto quantized_conv2d_dynamic(const Tensor& input, const Tensor& weight,
+                              const std::optional<Tensor>& bias, int64_t stride,
+                              int64_t padding, int64_t dilation, int64_t groups)
+    -> Tensor {
+    // Dynamic per-tensor symmetric INT8 quantized conv2d, mirroring
+    // QuantizedConv2d::from_float + forward (see quantized_linear_dynamic).
+    // weight: [out_channels, in_channels/groups, kH, kW] with a square kernel
+    // (the eager QuantizedConv2d supports square kernels + symmetric configs).
+    if (weight.shape().size() != 4) {
+        throw std::runtime_error(
+            "quantized_conv2d_dynamic: weight must be 4D "
+            "[out_channels, in_channels/groups, kH, kW]");
+    }
+    const int64_t out_channels = weight.shape()[0];
+    const int64_t in_channels  = weight.shape()[1] * groups;
+    const int64_t kernel_size  = weight.shape()[2];
+    QuantizedTensor q_weight = quantize_per_tensor_symmetric(weight);
+    QuantizedConv2d layer(in_channels, out_channels, kernel_size, stride, padding,
+                          dilation, groups, q_weight.params());
+    layer.set_weight(q_weight);
+    if (bias.has_value()) {
+        layer.set_bias(*bias);
+    }
+    return layer.forward(Variable(input, /*requires_grad=*/false)).tensor();
+}
 
 QuantizedConv2d::QuantizedConv2d(
     int64_t in_channels,

@@ -289,9 +289,17 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         case ElemOp::PowScalar:  return vp + "val = " + fn("pow") + "(" + a + ", " + s + F + ");";
         case ElemOp::ClampMin:   return vp + "val = " + fn("fmax") + "(" + a + ", " + s + F + ");";
         case ElemOp::ClampMax:   return vp + "val = " + fn("fmin") + "(" + a + ", " + s + F + ");";
-
-        default: return vp + "val = " + a + "; // unknown op";
     }
+    // No `default:` — `-Wswitch` flags any ElemOp without an explicit case above
+    // (promoted to an error under the CI/Release warning flags), and the throw is
+    // the runtime backstop. The previous silent identity default (`val = a`) let a
+    // newly-added ElemOp that was wired into the CPU twin (execute_fused_cpu) but
+    // missed here compile into a passthrough kernel, silently diverging CUDA/ROCm
+    // from CPU. The throw is unreachable for any valid enum value and satisfies
+    // the non-void return.
+    throw std::runtime_error(
+        "KernelCodegen::emit_op: unhandled ElemOp (" +
+        std::to_string(static_cast<int>(step.op)) + ")");
 }
 
 auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
@@ -790,6 +798,22 @@ auto execute_fused(const FusionGroup& group,
             break;
         }
     }
+
+    // The generated kernel is an NVRTC/HIPRTC device kernel; it can only be
+    // compiled for and launched on a CUDA or ROCm device. A Vulkan/OneAPI tensor
+    // reaching here (possible in a combined build where CODEGEN_AVAILABLE is set
+    // by CUDA/ROCm) must NOT be treated as the GPU target — compiling a CUDA/HIP
+    // kernel and launching it over that device's memory is illegal. Reject
+    // loudly so the caller routes this group through the correct backend path.
+    // Mirrors execute_extended_fused's guard.
+    if (gpu_device.type != Device::Type::CUDA &&
+        gpu_device.type != Device::Type::ROCm) {
+        throw std::runtime_error(
+            "KernelCodegen::execute_fused: native fused codegen targets only "
+            "CUDA/ROCm; got a " + gpu_device.to_string() +
+            " tensor — route this group through its backend's own path");
+    }
+
     std::vector<Tensor> gpu_inputs;
     gpu_inputs.reserve(inputs.size());
     for (const auto& inp : inputs) {

@@ -774,14 +774,15 @@ private:
                 "compile_script: method argument must be a scalar integer");
         }
         if (t.device().type != Device::Type::CPU) t = t.to(Device::cpu());
-        if (t.dtype() == DType::Float32) {
-            return static_cast<int64_t>(t.data<float>()[0]);
-        }
-        if (t.dtype() == DType::Float64) {
-            return static_cast<int64_t>(t.data<double>()[0]);
-        }
-        throw std::runtime_error(
-            "compile_script: method int argument must be numeric");
+        // A NumberExpr literal is stamped with the trace's context dtype (the
+        // first input's dtype), so an integer method argument (e.g. `.sum(dim)`)
+        // can arrive as ANY numeric dtype — Float16/BFloat16/Int*/Float64, not
+        // just Float32/64. Normalize through Int64 (exact for any integer these
+        // carry, truncating toward zero like the old static_cast) rather than
+        // rejecting the other dtypes, which broke integer args for F16/BF16/int
+        // traces.
+        if (t.dtype() != DType::Int64) t = t.to(DType::Int64);
+        return t.data<int64_t>()[0];
     }
 
     Variable call_method_with_args(const Variable& recv,

@@ -695,6 +695,18 @@ auto Tracer::register_new_tensor(const Tensor& tensor) -> std::string {
     return id;
 }
 
+auto Tracer::alias_tensor(const Tensor& alias, const std::string& existing_id) -> void {
+    // Point this tensor's fingerprint at an already-registered value id so any
+    // later consumer that registers `alias` resolves to the SAME graph value,
+    // WITHOUT minting a new id or recording a node. Used for transparent
+    // value-identity ops (e.g. Contiguous): contiguous(x) has identical values
+    // to x but — when x was non-contiguous — a fresh storage/fingerprint, so it
+    // cannot be deduped by register_tensor. Eliding it here keeps such ops from
+    // forcing a whole-graph eager fallback (they are pure layout materializations
+    // that do not change values, so the downstream replay is numerically exact).
+    tensor_id_map_[tensor_fingerprint(alias)] = existing_id;
+}
+
 auto Tracer::set_parameters(std::vector<std::shared_ptr<Variable>> params) -> void {
     parameters_ = std::move(params);
     param_storage_index_.clear();

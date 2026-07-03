@@ -16,6 +16,8 @@
 #include "../../include/tenzor/ops/linalg.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/functional.hpp"
+#include "../../include/tenzor/nn/quantization/quantized_layers.hpp"
+#include "../../include/tenzor/sparse/sparse_ops.hpp"
 #include "../../include/tenzor/backend/fast_dispatch.hpp"
 #include "../../include/tenzor/core/shape.hpp"
 #include <algorithm>
@@ -1144,10 +1146,22 @@ auto Graph::infer_types() -> void {
                 break;
 
             case OpType::QuantizedLinear:
+            case OpType::SparseMatMul:
+                // Inputs [x, weight(, bias)]; output = x[:-1] + [out_features],
+                // out_features = weight.shape[0]. (Same shape rule as Linear.)
+                if (input_shapes.size() >= 2 && input_shapes[0].size() >= 1 &&
+                    !input_shapes[1].empty()) {
+                    std::vector<int64_t> os(input_shapes[0].begin(),
+                                            input_shapes[0].end() - 1);
+                    os.push_back(input_shapes[1][0]);
+                    output_shapes.push_back(std::move(os));
+                } else if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
             case OpType::QuantizedConv2d:
             case OpType::Dequantize:
             case OpType::Quantize:
-            case OpType::SparseMatMul:
             case OpType::DenseToSparse:
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
@@ -2715,11 +2729,37 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     static_cast<double>(node->get_attr("eps")) : 1e-5);
                 bn_attrs.set(AttrKey::Momentum, 0.1);
                 bn_attrs.set(AttrKey::Training, false);
+
+                // The tracer records BOTH BN2d variants under OpType::BatchNorm2d,
+                // discriminated only by arity. The dispatch interceptor rewrites an
+                // AFFINE forward's inputs into IR operand order
+                // (x, gamma, beta, mean, var) to mirror stablehlo.batch_norm_inference;
+                // the non-affine forward keeps its eager order (x, mean, var).
+                // Reconstruct the exact kernel-canonical operand order and dispatch
+                // the MATCHING kernel. Dispatching the non-affine kernel over the
+                // affine 5-input node (the previous bug) silently read gamma as mean
+                // and beta as var and dropped the affine scale+shift entirely.
                 std::vector<Tensor> inputs;
+                inputs.reserve(input_vars.size());
                 for (auto& iv : input_vars) {
                     inputs.push_back(iv.tensor());
                 }
-                auto result = dispatch(OpId::BatchNorm2dForward, inputs, bn_attrs);
+
+                std::vector<Tensor> result;
+                if (inputs.size() == 5) {
+                    // IR order (x, gamma, beta, mean, var) -> affine kernel order
+                    // (x, mean, var, gamma, beta).
+                    std::vector<Tensor> affine_inputs = {
+                        inputs[0], inputs[3], inputs[4], inputs[1], inputs[2]};
+                    result = dispatch(OpId::BatchNorm2dForwardAffine,
+                                      affine_inputs, bn_attrs);
+                } else if (inputs.size() == 3) {
+                    result = dispatch(OpId::BatchNorm2dForward, inputs, bn_attrs);
+                } else {
+                    throw std::runtime_error(
+                        "JIT: BatchNorm2d replay expects 3 (non-affine) or 5 "
+                        "(affine) inputs, got " + std::to_string(inputs.size()));
+                }
                 if (!result.empty()) {
                     outputs.push_back(Variable(result[0], false));
                 }
@@ -3467,7 +3507,8 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 // Float32 scalar would force/round the scaled scores to Float32,
                 // diverging from eager for non-Float32 traces.
                 auto scaled = scores * Variable(
-                    tenzor::full({1}, scale, scores.tensor().dtype()), false);
+                    tenzor::full({1}, scale, scores.tensor().dtype(),
+                                 scores.tensor().device()), false);
 
                 // Add the additive mask (4th input) before softmax when the
                 // matched pattern attached one (FuseAttentionPass appends it as
@@ -3647,11 +3688,84 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
         }
 
-        case OpType::QuantizedLinear:
-        case OpType::QuantizedConv2d:
+        case OpType::QuantizedLinear: {
+            // Retagged from Linear by QuantizationPass; inputs = [x, weight(, bias)].
+            // int8 matmul is inference-only (non-differentiable).
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: QuantizedLinear is inference-only (the int8 "
+                    "matmul is not differentiable); fall back to eager");
+            }
+            if (input_vars.size() < 2) {
+                throw std::runtime_error(
+                    "JIT: QuantizedLinear expects [input, weight] (+ optional bias)");
+            }
+            std::optional<Tensor> bias;
+            if (input_vars.size() >= 3) bias = input_vars[2].tensor();
+            Tensor out = nn::quantization::quantized_linear_dynamic(
+                input_vars[0].tensor(), input_vars[1].tensor(), bias);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::QuantizedConv2d: {
+            // Retagged from Conv2d; inputs = [x, weight(, bias)]; square config.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: QuantizedConv2d is inference-only (the int8 "
+                    "conv is not differentiable); fall back to eager");
+            }
+            if (input_vars.size() < 2) {
+                throw std::runtime_error(
+                    "JIT: QuantizedConv2d expects [input, weight] (+ optional bias)");
+            }
+            // Square configs (eager QuantizedConv2d constraint): read the H axis
+            // from any form the tracer emits (per-axis int, 2-vec, scalar).
+            auto scalar_from = [&](const char* h_key, const char* shared_key,
+                                   int64_t default_v) -> int64_t {
+                if (node->has_attr(h_key)) return node->get_int_attr(h_key);
+                auto v = node->get_vec_attr(shared_key);
+                if (!v.empty()) return v[0];
+                if (node->has_attr(shared_key)) return node->get_int_attr(shared_key);
+                return default_v;
+            };
+            int64_t stride   = scalar_from("stride_h",   "stride",   1);
+            int64_t padding  = scalar_from("padding_h",  "padding",  0);
+            int64_t dilation = scalar_from("dilation_h", "dilation", 1);
+            int64_t groups   = node->has_attr("groups")
+                ? node->get_int_attr("groups") : static_cast<int64_t>(1);
+            std::optional<Tensor> bias;
+            if (input_vars.size() >= 3) bias = input_vars[2].tensor();
+            Tensor out = nn::quantization::quantized_conv2d_dynamic(
+                input_vars[0].tensor(), input_vars[1].tensor(), bias,
+                stride, padding, dilation, groups);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::SparseMatMul: {
+            // Retagged from Linear by SparsePass; inputs = [x, weight(, bias)].
+            // Sparse SpMM over the from_dense weight is EXACT (lossless), so this
+            // is differentiable-safe to fall back to eager; run inference here.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseMatMul is not wired for differentiable "
+                    "replay; fall back to eager");
+            }
+            if (input_vars.size() < 2) {
+                throw std::runtime_error(
+                    "JIT: SparseMatMul expects [input, weight] (+ optional bias)");
+            }
+            std::optional<Tensor> bias;
+            if (input_vars.size() >= 3) bias = input_vars[2].tensor();
+            Tensor out = tenzor::sparse::sparse_matmul_dynamic(
+                input_vars[0].tensor(), input_vars[1].tensor(), bias);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
         case OpType::Dequantize:
         case OpType::Quantize:
-        case OpType::SparseMatMul:
         case OpType::DenseToSparse:
             throw std::runtime_error(
                 "JIT interpreter does not execute specialized op " +

@@ -669,6 +669,24 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
     // warn once. (An explicit target on such a device is honoured below and,
     // if it fails, caught by the C2 net.)
     if (config_.target == "auto" && !auto_target_for_device(dev)) {
+        // In strict mode a missing IREE target is a hard error, exactly like a
+        // lowering gap on CUDA/ROCm — the documented strict contract is "JIT
+        // coverage gaps throw loudly". Without this, identical strict code threw
+        // on a CUDA lowering gap but silently ran eager on OneAPI/MPS.
+        bool strict = config_.strict;
+        if (!strict) {
+            if (const char* s = std::getenv("TENZOR_JIT_STRICT");
+                s && *s && *s != '0') {
+                strict = true;
+            }
+        }
+        if (strict) {
+            throw std::runtime_error(
+                "MLIR JIT (strict): device '" + dev.to_string() +
+                "' has no IREE target backend (Intel OneAPI / Apple MPS have no "
+                "IREE HAL); cannot compile. Use backend=\"nvrtc\" or a device "
+                "with an IREE target (CPU/CUDA/ROCm/Vulkan) to enable JIT.");
+        }
         static std::once_flag warned_no_target;
         std::call_once(warned_no_target, [&] {
             TENZOR_LOG_WARN(
@@ -796,18 +814,24 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
     }
 
     mj::GraphToMLIR lowerer;
-    // Plugin path is the default — the lowering emits call @tenzor_plugin.<op>
-    // for the 4 dialect ops and the in-process IreeInvoker registers a VM
-    // native module that resolves them. Graphs that contain none of those ops
-    // are equally compatible (no extern decls are produced).
-    lowerer.set_plugin_enabled(true);
+    // Always lower the 4 dialect ops (flash_attention/gqa/rope/rms_norm) to pure
+    // StableHLO (the "expand" form) rather than `call @tenzor_plugin.<op>`. The
+    // plugin custom-calls resolve via a VM native module whose marshalling always
+    // materializes CPU tensors (buffer_view_to_tensor), so they ran their CPU
+    // kernels even on a GPU target — a hidden host round-trip AND a numeric
+    // divergence from the StableHLO expansion used on GPU-HAL-less runtimes.
+    // Expanding uniformly makes these ops execute on the compiled HAL target on
+    // EVERY backend, with identical numerics regardless of how libIREERuntime was
+    // built. (Graphs without these ops are unaffected — the expansion is a no-op
+    // for them.)
+    lowerer.set_plugin_enabled(false);
     const std::string mlir_text = lowerer.lower(*graph);
 
     const ::tenzor::Device in_dev = inputs[0].tensor().device();
 
     mj::CompileOptions opts;
     opts.target          = resolve_target(config_.target, in_dev);
-    opts.plugin_enabled  = true;
+    opts.plugin_enabled  = false;  // H2: always the device-correct expand form
     // M1: derive the ROCm GPU ISA from the actual device instead of a
     // build-time constant. Ordinal is the input's Device::index when the
     // tensor lives on a ROCm device; otherwise (e.g. a CPU-staged input with
@@ -829,11 +853,21 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
     // M3: thread the input's device ordinal so the IREE HAL device matches the
     // requested ordinal (cuda:1 runs on GPU 1, not the driver default).
     const int hal_ordinal = in_dev.index < 0 ? 0 : in_dev.index;
+    // Test/diagnostic hook: force the subprocess path (iree-run-module) even when
+    // the in-process HAL driver is linked, so the subprocess I/O path can be
+    // exercised on a CPU-only build. Does not affect default behavior.
+    bool force_subprocess = false;
+    if (const char* s = std::getenv("TENZOR_MLIR_FORCE_SUBPROCESS");
+        s && *s && *s != '0') {
+        force_subprocess = true;
+    }
     std::unique_ptr<mj::IreeInvoker> invoker;
     try {
-        invoker = mj::IreeInvoker::load(artifact,
-                                        mj::IreeInvoker::Mode::InProcess,
-                                        hal_ordinal);
+        invoker = mj::IreeInvoker::load(
+            artifact,
+            force_subprocess ? mj::IreeInvoker::Mode::Subprocess
+                             : mj::IreeInvoker::Mode::InProcess,
+            hal_ordinal);
     } catch (const mj::JitInvokeError& e) {
         const std::string what = e.what();
         if (what.find("NOT_FOUND") != std::string::npos &&

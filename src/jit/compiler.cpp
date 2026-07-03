@@ -559,8 +559,12 @@ auto ConstantFoldingPass::evaluate_constant(const Node& node) -> Tensor {
                 throw std::runtime_error(
                     "Reshape constant folding: shape input must be Int64");
             }
-            const int64_t* p = shape_t.data<int64_t>();
-            std::vector<int64_t> shape_vec(p, p + shape_t.numel());
+            // The shape operand may be device-resident; data<int64_t>() returns a
+            // raw host pointer, so read it on the host. contiguous() guards the
+            // linear read.
+            Tensor shape_host = shape_t.to(Device::cpu()).contiguous();
+            const int64_t* p = shape_host.data<int64_t>();
+            std::vector<int64_t> shape_vec(p, p + shape_host.numel());
             return tenzor::reshape(inputs[0], std::move(shape_vec));
         }
         default:
@@ -2041,8 +2045,15 @@ auto LoopUnrollingPass::run(Graph& graph) -> bool {
             auto& body_inputs = body->inputs();
             if (!body_inputs.empty()) {
                 auto iter_in = body_inputs[0];
-                Tensor iter_tensor({1}, DType::Int64, iter_in->device());
+                // Build the counter constant on the host (data<int64_t>() is a raw
+                // host pointer; writing into a device-allocated tensor would be
+                // UB), then move it to the loop's device so the constant lands
+                // where the body runs.
+                Tensor iter_tensor({1}, DType::Int64, Device::cpu());
                 iter_tensor.data<int64_t>()[0] = iter;
+                if (iter_in->device().type != Device::Type::CPU) {
+                    iter_tensor = iter_tensor.to(iter_in->device());
+                }
                 auto iter_node = graph.create_node(OpType::Constant);
                 iter_node->set_tensor_attr("value", iter_tensor);
                 std::string iter_val_id =
@@ -3175,76 +3186,44 @@ auto QuantizationPass::compute_scale_and_zero(const Tensor& weight)
     -> std::pair<float, int64_t> {
     // Symmetric quantization: scale = max(|weight|) / 127
     auto abs_weight = tenzor::abs(weight).to(DType::Float32);
-    float max_val = tenzor::max(abs_weight).data<float>()[0];
+    // item<T>() performs the documented device->host copy; data<float>()[0] on a
+    // device tensor would dereference a device pointer on the host (UB on GPU).
+    float max_val = tenzor::max(abs_weight).item<float>();
     if (max_val == 0.0f) max_val = 1.0f;  // avoid division by zero
     float scale = max_val / 127.0f;
     return {scale, 0};  // symmetric quantization: zero_point = 0
 }
 
 auto QuantizationPass::quantize_linear(std::shared_ptr<Node> node, Graph& graph) -> bool {
-    // Check if this node has a weight tensor attribute
-    if (!node->has_attr("weight")) return false;
+    // A traced Linear carries its operands as INPUTS in dispatch order:
+    // [x, weight(, bias)] — the weight is a captured-parameter constant at
+    // input[1], NOT a node attribute. Retag the node to QuantizedLinear keeping
+    // the same inputs/outputs; the JIT interpreter (Graph::execute_node) runs it
+    // via nn::quantization::quantized_linear_dynamic, which dynamically quantizes
+    // the weight+activation to int8 and dispatches OpId::QuantizedLinear (a real
+    // kernel on every backend), matching eager nn::QuantizedLinear numerically.
+    // int8 is a deliberate lossy approximation of the fp32 Linear.
+    if (node->inputs().size() < 2) return false;  // need at least [x, weight]
 
-    auto weight = node->get_tensor_attr("weight");
-    auto [scale, zero_point] = compute_scale_and_zero(weight);
-
-    // Create the quantized replacement node
-    auto qnode = graph.create_node(OpType::QuantizedLinear, "quantized_" + node->name());
-
-    // Copy inputs from original node
-    for (auto& input : node->inputs()) {
-        qnode->add_input(input);
-    }
-
-    // Copy outputs
-    for (auto& output : node->outputs()) {
-        qnode->add_output(output);
-    }
-
-    // Set quantization parameters
-    qnode->set_tensor_attr("weight", weight);
-    qnode->set_attr("scale", scale);
-    qnode->set_int_attr("zero_point", zero_point);
-    qnode->set_bool_attr("quantized", true);
-    if (node->has_attr("bias")) {
-        qnode->set_tensor_attr("bias", node->get_tensor_attr("bias"));
-    }
-
-    // Replace the original node
-    graph.replace_node(node, qnode);
+    // Retag IN PLACE (keep inputs/outputs/identity). Creating a replacement node
+    // that reuses the same output Value objects breaks graph.replace_node (its
+    // replace_value(old,new) is a self no-op and remove_node then orphans the
+    // shared output), leaving the graph output uncomputed.
+    node->set_op_type(OpType::QuantizedLinear);
+    node->set_bool_attr("quantized", true);
     return true;
 }
 
 auto QuantizationPass::quantize_conv2d(std::shared_ptr<Node> node, Graph& graph) -> bool {
-    if (!node->has_attr("weight")) return false;
-
-    auto weight = node->get_tensor_attr("weight");
-    auto [scale, zero_point] = compute_scale_and_zero(weight);
-
-    auto qnode = graph.create_node(OpType::QuantizedConv2d, "quantized_" + node->name());
-
-    for (auto& input : node->inputs()) {
-        qnode->add_input(input);
-    }
-    for (auto& output : node->outputs()) {
-        qnode->add_output(output);
-    }
-
-    qnode->set_tensor_attr("weight", weight);
-    qnode->set_attr("scale", scale);
-    qnode->set_int_attr("zero_point", zero_point);
-    qnode->set_bool_attr("quantized", true);
-
-    // Copy conv attributes
-    if (node->has_attr("stride")) qnode->set_int_attr("stride", node->get_int_attr("stride"));
-    if (node->has_attr("padding")) qnode->set_int_attr("padding", node->get_int_attr("padding"));
-    if (node->has_attr("dilation")) qnode->set_int_attr("dilation", node->get_int_attr("dilation"));
-    if (node->has_attr("groups")) qnode->set_int_attr("groups", node->get_int_attr("groups"));
-    if (node->has_attr("bias")) {
-        qnode->set_tensor_attr("bias", node->get_tensor_attr("bias"));
-    }
-
-    graph.replace_node(node, qnode);
+    // A traced Conv2d carries [x, weight(, bias)] as inputs and its
+    // stride/padding/dilation/groups as node attrs. Retag IN PLACE to
+    // QuantizedConv2d (keeping inputs/outputs/attrs); the JIT interpreter runs
+    // it via nn::quantization::quantized_conv2d_dynamic. (See quantize_linear
+    // for why in-place beats a replacement node.)
+    (void)graph;
+    if (node->inputs().size() < 2) return false;  // need at least [x, weight]
+    node->set_op_type(OpType::QuantizedConv2d);
+    node->set_bool_attr("quantized", true);
     return true;
 }
 
@@ -3278,7 +3257,10 @@ auto QuantizationPass::run(Graph& graph) -> bool {
 // ============================================================================
 
 auto SparsePass::compute_sparsity(const Tensor& weight) -> float {
-    auto w_f32 = weight.to(DType::Float32);
+    // Move to the host before the linear scan: data<float>() is a raw host
+    // pointer, so iterating it over a device tensor is UB on GPU backends.
+    // contiguous() guards the flat index.
+    auto w_f32 = weight.to(DType::Float32).to(Device::cpu()).contiguous();
     int64_t total = w_f32.numel();
     if (total == 0) return 0.0f;
 
@@ -3292,34 +3274,21 @@ auto SparsePass::compute_sparsity(const Tensor& weight) -> float {
 }
 
 auto SparsePass::convert_to_sparse(std::shared_ptr<Node> node, Graph& graph) -> bool {
-    if (!node->has_attr("weight")) return false;
+    // A traced Linear carries [x, weight(, bias)] as inputs; the weight is a
+    // captured constant at input[1]. Read it to measure sparsity and retag IN
+    // PLACE to SparseMatMul only when the weight is sparse enough to benefit —
+    // the interpreter runs it via tenzor::sparse::sparse_matmul_dynamic
+    // (spmm(from_dense(W), xᵀ)ᵀ + bias), which is EXACT (lossless), so a dense
+    // weight would still be correct, just slower; hence the threshold gate.
+    // (In-place retag; see quantize_linear for why replacement nodes break.)
+    if (node->inputs().size() < 2) return false;
+    const auto& consts = graph.constants();
+    auto it = consts.find(node->inputs()[1]->id());
+    if (it == consts.end()) return false;  // weight not a known compile-time constant
+    if (compute_sparsity(it->second) < threshold_) return false;
 
-    auto weight = node->get_tensor_attr("weight");
-    float sparsity = compute_sparsity(weight);
-
-    if (sparsity < threshold_) return false;
-
-    // For Linear: replace with SparseMatMul
-    // The weight is transposed for Linear (out_features x in_features),
-    // so SpMM(sparse_weight, input^T)^T = input @ weight^T
-    auto sparse_node = graph.create_node(OpType::SparseMatMul, "sparse_" + node->name());
-
-    for (auto& input : node->inputs()) {
-        sparse_node->add_input(input);
-    }
-    for (auto& output : node->outputs()) {
-        sparse_node->add_output(output);
-    }
-
-    // Store sparse metadata
-    sparse_node->set_tensor_attr("weight", weight);
-    sparse_node->set_attr("sparsity", sparsity);
-    sparse_node->set_bool_attr("is_sparse", true);
-    if (node->has_attr("bias")) {
-        sparse_node->set_tensor_attr("bias", node->get_tensor_attr("bias"));
-    }
-
-    graph.replace_node(node, sparse_node);
+    node->set_op_type(OpType::SparseMatMul);
+    node->set_bool_attr("is_sparse", true);
     return true;
 }
 
@@ -3329,10 +3298,12 @@ auto SparsePass::run(Graph& graph) -> bool {
     // Collect candidate nodes
     std::vector<std::shared_ptr<Node>> candidates;
     for (auto& node : graph.nodes()) {
-        // Only target Linear and MatMul nodes (SpMM replacement)
-        if ((node->op_type() == OpType::Linear || node->op_type() == OpType::MatMul) &&
+        // Target traced Linear nodes (x @ Wᵀ) — the SparseMatMul executor is
+        // Linear-shaped. A raw MatMul (x @ W, no transpose) would need a
+        // different orientation, so it is intentionally excluded.
+        if (node->op_type() == OpType::Linear &&
             !node->get_bool_attr("is_sparse") &&
-            node->has_attr("weight")) {
+            node->inputs().size() >= 2) {
             candidates.push_back(node);
         }
     }

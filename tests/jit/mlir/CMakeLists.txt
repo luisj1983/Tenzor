@@ -239,6 +239,14 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_jit_training_parity
         DISCOVERY_TIMEOUT 300 BACKENDS none LABELS "jit;mlir;iree")
 
+    # Numeric-parity regressions: subprocess f64 bit-exactness (M8) and
+    # F16 softmax/layernorm F32-accumulation parity (M3).
+    add_executable(test_jit_mlir_numeric_parity test_jit_mlir_numeric_parity.cpp)
+    target_link_libraries(test_jit_mlir_numeric_parity
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_jit_mlir_numeric_parity
+        DISCOVERY_TIMEOUT 300 BACKENDS none LABELS "jit;mlir;iree")
+
     # Group F — Debug UX (show_graph / show_mlir / show_stablehlo /
     # show_iree / cache_stats + TENZOR_JIT_DUMP env var).
     add_executable(test_debug_apis test_debug_apis.cpp)

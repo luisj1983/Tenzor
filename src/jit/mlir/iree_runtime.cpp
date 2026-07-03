@@ -31,7 +31,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -709,6 +711,117 @@ auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode,
 
 namespace {
 
+// Map a NumPy dtype descr (e.g. "<f4") to a Tenzor DType. All supported hosts
+// are little-endian; a big-endian ('>') multi-byte descr would need byte-
+// swapping, which iree-run-module never emits on these platforms — reject it.
+auto npy_descr_to_dtype(const std::string& descr) -> ::tenzor::DType {
+    using ::tenzor::DType;
+    std::string t = descr;
+    if (!t.empty() && (t[0] == '<' || t[0] == '|' || t[0] == '=')) {
+        t = t.substr(1);
+    } else if (!t.empty() && t[0] == '>') {
+        throw JitInvokeError(
+            "iree-run-module: big-endian .npy output '" + descr +
+            "' unsupported on this little-endian host");
+    }
+    if (t == "f2")  return DType::Float16;
+    if (t == "f4")  return DType::Float32;
+    if (t == "f8")  return DType::Float64;
+    if (t == "i1")  return DType::Int8;
+    if (t == "i2")  return DType::Int16;
+    if (t == "i4")  return DType::Int32;
+    if (t == "i8")  return DType::Int64;
+    if (t == "u1")  return DType::UInt8;
+    if (t == "u2")  return DType::UInt16;
+    if (t == "u4")  return DType::UInt32;
+    if (t == "u8")  return DType::UInt64;
+    if (t == "b1")  return DType::Bool;
+    if (t == "c8")  return DType::Complex64;
+    if (t == "c16") return DType::Complex128;
+    throw JitInvokeError("iree-run-module: unsupported .npy descr '" + descr + "'");
+}
+
+// Read a NumPy .npy file (little-endian, C order) into a CPU Tensor. Used for
+// bit-exact subprocess output: iree-run-module's stdout printing rounds floats
+// to ~6 significant figures, silently losing precision for f32/f64 relative to
+// the bit-exact InProcess buffer-view path.
+auto read_npy_output(const std::string& path) -> ::tenzor::Tensor {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        throw JitInvokeError("iree-run-module: cannot open output .npy: " + path);
+    }
+    char magic[6] = {};
+    f.read(magic, 6);
+    static const char kMagic[6] = {'\x93', 'N', 'U', 'M', 'P', 'Y'};
+    if (!f || std::memcmp(magic, kMagic, 6) != 0) {
+        throw JitInvokeError("iree-run-module: bad .npy magic in " + path);
+    }
+    unsigned char vmaj = 0, vmin = 0;
+    f.read(reinterpret_cast<char*>(&vmaj), 1);
+    f.read(reinterpret_cast<char*>(&vmin), 1);
+    (void)vmin;
+    uint32_t hlen = 0;
+    if (vmaj >= 2) {
+        unsigned char b[4] = {};
+        f.read(reinterpret_cast<char*>(b), 4);
+        hlen = uint32_t(b[0]) | (uint32_t(b[1]) << 8) |
+               (uint32_t(b[2]) << 16) | (uint32_t(b[3]) << 24);
+    } else {
+        unsigned char b[2] = {};
+        f.read(reinterpret_cast<char*>(b), 2);
+        hlen = uint32_t(b[0]) | (uint32_t(b[1]) << 8);
+    }
+    std::string header(hlen, '\0');
+    f.read(header.data(), static_cast<std::streamsize>(hlen));
+    if (!f) {
+        throw JitInvokeError("iree-run-module: truncated .npy header in " + path);
+    }
+    if (header.find("'fortran_order': True") != std::string::npos) {
+        throw JitInvokeError("iree-run-module: fortran-order .npy unsupported: " + path);
+    }
+
+    auto extract_quoted = [&](const char* key) -> std::string {
+        auto k = header.find(key);
+        if (k == std::string::npos) return {};
+        auto q1 = header.find('\'', k + std::strlen(key));
+        if (q1 == std::string::npos) return {};
+        auto q2 = header.find('\'', q1 + 1);
+        if (q2 == std::string::npos) return {};
+        return header.substr(q1 + 1, q2 - q1 - 1);
+    };
+    const ::tenzor::DType dt = npy_descr_to_dtype(extract_quoted("'descr':"));
+
+    std::vector<int64_t> shape;
+    {
+        auto s = header.find("'shape':");
+        auto lp = (s == std::string::npos) ? std::string::npos : header.find('(', s);
+        auto rp = (lp == std::string::npos) ? std::string::npos : header.find(')', lp);
+        if (lp == std::string::npos || rp == std::string::npos) {
+            throw JitInvokeError("iree-run-module: bad .npy shape header in " + path);
+        }
+        std::istringstream ss(header.substr(lp + 1, rp - lp - 1));
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            const size_t a = tok.find_first_not_of(" \t");
+            if (a == std::string::npos) continue;
+            const size_t b = tok.find_last_not_of(" \t");
+            shape.push_back(std::stoll(tok.substr(a, b - a + 1)));
+        }
+    }
+
+    int64_t numel = 1;
+    for (auto dv : shape) numel *= dv;
+    ::tenzor::Tensor out(shape, dt, ::tenzor::Device::cpu());
+    const std::streamsize nbytes =
+        static_cast<std::streamsize>(numel) *
+        static_cast<std::streamsize>(::tenzor::dtype_size(dt));
+    f.read(reinterpret_cast<char*>(out.data_ptr()), nbytes);
+    if (f.gcount() != nbytes) {
+        throw JitInvokeError("iree-run-module: short .npy data read in " + path);
+    }
+    return out;
+}
+
 auto invoke_subprocess(IreeInvoker& self,
                        const std::vector<::tenzor::Tensor>& inputs,
                        const std::string& vmfb_path,
@@ -716,18 +829,67 @@ auto invoke_subprocess(IreeInvoker& self,
                        const std::string& iree_run_module)
     -> std::vector<::tenzor::Tensor> {
     (void)self;
-    std::vector<std::string> argv;
-    argv.reserve(inputs.size() + 5);
-    argv.push_back(iree_run_module);
-    argv.push_back("--device=" + (device == "local-task" ? "local-sync"
-                                                         : device));
-    argv.push_back("--module=" + vmfb_path);
-    argv.push_back("--function=main");
-    // 1M was far too small (a single 512x2048 activation already hits the cap),
-    // causing iree-run-module to elide the middle of larger outputs and the
-    // parser to silently zero-pad the tail. Raise it well past any realistic
-    // output size so full tensors are always printed; the short-read guard in
-    // parse_output_line still catches any unexpected truncation.
+    auto base_argv = [&]() {
+        std::vector<std::string> argv;
+        argv.reserve(inputs.size() + 6);
+        argv.push_back(iree_run_module);
+        argv.push_back("--device=" + (device == "local-task" ? "local-sync"
+                                                             : device));
+        argv.push_back("--module=" + vmfb_path);
+        argv.push_back("--function=main");
+        return argv;
+    };
+
+    // Bit-exact output via a temp NumPy .npy (iree-run-module --output=@path):
+    // stdout printing rounds floats to ~6 significant figures, silently losing
+    // precision for f32/f64 relative to the InProcess buffer-view path. @main is
+    // compiled to a single output (enforced by mlir_invoke_impl), so one file
+    // suffices. bf16 has no numpy encoding in iree-run-module's numpy_io — for
+    // it we fall back to stdout parsing, whose ~6 sig figs already exceed bf16's
+    // ~3-digit mantissa precision, so no bits are lost.
+    std::string npy_path;
+    {
+        std::string tmpl = (std::filesystem::temp_directory_path() /
+                            "tenzor_iree_out_XXXXXX").string();
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        int fd = ::mkstemp(buf.data());
+        if (fd >= 0) {
+            ::close(fd);
+            npy_path.assign(buf.data());
+        }
+    }
+    struct FileGuard {
+        std::string p;
+        ~FileGuard() { if (!p.empty()) std::remove(p.c_str()); }
+    } guard{npy_path};
+
+    if (!npy_path.empty()) {
+        std::vector<std::string> argv = base_argv();
+        argv.push_back("--output=@" + npy_path);
+        for (const auto& t : inputs) {
+            argv.push_back(render_input_flag(t));
+        }
+        SubprocessResult res = run_subprocess(argv);
+        if (res.exit_code == 0) {
+            return {read_npy_output(npy_path)};
+        }
+        // Only the known numpy-encoding gap (bf16) is retried via stdout; any
+        // other non-zero exit is a genuine failure.
+        if (res.stderr_text.find("unsupported data encoding") ==
+            std::string::npos) {
+            throw JitInvokeError(
+                "iree-run-module exit=" + std::to_string(res.exit_code) +
+                "\nstderr:\n" + res.stderr_text +
+                "\nstdout:\n" + res.stdout_text);
+        }
+    }
+
+    // Fallback: stdout ASCII parse (bf16, or if no temp file could be created).
+    // --output_max_element_count is raised well past any realistic output size
+    // so full tensors print (the short-read guard in parse_output_line catches
+    // any unexpected truncation).
+    std::vector<std::string> argv = base_argv();
     argv.push_back("--output_max_element_count=2147483647");
     for (const auto& t : inputs) {
         argv.push_back(render_input_flag(t));

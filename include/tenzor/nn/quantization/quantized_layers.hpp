@@ -15,6 +15,7 @@
 #include "observer.hpp"
 #include <array>
 #include <memory>
+#include <optional>
 #include <tuple>
 
 namespace tenzor {
@@ -141,6 +142,41 @@ private:
     float bias_scale_;             ///< Bias scale factor
     std::optional<QuantizationParams> activation_qparams_;  ///< Calibrated input qparams (static quant)
 };
+
+/**
+ * @brief Dynamic per-tensor symmetric INT8 quantized linear (free function).
+ *
+ * Quantizes the fp32 @p weight to int8 and runs a QuantizedLinear forward
+ * (which dynamically quantizes @p input). Shares the exact eager code path used
+ * by nn::QuantizedLinear so the result is identical on every backend; used by
+ * the JIT interpreter to execute QuantizationPass-produced QuantizedLinear
+ * nodes without reimplementing quantization.
+ *
+ * @param input  Float32 activation, rank >= 2, last dim == weight.shape[1].
+ * @param weight Float32 weight, [out_features, in_features].
+ * @param bias   Optional Float32 bias, [out_features].
+ * @return Float32 output, input.shape[:-1] + [out_features].
+ */
+auto quantized_linear_dynamic(const Tensor& input, const Tensor& weight,
+                              const std::optional<Tensor>& bias) -> Tensor;
+
+/**
+ * @brief Dynamic per-tensor symmetric INT8 quantized conv2d (free function).
+ *
+ * Quantizes the fp32 @p weight to int8 and runs a QuantizedConv2d forward
+ * (dynamically quantizing @p input). Shares the eager nn::QuantizedConv2d code
+ * path so the result is identical on every backend; used by the JIT interpreter
+ * to execute QuantizationPass-produced QuantizedConv2d nodes. Square kernel +
+ * symmetric stride/padding/dilation (the eager QuantizedConv2d constraint).
+ *
+ * @param input  Float32 NCHW activation.
+ * @param weight Float32 weight, [out_channels, in_channels/groups, kH, kW].
+ * @param bias   Optional Float32 bias, [out_channels].
+ */
+auto quantized_conv2d_dynamic(const Tensor& input, const Tensor& weight,
+                              const std::optional<Tensor>& bias, int64_t stride,
+                              int64_t padding, int64_t dilation, int64_t groups)
+    -> Tensor;
 
 /**
  * @brief Quantized 2D convolution layer.

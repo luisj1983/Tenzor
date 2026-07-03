@@ -10,6 +10,8 @@
 
 #include "sparse_tensor.hpp"
 
+#include <optional>
+
 namespace tenzor {
 namespace sparse {
 
@@ -127,6 +129,22 @@ auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor;
  * @return Sparse tensor with same pattern, values replaced by log-softmax output
  */
 auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor;
+
+/**
+ * @brief Dense-weight linear via sparse SpMM (free function).
+ *
+ * Computes y = spmm(from_dense(weight), xᵀ)ᵀ + bias — the EXACT (lossless)
+ * equivalent of x @ weightᵀ routed through the CSR SpMM path (from_dense keeps
+ * every non-zero, so no values are dropped). Used by the JIT SparsePass
+ * interpreter to execute SparseMatMul nodes retagged from Linear.
+ *
+ * @param input  Float activation, rank >= 2, last dim == weight.shape[1].
+ * @param weight Float weight, [out_features, in_features].
+ * @param bias   Optional bias, [out_features].
+ * @return Output, input.shape[:-1] + [out_features].
+ */
+auto sparse_matmul_dynamic(const Tensor& input, const Tensor& weight,
+                           const std::optional<Tensor>& bias) -> Tensor;
 
 } // namespace sparse
 } // namespace tenzor

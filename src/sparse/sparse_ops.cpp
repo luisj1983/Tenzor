@@ -2113,5 +2113,38 @@ auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
     return SparseTensor::sparse_csr(crow_cpu, col.contiguous(), out_vals, shape);
 }
 
+auto sparse_matmul_dynamic(const Tensor& input, const Tensor& weight,
+                           const std::optional<Tensor>& bias) -> Tensor {
+    if (weight.shape().size() != 2) {
+        throw std::runtime_error(
+            "sparse_matmul_dynamic: weight must be 2D [out_features, in_features]");
+    }
+    const int64_t out_features = weight.shape()[0];
+    const int64_t in_features  = weight.shape()[1];
+    const auto ishape = input.shape();
+    if (ishape.empty() || ishape.back() != in_features) {
+        throw std::runtime_error(
+            "sparse_matmul_dynamic: input last dim must equal weight in_features");
+    }
+    const int64_t rows = input.numel() / in_features;
+    Tensor x2d = (ishape.size() == 2) ? input : input.reshape({rows, in_features});
+
+    // y = spmm(sparse(W [out,in]), xᵀ [in,rows])ᵀ [rows,out]. contiguous() as
+    // the SpMM CSR path and transpose consumers read row-major memory.
+    SparseTensor sw = SparseTensor::from_dense(weight, SparseLayout::CSR);
+    Tensor xt = tenzor::transpose(x2d, 0, 1).contiguous();  // [in, rows]
+    Tensor yt = spmm(sw, xt);                                // [out, rows]
+    Tensor y  = tenzor::transpose(yt, 0, 1).contiguous();    // [rows, out]
+    if (bias.has_value()) {
+        y = tenzor::add(y, *bias);  // broadcast [out]
+    }
+    if (ishape.size() != 2) {
+        std::vector<int64_t> os(ishape.begin(), ishape.end() - 1);
+        os.push_back(out_features);
+        y = y.reshape(os);
+    }
+    return y;
+}
+
 } // namespace sparse
 } // namespace tenzor

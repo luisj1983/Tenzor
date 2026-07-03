@@ -1038,48 +1038,70 @@ auto handle_softmax(LoweringContext& ctx,
         if (i != dim) bcast_dims.push_back(i);
     }
 
-    // 1) reduce_max — -inf init (hex bit pattern per dtype).
+    // Compute the softmax in a widened dtype for F16/BF16 so the exp-sum
+    // reduction accumulates in F32 — matching the eager kernel (and the widened
+    // handle_sum/handle_mean). Reducing in half precision loses accuracy as the
+    // reduction length grows and diverges from eager. cd == d for F32/F64.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string xc = x;
+    if (widen) {
+        auto conv = ctx.fresh_name();
+        emit_stablehlo_convert(body, conv, x, shape, d, cd);
+        body << '\n';
+        xc = conv;
+    }
+
+    // 1) reduce_max — -inf init (hex bit pattern per compute dtype).
     std::string init_max = "-2147483648";
-    if (d == ::tenzor::DType::Float32)       init_max = "0xFF800000";
-    else if (d == ::tenzor::DType::Float64)  init_max = "0xFFF0000000000000";
-    else if (d == ::tenzor::DType::Float16)  init_max = "0xFC00";
-    else if (d == ::tenzor::DType::BFloat16) init_max = "0xFF80";
+    if (cd == ::tenzor::DType::Float32)       init_max = "0xFF800000";
+    else if (cd == ::tenzor::DType::Float64)  init_max = "0xFFF0000000000000";
+    else if (cd == ::tenzor::DType::Float16)  init_max = "0xFC00";
+    else if (cd == ::tenzor::DType::BFloat16) init_max = "0xFF80";
     auto init_m = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init_m, init_max, {}, d); body << '\n';
+    emit_stablehlo_splat_constant(body, init_m, init_max, {}, cd); body << '\n';
     auto m_name = ctx.fresh_name();
-    emit_stablehlo_reduce(body, m_name, x, init_m, "maximum", reduce_dims,
-                          shape, reduced_shape, d);
+    emit_stablehlo_reduce(body, m_name, xc, init_m, "maximum", reduce_dims,
+                          shape, reduced_shape, cd);
     body << '\n';
     // broadcast m back
     auto m_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, m_b, m_name, bcast_dims,
-                                    reduced_shape, shape, d);
+                                    reduced_shape, shape, cd);
     body << '\n';
     // z = x - m
     auto z = ctx.fresh_name();
-    emit_stablehlo_binary(body, "subtract", z, x, m_b, shape, d);
+    emit_stablehlo_binary(body, "subtract", z, xc, m_b, shape, cd);
     body << '\n';
     // e = exp(z)
     auto e = ctx.fresh_name();
-    emit_stablehlo_unary(body, "exponential", e, z, shape, d);
+    emit_stablehlo_unary(body, "exponential", e, z, shape, cd);
     body << '\n';
     // s = reduce_sum(e)
     auto init_s = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, d), {}, d);
+    emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, cd), {}, cd);
     body << '\n';
     auto s_name = ctx.fresh_name();
     emit_stablehlo_reduce(body, s_name, e, init_s, "add", reduce_dims,
-                          shape, reduced_shape, d);
+                          shape, reduced_shape, cd);
     body << '\n';
     auto s_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, s_b, s_name, bcast_dims,
-                                    reduced_shape, shape, d);
+                                    reduced_shape, shape, cd);
     body << '\n';
-    // out = e / s
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out_val->id(), out_name);
-    emit_stablehlo_binary(body, "divide", out_name, e, s_b, shape, d);
+    // out = e / s (in compute dtype), then narrow back to storage dtype.
+    auto div_out = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", div_out, e, s_b, shape, cd);
     body << '\n';
+    if (widen) {
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out_val->id(), out_name);
+        emit_stablehlo_convert(body, out_name, div_out, shape, cd, d);
+        body << '\n';
+    } else {
+        ctx.bind(out_val->id(), div_out);
+    }
 }
 
 /// Lower MatMul for rank-2 or higher inputs.
@@ -2161,89 +2183,125 @@ auto handle_layer_norm(LoweringContext& ctx,
     int64_t N = 1;
     for (auto k : norm_dims) N *= shape[k];
 
-    const auto& x = ctx.name_for(x_val->id());
+    // Compute the normalization (and affine) in a widened dtype for F16/BF16 so
+    // the mean/variance reductions accumulate in F32 — matching the eager kernel
+    // and the widened handle_sum/handle_mean/handle_softmax. Reducing in half
+    // precision loses accuracy as the normalized length grows. cd == d for
+    // F32/F64. Widened gamma/beta keep the affine in the same compute dtype;
+    // the final result is narrowed back to the storage dtype d.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string x = ctx.name_for(x_val->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x, shape, d, cd);
+        body << '\n';
+        x = xc;
+    }
 
     // sum_x = reduce_sum(x, norm_dims)
     auto init0 = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, d), {}, d);
+    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, cd), {}, cd);
     body << '\n';
     auto sum_x = ctx.fresh_name();
     emit_stablehlo_reduce(body, sum_x, x, init0, "add", norm_dims, shape,
-                          reduced_shape, d);
+                          reduced_shape, cd);
     body << '\n';
     // n_const = N
     auto n_const = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, n_const,
-                                  scalar_literal(static_cast<double>(N), d),
-                                  reduced_shape, d);
+                                  scalar_literal(static_cast<double>(N), cd),
+                                  reduced_shape, cd);
     body << '\n';
     auto mean_r = ctx.fresh_name();
     emit_stablehlo_binary(body, "divide", mean_r, sum_x, n_const,
-                          reduced_shape, d);
+                          reduced_shape, cd);
     body << '\n';
     auto mean_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, mean_b, mean_r, bcast_dims,
-                                    reduced_shape, shape, d);
+                                    reduced_shape, shape, cd);
     body << '\n';
     // centered = x - mean
     auto centered = ctx.fresh_name();
-    emit_stablehlo_binary(body, "subtract", centered, x, mean_b, shape, d);
+    emit_stablehlo_binary(body, "subtract", centered, x, mean_b, shape, cd);
     body << '\n';
     // sq = centered * centered
     auto sq = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", sq, centered, centered, shape, d);
+    emit_stablehlo_binary(body, "multiply", sq, centered, centered, shape, cd);
     body << '\n';
     // sum_sq
     auto init1 = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init1, scalar_literal(0.0, d), {}, d);
+    emit_stablehlo_splat_constant(body, init1, scalar_literal(0.0, cd), {}, cd);
     body << '\n';
     auto sum_sq = ctx.fresh_name();
     emit_stablehlo_reduce(body, sum_sq, sq, init1, "add", norm_dims, shape,
-                          reduced_shape, d);
+                          reduced_shape, cd);
     body << '\n';
     auto var_r = ctx.fresh_name();
     emit_stablehlo_binary(body, "divide", var_r, sum_sq, n_const,
-                          reduced_shape, d);
+                          reduced_shape, cd);
     body << '\n';
     // var + eps
     auto eps_c = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, eps_c,
-                                  scalar_literal(static_cast<double>(eps), d),
-                                  reduced_shape, d);
+                                  scalar_literal(static_cast<double>(eps), cd),
+                                  reduced_shape, cd);
     body << '\n';
     auto var_eps = ctx.fresh_name();
-    emit_stablehlo_binary(body, "add", var_eps, var_r, eps_c, reduced_shape, d);
+    emit_stablehlo_binary(body, "add", var_eps, var_r, eps_c, reduced_shape, cd);
     body << '\n';
     auto std_r = ctx.fresh_name();
-    emit_stablehlo_unary(body, "sqrt", std_r, var_eps, reduced_shape, d);
+    emit_stablehlo_unary(body, "sqrt", std_r, var_eps, reduced_shape, cd);
     body << '\n';
     auto std_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, std_b, std_r, bcast_dims,
-                                    reduced_shape, shape, d);
+                                    reduced_shape, shape, cd);
     body << '\n';
     auto x_hat = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", x_hat, centered, std_b, shape, d);
+    emit_stablehlo_binary(body, "divide", x_hat, centered, std_b, shape, cd);
     body << '\n';
+
+    // Widen a gamma/beta operand to the compute dtype (no-op when already cd).
+    auto to_compute = [&](const std::shared_ptr<::tenzor::jit::Value>& val)
+        -> std::string {
+        std::string name = ctx.name_for(val->id());
+        if (val->dtype() != cd) {
+            auto c = ctx.fresh_name();
+            emit_stablehlo_convert(body, c, name, val->shape(), val->dtype(), cd);
+            body << '\n';
+            name = c;
+        }
+        return name;
+    };
 
     // Apply weight/bias if present (inputs[1], inputs[2]).
     std::string final_name = x_hat;
     if (node.inputs().size() >= 2) {
         const auto& w_val = node.inputs()[1];
-        auto w_b = maybe_broadcast(body, ctx, ctx.name_for(w_val->id()),
-                                   w_val->shape(), shape, d);
+        auto w_b = maybe_broadcast(body, ctx, to_compute(w_val),
+                                   w_val->shape(), shape, cd);
         auto scaled = ctx.fresh_name();
-        emit_stablehlo_binary(body, "multiply", scaled, x_hat, w_b, shape, d);
+        emit_stablehlo_binary(body, "multiply", scaled, x_hat, w_b, shape, cd);
         body << '\n';
         final_name = scaled;
     }
     if (node.inputs().size() >= 3) {
         const auto& b_val = node.inputs()[2];
-        auto b_b = maybe_broadcast(body, ctx, ctx.name_for(b_val->id()),
-                                   b_val->shape(), shape, d);
+        auto b_b = maybe_broadcast(body, ctx, to_compute(b_val),
+                                   b_val->shape(), shape, cd);
         auto shifted = ctx.fresh_name();
-        emit_stablehlo_binary(body, "add", shifted, final_name, b_b, shape, d);
+        emit_stablehlo_binary(body, "add", shifted, final_name, b_b, shape, cd);
         body << '\n';
         final_name = shifted;
+    }
+
+    // Narrow the result back to the storage dtype (no-op when cd == d).
+    if (widen) {
+        auto out_name = ctx.fresh_name();
+        emit_stablehlo_convert(body, out_name, final_name, shape, cd, d);
+        body << '\n';
+        final_name = out_name;
     }
 
     // Bind the primary output (out_val->id()) to the final tensor.
@@ -2787,34 +2845,53 @@ auto emit_softmax_last_dim(LoweringContext& ctx, std::ostream& body,
         if (i != dim) { reduced_shape.push_back(shape[i]); bcast_dims.push_back(i); }
     }
 
+    // Compute the attention softmax in a widened dtype for F16/BF16 so the
+    // exp-sum reduction accumulates in F32 (matches eager and handle_softmax).
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string xc = x;
+    if (widen) {
+        auto conv = ctx.fresh_name();
+        emit_stablehlo_convert(body, conv, x, shape, d, cd);
+        body << '\n';
+        xc = conv;
+    }
+
     std::string init_max = "0xFF800000";
-    if (d == ::tenzor::DType::Float64)  init_max = "0xFFF0000000000000";
-    else if (d == ::tenzor::DType::Float16)  init_max = "0xFC00";
-    else if (d == ::tenzor::DType::BFloat16) init_max = "0xFF80";
+    if (cd == ::tenzor::DType::Float64)  init_max = "0xFFF0000000000000";
+    else if (cd == ::tenzor::DType::Float16)  init_max = "0xFC00";
+    else if (cd == ::tenzor::DType::BFloat16) init_max = "0xFF80";
 
     auto init_m = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init_m, init_max, {}, d); body << '\n';
+    emit_stablehlo_splat_constant(body, init_m, init_max, {}, cd); body << '\n';
     auto m = ctx.fresh_name();
-    emit_stablehlo_reduce(body, m, x, init_m, "maximum", reduce_dims, shape,
-                          reduced_shape, d); body << '\n';
+    emit_stablehlo_reduce(body, m, xc, init_m, "maximum", reduce_dims, shape,
+                          reduced_shape, cd); body << '\n';
     auto m_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, m_b, m, bcast_dims, reduced_shape,
-                                    shape, d); body << '\n';
+                                    shape, cd); body << '\n';
     auto z = ctx.fresh_name();
-    emit_stablehlo_binary(body, "subtract", z, x, m_b, shape, d); body << '\n';
+    emit_stablehlo_binary(body, "subtract", z, xc, m_b, shape, cd); body << '\n';
     auto e = ctx.fresh_name();
-    emit_stablehlo_unary(body, "exponential", e, z, shape, d); body << '\n';
+    emit_stablehlo_unary(body, "exponential", e, z, shape, cd); body << '\n';
     auto init_s = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, d), {}, d);
+    emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, cd), {}, cd);
     body << '\n';
     auto s = ctx.fresh_name();
     emit_stablehlo_reduce(body, s, e, init_s, "add", reduce_dims, shape,
-                          reduced_shape, d); body << '\n';
+                          reduced_shape, cd); body << '\n';
     auto s_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, s_b, s, bcast_dims, reduced_shape,
-                                    shape, d); body << '\n';
+                                    shape, cd); body << '\n';
     auto out = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", out, e, s_b, shape, d); body << '\n';
+    emit_stablehlo_binary(body, "divide", out, e, s_b, shape, cd); body << '\n';
+    if (widen) {
+        auto out_narrow = ctx.fresh_name();
+        emit_stablehlo_convert(body, out_narrow, out, shape, cd, d);
+        body << '\n';
+        return out_narrow;
+    }
     return out;
 }
 

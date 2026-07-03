@@ -20,6 +20,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/compiler.hpp>
 #include <tenzor/jit/graph.hpp>
+#include <tenzor/jit/pattern_matcher.hpp>
 #include <tenzor/jit/tracer.hpp>
 #include <memory>
 
@@ -208,4 +209,78 @@ TEST_F(FusionPassesTest, ExtendedFusion_RunsOnSimpleGraph) {
     pass.run(graph);
     // Pass may or may not modify; node count never grows.
     EXPECT_LE(graph.num_nodes(), orig_nodes);
+}
+
+// ============================================================================
+// GemmEpilogue matcher — residual-vs-bias discrimination (H1 regression)
+//
+// The GemmEpilogue matcher may absorb an Add after a bias-less MatMul/Linear as
+// a per-column bias. It MUST only do so when the Add's other operand is a real
+// [cols] per-column bias — a full [rows,cols] residual would be broadcast from
+// its first row by the native kernel (bias[idx%cols]). We build the graph
+// directly (bypassing the pass ordering that hides this via normal tracing) so
+// the matcher itself is exercised: the [rows,cols] case must NOT fuse the Add
+// (teeth: it would without the rank-1 guard), the [cols] case still must.
+// ============================================================================
+
+namespace {
+// Build: (bias-less) Linear(x[4,16], w[8,16]) -> lin_out[4,8]; Add(lin_out,
+// other[other_shape]) -> add_out[4,8]. Returns the graph and the Add node.
+auto build_linear_add(Graph& g, const Device& dev,
+                      const std::vector<int64_t>& other_shape)
+    -> std::shared_ptr<Node> {
+    auto x   = g.create_value("x",   {4, 16}, DType::Float32, dev);
+    auto w   = g.create_value("w",   {8, 16}, DType::Float32, dev);
+    auto lin = g.create_node(OpType::Linear, "linear");
+    auto lin_out = g.create_value("lin_out", {4, 8}, DType::Float32, dev);
+    lin->add_input(x);
+    lin->add_input(w);                 // bias-less: exactly 2 inputs
+    lin->add_output(lin_out);
+    lin_out->set_node(lin);
+    g.add_node(lin);
+
+    auto other = g.create_value("other", other_shape, DType::Float32, dev);
+    auto add = g.create_node(OpType::Add, "add");
+    auto add_out = g.create_value("add_out", {4, 8}, DType::Float32, dev);
+    add->add_input(lin_out);
+    add->add_input(other);
+    add->add_output(add_out);
+    add_out->set_node(add);
+    g.add_node(add);
+
+    g.set_inputs({x});
+    g.set_outputs({add_out});
+    return add;
+}
+
+auto add_is_in_gemm_epilogue(const std::vector<FusionMatch>& matches,
+                             const Node* add) -> bool {
+    for (const auto& m : matches) {
+        if (m.kind != FusionKind::GemmEpilogue) continue;
+        for (const auto& n : m.nodes) {
+            if (n.get() == add) return true;
+        }
+    }
+    return false;
+}
+}  // namespace
+
+TEST_F(FusionPassesTest, GemmEpilogue_ResidualNotFusedAsBias) {
+    Graph graph;
+    auto add = build_linear_add(graph, device_, {4, 8});  // [rows, cols] residual
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    EXPECT_FALSE(add_is_in_gemm_epilogue(matches, add.get()))
+        << "a [rows,cols] residual Add was wrongly absorbed as a per-column "
+           "GemmEpilogue bias";
+}
+
+TEST_F(FusionPassesTest, GemmEpilogue_PerColumnBiasStillFuses) {
+    Graph graph;
+    auto add = build_linear_add(graph, device_, {8});  // [cols] per-column bias
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    EXPECT_TRUE(add_is_in_gemm_epilogue(matches, add.get()))
+        << "a genuine [cols] per-column bias must still fuse into GemmEpilogue "
+           "(guard over-rejected a real bias)";
 }

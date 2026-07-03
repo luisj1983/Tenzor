@@ -254,6 +254,12 @@ public:
      */
     auto op_type() const -> OpType { return op_type_; }
 
+    /// @brief Retag this node's operation type in place (keeps inputs/outputs/
+    /// attrs and the node's identity). Used by optimization passes that replace
+    /// an op with a specialized variant over the SAME operands (e.g.
+    /// QuantizationPass: Linear -> QuantizedLinear).
+    auto set_op_type(OpType t) -> void { op_type_ = t; }
+
     /**
      * @brief Get node name.
      *

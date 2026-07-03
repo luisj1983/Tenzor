@@ -154,6 +154,22 @@ static auto is_constant_creation_op(OpId op) -> bool {
     }
 }
 
+// A transparent value-identity op returns a tensor with the SAME values as its
+// single input but possibly different storage/strides — a pure layout
+// materialization with no IR OpType. contiguous() is the canonical case: bias-
+// less Linear lowers to permute+matmul and matmul materializes a contiguous
+// copy of the permuted weight, so without this every bias-less Linear would
+// graph-break and fall back to eager. The tracer aliases the output to its
+// input and records no node (values are unchanged, so replay stays exact).
+static auto is_value_identity_op(OpId op) -> bool {
+    switch (op) {
+        case OpId::Contiguous:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // A pure view/shape op returns a tensor that shares its input's storage and,
 // when the target shape/strides match exactly, the SAME logical view — a
 // genuine no-op the tracer should drop. Any OTHER op whose output aliases an
@@ -204,6 +220,17 @@ auto make_tracing_interceptor(
             if (inputs.empty() && is_constant_creation_op(op)) {
                 for (auto& t : results) {
                     tracer.register_tensor(t);
+                }
+                return results;
+            }
+            // A transparent value-identity op (e.g. Contiguous) is NOT a graph
+            // break: it produces the same values as its input. Alias each output
+            // to the input's traced value and record no node so downstream
+            // consumers resolve through the input and the graph stays intact.
+            if (!inputs.empty() && !results.empty() && is_value_identity_op(op)) {
+                const std::string in_id = tracer.register_tensor(inputs[0]);
+                for (auto& t : results) {
+                    tracer.alias_tensor(t, in_id);
                 }
                 return results;
             }

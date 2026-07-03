@@ -152,10 +152,18 @@ auto ExtendedKernelCodegen::activation_expr(OpType act, const std::string& var,
             // Exact erf GELU 0.5*x*(1 + erf(x / sqrt(2))) to match the eager/CPU
             // kernel and codegen.cpp; the tanh approximation diverged from the
             // exact-erf eager op. erf has float+double device overloads.
-            return "0.5" + F + " * " + var + " * (1.0" + F + " + erf(" + var +
+            return "0.5" + F + " * " + var + " * (1.0" + F + " + " +
+                   fn_for("erf", dtype) + "(" + var +
                    " * 0.7071067811865476" + F + "))";
         default:
-            return var;
+            // Never silently return identity for an unhandled activation — that
+            // is the same silent-divergence class as the elementwise emit_op
+            // default. is_activation() only admits ReLU/Sigmoid/Tanh/GELU, so
+            // reaching here means a new fuseable activation was added without a
+            // codegen arm. Fail loudly.
+            throw std::runtime_error(
+                "ExtendedKernelCodegen::activation_expr: unhandled activation "
+                "OpType (" + std::to_string(static_cast<int>(act)) + ")");
     }
 }
 
@@ -285,8 +293,8 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
             case ElemOp::Sinh:       out << indent << v << " = " << fn_for("sinh", group.dtype) << "(" << v << ");\n"; break;
             case ElemOp::Cosh:       out << indent << v << " = " << fn_for("cosh", group.dtype) << "(" << v << ");\n"; break;
             case ElemOp::Tanh:       out << indent << v << " = " << fn_for("tanh", group.dtype) << "(" << v << ");\n"; break;
-            case ElemOp::Erf:        out << indent << v << " = erf(" << v << ");\n"; break;
-            case ElemOp::Erfc:       out << indent << v << " = erfc(" << v << ");\n"; break;
+            case ElemOp::Erf:        out << indent << v << " = " << fn_for("erf", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Erfc:       out << indent << v << " = " << fn_for("erfc", group.dtype) << "(" << v << ");\n"; break;
             case ElemOp::Log2:       out << indent << v << " = " << fn_for("log2", group.dtype) << "(" << v << ");\n"; break;
             case ElemOp::Log10:      out << indent << v << " = " << fn_for("log10", group.dtype) << "(" << v << ");\n"; break;
             case ElemOp::Log1p:      out << indent << v << " = " << fn_for("log1p", group.dtype) << "(" << v << ");\n"; break;
@@ -302,7 +310,7 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
                 out << indent << v << " = (" << v << " < 0) ? 0 : " << v << ";\n"; break;
             case ElemOp::Gelu:
                 out << indent << v << " = 0.5" << F << " * " << v << " * (1.0" << F
-                    << " + erf(" << v << " * 0.7071067811865476" << F << "));\n"; break;
+                    << " + " << fn_for("erf", group.dtype) << "(" << v << " * 0.7071067811865476" << F << "));\n"; break;
             case ElemOp::MulScalar:  out << indent << v << " = " << v << " * " << sc << ";\n"; break;
             case ElemOp::AddScalar:  out << indent << v << " = " << v << " + " << sc << ";\n"; break;
             case ElemOp::PowScalar:  out << indent << v << " = " << pow_fn << "(" << v << ", " << sc << ");\n"; break;
@@ -573,7 +581,7 @@ extern "C" __global__ void fused_layer_norm_kernel(
     }
 
     ss << R"(
-    int64_t outer_size, int64_t norm_size, float eps) {
+    int64_t outer_size, int64_t norm_size, )" << C << R"( eps) {
 
     // One block per normalized instance
     int instance = blockIdx.x;
@@ -694,7 +702,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
     }
 
     ss << R"(
-    int64_t outer_size, int64_t norm_size, float eps) {
+    int64_t outer_size, int64_t norm_size, )" << C << R"( eps) {
 
     int instance = blockIdx.x;
     if (instance >= outer_size) return;
@@ -937,7 +945,12 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     Tensor output;
     std::vector<const void*> ptrs;   // buffer args (fully populated before &-taken)
     std::vector<int64_t> ivals;      // integer scalar args (fully populated first)
-    float eps_val = group.eps;
+    // eps must be marshalled at the kernel's COMPUTE precision: a Float64 norm
+    // compiles `double eps` (compute_type == double), so passing a 4-byte float
+    // by pointer would misalign the kernel arg and feed it garbage. Keep both a
+    // float and a double copy alive; select by dtype when appending the arg.
+    float eps_val_f = static_cast<float>(group.eps);
+    double eps_val_d = group.eps;
     bool has_eps = false;
     int grid = 1;
     unsigned shared = 0;
@@ -1061,7 +1074,13 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     args.reserve(ptrs.size() + ivals.size() + 1);
     for (auto& p : ptrs) args.push_back(static_cast<void*>(&p));
     for (auto& v : ivals) args.push_back(static_cast<void*>(&v));
-    if (has_eps) args.push_back(static_cast<void*>(&eps_val));
+    if (has_eps) {
+        if (group.dtype == DType::Float64) {
+            args.push_back(static_cast<void*>(&eps_val_d));
+        } else {
+            args.push_back(static_cast<void*>(&eps_val_f));
+        }
+    }
 
     kernel->launch_raw(args, grid, kBlock, shared, nullptr);
 

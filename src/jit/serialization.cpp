@@ -358,7 +358,16 @@ auto GraphReader::read_values(Graph& graph) -> void {
     for (uint64_t i = 0; i < num_values; ++i) {
         std::string id = read_string();
         std::vector<int64_t> shape = read_int64_vector();
-        DType dtype = static_cast<DType>(read_uint32());
+        // Validate the untrusted dtype integer against the enum before the cast
+        // (mirrors read_tensor); an out-of-range DType makes dtype_size() return
+        // 0 and can drive later out-of-bounds reads on a corrupt .graph.
+        uint32_t raw_dtype = read_uint32();
+        if (raw_dtype > static_cast<uint32_t>(DType::FP8_E5M2FNUZ)) {
+            throw std::runtime_error(
+                "GraphReader::read_values: unknown dtype value " +
+                std::to_string(raw_dtype));
+        }
+        DType dtype = static_cast<DType>(raw_dtype);
         uint32_t raw_dev_type = read_uint32();
         // Validate the untrusted device-type integer against the enum before
         // constructing the Device (mirrors the DType guard in read_tensor).

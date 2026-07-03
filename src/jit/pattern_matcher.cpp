@@ -315,6 +315,15 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     if ((n2->op_type() != OpType::Pow && n2->op_type() != OpType::Mul) ||
         used.count(n2.get())) return std::nullopt;
     if (!consumes_output(n1, n2)) return std::nullopt;
+    // If the square step is a Mul, it must be a genuine self-square (x*x): the
+    // fused LayerNorm kernel reads a single input stream and computes x*x. A
+    // Mul(a,b) with distinct operands would silently square only `a`, drop `b`,
+    // and mis-collect `b` as gamma. Reject so the correct eager path runs.
+    if (n2->op_type() == OpType::Mul &&
+        !(n2->inputs().size() == 2 &&
+          n2->inputs()[0].get() == n2->inputs()[1].get())) {
+        return std::nullopt;
+    }
 
     // Mean of squared differences
     if (start_idx + 3 >= nodes.size()) return std::nullopt;
@@ -418,6 +427,14 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     auto& n0 = nodes[start_idx];
     if ((n0->op_type() != OpType::Pow && n0->op_type() != OpType::Mul) ||
         used.count(n0.get())) return std::nullopt;
+    // A Mul square step must be a genuine self-square (x*x); the fused RMSNorm
+    // kernel reads a single input stream. A Mul(a,b) with distinct operands
+    // would silently square only `a`, drop `b`, and mis-collect `b` as gamma.
+    if (n0->op_type() == OpType::Mul &&
+        !(n0->inputs().size() == 2 &&
+          n0->inputs()[0].get() == n0->inputs()[1].get())) {
+        return std::nullopt;
+    }
 
     auto& n1 = nodes[start_idx + 1];
     if (n1->op_type() != OpType::Mean || used.count(n1.get())) return std::nullopt;
@@ -508,12 +525,46 @@ auto PatternMatcher::match_gemm_epilogue(const Graph& graph, size_t start_idx,
     // consume the MatMul/Linear output) — matching purely on op-type and
     // topological position fuses an unrelated Add, dangling its true producer's
     // output. Every sibling matcher uses consumes_output() for this reason.
+    //
+    // Additionally require the Add's OTHER operand to be a genuine per-column
+    // bias: a rank-1 [cols] vector (or a leading-1 broadcast such as [1, cols]).
+    // The epilogue kernel indexes it as bias[idx % cols], so a full-tensor
+    // residual (e.g. y = matmul(x, W) + skip with skip [rows, cols]) would be
+    // silently broadcast from its first row — numerically wrong on the fused
+    // CUDA/ROCm path while eager stays correct. If shapes aren't inferred yet,
+    // do NOT fuse; leave the Add for the correct (eager) elementwise path.
     if (!base_linear_has_bias && next < nodes.size() &&
         nodes[next]->op_type() == OpType::Add &&
         !used.count(nodes[next].get()) &&
         consumes_output(matched.back(), nodes[next])) {
-        matched.push_back(nodes[next]);
-        ++next;
+        std::unordered_set<Value*> mm_outputs;
+        const std::vector<int64_t>* mm_shape = nullptr;
+        for (const auto& out : matched.back()->outputs()) {
+            if (out) {
+                mm_outputs.insert(out.get());
+                if (!mm_shape) mm_shape = &out->shape();
+            }
+        }
+        const Value* bias_val = nullptr;
+        for (const auto& inp : nodes[next]->inputs()) {
+            if (inp && !mm_outputs.count(inp.get())) { bias_val = inp.get(); break; }
+        }
+        bool is_per_column_bias = false;
+        if (bias_val && mm_shape && !mm_shape->empty()) {
+            const auto& bshape = bias_val->shape();
+            const int64_t cols = mm_shape->back();
+            if (!bshape.empty() && cols > 0 && bshape.back() == cols) {
+                int64_t bnumel = 1;
+                for (auto d : bshape) bnumel *= d;
+                // A per-column bias has exactly `cols` elements (all leading
+                // dims == 1); a [rows, cols] residual has rows*cols != cols.
+                is_per_column_bias = (bnumel == cols);
+            }
+        }
+        if (is_per_column_bias) {
+            matched.push_back(nodes[next]);
+            ++next;
+        }
     }
 
     // Optional: activation — must consume the previous matched node's output and

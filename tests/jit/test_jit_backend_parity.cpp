@@ -620,6 +620,191 @@ TEST(JITBackendParity, JITCompiledGemmEpilogueBias) {
     }
 }
 
+// ============================================================================
+// JIT-COMPILED affine BatchNorm2d (eval) parity — regression for the interpreter
+// replay bug where OpType::BatchNorm2d dispatched the NON-affine kernel over the
+// affine node's 5 reordered inputs (x, gamma, beta, mean, var), silently reading
+// gamma-as-mean / beta-as-var and dropping the affine scale+shift. Runs the
+// COMPILED graph (trace -> IR -> execute_node) on EVERY backend incl. CPU and
+// compares to the eager reference — the bug produced silently-wrong output on
+// all backends, so CPU alone catches it.
+// ============================================================================
+
+TEST(JITBackendParity, JITCompiledBatchNorm2dAffineEval) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled affine BatchNorm2d eval parity");
+
+    const int64_t N = 2, C = 4, H = 3, W = 3;
+    nn::BatchNorm2d bn(C);  // affine=true, track_running_stats=true by default
+
+    // Move running mean/var away from the {0,1} defaults so the affine kernel's
+    // result differs sharply from the buggy gamma-as-mean/beta-as-var reading.
+    bn.train();
+    for (int it = 0; it < 5; ++it) {
+        auto xb = randn({N, C, H, W}, DType::Float32, Device::cpu());
+        bn.forward(Variable(xb, false));
+    }
+    // Give gamma/beta distinctive values (defaults gamma=1, beta=0 make the
+    // affine step an identity and weaken the regression).
+    {
+        auto params = bn.parameters();  // gamma (weight), beta (bias)
+        ASSERT_GE(params.size(), 2u);
+        params[0]->tensor() = tenzor::add(randn({C}, DType::Float32, Device::cpu()), 1.5f);
+        params[1]->tensor() = randn({C}, DType::Float32, Device::cpu());
+    }
+    bn.eval();
+
+    auto input = randn({N, C, H, W}, DType::Float32, Device::cpu());
+    auto ref = bn.forward(Variable(input, false)).tensor();  // eager CPU reference
+
+    for (size_t i = 0; i < backends.size(); ++i) {
+        try {
+            bn.to(backends[i]);  // moves params AND running-stat buffers
+            auto in_dev = input.to(backends[i]);
+            auto fn = [&bn](const Variable& x) -> Variable { return bn.forward(x); };
+            jit::CompiledFunction compiled(fn, {});
+            auto out0 = compiled(Variable(in_dev, false)).tensor();  // compile+run
+            auto out1 = compiled(Variable(in_dev, false)).tensor();  // cache hit
+            backends[i].synchronize();
+            SCOPED_TRACE("BN2d affine JIT parity on " + backend_name(backends[i]));
+            EXPECT_GT(compiled.num_cached(), 0u)
+                << "JIT compilation silently fell back to eager on "
+                << backend_name(backends[i]);
+            EXPECT_TENSORS_CLOSE(ref, out0.to(Device::cpu()), 1e-3f, 1e-3f);
+            EXPECT_TENSORS_CLOSE(ref, out1.to(Device::cpu()), 1e-3f, 1e-3f);
+            bn.to(Device::cpu());  // restore (stats persist) for the next backend
+        } catch (const std::exception& e) {
+            bn.to(Device::cpu());
+            ADD_FAILURE() << "JITCompiledBatchNorm2dAffineEval failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
+
+// ============================================================================
+// JIT-COMPILED bias-less Linear + FULL residual parity. Exercises two fixes:
+//   (1) Contiguous-elision in the tracer: a bias-less nn::Linear lowers to
+//       permute+matmul, and matmul materializes a contiguous copy of the
+//       permuted weight (OpId::Contiguous). That op has no IR OpType; before the
+//       fix it graph-broke and the whole function silently fell back to eager
+//       (num_cached==0). The EXPECT_GT(num_cached,0) below asserts it now
+//       compiles on every backend.
+//   (2) The GemmEpilogue residual-as-bias guard: a residual skip of shape
+//       [rows, cols] (NOT a [cols] vector) must never be fused as a per-column
+//       bias (the native kernel indexes bias[idx%cols] and would broadcast row 0
+//       across every row). The GPU EXPECT_EQ(fused_after,fused_before) asserts no
+//       native GemmEpilogue kernel launched for the residual.
+// Compares compiled to SAME-backend eager so the check isolates fusion/lowering
+// correctness from cross-device GEMM precision.
+// ============================================================================
+
+TEST(JITBackendParity, JITCompiledLinearFullResidual) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled bias-less Linear + residual parity");
+
+    const int64_t M = 4, K = 32, Ncol = 16;
+    nn::Linear proj(K, Ncol, /*bias=*/false);  // bias-less -> reaches GemmEpilogue
+    auto skip = randn({M, Ncol}, DType::Float32, Device::cpu());  // FULL residual
+    auto input = randn({M, K}, DType::Float32, Device::cpu());
+
+    for (size_t i = 0; i < backends.size(); ++i) {
+        const bool is_gpu = backends[i].type == Device::Type::CUDA ||
+                            backends[i].type == Device::Type::ROCm;
+        try {
+            nn::Linear proj_dev(K, Ncol, /*bias=*/false);
+            copy_params(proj, proj_dev);
+            proj_dev.to(backends[i]);
+            auto skip_dev = Variable(skip.to(backends[i]), false);
+            auto in_dev = input.to(backends[i]);
+            // Same-backend eager reference isolates fusion correctness from
+            // cross-device GEMM precision. If the residual were mis-fused as a
+            // per-column bias, the compiled result would broadcast row 0 and
+            // diverge from this reference by far more than any tolerance.
+            auto ref_dev = (proj_dev.forward(Variable(in_dev, false)) +
+                            skip_dev).tensor().to(Device::cpu());
+            auto fn = [&proj_dev, &skip_dev](const Variable& x) -> Variable {
+                return proj_dev.forward(x) + skip_dev;
+            };
+            const uint64_t fused_before = jit::extended_fused_launch_count();
+            jit::CompiledFunction compiled(fn, {});
+            auto out0 = compiled(Variable(in_dev, false)).tensor();
+            auto out1 = compiled(Variable(in_dev, false)).tensor();
+            backends[i].synchronize();
+            const uint64_t fused_after = jit::extended_fused_launch_count();
+            SCOPED_TRACE("linear+residual JIT parity on " + backend_name(backends[i]));
+            EXPECT_GT(compiled.num_cached(), 0u)
+                << "JIT compilation silently fell back to eager on "
+                << backend_name(backends[i]);
+            if (is_gpu) {
+                EXPECT_EQ(fused_after, fused_before)
+                    << "a full [rows,cols] residual Add was wrongly fused as a "
+                    << "per-column GemmEpilogue bias on " << backend_name(backends[i]);
+            }
+            EXPECT_TENSORS_CLOSE(ref_dev, out0.to(Device::cpu()), 1e-3f, 1e-3f);
+            EXPECT_TENSORS_CLOSE(ref_dev, out1.to(Device::cpu()), 1e-3f, 1e-3f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "JITCompiledLinearFullResidual failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
+
+// ============================================================================
+// JIT-COMPILED scaled-dot-product attention parity — regression for the fused
+// FlashAttention executor building its 1/sqrt(d) scale scalar on the CPU while
+// `scores` lived on the GPU: that device-mismatched and THREW on every GPU
+// backend on the compiled (cache-hit) call, after working on the first eager
+// call. FuseAttentionPass matches MatMul(Q,Kᵀ) -> Mul(scalar scale) -> Softmax
+// (last dim) -> MatMul(_,V) and forms a FlashAttention node whose executor runs
+// the fixed code path. Asserts compiled == same-backend eager on every backend.
+// ============================================================================
+
+TEST(JITBackendParity, JITCompiledScaledDotProductAttention) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled attention parity");
+
+    const int64_t B = 2, S = 8, D = 16;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+    auto q = randn({B, S, D}, DType::Float32, Device::cpu());
+    auto k = randn({B, S, D}, DType::Float32, Device::cpu());
+    auto v = randn({B, S, D}, DType::Float32, Device::cpu());
+
+    for (size_t i = 0; i < backends.size(); ++i) {
+        try {
+            auto q_dev = q.to(backends[i]);
+            auto kT_dev = Variable(transpose(k, 1, 2).to(backends[i]), false);  // [B,D,S]
+            auto v_dev = Variable(v.to(backends[i]), false);
+            // Pattern matches FuseAttentionPass exactly: the scale is a scalar
+            // Mul (not a Div) so the QK^T -> scale -> softmax -> *V chain fuses
+            // into a FlashAttention node.
+            auto attn_fn = [&](const Variable& qv) -> Variable {
+                auto scores = tenzor::matmul(qv, kT_dev);
+                auto scaled = scores * Variable(
+                    tenzor::full({1}, scale, DType::Float32, backends[i]), false);
+                auto probs = nn::softmax(scaled, -1);
+                return tenzor::matmul(probs, v_dev);
+            };
+            // Same-backend eager reference isolates fusion correctness from
+            // cross-device GEMM precision.
+            auto ref_dev = attn_fn(Variable(q_dev, false)).tensor().to(Device::cpu());
+
+            jit::CompiledFunction compiled(attn_fn, {});
+            auto out0 = compiled(Variable(q_dev, false)).tensor();  // compile+cache
+            auto out1 = compiled(Variable(q_dev, false)).tensor();  // cache hit
+            backends[i].synchronize();
+            SCOPED_TRACE("attention JIT parity on " + backend_name(backends[i]));
+            EXPECT_GT(compiled.num_cached(), 0u)
+                << "JIT compilation silently fell back to eager on "
+                << backend_name(backends[i]);
+            EXPECT_TENSORS_CLOSE(ref_dev, out0.to(Device::cpu()), 1e-3f, 1e-3f);
+            EXPECT_TENSORS_CLOSE(ref_dev, out1.to(Device::cpu()), 1e-3f, 1e-3f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "JITCompiledScaledDotProductAttention failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
+
 // Backward-through-JIT parity tests moved to
 // tests/backend_parity/test_jit_autograd_parity.cpp per plan 4.4.
 
