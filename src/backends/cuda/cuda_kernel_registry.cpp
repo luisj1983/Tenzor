@@ -12,6 +12,7 @@
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/attr_macros.hpp"
+#include "cuda_stream.hpp"  // cuda::cuda_current_stream()
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/linalg.hpp"
@@ -48,7 +49,10 @@ inline cudaStream_t get_cuda_stream(const OpAttributes& attrs) {
             reinterpret_cast<void*>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream)))
         );
     }
-    return nullptr;  // Default stream
+    // Fall back to the thread-local current stream (nullptr = default stream in
+    // normal execution). CUDA-graph capture sets this to the capture stream so
+    // the forward pass is recorded onto it rather than the default stream.
+    return cuda::cuda_current_stream();
 }
 
 // Copy a contiguous device buffer (`src`, n elements) into a (possibly

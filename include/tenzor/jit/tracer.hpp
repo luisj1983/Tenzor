@@ -171,7 +171,22 @@ enum class OpType {
     Ge,               ///< Elementwise a >= b  (Bool)
     LogicalAnd,       ///< Elementwise a && b  (Bool)
     LogicalOr,        ///< Elementwise a || b  (Bool)
-    LogicalNot        ///< Elementwise !a      (Bool)
+    LogicalNot,       ///< Elementwise !a      (Bool)
+    // JIT review C2: previously-unmapped ops, now first-class IR nodes so they
+    // are CAPTURED and replayed through the JIT (not eager-fallback).
+    Var,              ///< Variance reduction
+    Std,              ///< Standard-deviation reduction
+    Prod,             ///< Product reduction
+    LeakyReLU,        ///< max(x, negative_slope*x)
+    ELU,              ///< Exponential linear unit
+    Mish,             ///< x * tanh(softplus(x))
+    Softplus,         ///< (1/beta) * log(1 + exp(beta*x))
+    GroupNorm,        ///< Group normalization
+    InstanceNorm,     ///< Instance normalization
+    Gather,           ///< Gather along dim by index tensor
+    Scatter,          ///< Scatter src into input along dim by index tensor
+    Flip,             ///< Reverse along dims
+    Roll              ///< Circular shift along dim
 };
 
 /**
@@ -450,6 +465,12 @@ public:
      *               the strict-mode exception message and stderr log.
      */
     auto record_graph_break(const std::string& reason) -> void;
+
+    /// Abort the trace unconditionally for an op that has no IR mapping (its
+    /// output/mutation would otherwise be silently baked as a constant). Always
+    /// throws; only used inside the trace machinery, whose caller falls back to
+    /// eager. See the implementation for why this differs from a `.item()` break.
+    auto abort_trace_unmappable(const std::string& reason) -> void;
 
     /**
      * @brief Trace a conditional branch (if/else).

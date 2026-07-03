@@ -524,14 +524,12 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
 
     // Mode-specific optimizations
     if (config_.mode == "max-autotune") {
-        // Enable layout and dtype optimization passes
+        // Layout optimization only. Do NOT force a Float16 downcast here:
+        // max-autotune tunes kernel/layout selection and must not silently
+        // change numerics vs eager or across backends. Precision reduction is
+        // opt-in via explicit autocast / mixed precision, never implied by mode.
         Compiler autotune_compiler(false);  // no default passes
         autotune_compiler.add_pass(std::make_unique<LayoutOptimizationPass>());
-
-        auto dtype_pass = std::make_unique<DTypeOptimizationPass>();
-        dtype_pass->set_target_dtype(DType::Float16);
-        autotune_compiler.add_pass(std::move(dtype_pass));
-
         autotune_compiler.optimize(*graph, 1);
     }
 
@@ -796,11 +794,11 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
     // passes the NVRTC path uses; reduce-overhead has no CUDA-graph capture on
     // the IREE runtime here, so warn once rather than silently ignoring it.
     if (config_.mode == "max-autotune") {
+        // Layout optimization only — no forced Float16 downcast (see the NVRTC
+        // path). max-autotune must not silently change numerics vs eager or
+        // across IREE targets; precision reduction stays opt-in.
         Compiler autotune_compiler(false);  // no default passes
         autotune_compiler.add_pass(std::make_unique<LayoutOptimizationPass>());
-        auto dtype_pass = std::make_unique<DTypeOptimizationPass>();
-        dtype_pass->set_target_dtype(DType::Float16);
-        autotune_compiler.add_pass(std::move(dtype_pass));
         autotune_compiler.optimize(*graph, 1);
     } else if (config_.mode == "reduce-overhead") {
         static std::once_flag warned_reduce_overhead;

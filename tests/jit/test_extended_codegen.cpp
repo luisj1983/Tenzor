@@ -121,7 +121,11 @@ TEST(ExtendedCodegen, GenerateRMSNormKernel) {
     auto source = ExtendedKernelCodegen::generate(group);
     EXPECT_FALSE(source.empty());
     EXPECT_NE(source.find("fused_rms_norm_kernel"), std::string::npos);
-    EXPECT_NE(source.find("rsqrtf"), std::string::npos);
+    // The inverse RMS must be computed as 1 / sqrtf(...), matching eager
+    // (CPU fused_ops uses 1.0 / std::sqrt), NOT the rsqrt fast-approx intrinsic
+    // which diverges from eager by ~1-2 ULP and differs across CUDA/ROCm.
+    EXPECT_NE(source.find("/ sqrtf"), std::string::npos);
+    EXPECT_EQ(source.find("rsqrtf"), std::string::npos);
 }
 
 TEST(ExtendedCodegen, GenerateReductionKernel) {

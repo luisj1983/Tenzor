@@ -10,6 +10,7 @@
 #endif
 #include <cuda_runtime.h>
 #include "cuda_stream_pool.hpp"
+#include "cuda_stream.hpp"  // cuda::cuda_current_stream()
 #include "cuda_error.hpp"
 #include <array>
 #include <stdexcept>
@@ -661,7 +662,13 @@ public:
         // cudaSetDevice would silently leak the device switch into the
         // calling thread (see allocate()/copy()).
         DeviceGuard guard(Device::cuda(device_id));
-        cudaError_t err = cudaMemset(ptr, value, bytes);
+        // Async on the thread-local current stream: during CUDA-graph capture a
+        // synchronous memset on the legacy stream is rejected ("would make the
+        // legacy stream depend on a capturing blocking stream"). Outside capture
+        // the current stream is the default stream, so ordering vs subsequent
+        // same-stream ops is preserved and host reads still synchronize.
+        cudaError_t err =
+            cudaMemsetAsync(ptr, value, bytes, cuda::cuda_current_stream());
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("cudaMemset failed: ") + cudaGetErrorString(err));
         }

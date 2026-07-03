@@ -24,6 +24,7 @@
 #include <charconv>  // For std::from_chars (dispatch wrappers)
 #include <span>      // For std::span (dispatch wrappers)
 #include "../cuda_stream_pool.hpp"
+#include "../cuda_stream.hpp"  // cuda::cuda_current_stream()
 
 namespace tenzor {
 
@@ -5998,6 +5999,17 @@ static std::pair<cudaStream_t, cuda::StreamGuard> get_dispatch_stream(
             cudaSetDevice(ref_tensor.device().index);
         }
         return {stream, cuda::StreamGuard{}};
+    }
+    // During CUDA-graph capture ALL work must run on the single capture stream,
+    // not a pooled stream — otherwise the launched kernels are not recorded into
+    // the captured graph (they run on an un-captured stream). When the backend's
+    // thread-local current stream is set (only during capture), use it directly
+    // instead of acquiring a pool stream.
+    if (cuda::cuda_current_stream() != nullptr) {
+        if (ref_tensor.device().type == Device::Type::CUDA) {
+            cudaSetDevice(ref_tensor.device().index);
+        }
+        return {cuda::cuda_current_stream(), cuda::StreamGuard{}};
     }
     int device_id = ref_tensor.device().index;
     auto guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);

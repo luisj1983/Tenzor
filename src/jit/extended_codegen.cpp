@@ -257,9 +257,15 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
     const bool is_max = (group.reduce_kind == OpType::Max);
     const bool is_min = (group.reduce_kind == OpType::Min);
     const bool is_mean = (group.reduce_kind == OpType::Mean);
+    // Use true ±infinity as the max/min identity, NOT a finite ±1e30 sentinel:
+    // real Float32 values range to ±3.4e38, so a finite sentinel would win over
+    // legitimate extreme inputs (e.g. reduce_max([-2e30,-3e30]) -> -1e30 instead
+    // of -2e30). NVRTC/HIPRTC expose no <math.h> (so INFINITY is undefined), but
+    // __int_as_float is a device builtin in both; the float ±inf bit pattern
+    // converts exactly to double for a double compute type.
     const std::string ident =
-        is_max ? std::string("-1e30") + F :
-        is_min ? std::string("1e30") + F  :
+        is_max ? std::string("__int_as_float(0xff800000)") :  // -inf
+        is_min ? std::string("__int_as_float(0x7f800000)")  : //  +inf
                  std::string("0");
     // combine(acc, x) -> updated acc, for the element loop and the tree steps.
     auto combine = [&](const std::string& acc, const std::string& x) -> std::string {
@@ -378,15 +384,35 @@ extern "C" __global__ void fused_reduction_kernel(
     // Each block reduces one (outer, inner) slice. Accumulate in the compute
     // type (float for the 16-bit storage types) and narrow to T only on store.
     )" << C << R"( sum = )" << ident << R"(;
-    for (int64_t r = threadIdx.x; r < reduce_size; r += blockDim.x) {
+)";
+    // Kahan-compensated accumulation for additive reductions (sum/mean): the CPU
+    // reduction sums in compensated float, so a bare running sum on the GPU
+    // diverges by more than a few ULP over a large reduce extent. Compensating
+    // the per-thread sequential accumulation (the dominant error term) keeps
+    // CPU/CUDA/ROCm agreement tight. Max/Min fold exactly, so they skip it.
+    const bool use_kahan = !is_max && !is_min;
+    if (use_kahan) ss << "    " << C << " kahan_c = 0;\n";
+    ss << R"(    for (int64_t r = threadIdx.x; r < reduce_size; r += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(input[outer * reduce_size * inner_size + r * inner_size + inner]);
 )";
 
     // Pre-reduction element-wise ops (lowered + representability-checked above).
     ss << pre_block.str();
 
-    ss << "        " << combine("sum", "val") << "\n";
+    if (use_kahan) {
+        ss << "        " << C << " kahan_y = val - kahan_c;\n"
+           << "        " << C << " kahan_t = sum + kahan_y;\n"
+           << "        kahan_c = (kahan_t - sum) - kahan_y;\n"
+           << "        sum = kahan_t;\n";
+    } else {
+        ss << "        " << combine("sum", "val") << "\n";
+    }
     ss << R"(    }
+)";
+    // Fold the per-thread compensation back before the tree reduction combines
+    // the partial sums across threads.
+    if (use_kahan) ss << "    sum = sum + kahan_c;\n";
+    ss << R"(
 
     // Warp-level reduction
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
@@ -500,7 +526,7 @@ extern "C" __global__ void fused_softmax_kernel(
     // Pass 1: find max (for numerical stability). All reductions run in the
     // compute type (float for the 16-bit storage types); only loads/stores touch
     // T.
-    )" << C << R"( thread_max = -1e30)" << F << R"(;
+    )" << C << R"( thread_max = __int_as_float(0xff800000))" << R"(;
     for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(row_input[c]);
         thread_max = val > thread_max ? val : thread_max;
@@ -520,7 +546,7 @@ extern "C" __global__ void fused_softmax_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        thread_max = (lane < blockDim.x / warpSize) ? shared_max[lane] : -1e30)" << F << R"(;
+        thread_max = (lane < blockDim.x / warpSize) ? shared_max[lane] : __int_as_float(0xff800000))" << R"(;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
             )" << C << R"( other = __shfl_down_sync(TZ_WARP_MASK, thread_max, offset);
             thread_max = other > thread_max ? other : thread_max;
@@ -536,10 +562,15 @@ extern "C" __global__ void fused_softmax_kernel(
     // diverge from the float reference. Keep the running sum in the compute type
     // and recompute exp() from the untouched input in pass 3.
     )" << C << R"( thread_sum = 0;
+    )" << C << R"( sum_c = 0;  // Kahan compensation (match CPU compensated sum)
     for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
         )" << C << R"( val = )" << exp_fn << R"((static_cast<)" << C << R"(>(row_input[c]) - row_max);
-        thread_sum += val;
+        )" << C << R"( ky = val - sum_c;
+        )" << C << R"( kt = thread_sum + ky;
+        sum_c = (kt - thread_sum) - ky;
+        thread_sum = kt;
     }
+    thread_sum = thread_sum + sum_c;
 
     // Warp reduction for sum
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
@@ -579,7 +610,11 @@ extern "C" __global__ void fused_softmax_kernel(
 auto ExtendedKernelCodegen::generate_layer_norm(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
     auto C = compute_type(group.dtype);  // Welford state in float/double
-    const std::string rsqrt_fn = fn_for("rsqrt", group.dtype);
+    // Eager (CPU fused_ops) computes the inverse std as 1.0 / sqrt(var + eps),
+    // NOT via the rsqrt intrinsic (which is a fast approximation differing by
+    // 1-2 ULP). Divide by sqrt here so the JIT norm matches eager and is
+    // consistent across CUDA/ROCm.
+    const std::string sqrt_fn = fn_for("sqrt", group.dtype);
     std::ostringstream ss;
 
     ss << R"(
@@ -674,7 +709,7 @@ extern "C" __global__ void fused_layer_norm_kernel(
     __syncthreads();
 
     )" << C << R"( final_mean = s_mean[0];
-    )" << C << R"( inv_std = )" << rsqrt_fn << R"((s_m2[0] + eps);
+    )" << C << R"( inv_std = (()" << C << R"()1) / )" << sqrt_fn << R"((s_m2[0] + eps);
 
     // Normalize + affine
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
@@ -701,7 +736,11 @@ extern "C" __global__ void fused_layer_norm_kernel(
 auto ExtendedKernelCodegen::generate_rms_norm(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
     auto C = compute_type(group.dtype);  // sum-of-squares in float/double
-    const std::string rsqrt_fn = fn_for("rsqrt", group.dtype);
+    // Eager (CPU fused_ops) computes the inverse std as 1.0 / sqrt(var + eps),
+    // NOT via the rsqrt intrinsic (which is a fast approximation differing by
+    // 1-2 ULP). Divide by sqrt here so the JIT norm matches eager and is
+    // consistent across CUDA/ROCm.
+    const std::string sqrt_fn = fn_for("sqrt", group.dtype);
     std::ostringstream ss;
 
     ss << R"(
@@ -726,10 +765,15 @@ extern "C" __global__ void fused_rms_norm_kernel(
     // Compute sum of squares (accumulate in compute type; 16-bit storage types
     // are promoted to float for the reduction).
     )" << C << R"( sum_sq = 0;
+    )" << C << R"( sumsq_c = 0;  // Kahan compensation (match CPU compensated sum)
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(x[i]);
-        sum_sq += val * val;
+        )" << C << R"( ky = val * val - sumsq_c;
+        )" << C << R"( kt = sum_sq + ky;
+        sumsq_c = (kt - sum_sq) - ky;
+        sum_sq = kt;
     }
+    sum_sq = sum_sq + sumsq_c;
 
     // Warp reduction
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
@@ -752,7 +796,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
     }
     __syncthreads();
 
-    )" << C << R"( rms_inv = )" << rsqrt_fn << R"((shared[0] / norm_size + eps);
+    )" << C << R"( rms_inv = (()" << C << R"()1) / )" << sqrt_fn << R"((shared[0] / norm_size + eps);
 
     // Normalize
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {

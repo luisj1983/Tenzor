@@ -19,8 +19,10 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include <tenzor/backend/cuda_graph.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/jit/compiler.hpp>
 #include <tenzor/jit/tracer.hpp>
@@ -29,25 +31,44 @@
 using namespace tenzor;
 
 namespace {
-bool cuda_available() {
-    auto* b = backend_registry().get_backend(Device::Type::CUDA);
-    return b != nullptr && b->is_available();
+// CUDA-graph capture works on either a CUDA or a ROCm (HIP graph) device — the
+// path is identical (routed through the CUDAGraph interface + backend-registered
+// factory). Return EVERY available GPU so the regression is exercised on each.
+std::vector<Device> available_gpus() {
+    std::vector<Device> gpus;
+    for (auto type : {Device::Type::CUDA, Device::Type::ROCm}) {
+        auto* b = backend_registry().get_backend(type);
+        if (b == nullptr || !b->is_available()) continue;
+        // Only include devices whose backend registered a graph-capture factory
+        // (CUDA and ROCm both do). create_for() returns null on a build/stack
+        // without graph support, in which case the JIT falls back to a normal
+        // forward — we must not assert capture on a device that does not support
+        // it (a hardware/driver capability gate, not a skipped Tenzor code path).
+        if (CUDAGraph::create_for(static_cast<int>(type), 0) != nullptr) {
+            gpus.push_back(Device{type, 0});
+        }
+    }
+    return gpus;
 }
 }  // namespace
 
 class CudaGraphReplay : public ::testing::Test {
 protected:
+    std::vector<Device> gpus_;
+
     void SetUp() override {
         tenzor::initialize();
-        if (!cuda_available()) {
-            GTEST_SKIP() << "CUDA device not available; CUDA-graph capture is a "
+        gpus_ = available_gpus();
+        if (gpus_.empty()) {
+            GTEST_SKIP() << "No CUDA/ROCm device available; graph capture is a "
                             "GPU-only path (no CPU fallback).";
         }
     }
 };
 
 TEST_F(CudaGraphReplay, ReplayWithChangedInputsReturnsFreshResult) {
-    const Device cuda = Device::cuda(0);
+  for (const Device& cuda : gpus_) {
+    SCOPED_TRACE("device: " + cuda.to_string());
 
     // Build a tiny executable graph: out = x + x, traced on CUDA.
     auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
@@ -63,28 +84,11 @@ TEST_F(CudaGraphReplay, ReplayWithChangedInputsReturnsFreshResult) {
     auto module = std::make_shared<jit::CompiledModule>(graph);
 
     // Capture with x0 (all ones) -> captured output should be 2.0 everywhere.
-    //
-    // NOTE: CUDAGraph::create() is resolved to the STUB compiled into
-    // tenzor_core (src/backend/cuda_graph_stub.cpp), which returns nullptr.
-    // The real implementation lives in the CUDA backend .so, but backends are
-    // dlopen'd with RTLD_LOCAL, so the strong stub symbol is never interposed
-    // (see the stub's own comment). Consequently capture_cuda_graph() throws
-    // "GPU is not available; cannot capture graph" even when a CUDA device is
-    // present. This is an architectural symbol-isolation limitation, unrelated
-    // to the stale-buffer fix under test. Skip (don't fail) so the regression
-    // is exercised wherever the real CUDAGraph symbol IS linked.
-    try {
-        module->capture_cuda_graph({x0});
-    } catch (const std::exception& e) {
-        std::string msg = e.what();
-        if (msg.find("GPU is not available") != std::string::npos ||
-            msg.find("cannot capture graph") != std::string::npos) {
-            GTEST_SKIP() << "CUDAGraph::create() is stubbed in this build "
-                            "(backends dlopen'd RTLD_LOCAL, so the real CUDA-graph "
-                            "symbol is not interposed): " << msg;
-        }
-        throw;
-    }
+    // The graph factory is routed through the backend registry (CUDA backend
+    // registers a CUDA-graph factory, ROCm a HIP-graph factory), and the
+    // backend's thread-local current-stream makes the forward pass record onto
+    // the capture stream — so capture actually contains the work.
+    module->capture_cuda_graph({x0});
     ASSERT_TRUE(module->has_cuda_graph());
 
     // Sanity: capture-time output is 2 * 1 = 2.
@@ -125,6 +129,7 @@ TEST_F(CudaGraphReplay, ReplayWithChangedInputsReturnsFreshResult) {
     for (int64_t i = 0; i < host2.numel(); ++i) {
         EXPECT_FLOAT_EQ(p2[i], 6.0f) << "second replay at " << i;
     }
+  }  // for each gpu
 }
 
 // capture_cuda_graph retains PRIVATE (cloned) input buffers. replay copies fresh
@@ -133,7 +138,8 @@ TEST_F(CudaGraphReplay, ReplayWithChangedInputsReturnsFreshResult) {
 // contiguous), replay would silently overwrite it. Assert the caller's
 // capture-time input is untouched after a replay with different data.
 TEST_F(CudaGraphReplay, ReplayDoesNotClobberCallerCaptureInput) {
-    const Device cuda = Device::cuda(0);
+  for (const Device& cuda : gpus_) {
+    SCOPED_TRACE("device: " + cuda.to_string());
 
     auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
         return {args[0] + args[0]};
@@ -145,16 +151,7 @@ TEST_F(CudaGraphReplay, ReplayDoesNotClobberCallerCaptureInput) {
     ASSERT_NE(graph, nullptr);
     auto module = std::make_shared<jit::CompiledModule>(graph);
 
-    try {
-        module->capture_cuda_graph({x0});
-    } catch (const std::exception& e) {
-        std::string msg = e.what();
-        if (msg.find("GPU is not available") != std::string::npos ||
-            msg.find("cannot capture graph") != std::string::npos) {
-            GTEST_SKIP() << "CUDAGraph::create() is stubbed in this build: " << msg;
-        }
-        throw;
-    }
+    module->capture_cuda_graph({x0});
     ASSERT_TRUE(module->has_cuda_graph());
 
     // Replay with all-5s. Pre-fix (aliased buffer) this device-to-device copy
@@ -169,4 +166,5 @@ TEST_F(CudaGraphReplay, ReplayDoesNotClobberCallerCaptureInput) {
         EXPECT_FLOAT_EQ(p[i], 1.0f)
             << "caller's capture-time input was clobbered by replay at " << i;
     }
+  }  // for each gpu
 }

@@ -268,16 +268,46 @@ auto SymbolicShapeInference::infer_reshape(const Node* node) -> std::vector<Symb
     }
 
     if (wildcard_idx < 0) {
-        // No wildcard: all target dims are concrete.
-        // Propagate symbolic dims where the target dim matches the input dim
-        // at the same position (common case: batch dim preserved).
+        // No explicit -1 wildcard. If the input is fully static, the concrete
+        // target IS the output shape.
+        bool input_static = true;
+        for (size_t i = 0; i < in_shape.rank(); ++i) {
+            if (in_shape[i].is_symbolic()) { input_static = false; break; }
+        }
+        if (input_static) {
+            std::vector<SymbolicDim> out_dims;
+            out_dims.reserve(target_shape.size());
+            for (size_t i = 0; i < target_shape.size(); ++i) {
+                out_dims.emplace_back(target_shape[i]);
+            }
+            return {SymbolicShape(std::move(out_dims))};
+        }
+
+        // Dynamic input, no wildcard. The concrete target dims were specialized
+        // to the trace shape; baking them would produce a wrong output shape for
+        // other bindings (x.view(x.size(0), 128) traced at B=32 must resolve to
+        // [B, 128], not [32, 128]). Treat the LEADING dim as the free
+        // data-dependent dim — the universal (B, ...) reshape pattern — and
+        // derive it symbolically from numel so the result is numel-preserving
+        // for every binding: out[0] = total_in / prod(target[1..]); trailing
+        // dims stay concrete. This mirrors the -1 wildcard math at position 0
+        // and matches the executor's runtime leading-dim recovery.
+        SymbolicDim total_in = SymbolicDim::concrete(1);
+        for (size_t i = 0; i < in_shape.rank(); ++i) total_in = total_in * in_shape[i];
+
+        SymbolicDim trailing = SymbolicDim::concrete(1);
+        for (size_t i = 1; i < target_shape.size(); ++i) {
+            trailing = trailing * SymbolicDim::concrete(target_shape[i]);
+        }
+
         std::vector<SymbolicDim> out_dims;
         out_dims.reserve(target_shape.size());
-        for (size_t i = 0; i < target_shape.size(); ++i) {
-            // target_shape[i] is concrete here (no wildcard). A pure input symbol
-            // cannot be verified to equal it, and the reshape forces the dim to the
-            // concrete value regardless, so emit the concrete target dim rather than
-            // (unsoundly) propagating the input symbol.
+        if (trailing.is_concrete() && trailing.value() == 0) {
+            out_dims.push_back(SymbolicDim::concrete(0));
+        } else {
+            out_dims.push_back(total_in / trailing);
+        }
+        for (size_t i = 1; i < target_shape.size(); ++i) {
             out_dims.emplace_back(target_shape[i]);
         }
         return {SymbolicShape(std::move(out_dims))};

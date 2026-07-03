@@ -1,5 +1,7 @@
 #include "tenzor/backend/cuda_graph.hpp"
 #include "cuda_graph.hpp"
+#include "cuda_stream.hpp"
+#include "tenzor/core/device.hpp"
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,8 @@ public:
     }
 
     ~CUDAGraphImpl() override {
+        // Never leave the thread-local current stream dangling on this thread.
+        cuda::cuda_current_stream() = nullptr;
         if (capture_.is_capturing()) {
             // Abort capture to avoid leaving stream in bad state
             cudaGraph_t dummy = nullptr;
@@ -42,11 +46,26 @@ public:
 
     void begin_capture() override {
         cudaSetDevice(device_id_);
-        capture_.begin_capture(stream_);
+        // Route all subsequent dispatch launches onto the capture stream so the
+        // forward pass is recorded (the backend otherwise launches on the
+        // un-capturable default stream).
+        cuda::cuda_current_stream() = stream_;
+        try {
+            capture_.begin_capture(stream_);
+        } catch (...) {
+            cuda::cuda_current_stream() = nullptr;
+            throw;
+        }
     }
 
     void end_capture() override {
-        capture_.end_capture();
+        try {
+            capture_.end_capture();
+        } catch (...) {
+            cuda::cuda_current_stream() = nullptr;
+            throw;
+        }
+        cuda::cuda_current_stream() = nullptr;
     }
 
     void replay() override {
@@ -64,7 +83,9 @@ private:
     cuda::CUDAGraphCapture capture_;
 };
 
-auto CUDAGraph::create(int32_t device_id) -> std::unique_ptr<CUDAGraph> {
+namespace {
+
+auto make_cuda_graph(int32_t device_id) -> std::unique_ptr<CUDAGraph> {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess) {
         return nullptr;
@@ -76,5 +97,18 @@ auto CUDAGraph::create(int32_t device_id) -> std::unique_ptr<CUDAGraph> {
     }
     return std::make_unique<CUDAGraphImpl>(device_id);
 }
+
+// Register the CUDA graph factory when this backend .so is dlopen'd. Backends
+// use RTLD_LOCAL, so the JIT (in tenzor_core) reaches this implementation via the
+// shared registry rather than by linking CUDAGraph::create directly.
+struct CUDAGraphFactoryRegistrar {
+    CUDAGraphFactoryRegistrar() {
+        CUDAGraph::register_factory(static_cast<int>(Device::Type::CUDA),
+                                    &make_cuda_graph);
+    }
+};
+[[maybe_unused]] const CUDAGraphFactoryRegistrar g_cuda_graph_registrar;
+
+}  // namespace
 
 } // namespace tenzor

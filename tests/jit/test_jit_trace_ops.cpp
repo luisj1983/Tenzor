@@ -286,3 +286,99 @@ TEST(JitAvgPool, CountIncludePadFalseReplayMatchesEagerAllBackends) {
             << backend_name(dev) << " — the flag was dropped at trace time";
     }
 }
+
+// =========================================================================
+// JIT review fix C1: FuseLayerNormActivationPass folds a trailing ReLU/GELU
+// into the LayerNorm node (marking fused_activation) and deletes the
+// activation node. Pre-fix, the executor never read that marker, so the
+// activation was silently DROPPED — replay returned a plain LayerNorm and
+// diverged from eager by O(1) on every backend. These assert the fused
+// activation is actually applied at replay.
+// =========================================================================
+TEST(JitTraceOps, LayerNormGeluFusionMatchesEager) {
+    check_op_on_all_backends(
+        "LayerNorm+GELU",
+        [](const Variable& x) {
+            int64_t d = x.tensor().shape().back();
+            return nn::functional::gelu(
+                nn::functional::layer_norm(x, {d}), "none");
+        },
+        [](Device dv) { return randn({4, 8}, DType::Float32, dv); });
+}
+
+TEST(JitTraceOps, LayerNormReluFusionMatchesEager) {
+    check_op_on_all_backends(
+        "LayerNorm+ReLU",
+        [](const Variable& x) {
+            int64_t d = x.tensor().shape().back();
+            return nn::relu(nn::functional::layer_norm(x, {d}));
+        },
+        [](Device dv) { return randn({4, 8}, DType::Float32, dv); });
+}
+
+// =========================================================================
+// JIT review fix C2: previously-unmapped ops (Var/Std/Prod, LeakyReLU/ELU/Mish/
+// Softplus, Gather/Scatter/Flip/Roll, GroupNorm/InstanceNorm) are now first-
+// class IR nodes, so they are CAPTURED and replayed through the JIT rather than
+// graph-breaking to eager. check_op_on_all_backends asserts BOTH that the op
+// compiled a graph (num_cached >= 1 — i.e. it did NOT graph-break) AND that the
+// replayed result matches eager on every backend.
+TEST(JitTraceOps, MappedReductionsMatchEager) {
+    check_op_on_all_backends(
+        "var(dim=1)",
+        [](const Variable& x) { return tenzor::var(nn::relu(x), 1, /*keepdim=*/false); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "std(dim=1)",
+        [](const Variable& x) { return tenzor::std(nn::relu(x), 1, /*keepdim=*/false); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "prod(dim=1)",
+        [](const Variable& x) { return tenzor::prod(nn::relu(x) + 0.5f, 1, /*keepdim=*/false); },
+        [](Device d) { return randn({4, 6}, DType::Float32, d); });
+}
+
+// gather / group_norm / flip / roll dispatch through OpId uniformly on EVERY
+// backend (CPU flip now routes through cpu::flip_kernel via OpId::Flip instead
+// of a manual memcpy that bypassed dispatch), so all are captured on all
+// backends — no eager fallback anywhere.
+TEST(JitTraceOps, MappedIndexingNormMatchEager) {
+    check_op_on_all_backends(
+        "flip(dim=1)",
+        [](const Variable& x) { return tenzor::flip(x, {1}); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "roll(2,dim=1)",
+        [](const Variable& x) { return tenzor::roll(x, 2, 1); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "gather(dim=1)",
+        [](const Variable& x) {
+            auto idx = zeros({4, 3}, DType::Int64, x.tensor().device());
+            return tenzor::gather(x, 1, idx);
+        },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "group_norm(2)",
+        [](const Variable& x) { return nn::functional::group_norm(x, 2); },
+        [](Device d) { return randn({2, 4, 3, 3}, DType::Float32, d); });
+}
+
+TEST(JitTraceOps, MappedActivationsMatchEager) {
+    check_op_on_all_backends(
+        "leaky_relu(0.05)",
+        [](const Variable& x) { return tenzor::leaky_relu(x, 0.05); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "elu(1.5)",
+        [](const Variable& x) { return tenzor::elu(x, 1.5f); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "mish",
+        [](const Variable& x) { return tenzor::mish(x); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+    check_op_on_all_backends(
+        "softplus",
+        [](const Variable& x) { return tenzor::softplus(x, 1.0f); },
+        [](Device d) { return randn({4, 8}, DType::Float32, d); });
+}

@@ -258,6 +258,10 @@ auto neg(const Variable& input) -> Variable {
 }
 
 auto softmax(const Variable& input, int64_t dim) -> Variable {
+    // Normalize a negative dim against the input rank up front, so the attribute
+    // recorded for JIT tracing / MLIR lowering and shape inference is
+    // non-negative (backends that already normalize see a no-op).
+    if (dim < 0) dim += static_cast<int64_t>(input.tensor().shape().size());
     if (!input.requires_grad() || !is_grad_enabled()) {
         OpAttributes attrs;
         attrs.set(AttrKey::Dim, dim);
@@ -304,6 +308,8 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
 }
 
 auto log_softmax(const Variable& input, int64_t dim) -> Variable {
+    // Normalize a negative dim against the input rank up front (see softmax).
+    if (dim < 0) dim += static_cast<int64_t>(input.tensor().shape().size());
     if (!input.requires_grad() || !is_grad_enabled()) {
         OpAttributes attrs;
         attrs.set(AttrKey::Dim, dim);

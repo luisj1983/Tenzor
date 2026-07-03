@@ -1,4 +1,5 @@
 #include "rocm_backend.hpp"
+#include "rocm_stream.hpp"  // rocm::rocm_current_stream()
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/rocm_caching_allocator.hip.hpp"
 #include "tenzor/core/device_guard.hpp"
@@ -38,9 +39,14 @@ static void ensure_rocm_path_for_hiprtc() {
 }
 
 ROCmBackend::ROCmBackend() {
-    // Check if caching allocator is enabled via environment variable
+    // Caching allocator: default ON (disable explicitly with
+    // TENZOR_ENABLE_CACHING_ALLOCATOR=0). It is REQUIRED for HIP-graph capture —
+    // the AMD driver faults on an allocation issued while a stream is capturing,
+    // so the captured forward() must be allocation-free, served from the pool the
+    // warmup pre-populates. It also reduces hipMalloc/hipFree overhead generally.
     const char* enable_caching = std::getenv("TENZOR_ENABLE_CACHING_ALLOCATOR");
-    use_caching_allocator_ = (enable_caching != nullptr && std::string(enable_caching) == "1");
+    use_caching_allocator_ =
+        (enable_caching == nullptr || std::string(enable_caching) != "0");
 
     // Set ROCM_PATH for MIOpen's HIPRTC kernel JIT before any MIOpen call.
     ensure_rocm_path_for_hiprtc();
@@ -171,6 +177,17 @@ auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
         return backend::rocm::RocmCachingAllocator::get().allocate(bytes, device_id);
     }
 
+    // Guard: a driver allocation issued while a stream is capturing faults on the
+    // AMD stack. HIP-graph capture must therefore be allocation-free (served from
+    // the caching-allocator pool). If capture is active but caching was disabled,
+    // fail with a clear message instead of crashing inside libamdhip64.
+    if (rocm::rocm_current_stream() != nullptr) {
+        throw std::runtime_error(
+            "ROCm: memory allocation during HIP-graph capture requires the "
+            "caching allocator (default ON). Do not set "
+            "TENZOR_ENABLE_CACHING_ALLOCATOR=0 when using graph capture.");
+    }
+
     if (device_id < 0 || device_id >= device_count()) {
         throw std::runtime_error(
             "ROCmBackend::allocate: invalid device_id " + std::to_string(device_id) +
@@ -182,7 +199,11 @@ auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
 
 #if HIP_VERSION >= 50300000
     if (hip_async_alloc_available()) {
-        hipStream_t stream = nullptr;  // default stream
+        // Use the thread-local current stream (nullptr = default outside capture).
+        // During HIP-graph capture this is the capture stream, so the async
+        // allocation is recorded onto it — a synchronous / default-stream
+        // allocation while another stream is capturing crashes the AMD driver.
+        hipStream_t stream = rocm::rocm_current_stream();
         hipError_t err = hipMallocAsync(&ptr, bytes, stream);
         if (err == hipSuccess) {
             std::lock_guard<std::mutex> lock(alloc_map_mutex_);
@@ -471,7 +492,12 @@ auto ROCmBackend::synchronize_event(EventHandle event) -> void {
 
 auto ROCmBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void {
     check_hip_error(hipSetDevice(device_id), "hipSetDevice in memset");
-    check_hip_error(hipMemset(ptr, value, bytes), "hipMemset");
+    // Async on the thread-local current stream: during HIP-graph capture a
+    // synchronous memset on the legacy stream is rejected. Outside capture the
+    // current stream is the default stream, so ordering vs subsequent same-stream
+    // ops is preserved and host reads still synchronize.
+    check_hip_error(hipMemsetAsync(ptr, value, bytes, rocm::rocm_current_stream()),
+                    "hipMemsetAsync");
 }
 
 // Legacy string-keyed dispatch removed (audit Phase C).

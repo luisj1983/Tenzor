@@ -1376,6 +1376,7 @@ private:
     std::vector<DynamicDimSpec> dynamic_dims_;                       ///< Dynamic dimension configuration
     Device traced_device_{Device::cpu()};                            ///< Device used at most recent trace
     DType  traced_dtype_{DType::Float32};                            ///< DType used at most recent trace
+    std::string traced_shape_key_;                                   ///< Full shape+device+dtype key the current graph_ is specialized for
 
     /// Serialises the mutating paths of forward()/replay/capture so a single
     /// CompiledModule shared across inference threads (the natural server

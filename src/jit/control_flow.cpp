@@ -27,10 +27,13 @@ auto cond(const Tensor& condition,
                                args);
     }
 
-    // Eager mode: evaluate condition and call appropriate branch
-    // Convert to Float32 first: the condition's natural dtype is often Bool/Int,
-    // and item<float>() requires a Float32 tensor.
-    bool cond_val = condition.to(DType::Float32).item<float>() != 0.0f;
+    // Eager mode: evaluate condition and call appropriate branch. Move to CPU
+    // BEFORE the Float32 cast: casting on the device lets some backends (e.g.
+    // ROCm) canonicalize a NaN condition to 0, flipping the taken branch vs CPU
+    // (NaN != 0 is true). A host-side cast keeps NaN as NaN so the branch choice
+    // is identical across all backends.
+    bool cond_val =
+        condition.to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
 
     if (cond_val) {
         return then_fn(args);
@@ -92,7 +95,10 @@ auto while_loop(int64_t max_iter,
     for (int64_t i = 0; i < max_iter; ++i) {
         // Check condition
         Tensor cond_result = cond_fn(state);
-        if (cond_result.to(DType::Float32).item<float>() == 0.0f) {
+        // Host-side cast (see cond()): a device-side Float32 cast can canonicalize
+        // a NaN loop predicate to 0 on some backends, exiting the loop early vs
+        // CPU (NaN == 0 is false → continue). Keep the check deterministic.
+        if (cond_result.to(Device::cpu()).to(DType::Float32).item<float>() == 0.0f) {
             break;
         }
 

@@ -11,6 +11,7 @@
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/ops/transform.hpp"  // Audit J5-followup: reshape
 #include "../../include/tenzor/ops/creation.hpp"
+#include "../../include/tenzor/backend/fast_dispatch.hpp"  // is_op_supported
 #include <iostream>
 #include <algorithm>
 #include <unordered_set>
@@ -986,7 +987,14 @@ auto FuseLayerNormActivationPass::run(Graph& graph) -> bool {
         auto& node2 = graph.nodes()[i + 1];
 
         if (node1->op_type() == OpType::LayerNorm &&
+            !node1->get_bool_attr("fused_activation") &&
             (node2->op_type() == OpType::ReLU || node2->op_type() == OpType::GELU)) {
+            // Only ONE activation may be folded into a LayerNorm. Without the
+            // fused_activation guard above, `relu(gelu(layer_norm(x)))` fuses
+            // twice — LN+GELU (marks gelu, deletes GELU), then LN+ReLU
+            // (OVERWRITES the marker with relu, deletes ReLU) — silently dropping
+            // the GELU. Fusing only the first adjacent activation and leaving the
+            // rest as normal nodes keeps replay == eager.
             // Verify data flow: layernorm output feeds into activation
             bool flow_valid = false;
             if (!node1->outputs().empty() && !node2->inputs().empty()) {
@@ -1876,8 +1884,13 @@ auto StrengthReductionPass::reduce_node(std::shared_ptr<Node> node, Graph& graph
         }
     }
 
+    // Pow(x,2)->Mul(x,x) and Pow(x,0.5)->Sqrt(x) are NOT bit-identical to the
+    // eager Pow kernel: libm pow(x,2)/pow(x,0.5) differ from x*x / sqrt(x) by
+    // ~1 ULP, and sqrt(-0.0) == -0.0 whereas pow(-0.0, 0.5) == +0.0. Gate behind
+    // allow_unsafe_algebra_ (default off), like the Div->Mul-reciprocal rewrite,
+    // so the JIT matches eager exactly by default.
     // ---- Pow(x, 2) -> Mul(x, x) ----
-    if (node->op_type() == OpType::Pow && producer1 &&
+    if (allow_unsafe_algebra_ && node->op_type() == OpType::Pow && producer1 &&
         producer1->op_type() == OpType::Constant) {
         auto val = get_scalar_float(*producer1);
         if (val) {
@@ -2425,6 +2438,27 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
             if (!representable) continue;  // leave the ops unfused (correct eager)
         }
 
+        // A LayerNorm/RMSNorm that FuseLayerNormActivationPass folded a trailing
+        // ReLU/GELU into (marked fused_activation) CANNOT be represented by the
+        // extended fused kernel — generate_layer_norm / generate_rms_norm emit no
+        // activation. Fusing it here would silently DROP the activation on the
+        // GPU path while the interpreter path applies it, diverging across
+        // backends. Refuse the fusion so the LayerNorm+activation runs through
+        // normal dispatch, where execute_node applies the fused activation
+        // uniformly on every backend.
+        {
+            bool has_folded_activation = false;
+            for (auto& n : match.nodes) {
+                if ((n->op_type() == OpType::LayerNorm ||
+                     n->op_type() == OpType::RMSNorm) &&
+                    n->get_bool_attr("fused_activation")) {
+                    has_folded_activation = true;
+                    break;
+                }
+            }
+            if (has_folded_activation) continue;  // interpreter applies the activation
+        }
+
         // Map the match kind to the appropriate fused OpType
         OpType fused_type;
         switch (match.kind) {
@@ -2714,12 +2748,18 @@ auto LayoutOptimizationPass::is_format_agnostic(OpType op) const -> bool {
 auto LayoutOptimizationPass::run(Graph& graph) -> bool {
     bool changed = false;
 
-    // Only optimize for GPU devices
+    // Only apply channels-last layout optimization on backends whose Conv
+    // kernels actually honor memory_format (CUDA/cuDNN, ROCm/MIOpen). On a
+    // backend that ignores memory_format but still receives the physically
+    // reordered LayoutConvert output, the Conv would read channels-last bytes
+    // as NCHW and silently produce wrong results — so restrict to CUDA/ROCm.
     auto& inputs = graph.inputs();
     if (inputs.empty()) return false;
 
     auto device = inputs[0]->device();
-    if (device.type == Device::Type::CPU) return false;
+    if (device.type != Device::Type::CUDA && device.type != Device::Type::ROCm) {
+        return false;
+    }
 
     // Phase 1: Identify nodes that benefit from channels-last and mark them.
     // Also propagate through format-agnostic ops connected to marked nodes.
@@ -2885,12 +2925,15 @@ auto DTypeOptimizationPass::is_stability_critical(OpType op) const -> bool {
 auto DTypeOptimizationPass::run(Graph& graph) -> bool {
     if (!enabled_) return false;
 
-    // Only optimize for GPU devices
     auto& inputs = graph.inputs();
     if (inputs.empty()) return false;
 
-    auto device = inputs[0]->device();
-    if (device.type == Device::Type::CPU) return false;
+    // Apply uniformly across devices. Previously this early-returned on CPU,
+    // which made the SAME compiled graph diverge CPU-vs-GPU (CPU stayed Float32
+    // while GPU downcast to the target dtype). This is an explicit, opt-in
+    // mixed-precision transform (not in the default pipeline and no longer
+    // auto-injected by any mode), so it must behave identically regardless of
+    // the target backend; CPU executes the reduced dtype via widen-compute-narrow.
 
     // Only optimize Float32 graphs
     bool has_fp32 = false;
@@ -3247,14 +3290,25 @@ auto QuantizationPass::quantize_conv2d(std::shared_ptr<Node> node, Graph& graph)
 auto QuantizationPass::run(Graph& graph) -> bool {
     bool modified = false;
 
+    // Backend gating: only quantize an op when the TARGET backend actually
+    // provides the quantized kernel. Rewriting Linear/Conv2d to their quantized
+    // form on a backend that lacks QuantizedLinear/QuantizedConv2d would leave
+    // the graph referencing a missing/divergent kernel. Skipping leaves the op
+    // in its correct dense form (runs identically everywhere) — this is not a
+    // CPU fallback, it is declining an unsupported optimization on that device.
+    if (graph.inputs().empty()) return false;
+    const Device::Type dev = graph.inputs()[0]->device().type;
+    const bool has_qlinear = is_op_supported(OpId::QuantizedLinear, dev);
+    const bool has_qconv   = is_op_supported(OpId::QuantizedConv2d, dev);
+
     // Collect nodes to quantize (can't modify graph while iterating)
     std::vector<std::shared_ptr<Node>> linear_nodes;
     std::vector<std::shared_ptr<Node>> conv_nodes;
 
     for (auto& node : graph.nodes()) {
-        if (node->op_type() == OpType::Linear && !node->get_bool_attr("quantized")) {
+        if (has_qlinear && node->op_type() == OpType::Linear && !node->get_bool_attr("quantized")) {
             linear_nodes.push_back(node);
-        } else if (node->op_type() == OpType::Conv2d && !node->get_bool_attr("quantized")) {
+        } else if (has_qconv && node->op_type() == OpType::Conv2d && !node->get_bool_attr("quantized")) {
             conv_nodes.push_back(node);
         }
     }
@@ -3311,6 +3365,14 @@ auto SparsePass::convert_to_sparse(std::shared_ptr<Node> node, Graph& graph) -> 
 
 auto SparsePass::run(Graph& graph) -> bool {
     bool modified = false;
+
+    // Backend gating: the SparseMatMul executor dispatches SparseSpMM. Only
+    // convert Linear->SparseMatMul on a backend that provides that kernel;
+    // otherwise leave the dense Linear (correct everywhere). Not a CPU fallback.
+    if (graph.inputs().empty()) return false;
+    if (!is_op_supported(OpId::SparseSpMM, graph.inputs()[0]->device().type)) {
+        return false;
+    }
 
     // Collect candidate nodes
     std::vector<std::shared_ptr<Node>> candidates;

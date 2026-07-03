@@ -1050,86 +1050,14 @@ auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
         }
     }
 
-    if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dims, shape_to_string(dims));
-        return dispatch(OpId::Flip, std::span<const Tensor>(&input, 1), attrs)[0];
-    }
-
-    // Flip is a pure reverse-stride remap: one element-wise copy pass into a
-    // single preallocated buffer. For each output linear index we decompose into
-    // coordinates, reverse the coordinate along every flipped axis
-    // (in_coord = dim_size-1 - out_coord), then memcpy by element size. This is
-    // dtype-agnostic (like repeat()/tile()) and avoids the previous
-    // O(dim_size) slice-objects + full cat() copy per flipped dimension.
-    auto shape = input.shape();
-    auto input_cont = input.is_contiguous() ? input : input.contiguous();
-    auto output = empty(std::vector<int64_t>(shape.begin(), shape.end()),
-                        input.dtype(), Device::cpu());
-
-    int64_t total = input_cont.numel();
-    if (total == 0) {
-        return output;
-    }
-
-    // Contiguous strides for the (now contiguous) input / output.
-    std::vector<int64_t> strides(ndim);
-    int64_t s = 1;
-    for (int64_t i = ndim - 1; i >= 0; --i) {
-        strides[i] = s;
-        s *= shape[i];
-    }
-
-    // Mark which dimensions are flipped (a dim may appear multiple times; the
-    // effect is idempotent, so a boolean mask is correct).
-    std::vector<char> flipped(ndim, 0);
-    for (auto dim : dims) {
-        flipped[dim] = 1;
-    }
-
-    const size_t esz = dtype_size(input.dtype());
-    const char* in_base = static_cast<const char*>(input_cont.data_ptr());
-    char* out_base = static_cast<char*>(output.data_ptr());
-
-#ifdef _OPENMP
-    #pragma omp parallel if (total > 65536)
-    {
-        std::vector<int64_t> coords(ndim);
-        #pragma omp for
-        for (int64_t out_idx = 0; out_idx < total; ++out_idx) {
-            int64_t temp = out_idx;
-            for (int64_t i = ndim - 1; i >= 0; --i) {
-                coords[i] = temp % shape[i];
-                temp /= shape[i];
-            }
-            int64_t in_idx = 0;
-            for (int64_t i = 0; i < ndim; ++i) {
-                int64_t c = flipped[i] ? (shape[i] - 1 - coords[i]) : coords[i];
-                in_idx += c * strides[i];
-            }
-            std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
-                        in_base + static_cast<size_t>(in_idx) * esz, esz);
-        }
-    }
-#else
-    std::vector<int64_t> coords(ndim);
-    for (int64_t out_idx = 0; out_idx < total; ++out_idx) {
-        int64_t temp = out_idx;
-        for (int64_t i = ndim - 1; i >= 0; --i) {
-            coords[i] = temp % shape[i];
-            temp /= shape[i];
-        }
-        int64_t in_idx = 0;
-        for (int64_t i = 0; i < ndim; ++i) {
-            int64_t c = flipped[i] ? (shape[i] - 1 - coords[i]) : coords[i];
-            in_idx += c * strides[i];
-        }
-        std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
-                    in_base + static_cast<size_t>(in_idx) * esz, esz);
-    }
-#endif
-
-    return output;
+    // Always dispatch OpId::Flip. Every backend provides a Flip kernel (CPU via
+    // cpu::flip_kernel, the reverse-stride copy that used to live inline here).
+    // Dispatching uniformly — instead of a CPU-only manual path that bypassed
+    // dispatch — lets the JIT tracer capture Flip on ALL backends rather than
+    // graph-breaking to eager on CPU.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dims, shape_to_string(dims));
+    return dispatch(OpId::Flip, std::span<const Tensor>(&input, 1), attrs)[0];
 }
 
 auto movedim(const Tensor& input, std::vector<int64_t> source, std::vector<int64_t> destination) -> Tensor {

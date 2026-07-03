@@ -14,6 +14,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "rocm_stream.hpp"  // rocm::rocm_current_stream()
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/linalg.hpp"
@@ -41,6 +42,17 @@
 
 namespace tenzor {
 
+// Single definition of the ROCm backend's thread-local current stream (declared
+// in rocm_stream.hpp). One shared instance across the whole ROCm backend .so, so
+// HIP-graph capture's begin_capture() and the dispatch/allocation paths all see
+// the same value.
+namespace rocm {
+hipStream_t& rocm_current_stream() {
+    static thread_local hipStream_t s = nullptr;
+    return s;
+}
+}  // namespace rocm
+
 // Helper to extract HIP stream from attributes
 inline hipStream_t get_hip_stream(const OpAttributes& attrs) {
     if (attrs.has(AttrKey::Stream)) {
@@ -48,7 +60,11 @@ inline hipStream_t get_hip_stream(const OpAttributes& attrs) {
             reinterpret_cast<void*>(static_cast<uintptr_t>(attrs.get_int(AttrKey::Stream)))
         );
     }
-    return nullptr;  // Default stream
+    // Fall back to the thread-local current stream (nullptr = default stream in
+    // normal execution). HIP-graph capture sets this to the capture stream so the
+    // forward pass is recorded onto it rather than the un-capturable default
+    // stream.
+    return rocm::rocm_current_stream();
 }
 
 

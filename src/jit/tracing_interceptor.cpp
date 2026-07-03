@@ -134,6 +134,23 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         // Index ops
         case OpId::IndexSelect: return OpType::IndexSelect;
 
+        // JIT review C2: map previously-unmapped single-dispatch ops so they are
+        // captured (and replayed through the interpreter) instead of graph-breaking
+        // to eager. Attributes are copied generically below.
+        case OpId::Var:          return OpType::Var;
+        case OpId::Std:          return OpType::Std;
+        case OpId::Prod:         return OpType::Prod;
+        case OpId::LeakyReLU:    return OpType::LeakyReLU;
+        case OpId::Elu:          return OpType::ELU;
+        case OpId::Mish:         return OpType::Mish;
+        case OpId::Softplus:     return OpType::Softplus;
+        case OpId::GroupNorm:    return OpType::GroupNorm;
+        case OpId::InstanceNorm: return OpType::InstanceNorm;
+        case OpId::Gather:       return OpType::Gather;
+        case OpId::Scatter:      return OpType::Scatter;
+        case OpId::Flip:         return OpType::Flip;
+        case OpId::Roll:         return OpType::Roll;
+
         // Vision
         case OpId::Interpolate: return OpType::Interpolate;
 
@@ -395,6 +412,9 @@ auto make_tracing_interceptor(
             if (attrs.has(k)) traced.bool_attrs[name] = attrs.get_bool(k, false);
         };
         copy_bool(AttrKey::Keepdim, "keepdim");
+        copy_bool(AttrKey::Unbiased, "unbiased");   // Var/Std
+        copy_int(AttrKey::NumGroups, "num_groups");  // GroupNorm
+        copy_int(AttrKey::Shift, "shift");           // Roll
         copy_bool(AttrKey::AlignCorners, "align_corners");
         // AvgPool2d's count_include_pad option (default true). Stored by the
         // pooling layer as an INT (set(AttrKey::CountIncludePad, int64_t{0|1})),

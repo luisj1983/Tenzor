@@ -705,8 +705,13 @@ private:
         // unrolled sequence (matching Python semantics for fixed-N loops).
         for (int64_t i = 0; i < f.count; ++i) {
             if (returned) return;
-            Tensor iv_t = full({}, static_cast<float>(i), DType::Float32, ctx_device_);
+            // Build the loop index on CPU and narrow to the context dtype on CPU
+            // (deterministic rounding), THEN move to the device. Casting f32->
+            // bf16/f16 on the device is not guaranteed identical across backends,
+            // so a large index would round differently per backend.
+            Tensor iv_t = full({}, static_cast<float>(i), DType::Float32, Device::cpu());
             if (ctx_dtype_ != DType::Float32) iv_t = iv_t.to(ctx_dtype_);
+            iv_t = iv_t.to(ctx_device_);
             Variable iv(iv_t, false);
             env.insert_or_assign(f.var, iv);
             exec_block(f.body, env, returned);
@@ -718,8 +723,11 @@ private:
     }
 
     Variable visit(const NumberExpr& n, const Env&) const {
-        Tensor t = full({}, static_cast<float>(n.value), DType::Float32, ctx_device_);
+        // Narrow the literal on CPU (deterministic rounding) before moving to the
+        // device, so an f32->bf16/f16 cast is identical across backends.
+        Tensor t = full({}, static_cast<float>(n.value), DType::Float32, Device::cpu());
         if (ctx_dtype_ != DType::Float32) t = t.to(ctx_dtype_);
+        t = t.to(ctx_device_);
         return Variable(t, false);
     }
 

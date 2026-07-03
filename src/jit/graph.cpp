@@ -2139,9 +2139,19 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
     // fallback; the constant follows the inputs onto whatever backend they use).
     // A freshly traced (not serialized) graph already has constants on the
     // input device, so the move is a no-op there.
-    const Device target_device = runtime_inputs.empty()
-                                     ? Device::cpu()
-                                     : runtime_inputs.front().tensor().device();
+    // Prefer the runtime input device. For a niladic graph (no runtime inputs:
+    // all data is baked constants / closure params) there is no input to follow,
+    // so fall back to a captured parameter's device, then a constant's device,
+    // and only finally to CPU — otherwise a GPU-resident niladic graph would be
+    // forced onto CPU.
+    Device target_device = Device::cpu();
+    if (!runtime_inputs.empty()) {
+        target_device = runtime_inputs.front().tensor().device();
+    } else if (!parameters_.empty() && parameters_.front()) {
+        target_device = parameters_.front()->tensor().device();
+    } else if (!constants_.empty()) {
+        target_device = constants_.begin()->second.device();
+    }
     for (const auto& [id, tensor] : constants_) {
         Tensor placed = (tensor.device() == target_device)
                             ? tensor
@@ -2882,8 +2892,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     std::optional<Variable> gamma, beta;
                     if (input_vars.size() >= 2) gamma = input_vars[1];
                     if (input_vars.size() >= 3) beta  = input_vars[2];
-                    outputs.push_back(nn::functional::layer_norm(
-                        input_vars[0], normalized_shape, gamma, beta, eps));
+                    Variable ln_out = nn::functional::layer_norm(
+                        input_vars[0], normalized_shape, gamma, beta, eps);
+                    // FuseLayerNormActivationPass may fold a following ReLU/GELU
+                    // into this node and delete the activation node; apply it
+                    // here so the activation is not dropped (act: 1=relu,2=gelu).
+                    if (node->get_bool_attr("fused_activation")) {
+                        int64_t act = node->get_int_attr("fused_activation_type");
+                        ln_out = (act == 1) ? nn::relu(ln_out) : nn::gelu(ln_out);
+                    }
+                    outputs.push_back(ln_out);
                     break;
                 }
                 OpAttributes ln_attrs;
@@ -2902,7 +2920,15 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 }
                 auto result = dispatch(OpId::LayerNorm, inputs, ln_attrs);
                 if (!result.empty()) {
-                    outputs.push_back(Variable(result[0], false));
+                    Variable ln_out(result[0], false);
+                    // FuseLayerNormActivationPass may fold a following ReLU/GELU
+                    // into this node and delete the activation node; apply it
+                    // here so the activation is not dropped (act: 1=relu,2=gelu).
+                    if (node->get_bool_attr("fused_activation")) {
+                        int64_t act = node->get_int_attr("fused_activation_type");
+                        ln_out = (act == 1) ? nn::relu(ln_out) : nn::gelu(ln_out);
+                    }
+                    outputs.push_back(ln_out);
                 }
             }
             break;
@@ -2913,6 +2939,25 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Reshape:
             if (!input_vars.empty()) {
                 auto shape = node->get_vec_attr("shape");
+                // Dynamic-shape safety: the target may have been baked at trace
+                // time for a specialized (e.g. batch) size. If it has no -1
+                // wildcard yet its element count differs from the LIVE input's,
+                // the leading dim was a data-dependent size — x.view(x.size(0),
+                // ...) frozen to the trace value. Recover it as a wildcard so the
+                // reshape tracks the runtime leading dim. reshape() still
+                // validates that the trailing dims divide the numel and throws
+                // cleanly if they do not (so a genuinely invalid reshape still
+                // fails loudly rather than silently mis-shaping).
+                const bool has_wildcard =
+                    std::any_of(shape.begin(), shape.end(),
+                                [](int64_t d) { return d < 0; });
+                if (!has_wildcard && !shape.empty()) {
+                    int64_t target_numel = 1;
+                    for (int64_t d : shape) target_numel *= d;
+                    if (target_numel != input_vars[0].tensor().numel()) {
+                        shape[0] = -1;
+                    }
+                }
                 outputs.push_back(input_vars[0].reshape(shape));
             }
             break;
@@ -3011,6 +3056,19 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Stack:
             if (!input_vars.empty()) {
                 int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                if (grad_mode) {
+                    // stack(xs, dim) == cat([x.unsqueeze(dim) for x in xs], dim).
+                    // Route through the autograd unsqueeze/cat ops so the gradient
+                    // chain to each stacked input is preserved; the raw
+                    // tenzor::stack path below severs it (requires_grad=false).
+                    std::vector<Variable> expanded;
+                    expanded.reserve(input_vars.size());
+                    for (const auto& v : input_vars) {
+                        expanded.push_back(tenzor::unsqueeze(v, dim));
+                    }
+                    outputs.push_back(tenzor::cat(expanded, dim));
+                    break;
+                }
                 std::vector<Tensor> tensors;
                 tensors.reserve(input_vars.size());
                 for (const auto& v : input_vars) {
@@ -3211,10 +3269,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 // The ConstantFolding/StrengthReduction passes model Pow this
                 // way, so reading only the "exponent" attr would use a stale/
                 // default value once the exponent has been moved to an input.
-                auto exp_cpu = input_vars[1].tensor().to(DType::Float32).to(Device::cpu());
-                float exponent = exp_cpu.data<float>()[0];
+                // Read the exponent in Float64 (not Float32) so a Float64 graph
+                // with a non-Float32-representable exponent (e.g. 1/3) replays at
+                // full precision instead of the narrowed value.
+                auto exp_cpu = input_vars[1].tensor().to(DType::Float64).to(Device::cpu());
+                double exponent = exp_cpu.data<double>()[0];
                 if (grad_mode) {
-                    outputs.push_back(tenzor::pow(input_vars[0], static_cast<double>(exponent)));
+                    outputs.push_back(tenzor::pow(input_vars[0], exponent));
                 } else {
                     auto result = tenzor::pow(input_vars[0].tensor(), exponent);
                     outputs.push_back(Variable(result, false));
@@ -3244,8 +3305,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Clamp:
             if (!input_vars.empty()) {
-                double min_val = static_cast<double>(static_cast<float>(node->get_attr("min")));
-                double max_val = static_cast<double>(static_cast<float>(node->get_attr("max")));
+                // A missing bound means "unbounded on that side" (one-sided
+                // clamp), NOT clamp-against-zero. Default to ±inf.
+                double min_val = node->has_attr("min")
+                    ? static_cast<double>(static_cast<float>(node->get_attr("min")))
+                    : -std::numeric_limits<double>::infinity();
+                double max_val = node->has_attr("max")
+                    ? static_cast<double>(static_cast<float>(node->get_attr("max")))
+                    : std::numeric_limits<double>::infinity();
                 outputs.push_back(tenzor::clamp(input_vars[0], min_val, max_val));
             }
             break;
@@ -3267,6 +3334,129 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             if (!input_vars.empty()) {
                 int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
                 outputs.push_back(tenzor::cat(input_vars, dim));
+            }
+            break;
+
+        // ====================================================================
+        // JIT review C2: previously-unmapped ops, now captured + replayed via
+        // their autograd ops (so grad flows in training-through-JIT and no eager
+        // fallback is needed). The autograd ops handle grad_mode transparently:
+        // when input_vars carry requires_grad they build the graph, otherwise
+        // they just compute — so a single path serves both modes (like Sum/Mean).
+        // ====================================================================
+        case OpType::Var:
+            if (!input_vars.empty()) {
+                bool keepdim = node->has_attr("keepdim") && node->get_bool_attr("keepdim");
+                bool unbiased = !node->has_attr("unbiased") || node->get_bool_attr("unbiased");
+                if (node->has_int_attr("dim")) {
+                    outputs.push_back(tenzor::var(input_vars[0], node->get_int_attr("dim"), keepdim, unbiased));
+                } else {
+                    outputs.push_back(tenzor::var(input_vars[0], std::nullopt, keepdim, unbiased));
+                }
+            }
+            break;
+
+        case OpType::Std:
+            if (!input_vars.empty()) {
+                bool keepdim = node->has_attr("keepdim") && node->get_bool_attr("keepdim");
+                bool unbiased = !node->has_attr("unbiased") || node->get_bool_attr("unbiased");
+                if (node->has_int_attr("dim")) {
+                    outputs.push_back(tenzor::std(input_vars[0], node->get_int_attr("dim"), keepdim, unbiased));
+                } else {
+                    outputs.push_back(tenzor::std(input_vars[0], std::nullopt, keepdim, unbiased));
+                }
+            }
+            break;
+
+        case OpType::Prod:
+            if (!input_vars.empty()) {
+                bool keepdim = node->has_attr("keepdim") && node->get_bool_attr("keepdim");
+                if (node->has_int_attr("dim")) {
+                    outputs.push_back(tenzor::prod(input_vars[0], node->get_int_attr("dim"), keepdim));
+                } else {
+                    outputs.push_back(tenzor::prod(input_vars[0], std::nullopt, keepdim));
+                }
+            }
+            break;
+
+        case OpType::LeakyReLU:
+            if (!input_vars.empty()) {
+                double slope = node->has_attr("negative_slope")
+                    ? static_cast<double>(node->get_attr("negative_slope"))
+                    : (node->has_attr("alpha") ? static_cast<double>(node->get_attr("alpha")) : 0.01);
+                outputs.push_back(tenzor::leaky_relu(input_vars[0], slope));
+            }
+            break;
+
+        case OpType::ELU:
+            if (!input_vars.empty()) {
+                float alpha = node->has_attr("alpha") ? node->get_attr("alpha") : 1.0f;
+                outputs.push_back(tenzor::elu(input_vars[0], alpha));
+            }
+            break;
+
+        case OpType::Mish:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::mish(input_vars[0]));
+            }
+            break;
+
+        case OpType::Softplus:
+            if (!input_vars.empty()) {
+                float beta = node->has_attr("beta") ? node->get_attr("beta") : 1.0f;
+                outputs.push_back(tenzor::softplus(input_vars[0], beta));
+            }
+            break;
+
+        case OpType::Gather:
+            if (input_vars.size() >= 2) {
+                int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : 0;
+                outputs.push_back(tenzor::gather(input_vars[0], dim, input_vars[1].tensor()));
+            }
+            break;
+
+        case OpType::Scatter:
+            if (input_vars.size() >= 3) {
+                int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : 0;
+                outputs.push_back(tenzor::scatter(input_vars[0], dim,
+                                                  input_vars[1].tensor(), input_vars[2]));
+            }
+            break;
+
+        case OpType::Flip:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::flip(input_vars[0], node->get_vec_attr("dims")));
+            }
+            break;
+
+        case OpType::Roll:
+            if (!input_vars.empty()) {
+                int64_t shift = node->has_int_attr("shift") ? node->get_int_attr("shift") : 0;
+                int64_t dim   = node->has_int_attr("dim")   ? node->get_int_attr("dim")   : 0;
+                outputs.push_back(tenzor::roll(input_vars[0], shift, dim));
+            }
+            break;
+
+        case OpType::GroupNorm:
+            if (!input_vars.empty()) {
+                int64_t num_groups = node->has_int_attr("num_groups") ? node->get_int_attr("num_groups") : 1;
+                double eps = node->has_attr("eps") ? static_cast<double>(node->get_attr("eps")) : 1e-5;
+                std::optional<Variable> weight, bias;
+                if (input_vars.size() >= 2) weight = input_vars[1];
+                if (input_vars.size() >= 3) bias   = input_vars[2];
+                outputs.push_back(nn::functional::group_norm(input_vars[0], num_groups, weight, bias, eps));
+            }
+            break;
+
+        case OpType::InstanceNorm:
+            if (!input_vars.empty()) {
+                double eps = node->has_attr("eps") ? static_cast<double>(node->get_attr("eps")) : 1e-5;
+                std::optional<Variable> weight, bias;
+                if (input_vars.size() >= 2) weight = input_vars[1];
+                if (input_vars.size() >= 3) bias   = input_vars[2];
+                outputs.push_back(nn::functional::instance_norm(
+                    input_vars[0], std::nullopt, std::nullopt, weight, bias,
+                    /*training=*/false, /*momentum=*/0.1, eps));
             }
             break;
 

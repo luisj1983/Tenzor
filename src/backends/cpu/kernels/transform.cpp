@@ -1179,5 +1179,88 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     return output;
 }
 
+// Reverse-stride flip: one element-wise copy pass into a preallocated buffer.
+// This is the concrete CPU implementation behind OpId::Flip; it must NOT call
+// the public tenzor::flip (which dispatches OpId::Flip) or it would recurse.
+auto flip_kernel(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
+    auto ndim = input.ndim();
+    for (auto& d : dims) {
+        if (d < 0) d += ndim;
+        if (d < 0 || d >= ndim) {
+            throw std::runtime_error("flip: dimension " + std::to_string(d) +
+                                     " out of range for " + std::to_string(ndim) +
+                                     "D tensor");
+        }
+    }
+
+    auto shape = input.shape();
+    auto input_cont = input.is_contiguous() ? input : contiguous_kernel(input);
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t total = input_cont.numel();
+    if (total == 0) {
+        return output;
+    }
+
+    // Contiguous strides for the (now contiguous) input / output.
+    std::vector<int64_t> strides(ndim);
+    int64_t s = 1;
+    for (int64_t i = ndim - 1; i >= 0; --i) {
+        strides[i] = s;
+        s *= shape[i];
+    }
+
+    // Mark which dimensions are flipped (idempotent: a boolean mask is correct).
+    std::vector<char> flipped(ndim, 0);
+    for (auto dim : dims) {
+        flipped[dim] = 1;
+    }
+
+    const size_t esz = dtype_size(input.dtype());
+    const char* in_base = static_cast<const char*>(input_cont.data_ptr());
+    char* out_base = static_cast<char*>(output.data_ptr());
+
+#ifdef _OPENMP
+    #pragma omp parallel if (total > 65536)
+    {
+        std::vector<int64_t> coords(ndim);
+        #pragma omp for
+        for (int64_t out_idx = 0; out_idx < total; ++out_idx) {
+            int64_t temp = out_idx;
+            for (int64_t i = ndim - 1; i >= 0; --i) {
+                coords[i] = temp % shape[i];
+                temp /= shape[i];
+            }
+            int64_t in_idx = 0;
+            for (int64_t i = 0; i < ndim; ++i) {
+                int64_t c = flipped[i] ? (shape[i] - 1 - coords[i]) : coords[i];
+                in_idx += c * strides[i];
+            }
+            std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                        in_base + static_cast<size_t>(in_idx) * esz, esz);
+        }
+    }
+#else
+    std::vector<int64_t> coords(ndim);
+    for (int64_t out_idx = 0; out_idx < total; ++out_idx) {
+        int64_t temp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            coords[i] = temp % shape[i];
+            temp /= shape[i];
+        }
+        int64_t in_idx = 0;
+        for (int64_t i = 0; i < ndim; ++i) {
+            int64_t c = flipped[i] ? (shape[i] - 1 - coords[i]) : coords[i];
+            in_idx += c * strides[i];
+        }
+        std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                    in_base + static_cast<size_t>(in_idx) * esz, esz);
+    }
+#endif
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

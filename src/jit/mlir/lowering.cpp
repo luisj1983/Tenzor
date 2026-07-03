@@ -2533,6 +2533,20 @@ auto handle_batch_norm2d(LoweringContext& ctx,
     const auto d = out_val->dtype();
     const float eps = get_attr_float(node, {"eps"}, 1e-5f);
 
+    // The MLIR/IREE path compiles inference graphs only (the grad/training
+    // variant is replayed through the interpreter and is never lowered here), so
+    // BatchNorm is always in eval mode and normalizes with the running
+    // statistics. If a training-mode BatchNorm node ever reaches this lowering,
+    // batch_norm_inference would silently use running stats instead of batch
+    // stats (and skip the running-stat update) — a real divergence from eager.
+    // Fail loudly instead of producing wrong numerics.
+    if (node.get_bool_attr("training")) {
+        throw std::runtime_error(
+            "GraphToMLIR: training-mode BatchNorm2d cannot be lowered to "
+            "batch_norm_inference; use the interpreter path (compile without "
+            "MLIR) for training-through-JIT");
+    }
+
     // Use the explicit stablehlo.batch_norm_inference op.
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
@@ -2716,14 +2730,53 @@ auto handle_pow(LoweringContext& ctx,
         throw std::runtime_error("GraphToMLIR: Pow expects 1 output");
     }
     const auto& out = node.outputs()[0];
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out->id(), out_name);
     const auto shape = out->shape();
     const auto d = out->dtype();
+
+    // Lower a small non-negative INTEGER exponent to repeated multiply.
+    // stablehlo.power is implemented as exp(y*log(x)) on GPU/SPIR-V HAL targets,
+    // which returns NaN for ANY negative base — diverging from eager (which
+    // multiplies) and from the llvm-cpu target (libm pow). Repeated multiply is
+    // exact and NaN-free for negative bases. A fractional/negative exponent
+    // still uses stablehlo.power (a negative base to a fractional power is
+    // genuinely NaN under eager too, so semantics match there).
+    auto lower_int_pow = [&](const std::string& a, int n) {
+        if (n == 0) {
+            auto out_name = ctx.fresh_name();
+            ctx.bind(out->id(), out_name);
+            emit_stablehlo_splat_constant(body, out_name, scalar_literal(1.0f, d),
+                                          shape, d);
+            body << '\n';
+            return;
+        }
+        std::string cur = a;
+        for (int i = 1; i < n; ++i) {
+            auto next = ctx.fresh_name();
+            emit_stablehlo_binary(body, "multiply", next, cur, a, shape, d);
+            body << '\n';
+            cur = next;
+        }
+        if (n == 1) {
+            // x^1 == x; realize with a multiply-by-one so the output gets its own
+            // SSA value (1*x == x exactly under IEEE round-to-nearest).
+            auto one_name = ctx.fresh_name();
+            emit_stablehlo_splat_constant(body, one_name, scalar_literal(1.0f, d),
+                                          shape, d);
+            body << '\n';
+            auto out_name = ctx.fresh_name();
+            ctx.bind(out->id(), out_name);
+            emit_stablehlo_binary(body, "multiply", out_name, a, one_name, shape, d);
+            body << '\n';
+            return;
+        }
+        ctx.bind(out->id(), cur);  // cur holds x^n for n >= 2
+    };
 
     if (node.inputs().size() == 2) {
         const auto& a = ctx.name_for(node.inputs()[0]->id());
         const auto& b = ctx.name_for(node.inputs()[1]->id());
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out->id(), out_name);
         emit_stablehlo_binary(body, "power", out_name, a, b, shape, d);
         body << '\n';
         return;
@@ -2731,10 +2784,17 @@ auto handle_pow(LoweringContext& ctx,
     if (node.inputs().size() == 1) {
         const auto& a = ctx.name_for(node.inputs()[0]->id());
         float exp = get_attr_float(node, {"exponent"}, 1.0f);
+        float r = std::round(exp);
+        if (std::abs(exp - r) < 1e-6f && r >= 0.0f && r <= 64.0f) {
+            lower_int_pow(a, static_cast<int>(r));
+            return;
+        }
         auto exp_name = ctx.fresh_name();
         emit_stablehlo_splat_constant(body, exp_name, scalar_literal(exp, d),
                                       shape, d);
         body << '\n';
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out->id(), out_name);
         emit_stablehlo_binary(body, "power", out_name, a, exp_name, shape, d);
         body << '\n';
         return;

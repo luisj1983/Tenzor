@@ -820,9 +820,22 @@ auto execute_fused(const FusionGroup& group,
     gpu_inputs.reserve(inputs.size());
     for (const auto& inp : inputs) {
         if (inp.device().type == Device::Type::CPU) {
+            // A CPU-resident operand (e.g. a hoisted scalar constant) is moved
+            // onto the target GPU. This is not a fallback: the kernel still runs
+            // on the GPU.
             gpu_inputs.push_back(inp.to(gpu_device));
-        } else {
+        } else if (inp.device() == gpu_device) {
             gpu_inputs.push_back(inp);
+        } else {
+            // A GPU-resident operand on a DIFFERENT device than the launch
+            // device. Passing its data_ptr() to a kernel launched on gpu_device
+            // is an illegal cross-device access. Reject loudly rather than
+            // silently corrupt (mirrors execute_extended_fused's require_dev).
+            throw std::runtime_error(
+                "KernelCodegen::execute_fused: fused inputs span multiple GPU "
+                "devices (" + inp.device().to_string() + " vs the launch device "
+                + gpu_device.to_string() + "); a single fused kernel cannot "
+                "read across devices");
         }
     }
 

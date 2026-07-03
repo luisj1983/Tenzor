@@ -112,6 +112,16 @@ public:
                 std::string("HIPGraph: replay failed: ") +
                 hipGetErrorString(err));
         }
+        // hipGraphLaunch is ASYNCHRONOUS on `stream`. The caller reads the
+        // captured output tensors immediately after replay() returns (its
+        // device->host copy runs on a different stream), so without this sync the
+        // readback can race the still-running graph and observe torn/stale data.
+        err = hipStreamSynchronize(stream);
+        if (err != hipSuccess) {
+            throw std::runtime_error(
+                std::string("HIPGraph: replay synchronize failed: ") +
+                hipGetErrorString(err));
+        }
     }
 
     /// Check if graph has been captured and compiled

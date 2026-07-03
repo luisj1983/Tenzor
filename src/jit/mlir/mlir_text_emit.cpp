@@ -285,7 +285,19 @@ auto emit_stablehlo_dot_general(std::ostream& os, const std::string& result,
         if (i != 0) os << ", ";
         os << rhs_contracting[i];
     }
-    os << "] : (";
+    os << "]";
+    // Force HIGHEST precision for float GEMMs: half-precision (F16/BF16) inputs
+    // then accumulate in f32 (matching eager MKL/oneDNN/cuBLAS f32-accumulate)
+    // and F32 inputs avoid TF32 reduced-precision tensor cores — keeping results
+    // consistent with eager and across HAL targets. Integer dot_general ignores
+    // precision, so restrict to float dtypes.
+    {
+        using ::tenzor::DType;
+        const bool is_float = (d == DType::Float16 || d == DType::BFloat16 ||
+                               d == DType::Float32 || d == DType::Float64);
+        if (is_float) os << ", precision = [HIGHEST, HIGHEST]";
+    }
+    os << " : (";
     write_tensor_type(os, lhs_shape, d);
     os << ", ";
     write_tensor_type(os, rhs_shape, d);

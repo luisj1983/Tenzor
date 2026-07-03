@@ -279,6 +279,7 @@ namespace cpu {
     auto clone_kernel(const Tensor& input) -> Tensor;
     auto fill_kernel(const Tensor& input, double value) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
+    auto flip_kernel(const Tensor& input, std::vector<int64_t> dims) -> Tensor;
     auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor;
     auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor;
 
@@ -3963,7 +3964,9 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto dims = attrs.get_int_list(AttrKey::Dims);
         if (dims.empty()) dims = {0};
-        return flip(inputs[0], dims);
+        // Call the concrete CPU kernel, NOT the public tenzor::flip (which
+        // dispatches OpId::Flip) — that would recurse.
+        return cpu::flip_kernel(inputs[0], dims);
     });
 
     // =========================================================================

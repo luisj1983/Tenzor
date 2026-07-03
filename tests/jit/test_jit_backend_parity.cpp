@@ -13,6 +13,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/compile.hpp>
 #include <tenzor/jit/extended_codegen.hpp>
+#include <tenzor/nn/functional.hpp>
 #include "../backend_parity/parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -807,6 +808,83 @@ TEST(JITBackendParity, JITCompiledScaledDotProductAttention) {
 
 // Backward-through-JIT parity tests moved to
 // tests/backend_parity/test_jit_autograd_parity.cpp per plan 4.4.
+
+// ============================================================================
+// JIT review coverage: multi-dtype cross-backend parity.
+//
+// The pre-existing backend-parity suite exercised Float32 ONLY, and the
+// multi-dtype JIT tests ran on CPU ONLY — so a JIT path that diverged from eager
+// for F16/BF16/F64 on a GPU backend (dropped fused activation, reduced-precision
+// accumulation, warp-width reduction order, etc.) was invisible. These assert
+// the JIT-replayed graph matches eager on the SAME backend and SAME dtype, for
+// every available backend and every dtype it supports. Ops are pure functions of
+// their input (no captured randomness) so eager and replay must agree.
+// ============================================================================
+namespace {
+void check_jit_matches_eager_per_dtype(
+        const char* label,
+        const std::function<Variable(const Variable&)>& fn,
+        const std::vector<int64_t>& shape) {
+    struct DtypeTol { DType dt; float rtol; float atol; const char* name; };
+    const std::vector<DtypeTol> dtypes = {
+        {DType::Float32,  1e-3f, 1e-3f, "Float32"},
+        {DType::Float64,  1e-5f, 1e-6f, "Float64"},
+        {DType::Float16,  3e-2f, 3e-2f, "Float16"},
+        {DType::BFloat16, 6e-2f, 6e-2f, "BFloat16"},
+    };
+    for (const auto& dev : get_available_backends()) {
+        for (const auto& d : dtypes) {
+            Tensor input;
+            Tensor eager;
+            try {
+                input = randn(shape, DType::Float32, dev).to(d.dt);
+                eager = fn(Variable(input, false)).tensor().to(DType::Float32)
+                            .to(Device::cpu());
+            } catch (const std::exception&) {
+                // Backend does not support this dtype for these ops — not a JIT
+                // bug; there is nothing to compare against, so move on.
+                continue;
+            }
+            try {
+                auto compiled =
+                    jit::compile([&fn](const Variable& x) { return fn(x); });
+                (void)compiled(Variable(input, false));  // warm up / trace
+                dev.synchronize();
+                Tensor replay = compiled(Variable(input, false)).tensor()
+                                    .to(DType::Float32).to(Device::cpu());
+                dev.synchronize();
+                EXPECT_TRUE(tensors_close(eager, replay, d.rtol, d.atol))
+                    << label << " JIT replay != eager on " << backend_name(dev)
+                    << " / " << d.name;
+            } catch (const std::exception& e) {
+                ADD_FAILURE() << label << " threw on " << backend_name(dev)
+                              << " / " << d.name << ": " << e.what();
+            }
+        }
+    }
+}
+}  // namespace
+
+TEST(JITBackendParity, LayerNormGeluReluMultiDtype) {
+    // Exercises C1 (fused LayerNorm activation) across dtypes and backends.
+    check_jit_matches_eager_per_dtype(
+        "LayerNorm+GELU+ReLU",
+        [](const Variable& x) {
+            int64_t d = x.tensor().shape().back();
+            return nn::relu(nn::functional::gelu(
+                nn::functional::layer_norm(x, {d}), "none"));
+        },
+        {4, 16});
+}
+
+TEST(JITBackendParity, SoftmaxMultiDtype) {
+    // Exercises the reduction/softmax path (M1/M2 accumulation, M9 dim) across
+    // dtypes and backends.
+    check_jit_matches_eager_per_dtype(
+        "Softmax(-1)",
+        [](const Variable& x) { return tenzor::softmax(x, -1); },
+        {4, 32});
+}
 
 // ============================================================================
 // Main

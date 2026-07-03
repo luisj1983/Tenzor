@@ -25,10 +25,14 @@ struct CompileOptions {
     /// $XDG_CACHE_HOME/tenzor/jit_mlir (falling back to $HOME/.cache/...).
     std::filesystem::path cache_dir;
 
-    /// When true, downstream IreeInvoker will register the Tenzor custom_call
-    /// resolvers. When false, the compiled module is expected to be free of
-    /// `stablehlo.custom_call @tenzor_*` invocations (used by IR-only tests).
-    bool plugin_enabled = true;
+    /// When true, the fused dialect ops (FlashAttention/GQA/RoPE/RMSNorm) lower
+    /// to `stablehlo.custom_call @tenzor_*` and IreeInvoker registers the custom
+    /// resolvers — but those resolver shims marshal buffers to CPU and run the
+    /// CPU kernel regardless of the compiled HAL target, which breaks
+    /// cross-backend parity. Default OFF so those ops instead lower via the
+    /// expand-to-StableHLO path and execute natively on the selected target.
+    /// Only enable for IR-only tests that assert on the custom_call form.
+    bool plugin_enabled = false;
 
     /// For target=="rocm": the AMD GPU ISA to compile for (e.g. "gfx1150"),
     /// derived from the *actual* ROCm device rather than a build-time

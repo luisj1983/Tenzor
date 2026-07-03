@@ -44,7 +44,7 @@ namespace jit {
 class SymbolicDim;
 
 /// Binary operation type for symbolic expressions
-enum class ExprOp : uint8_t { Add, Sub, Mul, Div };
+enum class ExprOp : uint8_t { Add, Sub, Mul, Div, Max };
 
 /// Forward-declared; full definition after SymbolicDim (needs SymbolicDim to be complete)
 struct SymbolicExpr;
@@ -212,6 +212,7 @@ inline auto SymbolicDim::to_string() const -> std::string {
         case ExprOp::Sub: op_str = " - "; break;
         case ExprOp::Mul: op_str = " * "; break;
         case ExprOp::Div: op_str = " / "; break;
+        case ExprOp::Max: op_str = " ⊔ "; break;  // broadcast (max) of two dims
     }
     return "(" + e.lhs.to_string() + op_str + e.rhs.to_string() + ")";
 }
@@ -440,11 +441,13 @@ inline auto broadcast_symbolic_shapes(const SymbolicShape& shape1,
             result[ndim - 1 - i] = dim1;
         }
         else {
-            // Both sides non-concrete and structurally different. Prefer one operand
-            // (dim1) rather than fabricating an unbindable "broadcast(...)" symbol;
-            // the two are constrained to be equal (or one == 1) at runtime by
-            // broadcasting rules.
-            result[ndim - 1 - i] = dim1;
+            // Both sides non-concrete and structurally different. The broadcast
+            // result is max(dim1, dim2): if one resolves to 1 at runtime the
+            // other wins; if both resolve equal, either wins. Picking dim1
+            // unconditionally was wrong (undersized output when dim1 resolves to
+            // 1 and dim2 > 1). A Max expression resolves correctly once both
+            // dims are bound.
+            result[ndim - 1 - i] = SymbolicDim::expr(ExprOp::Max, dim1, dim2);
         }
     }
 
@@ -518,6 +521,7 @@ public:
             case ExprOp::Div:
                 if (r == 0) throw std::runtime_error("Division by zero resolving symbolic expression");
                 return l / r;
+            case ExprOp::Max: return (l > r ? l : r);
         }
         return 0;  // unreachable
     }

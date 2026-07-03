@@ -49,6 +49,12 @@ auto CompiledModule::trace(std::shared_ptr<nn::Module> module,
     // trigger a retrace when a mismatched input is supplied later.
     compiled->traced_device_ = example_input.tensor().device();
     compiled->traced_dtype_  = example_input.tensor().dtype();
+    compiled->traced_shape_key_ = compiled->compute_shape_key(example_input);
+    // Retain the source module so the device/dtype-mismatch and shape-guard
+    // retrace paths in forward() are actually reachable for traced modules
+    // (they are all guarded by `source_module_ != nullptr`). Without this the
+    // retrace is dead code and a cross-device call throws at dispatch instead.
+    compiled->set_source_module(module);
     return compiled;
 }
 
@@ -121,22 +127,20 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
     // Device/dtype mismatch retrace: if the current graph was traced with a
     // different device or dtype than the incoming input, retrace using the
     // actual input. Cached by shape-key (which now encodes device+dtype).
-    if (source_module_ &&
-        (input.tensor().device() != traced_device_ ||
-         input.tensor().dtype()  != traced_dtype_)) {
-        auto key = compute_shape_key(input);
+    auto key = compute_shape_key(input);
+    if (source_module_ && key != traced_shape_key_) {
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
             graph_ = it->second;
         } else {
-            // ALWAYS retrace on a device/dtype miss — never replay a graph built
-            // for the old device/dtype (its frozen constants carry the old dtype;
-            // its fused nodes are pinned to the old device). Cache only while
-            // under the capacity bound; past it, use the fresh graph for this
-            // call without growing the cache. traced_* is advanced below only
-            // because graph_ now provably matches this input (previously it was
-            // advanced even when the cap was hit and the stale graph was kept,
-            // so subsequent same-device calls skipped this check and replayed it).
+            // Retrace on ANY shape/device/dtype change (compute_shape_key encodes
+            // all three). A device/dtype miss must retrace (frozen constants carry
+            // the old dtype; fused nodes are pinned to the old device). A
+            // SHAPE-only change must ALSO retrace: creation ops (zeros/arange) and
+            // other shape-derived values were baked at the trace shape, so
+            // replaying the old graph on a new shape silently uses stale shapes.
+            // Cache only while under the capacity bound; past it, use the fresh
+            // graph for this call without growing the cache.
             auto retraced = CompiledModule::trace(source_module_, input);
             retraced->optimize_for_inference();
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
@@ -146,6 +150,7 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
         }
         traced_device_ = input.tensor().device();
         traced_dtype_  = input.tensor().dtype();
+        traced_shape_key_ = key;
     }
 
     auto results = graph_->forward({input});
@@ -214,30 +219,17 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     // graph and hitting a device-mismatch error at dispatch. Keyed off
     // inputs[0] (the example_input used for tracing); cached by shape-key
     // (which encodes device+dtype).
-    auto any_input_mismatch = [&]() {
-        // Scan ALL inputs, not just inputs[0]: a device/dtype change confined to
-        // a later input still requires a retrace, otherwise the stale (wrong
-        // device/precision) graph replays and hits a dispatch mismatch. The
-        // cache key (compute_shape_key) already encodes every input's
-        // device+dtype, so keying was correct — only the trigger was too narrow.
-        for (const auto& in : inputs) {
-            if (in.tensor().device() != traced_device_ ||
-                in.tensor().dtype()  != traced_dtype_) {
-                return true;
-            }
-        }
-        return false;
-    };
-    if (source_module_ && !inputs.empty() && any_input_mismatch()) {
-        auto key = compute_shape_key(inputs);
+    // Retrace on ANY shape/device/dtype change across the inputs. compute_shape_key
+    // encodes every input's shape+device+dtype, so comparing it against the key
+    // the current graph_ was specialized for catches all three (a device/dtype
+    // change on any input, AND a shape-only change that would otherwise replay a
+    // graph with baked trace-shape creation ops).
+    auto key = compute_shape_key(inputs);
+    if (source_module_ && !inputs.empty() && key != traced_shape_key_) {
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
             graph_ = it->second;
         } else {
-            // ALWAYS retrace on a device/dtype miss (see single-input forward()):
-            // never replay a graph built for the old device/dtype. Cache only
-            // while under the capacity bound; advance traced_* below only because
-            // graph_ now provably matches these inputs.
             auto retraced = CompiledModule::trace(source_module_, inputs[0]);
             retraced->optimize_for_inference();
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
@@ -247,6 +239,7 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
         }
         traced_device_ = inputs[0].tensor().device();
         traced_dtype_  = inputs[0].tensor().dtype();
+        traced_shape_key_ = key;
     }
 
     auto results = graph_->forward(inputs);
@@ -458,31 +451,23 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
         device_type = sample_inputs[0].device().type;
     }
 
-    // Create graph capture object based on device type
-#ifdef TENZOR_HAS_ROCM
-    if (device_type == Device::Type::ROCm) {
-        int hip_count = 0;
-        HIP_CHECK(hipGetDeviceCount(&hip_count));
-        if (hip_count == 0 || device_id >= hip_count) {
-            throw std::runtime_error(
-                "ROCm is not available; cannot capture HIP graph");
-        }
-        cuda_graph_ = std::make_unique<ROCmGraphAdapter>(device_id);
-    } else
-#endif
+    // Create the graph capture object via the backend-registered factory for
+    // BOTH CUDA and ROCm. Backends are dlopen'd RTLD_LOCAL, so the real
+    // CUDA/HIP graph implementation cannot be linked directly — the CUDA backend
+    // registers a CUDA-graph factory and the ROCm backend a HIP-graph factory
+    // (both stream-aware: they route the captured forward() onto the capture
+    // stream). Capture is a CUDA/ROCm-only optimization; any other device type
+    // is refused rather than recording an empty graph over non-CUDA work.
     {
-        // CUDA path. Only a CUDA device is valid here (ROCm is handled above
-        // when compiled in). Any other device type (CPU/Vulkan/OneAPI) must be
-        // refused: CUDA-graph capture is a CUDA/ROCm-only optimization, and
-        // capturing here would record an empty CUDA graph over that backend's
-        // (non-CUDA) work, then silently replay stale results forever.
-        if (device_type != Device::Type::CUDA) {
+        if (device_type != Device::Type::CUDA &&
+            device_type != Device::Type::ROCm) {
             throw std::runtime_error(
                 "capture_cuda_graph: CUDA-graph capture is only supported on "
                 "CUDA/ROCm devices; got " +
                 Device{device_type, device_id}.to_string());
         }
-        cuda_graph_ = CUDAGraph::create(device_id);
+        cuda_graph_ =
+            CUDAGraph::create_for(static_cast<int>(device_type), device_id);
         if (!cuda_graph_) {
             throw std::runtime_error(
                 "GPU is not available; cannot capture graph (device type: " +
@@ -532,6 +517,25 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
     // replay path usable (and verifiable) — without this the caller has no way
     // to read a replay's output.
     captured_outputs_.clear();
+    // Warm up: run the forward once OUTSIDE capture so the caching allocator has
+    // every intermediate/output buffer cached. CUDA/HIP forbid cudaMalloc while a
+    // stream is capturing, so allocations during capture must be served from the
+    // cache (no driver allocation). The warmup populates that cache.
+    {
+        auto warm = graph_->forward(vars);
+        (void)warm;
+    }
+    // Drain the warmup and any prior async work so it is not swept into the
+    // capture, and so the capture starts from a quiescent device.
+    if (!captured_inputs_.empty()) {
+        captured_inputs_.front().device().synchronize();
+    }
+    auto reset_capture_state = [&]() {
+        cuda_graph_.reset();
+        captured_shapes_.clear();
+        captured_inputs_.clear();
+        captured_outputs_.clear();
+    };
     cuda_graph_->begin_capture();
     try {
         auto out_vars = graph_->forward(vars);
@@ -547,13 +551,24 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
         } catch (...) {
             // Ignore end_capture errors during cleanup
         }
-        cuda_graph_.reset();
-        captured_shapes_.clear();
-        captured_inputs_.clear();
-        captured_outputs_.clear();
+        reset_capture_state();
         throw;
     }
-    cuda_graph_->end_capture();
+    // end_capture can FAIL if the forward work was not actually recorded onto the
+    // capture stream (e.g. a backend that launches on the legacy default stream
+    // during a global-mode capture). Rather than instantiate/replay a graph that
+    // is empty or invalid — which would silently return stale capture-time
+    // outputs — reset all capture state so has_cuda_graph() is false and the
+    // caller transparently falls back to the correct normal forward() path.
+    try {
+        cuda_graph_->end_capture();
+    } catch (...) {
+        reset_capture_state();
+        return;
+    }
+    if (!cuda_graph_ || !cuda_graph_->is_ready()) {
+        reset_capture_state();
+    }
 }
 
 auto CompiledModule::replay_cuda_graph_outputs() const -> std::vector<Tensor> {

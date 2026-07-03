@@ -277,6 +277,26 @@ auto Tracer::record_graph_break(const std::string& reason) -> void {
     std::fprintf(stderr, "[tenzor.jit] warning: %s\n", msg.c_str());
 }
 
+// A graph break that CANNOT be tolerated: an op with no IR mapping (or an
+// unmapped in-place op) whose output/mutation would be silently baked as a
+// constant, producing a graph that returns wrong results on replay. Unlike a
+// user-facing `.item()` break (which non-strict mode is allowed to warn-and-bake
+// for data-dependent control flow), an unmapped op ALWAYS corrupts the graph, so
+// abort the trace unconditionally. This is safe: it only fires inside the
+// interceptor/inplace hook during jit::compile()'s trace, whose catch handler
+// already computed the correct eager result and will surface this (strict) or
+// transparently fall back to eager on the same device (non-strict).
+auto Tracer::abort_trace_unmappable(const std::string& reason) -> void {
+    if (!tracing_) return;
+    ++graph_break_count_;
+    tracing_ = false;
+    throw std::runtime_error(
+        std::string("tenzor::jit tracer graph break: ") + reason +
+        ". This op has no JIT IR mapping and cannot be captured; the compiled "
+        "function will fall back to eager execution on the same device (enable "
+        "TENZOR_JIT_STRICT to surface this instead).");
+}
+
 auto Tracer::end_trace(const std::vector<Variable>& inputs,
                        const std::vector<Variable>& outputs) -> std::shared_ptr<Graph> {
     tracing_ = false;
@@ -622,9 +642,10 @@ auto Tracer::record_inplace(OpId op, Tensor& target,
 
     auto op_type = inplace_opid_to_optype(op);
     if (!op_type) {
-        // Un-mappable in-place op: a graph break (strict throws) rather than a
-        // silently dropped mutation.
-        record_graph_break(
+        // Un-mappable in-place op: aborting the trace (rather than silently
+        // dropping the mutation, which leaves later reads resolving to the stale
+        // pre-op value) so the compiled fn falls back to eager on the same device.
+        abort_trace_unmappable(
             "in-place operation (OpId=" +
             std::to_string(static_cast<int>(op)) +
             ") has no IR OpType mapping");
@@ -826,7 +847,12 @@ TracingGuard::TracingGuard() : tracer_(Tracer::get_instance()) {
     auto interceptor = make_tracing_interceptor(
         tracer_,
         [this](OpId op) {
-            tracer_.record_graph_break(
+            // An unmapped op ALWAYS corrupts the graph (its output is baked as a
+            // constant, severing input dependence). Abort the trace so the
+            // compiled function falls back to eager on the same device instead of
+            // caching a silently-wrong graph. (A user-facing .item() break below
+            // stays a warn-in-non-strict, since that is intentional/documented.)
+            tracer_.abort_trace_unmappable(
                 "unmapped operation (OpId=" +
                 std::to_string(static_cast<int>(op)) +
                 ") has no IR OpType mapping");
@@ -959,6 +985,19 @@ auto Tracer::trace_if(const Tensor& condition,
     // Trace the else-branch
     auto else_outputs = else_fn(inputs);
     auto else_ops_end = ops_.size();
+
+    // A well-formed conditional must yield the SAME number of outputs from both
+    // branches — the runtime picks one branch and its outputs are wired to the
+    // If node's consumers. If the else branch produced a different count, the
+    // executor (which records num_outputs from the then branch only) would
+    // silently under/over-produce depending on which branch the runtime
+    // condition selects. Fail loudly at trace time instead.
+    if (then_outputs.size() != else_outputs.size()) {
+        throw std::runtime_error(
+            "jit::cond: then/else branches must return the same number of "
+            "outputs (then=" + std::to_string(then_outputs.size()) +
+            ", else=" + std::to_string(else_outputs.size()) + ")");
+    }
 
     // Register output tensors
     std::vector<std::string> output_ids;

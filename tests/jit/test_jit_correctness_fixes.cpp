@@ -369,3 +369,49 @@ TEST(JitCorrectnessFixes, ReplaceInputCleansOldValueUses) {
     EXPECT_EQ(b->uses().size(), 1u)
         << "Node::replace_input did not add the consumer to the new value";
 }
+
+// -------------------------------------------------------------------------
+// JIT review fix H1: OpType::Stack must be differentiable when the graph is
+// replayed in grad_mode (training-through-JIT). Pre-fix, the Stack case wrapped
+// its result as Variable(result, /*requires_grad=*/false), severing the
+// autograd chain to the stacked inputs — so backward produced NO input grads,
+// while the neighbouring Cat case (unsqueeze+cat) worked. Analytic check:
+// d/da sum(stack([a, b], 0)) == ones_like(a).
+// -------------------------------------------------------------------------
+TEST(JitReviewFixes, StackGradientsFlowInGradMode) {
+    auto g = std::make_shared<Graph>();
+    auto a = g->create_value("a", {3, 4}, DType::Float32, Device::cpu());
+    auto b = g->create_value("b", {3, 4}, DType::Float32, Device::cpu());
+    g->set_inputs({a, b});
+
+    auto st = g->create_node(OpType::Stack, "stack");
+    st->add_input(a);
+    st->add_input(b);
+    st->set_int_attr("dim", 0);
+    auto out = g->create_value("s", {2, 3, 4}, DType::Float32, Device::cpu());
+    st->add_output(out);
+    out->set_node(st);
+    g->add_node(st);
+    g->set_outputs({out});
+
+    Variable va(randn({3, 4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    Variable vb(randn({3, 4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+
+    auto results = g->forward({va, vb}, /*grad_mode=*/true);
+    ASSERT_EQ(results.size(), 1u);
+    ASSERT_TRUE(results[0].requires_grad())
+        << "Stack replay severed grad tracking (requires_grad=false output)";
+
+    Variable loss = tenzor::sum(results[0]);
+    loss.backward();
+
+    ASSERT_TRUE(va.has_grad()) << "no gradient reached stacked input a";
+    ASSERT_TRUE(vb.has_grad()) << "no gradient reached stacked input b";
+    // Each grad element is 1 (sum over the stacked tensor); 3*4 = 12.
+    Tensor ga = va.grad().value().to(DType::Float32).to(Device::cpu());
+    Tensor gb = vb.grad().value().to(DType::Float32).to(Device::cpu());
+    float sa = tenzor::sum(Variable(ga, false)).tensor().item<float>();
+    float sb = tenzor::sum(Variable(gb, false)).tensor().item<float>();
+    EXPECT_NEAR(sa, 12.0f, 1e-4f);
+    EXPECT_NEAR(sb, 12.0f, 1e-4f);
+}

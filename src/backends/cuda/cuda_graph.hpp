@@ -160,6 +160,17 @@ public:
                 std::string("CUDAGraphCapture: replay failed: ") +
                 cudaGetErrorString(err));
         }
+        // cudaGraphLaunch is ASYNCHRONOUS on `stream`. The caller reads the
+        // captured output tensors immediately after replay() returns (and its
+        // device->host copy runs on a DIFFERENT stream), so without this sync the
+        // readback can race the still-running graph and observe torn/stale data.
+        // Synchronize the launch stream before returning so replay is complete.
+        err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("CUDAGraphCapture: replay synchronize failed: ") +
+                cudaGetErrorString(err));
+        }
     }
 
     /**

@@ -305,8 +305,36 @@ add_custom_command(
     VERBATIM
 )
 
+# Manually compile hip_graph_impl.cpp (pure C++ HIP host API — CUDAGraph-interface
+# impl backed by HIP graph, plus the backend-registered factory).
+set(ROCM_HIP_GRAPH_IMPL_OBJ "${CMAKE_CURRENT_BINARY_DIR}/hip_graph_impl.cpp.o")
+add_custom_command(
+    OUTPUT ${ROCM_HIP_GRAPH_IMPL_OBJ}
+    COMMAND ${CMAKE_CXX_COMPILER}
+        -c ${CMAKE_CURRENT_SOURCE_DIR}/hip_graph_impl.cpp
+        -o ${ROCM_HIP_GRAPH_IMPL_OBJ}
+        -std=c++20 -fPIC
+        ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
+        -Wall -Wextra -pedantic
+                -fopenmp
+        -I${PROJECT_SOURCE_DIR}/include
+        -isystem ${ROCM_PATH}/include
+        -DTENZOR_HAS_MIOPEN
+        -DTENZOR_HAS_ROCBLAS
+        -DTENZOR_ROCM_BACKEND
+        -DUSE_PROF_API=1
+        -D__HIP_PLATFORM_AMD__=1
+        -Dtenzor_backend_rocm_EXPORTS
+    DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/hip_graph_impl.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/hip_graph.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_stream.hpp
+    COMMENT "Compiling hip_graph_impl.cpp (pure C++, no HIP flags)"
+    VERBATIM
+)
+
 # Create ROCm backend shared library using the manually compiled objects
-add_library(tenzor_backend_rocm SHARED ${ROCM_BACKEND_OBJ} ${ROCM_KERNEL_REGISTRY_OBJ})
+add_library(tenzor_backend_rocm SHARED ${ROCM_BACKEND_OBJ} ${ROCM_KERNEL_REGISTRY_OBJ} ${ROCM_HIP_GRAPH_IMPL_OBJ})
 
 # Set target properties
 set_target_properties(tenzor_backend_rocm PROPERTIES
