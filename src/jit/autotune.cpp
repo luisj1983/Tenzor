@@ -41,6 +41,11 @@ auto AutotuneCache::lookup(const std::string& key) const -> std::optional<int> {
 // ============================================================================
 
 auto AutotuneCache::record(const std::string& key, int algorithm_id, double time_ms) -> void {
+    // Reject non-positive timings. A degenerate/failed benchmark reporting 0.0
+    // (or a negative value) would otherwise become permanently sticky — no
+    // genuinely-measured positive time could ever displace it — and would be
+    // persisted across restarts via save()/load().
+    if (!(time_ms > 0.0)) return;  // also rejects NaN
     std::unique_lock lock(mutex_);
     auto it = cache_.find(key);
     if (it == cache_.end() || time_ms < it->second.time_ms) {

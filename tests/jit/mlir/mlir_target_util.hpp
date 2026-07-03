@@ -14,15 +14,34 @@
 #pragma once
 
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/mlir/iree_runtime.hpp"
 #include "tenzor/tenzor.hpp"
+
+#include <gtest/gtest.h>
 
 #include <functional>
 #include <string>
 #include <vector>
 
 namespace tenzor::testing::mlir {
+
+// audit Tier-1 #1: a compiled-vs-eager numeric check is VACUOUS if the compiled
+// call silently fell back to eager (mlir_invoke does this, non-strict, whenever
+// an op fails to lower) — the diff is then eager-vs-eager == 0 and the test
+// passes proving nothing. Bracket each compiled(x) with reset_jit_stats()
+// before and assert_jit_used(...) after: a recorded compile miss proves the
+// IREE StableHLO path actually executed, so the numeric comparison has teeth.
+inline auto reset_jit_stats() -> void {
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
+}
+inline auto assert_jit_used(const std::string& what, const std::string& target)
+    -> void {
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << what << " did NOT run through IREE on target=" << target
+        << " (silent eager fallback makes the numeric check vacuous)";
+}
 
 inline auto ensure_core_init() -> void {
     static const bool inited = []() {

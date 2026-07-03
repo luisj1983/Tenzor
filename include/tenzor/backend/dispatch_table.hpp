@@ -412,6 +412,18 @@ struct alignas(64) BackendDispatchTable {
             }
         }
 
+        // Capture a pre-mutation deep copy for the tracer BEFORE the kernel
+        // runs: the tracer reuses `target`'s pre-op value id as the node input,
+        // and if that id is a captured constant leaf it gets baked into the
+        // graph. Baking would otherwise read the post-mutation contents (the
+        // snapshot and target share storage after a shallow copy) and replay
+        // wrong. Only taken during a trace (hook installed) — the [[unlikely]]
+        // guard keeps the common non-traced path a single null check.
+        const bool trace_active = detail::inplace_op_hook_active();
+        Tensor pre_snapshot;
+        if (trace_active) [[unlikely]] {
+            pre_snapshot = target.clone();
+        }
         auto pre_version = target.version();
         auto& result = fn(target, others, attrs);
         // Auto-bump version counter only if kernel didn't already bump
@@ -421,12 +433,10 @@ struct alignas(64) BackendDispatchTable {
         // Notify the JIT tracer of the in-place mutation. dispatch_inplace
         // bypasses the DispatchInterceptorStack (autocast on in-place ops is
         // unsafe), so without this the tracer never observes the mutation and
-        // later reads of `target` resolve to its PRE-op graph value. The hook
-        // is thread-local and only installed during a trace; the guard makes
-        // the common non-traced path a single atomic-free null check.
-        if (detail::inplace_op_hook_active()) [[unlikely]] {
+        // later reads of `target` resolve to its PRE-op graph value.
+        if (trace_active) [[unlikely]] {
             detail::notify_inplace_op(op, result, others.data(), others.size(),
-                                      attrs);
+                                      attrs, &pre_snapshot);
         }
         return result;
     }

@@ -782,6 +782,20 @@ public:
     auto num_values() const -> size_t { return values_.size(); }
 
     /**
+     * @brief User key/value metadata (model_name, version, dtype, …).
+     *
+     * Persisted through save/load so a reloaded graph carries the same
+     * provenance/annotations. CompiledModule syncs its own metadata into and
+     * out of this map at save/load time.
+     */
+    auto set_string_metadata(const std::string& key, const std::string& value)
+        -> void { string_metadata_[key] = value; }
+    auto string_metadata() const
+        -> const std::unordered_map<std::string, std::string>& {
+        return string_metadata_;
+    }
+
+    /**
      * @brief Partition graph at specified node indices.
      *
      * Splits the graph into sub-graphs at the given break points.
@@ -876,6 +890,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Value>> values_;  ///< ID -> Value map
     std::vector<std::shared_ptr<Value>> inputs_;            ///< Graph inputs
     std::vector<std::shared_ptr<Value>> outputs_;           ///< Graph outputs
+    std::unordered_map<std::string, std::string> string_metadata_;  ///< User KV metadata (serialized)
     /// Captured parameter / constant tensors, keyed by Value ID. These
     /// are Tensors that were read by traced ops but were not graph
     /// inputs (e.g. Linear's weight/bias). During Graph::forward they

@@ -146,3 +146,47 @@ TEST(JitInplaceTrace, InplaceMutationAppliedOnReplayAllBackends) {
         EXPECT_TENSORS_CLOSE(eager, replay, 1e-5f, 1e-5f);
     }
 }
+
+// ---------------------------------------------------------------------------
+// M8b: an in-place op that mutates a CAPTURED CONSTANT LEAF must bake that
+// leaf's PRE-mutation value. The tracer reuses the leaf's pre-op value id as
+// the node input and, having no producing node, end_trace() bakes it as a
+// constant. Before the fix the retained storage was a shallow copy sharing the
+// (now-mutated) buffer, so the baked constant captured the POST-op value and
+// replay double-counted the mutation. Replaying with a DIFFERENT input than was
+// used at trace time exposes the stale constant.
+// ---------------------------------------------------------------------------
+TEST(JitInplaceTrace, InplaceMutationOfCapturedConstantBakesPreOpValue) {
+    for (const auto& dev : get_available_backends()) {
+        SCOPED_TRACE(backend_name(dev));
+
+        // c is a captured constant leaf (created outside fn, not a trace input).
+        Tensor c = full({4}, 5.0f, DType::Float32, dev);
+
+        // fn(x): c.add_(x); return c   => 5 + x
+        auto fn = [&c](const std::vector<Variable>& ins) -> std::vector<Variable> {
+            tenzor::add_(c, ins[0].tensor());  // in-place mutate captured leaf
+            return {Variable(c, false)};
+        };
+
+        Tensor x_trace = full({4}, 2.0f, DType::Float32, dev);
+        auto graph = jit::trace(fn, {Variable(x_trace, false)});
+        ASSERT_NE(graph, nullptr) << backend_name(dev);
+
+        // Replay with a DIFFERENT input. Correct baked constant is 5, so
+        // replay == 5 + 10 == 15. The pre-fix bug baked c's post-mutation value
+        // (5 + 2 == 7), yielding replay == 7 + 10 == 17.
+        Tensor x_new = full({4}, 10.0f, DType::Float32, dev);
+        auto outs = graph->forward({Variable(x_new, false)});
+        ASSERT_EQ(outs.size(), 1u) << backend_name(dev);
+        Tensor replay = outs[0].tensor();
+
+        dev.synchronize();
+
+        Tensor stale = full({4}, 17.0f, DType::Float32, dev);
+        EXPECT_FALSE(tensors_close(stale, replay, 1e-5f, 1e-5f))
+            << "captured constant baked its POST-mutation value (replay == 17)";
+        Tensor expected = full({4}, 15.0f, DType::Float32, dev);
+        EXPECT_TENSORS_CLOSE(expected, replay, 1e-5f, 1e-5f);
+    }
+}

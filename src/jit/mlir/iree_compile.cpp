@@ -458,6 +458,7 @@ auto run_iree_compile_subprocess(const std::string& binary,
 auto compile_via_subprocess(const std::string& mlir_text,
                             const std::string& target,
                             const std::string& rocm_arch,
+                            const std::string& cuda_arch,
                             const fs::path& vmfb_path,
                             const fs::path& mlir_path) -> void {
     const std::string& bin = ::tenzor::jit::mlir_jit::resolve_iree_compile();
@@ -477,6 +478,11 @@ auto compile_via_subprocess(const std::string& mlir_text,
     // the build constant only when device detection fails).
     if (target == "rocm") {
         args.push_back("--iree-rocm-target=" + rocm_arch);
+    }
+    // CUDA also needs an explicit target (see compile_mlir); without it
+    // iree-compile rejects the cuda backend with "missing GPU target".
+    if (target == "cuda" && !cuda_arch.empty()) {
+        args.push_back("--iree-cuda-target=" + cuda_arch);
     }
     // Write MLIR text to a temp file rather than piping via stdin. The
     // stdin pipe path was hitting auto-input-type detection failures on
@@ -660,6 +666,26 @@ auto compile_mlir(const std::string& mlir_text,
 #endif
     }
 
+    // CUDA, like ROCm, requires an explicit target — current iree-compile
+    // rejects a cuda backend with no `--iree-cuda-target` ("missing GPU target
+    // in #hal.executable.target"). The old code assumed a "sensible default"
+    // and passed nothing, so every cuda compile failed and silently fell back
+    // to eager (cuda JIT never ran). Resolve an arch: TENZOR_CUDA_TARGET env
+    // override, else the build-time default, else sm_80 (Ampere baseline —
+    // PTX forward-compat JITs onto newer GPUs, verified on Blackwell).
+    std::string cuda_arch;
+    if (target == "cuda") {
+        if (const char* e = std::getenv("TENZOR_CUDA_TARGET"); e != nullptr && *e != '\0') {
+            cuda_arch = e;
+        } else {
+#ifdef TENZOR_DEFAULT_CUDA_TARGET
+            cuda_arch = TENZOR_DEFAULT_CUDA_TARGET;
+#else
+            cuda_arch = "sm_80";
+#endif
+        }
+    }
+
     bool is_shared_temp = false;
     fs::path cache_dir;
     if (opts.cache_dir.empty()) {
@@ -675,6 +701,7 @@ auto compile_mlir(const std::string& mlir_text,
     // and must not alias to one .vmfb. Non-rocm targets keep the bare target.
     const std::string key_target =
         (target == "rocm" && !rocm_arch.empty()) ? (target + ":" + rocm_arch)
+      : (target == "cuda" && !cuda_arch.empty()) ? (target + ":" + cuda_arch)
                                                  : target;
     const std::string key = compute_cache_key(mlir_text, key_target);
     const fs::path vmfb_path = cache_dir / (key + ".vmfb");
@@ -726,8 +753,8 @@ auto compile_mlir(const std::string& mlir_text,
         }
         write_vmfb_atomically(vmfb_path, cache_dir,
                               [&](const fs::path& tmp_out) {
-            compile_via_subprocess(mlir_text, target, rocm_arch, tmp_out,
-                                   mlir_path);
+            compile_via_subprocess(mlir_text, target, rocm_arch, cuda_arch,
+                                   tmp_out, mlir_path);
         });
         const auto compile_t1 = std::chrono::steady_clock::now();
         const double compile_ms =
@@ -763,11 +790,19 @@ auto compile_mlir(const std::string& mlir_text,
     // has a sensible default in iree-compile; Vulkan/CPU are
     // chip-independent.
     std::string rocm_target_flag;
+    std::string cuda_target_flag;
     std::vector<const char*> flags = {target_flag.c_str(), input_flag.c_str()};
     if (target == "rocm") {
         // Device-derived arch (M1); rocm_arch is guaranteed non-empty above.
         rocm_target_flag = std::string("--iree-rocm-target=") + rocm_arch;
         flags.push_back(rocm_target_flag.c_str());
+    }
+    // CUDA needs an explicit target too — the old "sensible default" comment was
+    // stale (current iree-compile rejects a cuda backend without it). cuda_arch
+    // is resolved (env / build default / sm_80) above.
+    if (target == "cuda" && !cuda_arch.empty()) {
+        cuda_target_flag = std::string("--iree-cuda-target=") + cuda_arch;
+        flags.push_back(cuda_target_flag.c_str());
     }
     if (auto* set_err = ireeCompilerSessionSetFlags(
             session, /*argc=*/static_cast<int>(flags.size()), flags.data());

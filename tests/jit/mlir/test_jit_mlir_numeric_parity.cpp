@@ -93,6 +93,47 @@ TEST(MlirNumericParity, SubprocessFloat32BitExact) {
     ::unsetenv("TENZOR_MLIR_FORCE_SUBPROCESS");
 }
 
+// Regression guard for the subprocess .npy output path. iree-run-module picks
+// its `--output=@path` serialization from the file EXTENSION, so the temp file
+// MUST end in ".npy"; otherwise iree writes a raw buffer that read_npy_output
+// rejects as "bad .npy magic". In NON-strict mode that failure is a SILENT
+// eager fallback — which is exactly why SubprocessFloat32BitExact above passed
+// vacuously while ROCm JIT (subprocess-only) never actually ran through IREE.
+// Under STRICT the failure THROWS, so this test fails loudly if the extension
+// (or any other subprocess-run breakage) ever regresses.
+TEST(MlirNumericParity, SubprocessStrictRunsThroughIree) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    ::setenv("TENZOR_MLIR_FORCE_SUBPROCESS", "1", /*overwrite=*/1);
+
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [](const Variable& x) -> Variable { return (x * x) + x; });
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    cfg.strict  = true;  // a broken .npy read must THROW, not fall back to eager
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    Tensor x_t({6}, DType::Float32, Device::cpu());
+    const float vals[6] = {1.5f, 2.25f, 3.0f, 4.75f, 5.5f, 6.125f};
+    for (int i = 0; i < 6; ++i) x_t.data<float>()[i] = vals[i];
+    Variable x(x_t, /*requires_grad=*/false);
+
+    const Variable eager = (x * x) + x;
+    mj::reset_cache_stats();
+    Variable out;
+    ASSERT_NO_THROW({ out = compiled(x); })
+        << "strict forced-subprocess run threw — the subprocess .npy output "
+           "path is broken (temp file likely lost its .npy extension, so "
+           "iree-run-module wrote a raw buffer that read_npy_output rejects)";
+    ASSERT_GE(mj::cache_stats().misses, 1u)
+        << "strict forced-subprocess run did not go through IREE";
+    EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 1e-3);
+
+    ::unsetenv("TENZOR_MLIR_FORCE_SUBPROCESS");
+}
+
 // M3 — F16 softmax over a long axis: the exp-sum must accumulate in F32 to match
 // the eager kernel (Kahan F32 accumulator). F16 accumulation over 2048 elements
 // diverges well past F16 ULP.

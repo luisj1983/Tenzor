@@ -305,10 +305,14 @@ public:
      * @param target The just-mutated tensor.
      * @param others Additional inputs the op consumed.
      * @param attrs  Op attributes (clamp bounds, leaky-relu slope, …).
+     * @param pre_snapshot Deep copy of `target` captured before the mutation
+     *        (may be null). Stored under the pre-op value id so a captured
+     *        constant leaf bakes its PRE-mutation value, not the post-op one.
      */
     auto record_inplace(OpId op, Tensor& target,
                         std::span<const Tensor> others,
-                        const OpAttributes& attrs) -> void;
+                        const OpAttributes& attrs,
+                        const Tensor* pre_snapshot = nullptr) -> void;
 
     /**
      * @brief Register a tensor in the trace.

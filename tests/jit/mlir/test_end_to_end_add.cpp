@@ -25,7 +25,10 @@
 #include "../../multi_backend_dtype_fixture.hpp"
 
 #include <chrono>
+#include <cmath>
+#include <complex>
 #include <cstdio>
+#include <limits>
 #include <set>
 #include <string>
 
@@ -51,7 +54,14 @@ auto backend_present(const std::string& name) -> bool {
 
 auto target_hw_present(const std::string& target) -> bool {
     if (target == "llvm-cpu")     return true;
-    if (target == "cuda")         return backend_present("cuda");
+    // cuda/vulkan gate on IREE device-init capability, NOT on the Tenzor
+    // backend being loaded — identical to the rocm rationale below. IREE drives
+    // the GPU directly via its own CUDA/Vulkan HAL driver, and run_add_on_target
+    // keeps the eager input on CPU (Path C.2) when the Tenzor backend is absent,
+    // so the JIT path still exercises the GPU. Gating on backend_present() here
+    // wrongly SKIPPED cuda/vulkan JIT whenever the Tenzor backend .so wasn't
+    // loaded (e.g. the MLIR-only build), leaving those paths untested.
+    if (target == "cuda")         return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("cuda");
     // rocm gating: Path C.2 (see docs/superpowers/plans/
     // 2026-05-19-tz-jit-mlir-phase1a.md). We don't require the Tenzor
     // ROCm backend to be loaded — IREE drives the GPU directly via its
@@ -61,7 +71,7 @@ auto target_hw_present(const std::string& target) -> bool {
     // directory is auto-prepended to LD_LIBRARY_PATH inside the probe.
     if (target == "rocm")
         return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("hip");
-    if (target == "vulkan-spirv") return backend_present("vulkan");
+    if (target == "vulkan-spirv") return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("vulkan");
     return false;
 }
 
@@ -130,7 +140,14 @@ void run_add_on_target(const std::string& target) {
 
     const auto fn = add_self_fn();
     auto eager  = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x);
+    // Prove the IREE compile+run path executed for this target rather than a
+    // silent eager fallback (which would make the diff below eager-vs-eager and
+    // pass vacuously). This is what makes the GPU-target assertions meaningful.
+    ASSERT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "target=" << target
+        << " did NOT run through IREE (silent eager fallback)";
 
     ASSERT_EQ(jitted.tensor().numel(), eager.tensor().numel())
         << "numel mismatch on target=" << target;
@@ -161,6 +178,112 @@ TEST(EndToEndAdd, MLIRVulkanMatchesEager) {
 
 TEST(EndToEndAdd, MLIRRocmMatchesEager) {
     run_add_on_target("rocm");
+}
+
+// A complex64 constant captured by the traced fn is baked into the graph as a
+// `stablehlo.constant dense<(re,im)...>`. Before complex-constant support in
+// the lowering, extract_scalar_value/emit_tensor_constant threw "unsupported
+// DType", which (in non-strict mode) silently fell back to eager. Here we run
+// STRICT so a lowering/compile failure throws instead of masking a regression,
+// giving a real end-to-end check that complex constants compile through IREE.
+TEST(EndToEndComplexConstant, MLIRBackendMatchesEager_CPU) {
+    ensure_core_init();
+    if (!iree_target_supported("llvm-cpu")) {
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "iree-compile dist lacks target=llvm-cpu");
+        return;
+    }
+
+    ::tenzor::Tensor c({4}, ::tenzor::DType::Complex64, ::tenzor::Device::cpu());
+    {
+        auto* cd = c.data<std::complex<float>>();
+        cd[0] = {1.0F, -2.0F};
+        cd[1] = {0.5F, 3.0F};
+        cd[2] = {-4.0F, 0.25F};
+        cd[3] = {2.0F, 2.0F};
+    }
+    ::tenzor::Variable c_var(c, /*requires_grad=*/false);
+
+    // Captured complex constant -> baked; input is complex too.
+    ::tenzor::jit::CompiledFunction::FnType fn =
+        [c_var](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+            return x + c_var;
+        };
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    cfg.strict  = true;  // fail loudly instead of eager-fallback masking a bug
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+
+    ::tenzor::Tensor x({4}, ::tenzor::DType::Complex64, ::tenzor::Device::cpu());
+    {
+        auto* xd = x.data<std::complex<float>>();
+        xd[0] = {2.0F, 1.0F};
+        xd[1] = {-1.0F, -1.0F};
+        xd[2] = {3.0F, 3.0F};
+        xd[3] = {0.0F, 5.0F};
+    }
+    ::tenzor::Variable xv(x, /*requires_grad=*/false);
+
+    auto eager  = fn(xv).tensor().to(::tenzor::Device::cpu());
+    auto jitted = compiled(xv).tensor().to(::tenzor::Device::cpu());
+
+    ASSERT_EQ(jitted.numel(), eager.numel());
+    ASSERT_EQ(jitted.dtype(), ::tenzor::DType::Complex64);
+    const auto* ed = eager.data<std::complex<float>>();
+    const auto* jd = jitted.data<std::complex<float>>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(ed[i].real(), jd[i].real(), 1e-5F) << "real i=" << i;
+        EXPECT_NEAR(ed[i].imag(), jd[i].imag(), 1e-5F) << "imag i=" << i;
+    }
+}
+
+// Non-finite float constants (+inf/-inf/NaN) baked into the graph must be
+// emitted as width-correct hex bit patterns — MLIR's dense<> parser rejects the
+// textual `inf`/`nan` that emit_float_literal produced before the fix. Runs
+// STRICT so a bad emission fails iree-compile (throws) instead of silently
+// falling back to eager. Verifies the compiled kernel preserves inf/-inf/NaN.
+TEST(EndToEndNonFiniteConstant, MLIRBackendMatchesEager_CPU) {
+    ensure_core_init();
+    if (!iree_target_supported("llvm-cpu")) {
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "iree-compile dist lacks target=llvm-cpu");
+        return;
+    }
+
+    ::tenzor::Tensor c({4}, ::tenzor::DType::Float32, ::tenzor::Device::cpu());
+    {
+        auto* cd = c.data<float>();
+        cd[0] = std::numeric_limits<float>::infinity();
+        cd[1] = -std::numeric_limits<float>::infinity();
+        cd[2] = std::numeric_limits<float>::quiet_NaN();
+        cd[3] = 2.5F;
+    }
+    ::tenzor::Variable c_var(c, /*requires_grad=*/false);
+
+    ::tenzor::jit::CompiledFunction::FnType fn =
+        [c_var](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+            return x + c_var;
+        };
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target  = "llvm-cpu";
+    cfg.strict  = true;  // a textual inf/nan emission would fail compile loudly
+    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+
+    auto x = ::tenzor::full({4}, 1.0F, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    auto jitted =
+        compiled(::tenzor::Variable(x, false)).tensor().to(::tenzor::Device::cpu());
+
+    ASSERT_EQ(jitted.numel(), 4);
+    const float* p = jitted.data<float>();
+    EXPECT_TRUE(std::isinf(p[0]) && p[0] > 0.0F) << "1+inf -> +inf, got " << p[0];
+    EXPECT_TRUE(std::isinf(p[1]) && p[1] < 0.0F) << "1-inf -> -inf, got " << p[1];
+    EXPECT_TRUE(std::isnan(p[2])) << "1+NaN -> NaN, got " << p[2];
+    EXPECT_FLOAT_EQ(p[3], 3.5F);
 }
 
 TEST(EndToEndAdd, SecondInvocationHitsInProcessCache) {

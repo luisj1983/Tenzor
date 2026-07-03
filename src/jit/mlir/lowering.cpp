@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <complex>
 #include <cstring>
 #include <functional>
 #include <initializer_list>
@@ -192,17 +193,88 @@ auto int_dtype_extreme_literal(::tenzor::DType d, bool want_max) -> std::string 
 
 /// Produce a textual `dense<scalar>` literal for a scalar value of the
 /// given dtype, matching the syntax StableHLO accepts as a splat constant.
+// Emit a single floating-point element for an MLIR `dense<>` payload or splat
+// constant. A finite value is written as a decimal literal with enough
+// significant digits to round-trip the target element type. A non-finite value
+// (±inf / NaN) MUST be written as a hex bit pattern whose WIDTH MATCHES the
+// MLIR element type — MLIR's dense<> parser rejects textual `inf`/`nan`, and a
+// hex pattern of the wrong width (e.g. an f32 `0x7F800000` under an `f16`
+// element type) is rejected or mis-decoded. Centralizes what scalar_literal and
+// render_one previously did inconsistently.
+inline auto emit_float_literal(std::ostream& os, double value, ::tenzor::DType d)
+    -> void {
+    using ::tenzor::DType;
+    if (std::isfinite(value)) {
+        const int prec = (d == DType::Float64) ? 17
+                       : (d == DType::Float32) ? 9
+                       : 5;  // Float16 / BFloat16
+        os << std::scientific << std::setprecision(prec) << value;
+        return;
+    }
+    auto emit_hex = [&os](unsigned long long bits, int width) {
+        os << "0x" << std::hex << std::uppercase << std::setfill('0')
+           << std::setw(width) << bits
+           << std::dec << std::nouppercase << std::setfill(' ');
+    };
+    switch (d) {
+        case DType::Float16: {
+            ::tenzor::Float16 h{static_cast<float>(value)};
+            std::uint16_t bits;
+            std::memcpy(&bits, &h, sizeof(bits));
+            emit_hex(bits, 4);
+            break;
+        }
+        case DType::BFloat16: {
+            ::tenzor::BFloat16 h{static_cast<float>(value)};
+            std::uint16_t bits;
+            std::memcpy(&bits, &h, sizeof(bits));
+            emit_hex(bits, 4);
+            break;
+        }
+        case DType::Float32: {
+            const float f = static_cast<float>(value);
+            std::uint32_t bits;
+            std::memcpy(&bits, &f, sizeof(bits));
+            emit_hex(bits, 8);
+            break;
+        }
+        default: {  // Float64 and any other float dtype
+            std::uint64_t bits;
+            std::memcpy(&bits, &value, sizeof(bits));
+            emit_hex(bits, 16);
+            break;
+        }
+    }
+}
+
+// The float element type backing each component of a complex dtype.
+inline auto complex_component_dtype(::tenzor::DType d) -> ::tenzor::DType {
+    return d == ::tenzor::DType::Complex64 ? ::tenzor::DType::Float32
+                                           : ::tenzor::DType::Float64;
+}
+
+// Emit one complex element for an MLIR `dense<>` payload as an MLIR
+// `(real, imag)` tuple. Each component goes through emit_float_literal so a
+// non-finite real/imaginary part is written as a component-width hex pattern
+// (f32 for complex<f32>, f64 for complex<f64>), consistent with the real path.
+inline auto emit_complex_literal(std::ostream& os, double re, double im,
+                                 ::tenzor::DType d) -> void {
+    const ::tenzor::DType cd = complex_component_dtype(d);
+    os << '(';
+    emit_float_literal(os, re, cd);
+    os << ',';
+    emit_float_literal(os, im, cd);
+    os << ')';
+}
+
 auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
     using ::tenzor::DType;
     std::ostringstream s;
     if (is_float_dtype(d)) {
-        // Use enough significant digits to round-trip the target type: Float64
-        // carries ~17, Float32 ~9, Float16/BFloat16 fewer. A fixed precision of
-        // 9 truncated Float64 splat constants to single-precision resolution.
-        int prec = (d == DType::Float64) ? 17
-                 : (d == DType::Float32) ? 9
-                 : 5;  // Float16 / BFloat16
-        s << std::scientific << std::setprecision(prec) << value;
+        // Finite values round-trip via a decimal literal; non-finite values are
+        // emitted as a width-correct hex bit pattern (textual inf/nan is
+        // rejected by MLIR's dense<> parser). See emit_float_literal.
+        emit_float_literal(s, value, d);
         return s.str();
     }
     if (is_int_dtype(d)) {
@@ -375,6 +447,59 @@ auto emit_tensor_constant(std::ostream& body, LoweringContext& ctx,
                           ::tenzor::DType d) -> std::string {
     auto name = ctx.fresh_name();
     ctx.bind(value_id, name);
+
+    // Complex constants need `(real, imag)` tuple payloads, which scalar_literal
+    // / render_one cannot express — handle them here for the empty, splat, and
+    // multi-element cases. IREE/StableHLO accepts complex<f32>/complex<f64>
+    // dense constants and complex elementwise ops, so this lets complex JIT
+    // graphs compile instead of throwing and falling back to eager.
+    using ::tenzor::DType;
+    if (d == DType::Complex64 || d == DType::Complex128) {
+        auto ccpu = t.device().type == ::tenzor::Device::Type::CPU ? t : t.cpu();
+        auto read_at = [&](int64_t i) -> std::pair<double, double> {
+            if (d == DType::Complex64) {
+                auto v = ccpu.data<std::complex<float>>()[i];
+                return {static_cast<double>(v.real()),
+                        static_cast<double>(v.imag())};
+            }
+            auto v = ccpu.data<std::complex<double>>()[i];
+            return {v.real(), v.imag()};
+        };
+        if (t.numel() <= 1) {
+            std::ostringstream one;
+            if (t.numel() == 1) {
+                auto [re, im] = read_at(0);
+                emit_complex_literal(one, re, im, d);
+            } else {
+                emit_complex_literal(one, 0.0, 0.0, d);
+            }
+            emit_stablehlo_splat_constant(body, name, one.str(), shape, d);
+            body << '\n';
+            return name;
+        }
+        std::ostringstream cpayload;
+        std::function<void(int64_t, int64_t&)> emit_cdim =
+            [&](int64_t dim_idx, int64_t& flat_idx) {
+            const int64_t extent = shape[dim_idx];
+            cpayload << '[';
+            for (int64_t i = 0; i < extent; ++i) {
+                if (i != 0) cpayload << ", ";
+                if (dim_idx + 1 == static_cast<int64_t>(shape.size())) {
+                    auto [re, im] = read_at(flat_idx++);
+                    emit_complex_literal(cpayload, re, im, d);
+                } else {
+                    emit_cdim(dim_idx + 1, flat_idx);
+                }
+            }
+            cpayload << ']';
+        };
+        int64_t cflat = 0;
+        emit_cdim(0, cflat);
+        emit_stablehlo_splat_constant(body, name, cpayload.str(), shape, d);
+        body << '\n';
+        return name;
+    }
+
     if (t.numel() == 0) {
         emit_stablehlo_splat_constant(body, name, scalar_literal(0.0, d),
                                       shape, d);
@@ -395,7 +520,6 @@ auto emit_tensor_constant(std::ostream& body, LoweringContext& ctx,
     // attribute matches the tensor type exactly. Materializes one float
     // per element — fine for the kilobyte-scale weight constants typical
     // of JIT'd inference graphs.
-    using ::tenzor::DType;
     auto cpu = t.device().type == ::tenzor::Device::Type::CPU ? t : t.cpu();
 
     std::ostringstream payload;
@@ -408,22 +532,27 @@ auto emit_tensor_constant(std::ostream& body, LoweringContext& ctx,
             if (dim_idx + 1 == static_cast<int64_t>(shape.size())) {
                 switch (d) {
                     case DType::Float32:
-                        render_one(payload, cpu.data<float>()[flat_idx++]);
+                        emit_float_literal(payload,
+                            static_cast<double>(cpu.data<float>()[flat_idx++]), d);
                         break;
                     case DType::Float64:
-                        render_one(payload, cpu.data<double>()[flat_idx++]);
+                        emit_float_literal(payload,
+                            cpu.data<double>()[flat_idx++], d);
                         break;
                     case DType::Float16:
-                        // Widen the half to float; render_one emits a decimal
-                        // float literal which MLIR accepts for an f16 element
-                        // type (precision is bounded by scalar_literal's
-                        // round-trip rationale for half types).
-                        render_one(payload, static_cast<float>(
-                            cpu.data<::tenzor::Float16>()[flat_idx++]));
+                        // Route through emit_float_literal with the ELEMENT
+                        // dtype so a non-finite half emits a 16-bit (0x7C00
+                        // -style) hex pattern; widening to float and calling
+                        // render_one emitted a 32-bit pattern under an f16
+                        // element type, which MLIR rejects.
+                        emit_float_literal(payload, static_cast<double>(
+                            static_cast<float>(
+                                cpu.data<::tenzor::Float16>()[flat_idx++])), d);
                         break;
                     case DType::BFloat16:
-                        render_one(payload, static_cast<float>(
-                            cpu.data<::tenzor::BFloat16>()[flat_idx++]));
+                        emit_float_literal(payload, static_cast<double>(
+                            static_cast<float>(
+                                cpu.data<::tenzor::BFloat16>()[flat_idx++])), d);
                         break;
                     case DType::Int8:
                         render_one(payload, cpu.data<int8_t>()[flat_idx++]);

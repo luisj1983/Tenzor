@@ -319,6 +319,12 @@ auto CompiledModule::save(const std::string& path) const -> void {
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph to save");
     }
+    // Push the module's user KV metadata onto the graph so it is serialized
+    // (the graph is the unit save_graph persists). Without this, save/load was
+    // lossy for metadata — a reloaded module had an empty metadata map.
+    for (const auto& [key, value] : metadata_) {
+        graph_->set_string_metadata(key, value);
+    }
     // Save the graph using existing serialization
     save_graph(*graph_, path);
 }
@@ -328,7 +334,12 @@ auto CompiledModule::load(const std::string& path) -> std::shared_ptr<CompiledMo
     if (!graph) {
         throw std::runtime_error("Failed to load graph from: " + path);
     }
-    return std::make_shared<CompiledModule>(graph);
+    auto module = std::make_shared<CompiledModule>(graph);
+    // Restore user KV metadata that was serialized with the graph.
+    for (const auto& [key, value] : graph->string_metadata()) {
+        module->add_metadata(key, value);
+    }
+    return module;
 }
 
 auto CompiledModule::add_metadata(const std::string& key, const std::string& value) -> void {
@@ -473,13 +484,20 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
 
     // Retain the EXACT input buffers the captured graph will hard-code so that
     // replay() can copy fresh inputs into them (device-to-device) instead of
-    // re-running over stale capture-time data. We force each captured input
-    // contiguous and remember it; the same Tensor objects are wrapped into the
-    // Variables fed to forward(), so the graph captures these very buffers.
+    // re-running over stale capture-time data. The same Tensor objects are
+    // wrapped into the Variables fed to forward(), so the graph captures these
+    // very buffers.
+    //
+    // clone() (not just contiguous()) is REQUIRED: contiguous() returns the
+    // caller's tensor unchanged when it is already contiguous, so the retained
+    // buffer would alias the caller's sample-input storage. replay() then does a
+    // device-to-device copy of fresh data INTO these buffers — which would
+    // silently overwrite the caller's still-live capture-time tensor. A deep
+    // copy gives the module private buffers that only replay() writes to.
     captured_inputs_.clear();
     captured_inputs_.reserve(sample_inputs.size());
     for (auto& t : sample_inputs) {
-        captured_inputs_.push_back(t.contiguous());
+        captured_inputs_.push_back(t.contiguous().clone());
     }
 
     // Wrap the RETAINED contiguous inputs as Variables for the capture forward

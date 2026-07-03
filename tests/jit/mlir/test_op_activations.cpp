@@ -57,7 +57,9 @@ void check_matches_eager(const std::string& name, FnT fn,
         cfg.target  = target;
         auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
 
+        mt::reset_jit_stats();
         auto jitted = compiled(x);
+        mt::assert_jit_used(name, target);
         auto jitted_cpu = jitted.tensor().to(::tenzor::Device::cpu());
         auto diff = ::tenzor::max(::tenzor::abs(
             eager_cpu - jitted_cpu)).template item<float>();

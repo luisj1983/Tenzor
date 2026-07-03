@@ -18,6 +18,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/jit/compile.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
@@ -61,7 +62,10 @@ TEST(OpWhere, WhereSelectsOnTrueWhenMaskIsAllTrue) {
         /*requires_grad=*/false);
 
     auto eager = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jit   = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
 
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
     auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
@@ -91,7 +95,10 @@ TEST(OpWhere, WhereSelectsOnFalseWhenMaskIsAllFalse) {
         /*requires_grad=*/false);
 
     auto eager = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jit   = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
 
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
     auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());

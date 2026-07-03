@@ -168,8 +168,11 @@ TEST(ExtendedCodegen, ExtendedFusionPassRegisteredInCompiler) {
     // Just verify the compiler can be constructed without error
     Graph graph;
     auto changes = compiler.optimize(graph);
-    // Empty graph = no changes
-    EXPECT_GE(changes, 0);
+    // An empty graph must yield EXACTLY zero changes (the old EXPECT_GE(.,0) was
+    // vacuous for an unsigned count). ExtendedFusionPass's real firing behavior
+    // is covered by the FusedExecIntegration tests and
+    // ReductionRefusesUnrepresentableBinaryMul below.
+    EXPECT_EQ(changes, 0u);
 }
 
 // ---------------------------------------------------------------------------

@@ -93,12 +93,31 @@ TEST_F(FusionPassesTest, FuseConvBatchNormReLU_WithPattern) {
     graph.set_inputs({input});
     graph.set_outputs({relu_v});
 
+    // fuse_triple folds the BN running-stats into the conv weights, so it bails
+    // (no fusion) unless the conv weight and BN gamma/running_var tensors are
+    // present. The value-only nodes above have none — which is exactly why the
+    // old EXPECT_LE passed vacuously (the pass never actually fired). Attach
+    // real params so the fold can happen and the assertions have teeth.
+    conv_v->node()->set_tensor_attr(
+        "weight", tenzor::randn({16, 3, 3, 3}, DType::Float32, device_));
+    auto bn = bn_v->node();
+    bn->set_tensor_attr("weight",       tenzor::ones({16}, DType::Float32, device_));
+    bn->set_tensor_attr("bias",         tenzor::zeros({16}, DType::Float32, device_));
+    bn->set_tensor_attr("running_mean", tenzor::zeros({16}, DType::Float32, device_));
+    bn->set_tensor_attr("running_var",  tenzor::ones({16}, DType::Float32, device_));
+    bn->set_attr("eps", 1e-5F);
+
     int orig_nodes = graph.num_nodes();
     FuseConvBatchNormReluPass pass;
-    pass.run(graph);
-    // After fusion the graph should contain at most the original number of
-    // nodes (typically fewer — the three are collapsed into one fused op).
-    EXPECT_LE(graph.num_nodes(), orig_nodes);
+    // The pass MUST fire on the canonical Conv->BN->ReLU triplet and reduce the
+    // node count (the three collapse into one fused op). The old EXPECT_LE was
+    // vacuous — it also holds when the pass does nothing, so a broken pass that
+    // silently stopped matching would still pass the test.
+    bool changed = pass.run(graph);
+    EXPECT_TRUE(changed) << "FuseConvBatchNormReLU did not fire on Conv->BN->ReLU";
+    EXPECT_LT(graph.num_nodes(), orig_nodes)
+        << "fusion did not reduce the node count (expected the triplet to "
+           "collapse into a single fused op)";
 }
 
 // ============================================================================
@@ -127,8 +146,10 @@ TEST_F(FusionPassesTest, FuseLayerNormActivation_WithPattern) {
 
     int orig_nodes = graph.num_nodes();
     FuseLayerNormActivationPass pass;
-    pass.run(graph);
-    EXPECT_LE(graph.num_nodes(), orig_nodes);
+    bool changed = pass.run(graph);
+    EXPECT_TRUE(changed) << "FuseLayerNormActivation did not fire on LayerNorm->GELU";
+    EXPECT_LT(graph.num_nodes(), orig_nodes)
+        << "fusion did not reduce the node count";
 }
 
 // ============================================================================
@@ -180,8 +201,10 @@ TEST_F(FusionPassesTest, FuseFFN_WithPattern) {
 
     int orig_nodes = graph.num_nodes();
     FuseFFNPass pass;
-    pass.run(graph);
-    EXPECT_LE(graph.num_nodes(), orig_nodes);
+    bool changed = pass.run(graph);
+    EXPECT_TRUE(changed) << "FuseFFN did not fire on Linear->GELU->Linear";
+    EXPECT_LT(graph.num_nodes(), orig_nodes)
+        << "fusion did not reduce the node count";
 }
 
 // ============================================================================

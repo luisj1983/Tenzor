@@ -2827,9 +2827,12 @@ auto LayoutOptimizationPass::run(Graph& graph) -> bool {
         convert_node->set_int_attr("target_format", ins.target_format);
         convert_output->set_node(convert_node);
 
-        // Replace the input on the consumer
+        // Replace the input on the consumer. replace_input already registers
+        // convert_output->add_use(consumer) (Node::replace_input calls
+        // val->add_use); a second add_use here would double-count the single
+        // real consumer, breaking single-use checks and over-extending
+        // memory-planner liveness for the converted value.
         ins.consumer->replace_input(ins.input_index, convert_output);
-        convert_output->add_use(ins.consumer);
 
         // Add the convert node to the graph
         graph.add_node(convert_node);
@@ -3010,11 +3013,16 @@ auto DTypeOptimizationPass::run(Graph& graph) -> bool {
                 output->device());
 
             auto cast_node = std::make_shared<Node>(OpType::Cast);
+            // add_input already registers output->add_use(cast_node)
+            // (Node::add_input calls val->add_use). A second add_use here would
+            // double-count, inflating output->uses().size() to 2 for a single
+            // real consumer and breaking single-use checks (PatternMatcher::
+            // has_single_use) plus over-extending memory-planner liveness — the
+            // same hazard the input-side path below documents avoiding.
             cast_node->add_input(output);
             cast_node->add_output(cast_output);
             cast_node->set_int_attr("target_dtype", static_cast<int64_t>(DType::Float32));
             cast_output->set_node(cast_node);
-            output->add_use(cast_node);
 
             graph.add_node(cast_node);
             output_casts[output->id()] = cast_output;

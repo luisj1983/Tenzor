@@ -144,7 +144,10 @@ auto ExtendedKernelCodegen::activation_expr(OpType act, const std::string& var,
     const std::string tanh_fn = fn_for("tanh", dtype);
     const std::string exp_fn = fn_for("exp", dtype);
     switch (act) {
-        case OpType::ReLU:    return var + " > 0 ? " + var + " : 0";
+        // clamp_min(x,0) == `x < 0 ? 0 : x`, which propagates NaN. The prior
+        // `x > 0 ? x : 0` returned 0 for NaN and diverged from the eager/CPU
+        // ReLU and the elementwise codegen path (codegen.cpp emit_op Relu).
+        case OpType::ReLU:    return var + " < 0.0" + F + " ? 0.0" + F + " : " + var;
         case OpType::Sigmoid:
             return "1.0" + F + " / (1.0" + F + " + " + exp_fn + "(-" + var + "))";
         case OpType::Tanh:    return tanh_fn + "(" + var + ")";

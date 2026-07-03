@@ -26,9 +26,10 @@ void set_inplace_op_hook(InplaceOpHook hook) {
 }
 
 void notify_inplace_op(OpId op, Tensor& target, const Tensor* others,
-                       std::size_t num_others, const OpAttributes& attrs) {
+                       std::size_t num_others, const OpAttributes& attrs,
+                       const Tensor* pre_snapshot) {
     if (tls_inplace_op_hook) {
-        tls_inplace_op_hook(op, target, others, num_others, attrs);
+        tls_inplace_op_hook(op, target, others, num_others, attrs, pre_snapshot);
     }
 }
 

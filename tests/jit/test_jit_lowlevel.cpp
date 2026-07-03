@@ -102,6 +102,52 @@ TEST_F(JITGraphTest, AddNodeWithInputsAndOutputs) {
     EXPECT_EQ(graph_.nodes().size(), 1u);
 }
 
+// execute_node(Squeeze) must mirror infer_types: with NO "dim"/"dims" attr,
+// torch squeeze() removes ALL size-1 dims. The old executor read
+// get_int_attr("dim") which defaults to 0, so it squeezed only dim 0 and
+// produced the wrong shape for hand-built / deserialized / ONNX graphs (which,
+// unlike autograd traces, can carry a no-attr or multi-axis Squeeze node).
+TEST_F(JITGraphTest, ExecuteSqueezeNoDimRemovesAllSizeOneDims) {
+    auto in = graph_.create_value("x", {1, 3, 1, 4}, DType::Float32, Device::cpu());
+    auto out = graph_.create_value("y", {3, 4}, DType::Float32, Device::cpu());
+    auto sq = graph_.create_node(OpType::Squeeze, "squeeze");
+    sq->add_input(in);
+    sq->add_output(out);
+    graph_.add_node(sq);
+    graph_.set_inputs({in});
+    graph_.set_outputs({out});
+
+    Tensor x = randn({1, 3, 1, 4}, DType::Float32, Device::cpu());
+    auto outs = graph_.forward({Variable(x, /*requires_grad=*/false)});
+    ASSERT_EQ(outs.size(), 1u);
+    auto sh = outs[0].tensor().shape();
+    std::vector<int64_t> got(sh.begin(), sh.end());
+    // Pre-fix: {3, 1, 4} (only dim 0 squeezed). Fixed: {3, 4}.
+    EXPECT_EQ(got, (std::vector<int64_t>{3, 4}));
+}
+
+// A "dims" vec squeezes exactly the listed size-1 axes (negatives normalized),
+// not dim 0. dims={0,2} on {1,3,1,4} -> {3,4}; the old code would have squeezed
+// only dim 0 -> {3,1,4}.
+TEST_F(JITGraphTest, ExecuteSqueezeDimsVecRemovesListedDims) {
+    auto in = graph_.create_value("x", {1, 3, 1, 4}, DType::Float32, Device::cpu());
+    auto out = graph_.create_value("y", {3, 4}, DType::Float32, Device::cpu());
+    auto sq = graph_.create_node(OpType::Squeeze, "squeeze");
+    sq->add_input(in);
+    sq->add_output(out);
+    sq->set_vec_attr("dims", {0, 2});
+    graph_.add_node(sq);
+    graph_.set_inputs({in});
+    graph_.set_outputs({out});
+
+    Tensor x = randn({1, 3, 1, 4}, DType::Float32, Device::cpu());
+    auto outs = graph_.forward({Variable(x, /*requires_grad=*/false)});
+    ASSERT_EQ(outs.size(), 1u);
+    auto sh = outs[0].tensor().shape();
+    std::vector<int64_t> got(sh.begin(), sh.end());
+    EXPECT_EQ(got, (std::vector<int64_t>{3, 4}));
+}
+
 TEST_F(JITGraphTest, ReplaceNodeInput) {
     auto in1 = graph_.create_value("in1", {4}, DType::Float32, Device::cpu());
     auto in2 = graph_.create_value("in2", {4}, DType::Float32, Device::cpu());

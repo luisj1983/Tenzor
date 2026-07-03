@@ -51,7 +51,7 @@ namespace jit {
  *                  device at execution time, so a graph traced on one
  *                  backend can replay on any other.
  */
-constexpr uint32_t SERIALIZATION_VERSION = 3;
+constexpr uint32_t SERIALIZATION_VERSION = 4;  // v4: user KV metadata section
 
 /**
  * @brief Magic number for Tenzor JIT files.

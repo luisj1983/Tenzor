@@ -10,6 +10,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/jit/compile.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -48,7 +49,10 @@ void check_matches_eager(const std::string& name, FnT fn,
     auto x = ::tenzor::Variable(raw, /*requires_grad=*/false);
 
     auto eager  = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
 
     auto diff = ::tenzor::max(::tenzor::abs(
         eager.tensor() - jitted.tensor())).template item<float>();
@@ -112,7 +116,10 @@ TEST(OpReductions, SumFloat16WidensAccumulator) {
     auto raw = ::tenzor::ones({1, 4096}, ::tenzor::DType::Float16);
     auto x   = ::tenzor::Variable(raw, /*requires_grad=*/false);
     auto eager  = fn(x).tensor();
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x).tensor();
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto diff = ::tenzor::max(::tenzor::abs(eager - jitted))
                     .to(::tenzor::DType::Float32).template item<float>();
     EXPECT_LT(diff, 1.0F) << "F16 sum JIT vs eager diff=" << diff;
@@ -130,7 +137,10 @@ TEST(OpReductions, MeanFloat16WidensAccumulator) {
     auto raw = ::tenzor::ones({1, 4096}, ::tenzor::DType::Float16);
     auto x   = ::tenzor::Variable(raw, /*requires_grad=*/false);
     auto eager  = fn(x).tensor();
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x).tensor();
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto diff = ::tenzor::max(::tenzor::abs(eager - jitted))
                     .to(::tenzor::DType::Float32).template item<float>();
     EXPECT_LT(diff, 1e-2F) << "F16 mean JIT vs eager diff=" << diff;

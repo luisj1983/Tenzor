@@ -1387,18 +1387,47 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Squeeze:
                 if (!input_sym_shapes.empty()) {
                     auto sym_shape = input_sym_shapes[0];
-                    int64_t dim = node->get_int_attr("dim");
-                    // Normalize a negative dim (e.g. squeeze(-1)) before indexing;
-                    // the concrete infer_types path does this too. Without it, the
-                    // cast to size_t below turns -1 into SIZE_MAX -> OOB read.
-                    if (dim < 0) {
-                        dim += static_cast<int64_t>(sym_shape.rank());
-                    }
-                    if (dim >= 0 && dim < static_cast<int64_t>(sym_shape.rank())) {
-                        auto& d = sym_shape[static_cast<size_t>(dim)];
-                        // Only squeeze if concrete and equal to 1
-                        if (d.is_concrete() && d.value() == 1) {
+                    int64_t rank = static_cast<int64_t>(sym_shape.rank());
+                    // Only a CONCRETE size-1 dim can be squeezed; an unknown
+                    // symbolic dim is conservatively kept. Mirrors the three
+                    // cases handled by concrete infer_types (dims vec / scalar
+                    // dim / no attr = remove all), which the old dim-0-only
+                    // path disagreed with.
+                    auto is_one = [](const SymbolicDim& d) {
+                        return d.is_concrete() && d.value() == 1;
+                    };
+                    if (node->has_attr("dims")) {
+                        auto dims = node->get_vec_attr("dims");
+                        std::vector<int64_t> norm;
+                        for (int64_t d : dims) {
+                            if (d < 0) d += rank;
+                            norm.push_back(d);
+                        }
+                        std::sort(norm.begin(), norm.end(),
+                                  [](int64_t a, int64_t b) { return a > b; });
+                        for (int64_t d : norm) {
+                            if (d >= 0 &&
+                                d < static_cast<int64_t>(sym_shape.rank()) &&
+                                is_one(sym_shape[static_cast<size_t>(d)])) {
+                                sym_shape.erase(static_cast<size_t>(d));
+                            }
+                        }
+                    } else if (node->has_attr("dim")) {
+                        int64_t dim = node->get_int_attr("dim");
+                        if (dim < 0) dim += rank;
+                        if (dim >= 0 && dim < rank &&
+                            is_one(sym_shape[static_cast<size_t>(dim)])) {
                             sym_shape.erase(static_cast<size_t>(dim));
+                        }
+                    } else {
+                        // No dim: remove ALL concrete size-1 dims (torch
+                        // squeeze()). Walk high->low so erase() doesn't shift
+                        // the indices of not-yet-visited dims.
+                        for (int64_t i = static_cast<int64_t>(sym_shape.rank()) - 1;
+                             i >= 0; --i) {
+                            if (is_one(sym_shape[static_cast<size_t>(i)])) {
+                                sym_shape.erase(static_cast<size_t>(i));
+                            }
                         }
                     }
                     output_sym_shapes.push_back(std::move(sym_shape));
@@ -2832,8 +2861,52 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Squeeze:
             if (!input_vars.empty()) {
-                int64_t dim = node->get_int_attr("dim");
-                outputs.push_back(tenzor::squeeze(input_vars[0], dim));
+                // Mirror infer_types: honor a "dims" vec (multi-axis), a scalar
+                // "dim", or NO attr (torch squeeze() = remove ALL size-1 dims).
+                // The old code read get_int_attr("dim") which defaults to 0 when
+                // absent, so a dims-vec or no-attr squeeze collapsed to "squeeze
+                // dim 0", producing the wrong tensor at runtime and disagreeing
+                // with infer_types. Compose the single-dim autograd squeeze so
+                // the grad chain is preserved; squeeze high->low so earlier
+                // removals don't shift the indices of later ones.
+                Variable x = input_vars[0];
+                int64_t rank = static_cast<int64_t>(x.tensor().shape().size());
+                auto shape_at = [&](int64_t i) {
+                    return x.tensor().shape()[static_cast<size_t>(i)];
+                };
+                if (node->has_attr("dims")) {
+                    auto dims = node->get_vec_attr("dims");
+                    std::vector<int64_t> norm;
+                    for (int64_t d : dims) {
+                        if (d < 0) d += rank;
+                        norm.push_back(d);
+                    }
+                    std::sort(norm.begin(), norm.end(),
+                              [](int64_t a, int64_t b) { return a > b; });
+                    for (int64_t d : norm) {
+                        if (d >= 0 &&
+                            d < static_cast<int64_t>(x.tensor().shape().size()) &&
+                            shape_at(d) == 1) {
+                            x = tenzor::squeeze(x, d);
+                        }
+                    }
+                } else if (node->has_attr("dim")) {
+                    int64_t dim = node->get_int_attr("dim");
+                    if (dim < 0) dim += rank;
+                    if (dim >= 0 && dim < rank && shape_at(dim) == 1) {
+                        x = tenzor::squeeze(x, dim);
+                    }
+                } else {
+                    std::vector<int64_t> ones;
+                    for (int64_t i = 0;
+                         i < static_cast<int64_t>(x.tensor().shape().size()); ++i) {
+                        if (shape_at(i) == 1) ones.push_back(i);
+                    }
+                    std::sort(ones.begin(), ones.end(),
+                              [](int64_t a, int64_t b) { return a > b; });
+                    for (int64_t d : ones) x = tenzor::squeeze(x, d);
+                }
+                outputs.push_back(x);
             }
             break;
 

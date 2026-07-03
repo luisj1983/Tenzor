@@ -1180,8 +1180,8 @@ TEST_F(JITCompilerTest, ConstantFolding_WithConstants) {
     ConstantFoldingPass pass;
     bool changed = pass.run(graph);
 
-    // Constant folding may or may not be implemented
-    EXPECT_GE(graph.num_nodes(), 0);
+    // const1 + const2 (both constant) must fold to a single constant.
+    EXPECT_TRUE(changed) << "ConstantFolding did not fold const + const";
 }
 
 TEST_F(JITCompilerTest, ConstantFolding_PassName) {
@@ -1276,13 +1276,23 @@ TEST_F(JITCompilerTest, FuseConvBatchNorm_WithPattern) {
     graph.set_inputs({input});
     graph.set_outputs({bn_out});
 
+    // Conv+BN fold needs the conv weight and BN gamma/running_var tensors — the
+    // pass bails without them, so the old EXPECT_LE passed vacuously (no fuse).
+    conv->set_tensor_attr("weight",
+                          tenzor::randn({16, 3, 3, 3}, DType::Float32, device_));
+    bn->set_tensor_attr("weight",       ones({16}, DType::Float32, device_));
+    bn->set_tensor_attr("bias",         zeros({16}, DType::Float32, device_));
+    bn->set_tensor_attr("running_mean", zeros({16}, DType::Float32, device_));
+    bn->set_tensor_attr("running_var",  ones({16}, DType::Float32, device_));
+    bn->set_attr("eps", 1e-5F);
+
     int orig_nodes = graph.num_nodes();
 
     FuseConvBatchNormPass pass;
     bool changed = pass.run(graph);
 
-    // Fusion may reduce nodes
-    EXPECT_LE(graph.num_nodes(), orig_nodes);
+    EXPECT_TRUE(changed) << "FuseConvBatchNorm did not fire on Conv->BN";
+    EXPECT_LT(graph.num_nodes(), orig_nodes) << "fusion did not reduce nodes";
 }
 
 TEST_F(JITCompilerTest, FuseConvBatchNorm_PassName) {
@@ -1326,7 +1336,10 @@ TEST_F(JITCompilerTest, FuseConvReLU_WithPattern) {
     FuseConvReluPass pass;
     bool changed = pass.run(graph);
 
-    EXPECT_LE(graph.num_nodes(), orig_nodes);
+    // Must actually fire on Conv->ReLU (the old EXPECT_LE also held on a no-op,
+    // so a pass that stopped matching would pass the test silently).
+    EXPECT_TRUE(changed) << "FuseConvReLU did not fire on Conv->ReLU";
+    EXPECT_LT(graph.num_nodes(), orig_nodes) << "fusion did not reduce nodes";
 }
 
 TEST_F(JITCompilerTest, FuseConvReLU_PassName) {
@@ -1370,7 +1383,8 @@ TEST_F(JITCompilerTest, FuseLinearReLU_WithPattern) {
     FuseLinearReluPass pass;
     bool changed = pass.run(graph);
 
-    EXPECT_LE(graph.num_nodes(), orig_nodes);
+    EXPECT_TRUE(changed) << "FuseLinearReLU did not fire on Linear->ReLU";
+    EXPECT_LT(graph.num_nodes(), orig_nodes) << "fusion did not reduce nodes";
 }
 
 TEST_F(JITCompilerTest, FuseLinearReLU_PassName) {
@@ -1413,8 +1427,9 @@ TEST_F(JITCompilerTest, AlgebraicSimplification_AddZero) {
     AlgebraicSimplificationPass pass;
     bool changed = pass.run(graph);
 
-    // x + 0 should simplify to x
-    EXPECT_GE(graph.num_nodes(), 0);
+    // x + 0 should simplify to x — the pass must actually report a change
+    // (the old EXPECT_GE(num_nodes,0) is always true and proved nothing).
+    EXPECT_TRUE(changed) << "AlgebraicSimplification did not simplify x + 0";
 }
 
 TEST_F(JITCompilerTest, AlgebraicSimplification_MulOne) {
@@ -1443,8 +1458,8 @@ TEST_F(JITCompilerTest, AlgebraicSimplification_MulOne) {
     AlgebraicSimplificationPass pass;
     bool changed = pass.run(graph);
 
-    // x * 1 should simplify to x
-    EXPECT_GE(graph.num_nodes(), 0);
+    // x * 1 should simplify to x — the pass must actually report a change.
+    EXPECT_TRUE(changed) << "AlgebraicSimplification did not simplify x * 1";
 }
 
 TEST_F(JITCompilerTest, AlgebraicSimplification_PassName) {
@@ -1480,8 +1495,8 @@ TEST_F(JITCompilerTest, ReshapeElimination_IdentityReshape) {
     ReshapeEliminationPass pass;
     bool changed = pass.run(graph);
 
-    // Identity reshape should be eliminated
-    EXPECT_GE(graph.num_nodes(), 0);
+    // An identity reshape (output shape == input shape) must be eliminated.
+    EXPECT_TRUE(changed) << "ReshapeElimination did not remove the identity reshape";
 }
 
 TEST_F(JITCompilerTest, ReshapeElimination_ChainedReshapes) {
@@ -1513,8 +1528,13 @@ TEST_F(JITCompilerTest, ReshapeElimination_ChainedReshapes) {
     ReshapeEliminationPass pass;
     bool changed = pass.run(graph);
 
-    // Chained reshapes should be merged
-    EXPECT_LE(graph.num_nodes(), orig_nodes);
+    // The pass MUST act on the chain [2,3]->[6]->[3,2]: it merges by pointing
+    // reshape2 straight at the input. The intermediate reshape becomes dead and
+    // is dropped by a later DCE pass, so the node count here is unchanged — the
+    // merge is a redirect, not an in-place removal (verified: changed==true,
+    // num_nodes==orig). The old EXPECT_LE proved nothing; assert the pass fires.
+    (void)orig_nodes;
+    EXPECT_TRUE(changed) << "ReshapeElimination did not merge the chained reshapes";
 }
 
 TEST_F(JITCompilerTest, ReshapeElimination_PassName) {

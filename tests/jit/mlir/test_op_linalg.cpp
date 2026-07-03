@@ -9,6 +9,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/jit/compile.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -51,7 +52,10 @@ TEST(OpLinalg, MatMul2D) {
     auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
     auto eager  = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto diff = ::tenzor::max(::tenzor::abs(
         eager.tensor() - jitted.tensor())).template item<float>();
     EXPECT_LT(diff, 1e-3F) << "matmul diff=" << diff;
@@ -73,7 +77,10 @@ TEST(OpLinalg, Bmm3D) {
     auto raw = ::tenzor::randn({3, 4, 5}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
     auto eager  = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto diff = ::tenzor::max(::tenzor::abs(
         eager.tensor() - jitted.tensor())).template item<float>();
     EXPECT_LT(diff, 1e-3F) << "bmm diff=" << diff;
@@ -96,7 +103,10 @@ TEST(OpLinalg, LinearWithBias) {
     auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
     auto eager  = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto diff = ::tenzor::max(::tenzor::abs(
         eager.tensor() - jitted.tensor())).template item<float>();
     EXPECT_LT(diff, 1e-3F) << "linear diff=" << diff;
@@ -127,7 +137,10 @@ TEST(OpLinalg, MatMulUnequalRankBatchLhs) {
     auto raw = ::tenzor::randn({2, 4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
     auto eager  = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto diff = ::tenzor::max(::tenzor::abs(
         eager.tensor() - jitted.tensor())).template item<float>();
     EXPECT_LT(diff, 1e-3F) << "matmul rank-3 lhs @ rank-2 rhs diff=" << diff;
@@ -151,7 +164,10 @@ TEST(OpLinalg, MatMulUnequalRankBatchRhs) {
     auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
     auto eager  = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jitted = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto diff = ::tenzor::max(::tenzor::abs(
         eager.tensor() - jitted.tensor())).template item<float>();
     EXPECT_LT(diff, 1e-3F) << "matmul rank-2 lhs @ rank-3 rhs diff=" << diff;

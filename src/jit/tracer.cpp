@@ -85,6 +85,13 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::ShapeGuard: return "ShapeGuard";
         case OpType::SwapOut: return "SwapOut";
         case OpType::SwapIn: return "SwapIn";
+        case OpType::GuardNode: return "GuardNode";
+        case OpType::QuantizedLinear: return "QuantizedLinear";
+        case OpType::QuantizedConv2d: return "QuantizedConv2d";
+        case OpType::Dequantize: return "Dequantize";
+        case OpType::Quantize: return "Quantize";
+        case OpType::SparseMatMul: return "SparseMatMul";
+        case OpType::DenseToSparse: return "DenseToSparse";
         case OpType::Constant: return "Constant";
         case OpType::Input: return "Input";
         case OpType::Output: return "Output";
@@ -169,6 +176,13 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"ShapeGuard", OpType::ShapeGuard},
         {"SwapOut", OpType::SwapOut},
         {"SwapIn", OpType::SwapIn},
+        {"GuardNode", OpType::GuardNode},
+        {"QuantizedLinear", OpType::QuantizedLinear},
+        {"QuantizedConv2d", OpType::QuantizedConv2d},
+        {"Dequantize", OpType::Dequantize},
+        {"Quantize", OpType::Quantize},
+        {"SparseMatMul", OpType::SparseMatMul},
+        {"DenseToSparse", OpType::DenseToSparse},
         {"Constant", OpType::Constant},
         {"Input", OpType::Input},
         {"Output", OpType::Output},
@@ -584,7 +598,8 @@ auto inplace_opid_to_optype(OpId op) -> std::optional<OpType> {
 
 auto Tracer::record_inplace(OpId op, Tensor& target,
                             std::span<const Tensor> others,
-                            const OpAttributes& attrs) -> void {
+                            const OpAttributes& attrs,
+                            const Tensor* pre_snapshot) -> void {
     if (!tracing_) return;
 
     auto op_type = inplace_opid_to_optype(op);
@@ -602,6 +617,15 @@ auto Tracer::record_inplace(OpId op, Tensor& target,
     // — and therefore the tracer fingerprint — unchanged, so the fingerprint
     // still resolves to the pre-op value at this point.
     std::string old_id = register_tensor(target);
+
+    // register_tensor stored a SHALLOW copy of `target`, which now shares the
+    // post-mutation storage. old_id semantically represents the PRE-op value
+    // and may be baked as a captured constant in end_trace(); overwrite its
+    // retained storage with the pre-mutation deep copy so the baked constant
+    // (and any functional replay reading old_id) sees the correct pre-op data.
+    if (pre_snapshot) {
+        tensor_storage_[old_id] = *pre_snapshot;
+    }
 
     std::vector<std::string> input_ids;
     input_ids.reserve(others.size() + 1);
@@ -808,10 +832,12 @@ TracingGuard::TracingGuard() : tracer_(Tracer::get_instance()) {
     // functional node so replay applies the mutation.
     tenzor::detail::set_inplace_op_hook(
         [this](OpId op, Tensor& target, const Tensor* others,
-               std::size_t num_others, const OpAttributes& attrs) {
+               std::size_t num_others, const OpAttributes& attrs,
+               const Tensor* pre_snapshot) {
             tracer_.record_inplace(
                 op, target,
-                std::span<const Tensor>(others, num_others), attrs);
+                std::span<const Tensor>(others, num_others), attrs,
+                pre_snapshot);
         });
 }
 

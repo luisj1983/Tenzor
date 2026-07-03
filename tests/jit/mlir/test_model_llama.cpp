@@ -55,14 +55,19 @@ auto backend_present(const std::string& name) -> bool {
 
 auto target_hw_present(const std::string& target) -> bool {
     if (target == "llvm-cpu")     return true;
-    if (target == "cuda")         return backend_present("cuda");
+    // cuda/vulkan gate on IREE device-init capability (like rocm below), NOT on
+    // the Tenzor backend .so — IREE drives the GPU directly and run_jit_match
+    // keeps eager on CPU (Path C.2) when the backend is absent.
+    if (target == "cuda")
+        return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("cuda");
     // rocm gating: Path C.2 (see docs/superpowers/plans/
     // 2026-05-19-tz-jit-mlir-phase1a.md). Probe IREE's HIP HAL directly
     // — the Tenzor ROCm backend isn't required, only working ROCm libs
     // that the IREE runtime can dlopen.
     if (target == "rocm")
         return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("hip");
-    if (target == "vulkan-spirv") return backend_present("vulkan");
+    if (target == "vulkan-spirv")
+        return ::tenzor::jit::mlir_jit::iree_can_initialize_default_device("vulkan");
     return false;
 }
 
@@ -401,7 +406,13 @@ void run_jit_match(const std::string& target) {
         return m.forward(t);
     };
     auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jit_out  = compiled(tokens);
+    // Prove the IREE compile+run path executed rather than a silent eager
+    // fallback (which would make the parity check vacuous — eager-vs-eager).
+    ASSERT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "MiniLlama did NOT run through IREE (silent eager fallback); target="
+        << target;
 
     const auto e_shape = eager.tensor().shape();
     const auto j_shape = jit_out.tensor().shape();

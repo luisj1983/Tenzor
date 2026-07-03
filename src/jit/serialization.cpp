@@ -9,9 +9,55 @@
 #include <sstream>
 #include <iomanip>
 #include <limits>
+#include <bit>
+#include <array>
+#include <algorithm>
+#include <cstddef>
 
 namespace tenzor {
 namespace jit {
+
+namespace {
+
+// The on-disk graph format is little-endian-canonical (as the header
+// documents). On little-endian hosts these helpers compile to a no-op — the
+// existing round-trip tests therefore fully exercise the format; on big-endian
+// hosts they byte-swap so a graph written on one endianness loads correctly on
+// the other. Correct-by-construction: std::reverse on the object's bytes is a
+// well-defined endianness flip for any trivially-copyable scalar.
+template <typename T>
+[[nodiscard]] auto to_little_endian(T value) -> T {
+    static_assert(std::is_trivially_copyable_v<T>);
+    if constexpr (std::endian::native == std::endian::little) {
+        return value;
+    } else {
+        auto bytes = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
+        std::reverse(bytes.begin(), bytes.end());
+        return std::bit_cast<T>(bytes);
+    }
+}
+
+// Reading is symmetric with writing (a second reversal restores host order).
+template <typename T>
+[[nodiscard]] auto from_little_endian(T value) -> T {
+    return to_little_endian(value);
+}
+
+// Byte-swap each scalar component of a raw tensor payload in place. `unit` is
+// the component width (dtype_size, except complex where each of the two
+// real/imag components is swapped independently). No-op on little-endian hosts.
+inline auto normalize_payload_endianness([[maybe_unused]] char* data,
+                                         [[maybe_unused]] size_t nbytes,
+                                         [[maybe_unused]] size_t unit) -> void {
+    if constexpr (std::endian::native != std::endian::little) {
+        if (unit <= 1) return;
+        for (size_t off = 0; off + unit <= nbytes; off += unit) {
+            std::reverse(data + off, data + off + unit);
+        }
+    }
+}
+
+}  // namespace
 
 // ============================================================================
 // GraphWriter Implementation
@@ -68,6 +114,15 @@ auto GraphWriter::write_metadata(const Graph& graph) -> void {
     write_uint64(graph.num_values());
     write_uint64(graph.inputs().size());
     write_uint64(graph.outputs().size());
+    // v4: user KV metadata (model_name/version/dtype/…). Written as a count
+    // followed by (key, value) string pairs so a reloaded graph carries the
+    // same annotations.
+    const auto& md = graph.string_metadata();
+    write_uint64(md.size());
+    for (const auto& [key, value] : md) {
+        write_string(key);
+        write_string(value);
+    }
 }
 
 auto GraphWriter::write_values(const Graph& graph) -> void {
@@ -211,22 +266,27 @@ auto GraphWriter::write_tensors([[maybe_unused]] const Graph& graph) -> void {
 }
 
 auto GraphWriter::write_uint32(uint32_t val) -> void {
+    val = to_little_endian(val);
     file_.write(reinterpret_cast<const char*>(&val), sizeof(val));
 }
 
 auto GraphWriter::write_uint64(uint64_t val) -> void {
+    val = to_little_endian(val);
     file_.write(reinterpret_cast<const char*>(&val), sizeof(val));
 }
 
 auto GraphWriter::write_int64(int64_t val) -> void {
+    val = to_little_endian(val);
     file_.write(reinterpret_cast<const char*>(&val), sizeof(val));
 }
 
 auto GraphWriter::write_float(float val) -> void {
+    val = to_little_endian(val);
     file_.write(reinterpret_cast<const char*>(&val), sizeof(val));
 }
 
 auto GraphWriter::write_double(double val) -> void {
+    val = to_little_endian(val);
     file_.write(reinterpret_cast<const char*>(&val), sizeof(val));
 }
 
@@ -266,7 +326,19 @@ auto GraphWriter::write_tensor(const Tensor& tensor) -> void {
                       : tensor.to(Device::cpu()).contiguous();
     size_t data_size = host.numel() * host.dtype_size();
     write_uint64(data_size);
-    file_.write(reinterpret_cast<const char*>(host.data_ptr()), data_size);
+    if constexpr (std::endian::native == std::endian::little) {
+        file_.write(reinterpret_cast<const char*>(host.data_ptr()), data_size);
+    } else {
+        // Serialize a little-endian-normalized copy without mutating the
+        // tensor's own storage.
+        std::vector<char> tmp(
+            reinterpret_cast<const char*>(host.data_ptr()),
+            reinterpret_cast<const char*>(host.data_ptr()) + data_size);
+        size_t unit = is_complex_type(host.dtype()) ? host.dtype_size() / 2
+                                                     : host.dtype_size();
+        normalize_payload_endianness(tmp.data(), data_size, unit);
+        file_.write(tmp.data(), data_size);
+    }
 }
 
 auto GraphWriter::write_int64_vector(const std::vector<int64_t>& vec) -> void {
@@ -340,7 +412,20 @@ auto GraphReader::read_metadata(Graph& graph) -> void {
     (void)read_uint64();  // num_values — consumed by read_values() directly
     meta_num_inputs_ = read_uint64();
     meta_num_outputs_ = read_uint64();
-    (void)graph;
+    // v4: user KV metadata. Bound the declared pair count against the remaining
+    // file length before the loop (each pair reads two length-prefixed strings),
+    // mirroring the other readers' anti-DoS guards.
+    uint64_t md_count = read_uint64();
+    if (md_count > remaining_bytes()) {
+        throw std::runtime_error(
+            "GraphReader::read_metadata: metadata pair count (" +
+            std::to_string(md_count) + ") exceeds remaining file bytes");
+    }
+    for (uint64_t i = 0; i < md_count; ++i) {
+        std::string key = read_string();
+        std::string value = read_string();
+        graph.set_string_metadata(key, value);
+    }
 }
 
 auto GraphReader::read_values(Graph& graph) -> void {
@@ -616,7 +701,7 @@ auto GraphReader::read_uint32() -> uint32_t {
     if (!file_) {
         throw std::runtime_error("GraphReader::read_uint32: truncated file");
     }
-    return val;
+    return from_little_endian(val);
 }
 
 auto GraphReader::read_uint64() -> uint64_t {
@@ -625,7 +710,7 @@ auto GraphReader::read_uint64() -> uint64_t {
     if (!file_) {
         throw std::runtime_error("GraphReader::read_uint64: truncated file");
     }
-    return val;
+    return from_little_endian(val);
 }
 
 auto GraphReader::read_int64() -> int64_t {
@@ -634,7 +719,7 @@ auto GraphReader::read_int64() -> int64_t {
     if (!file_) {
         throw std::runtime_error("GraphReader::read_int64: truncated file");
     }
-    return val;
+    return from_little_endian(val);
 }
 
 auto GraphReader::read_float() -> float {
@@ -643,7 +728,7 @@ auto GraphReader::read_float() -> float {
     if (!file_) {
         throw std::runtime_error("GraphReader::read_float: truncated file");
     }
-    return val;
+    return from_little_endian(val);
 }
 
 auto GraphReader::read_double() -> double {
@@ -652,7 +737,7 @@ auto GraphReader::read_double() -> double {
     if (!file_) {
         throw std::runtime_error("GraphReader::read_double: truncated file");
     }
-    return val;
+    return from_little_endian(val);
 }
 
 auto GraphReader::read_bool() -> bool {
@@ -773,6 +858,15 @@ auto GraphReader::read_tensor() -> Tensor {
                static_cast<std::streamsize>(data_size));
     if (!file_) {
         throw std::runtime_error("GraphReader::read_tensor: truncated tensor data");
+    }
+
+    // Payload was written little-endian-canonical; restore host order (no-op on
+    // little-endian hosts).
+    if constexpr (std::endian::native != std::endian::little) {
+        size_t unit = is_complex_type(dtype) ? dtype_size(dtype) / 2
+                                              : dtype_size(dtype);
+        normalize_payload_endianness(reinterpret_cast<char*>(tensor.data_ptr()),
+                                     data_size, unit);
     }
 
     return tensor;

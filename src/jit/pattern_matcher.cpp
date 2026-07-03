@@ -262,10 +262,17 @@ auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
     // carry the same reduction axis (and keepdim) before accepting the match.
     // Absent `dim`/`keepdim` attrs mean the op's canonical default, so two nodes
     // both lacking the attr agree.
-    auto reduce_dim = [](const std::shared_ptr<Node>& n) -> std::optional<int64_t> {
-        return n->has_int_attr("dim")
-                   ? std::optional<int64_t>{n->get_int_attr("dim")}
-                   : std::nullopt;
+    // Normalize negative dims to [0,rank) before comparing so a graph carrying
+    // dim=-1 on Max and dim=rank-1 on Sum (the same axis) is recognized as a
+    // match instead of being rejected — mirrors match_layer_norm.
+    int64_t sm_rank = static_cast<int64_t>(
+        n0->inputs().empty() ? 0 : n0->inputs()[0]->shape().size());
+    auto reduce_dim = [sm_rank](const std::shared_ptr<Node>& n)
+            -> std::optional<int64_t> {
+        if (!n->has_int_attr("dim")) return std::nullopt;
+        int64_t d = n->get_int_attr("dim");
+        if (d < 0) d += sm_rank;
+        return d;
     };
     auto reduce_keepdim = [](const std::shared_ptr<Node>& n) -> bool {
         return n->has_attr("keepdim") ? n->get_bool_attr("keepdim") : false;
@@ -648,10 +655,18 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
     size_t idx = start_idx + 1;
     bool found_reduction = false;
 
-    // Collect pre-reduction element-wise ops
+    // Collect pre-reduction element-wise ops. Each appended node must actually
+    // consume the previously matched node's output: matching purely on
+    // positional adjacency + single-use (as this did before) let a run of
+    // data-INDEPENDENT single-use ops fuse into one Reduction match, which
+    // execute_extended_fused evaluates over a single input and collapses
+    // several independent graph outputs into one (silently wrong / dropped
+    // subgraph). Mirror match_layer_norm/match_softmax and require a real data
+    // edge.
     while (idx < nodes.size() && !found_reduction) {
         auto& nk = nodes[idx];
         if (used.count(nk.get())) break;
+        if (!consumes_output(matched.back(), nk)) break;
 
         if (is_reduction(nk->op_type())) {
             matched.push_back(nk);
@@ -672,6 +687,7 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
         auto& nk = nodes[idx];
         if (used.count(nk.get()) || !is_elementwise(nk->op_type())) break;
         if (!has_single_use(matched.back())) break;
+        if (!consumes_output(matched.back(), nk)) break;
         matched.push_back(nk);
         ++idx;
     }
@@ -682,6 +698,21 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
     // Verify single-use for all intermediate nodes
     for (size_t i = 0; i + 1 < matched.size(); ++i) {
         if (!has_single_use(matched[i])) return std::nullopt;
+    }
+
+    // No intermediate output may escape the matched group: an external consumer
+    // would lose its input when the group is replaced by the single fused
+    // reduction kernel. Mirrors the group check in match_layer_norm.
+    {
+        std::unordered_set<Node*> grp;
+        for (const auto& n : matched) grp.insert(n.get());
+        for (size_t i = 0; i + 1 < matched.size(); ++i) {
+            if (matched[i]->outputs().empty()) return std::nullopt;
+            for (const auto& u : matched[i]->outputs()[0]->uses()) {
+                auto up = u.lock();
+                if (up && grp.count(up.get()) == 0) return std::nullopt;
+            }
+        }
     }
 
     FusionMatch match;

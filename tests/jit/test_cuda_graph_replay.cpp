@@ -126,3 +126,47 @@ TEST_F(CudaGraphReplay, ReplayWithChangedInputsReturnsFreshResult) {
         EXPECT_FLOAT_EQ(p2[i], 6.0f) << "second replay at " << i;
     }
 }
+
+// capture_cuda_graph retains PRIVATE (cloned) input buffers. replay copies fresh
+// data into those buffers device-to-device; if they aliased the caller's
+// capture-time tensor (contiguous() returns the same tensor when already
+// contiguous), replay would silently overwrite it. Assert the caller's
+// capture-time input is untouched after a replay with different data.
+TEST_F(CudaGraphReplay, ReplayDoesNotClobberCallerCaptureInput) {
+    const Device cuda = Device::cuda(0);
+
+    auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
+        return {args[0] + args[0]};
+    };
+
+    Tensor x0 = full({4}, 1.0f, DType::Float32, cuda);  // caller keeps this
+    std::vector<Variable> trace_inputs = {Variable(x0, /*requires_grad=*/false)};
+    std::shared_ptr<jit::Graph> graph = jit::trace(closure, trace_inputs);
+    ASSERT_NE(graph, nullptr);
+    auto module = std::make_shared<jit::CompiledModule>(graph);
+
+    try {
+        module->capture_cuda_graph({x0});
+    } catch (const std::exception& e) {
+        std::string msg = e.what();
+        if (msg.find("GPU is not available") != std::string::npos ||
+            msg.find("cannot capture graph") != std::string::npos) {
+            GTEST_SKIP() << "CUDAGraph::create() is stubbed in this build: " << msg;
+        }
+        throw;
+    }
+    ASSERT_TRUE(module->has_cuda_graph());
+
+    // Replay with all-5s. Pre-fix (aliased buffer) this device-to-device copy
+    // would overwrite x0's storage; post-fix (private clone) x0 stays all-1s.
+    Tensor x1 = full({4}, 5.0f, DType::Float32, cuda);
+    std::vector<Tensor> replay_inputs = {x1};
+    ASSERT_TRUE(module->replay_cuda_graph(replay_inputs));
+
+    Tensor x0_host = x0.to(Device::cpu());
+    const float* p = x0_host.data<float>();
+    for (int64_t i = 0; i < x0_host.numel(); ++i) {
+        EXPECT_FLOAT_EQ(p[i], 1.0f)
+            << "caller's capture-time input was clobbered by replay at " << i;
+    }
+}

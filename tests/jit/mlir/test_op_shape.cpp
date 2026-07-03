@@ -244,7 +244,11 @@ void expect_jit_matches_eager(::tenzor::jit::CompiledFunction::FnType fn,
     auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
 
     auto eager = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jit   = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback would make the "
+           "numeric check below vacuous; llvm-cpu)";
 
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
     auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());

@@ -849,11 +849,19 @@ auto invoke_subprocess(IreeInvoker& self,
     // ~3-digit mantissa precision, so no bits are lost.
     std::string npy_path;
     {
+        // The temp path MUST end in ".npy": iree-run-module's `--output=@path`
+        // selects the output serialization from the file EXTENSION. Without
+        // ".npy" it writes a raw little-endian buffer dump, which read_npy_output
+        // then rejects as "bad .npy magic" — so the run silently fell back to
+        // eager (this path is the only route for targets whose in-process HAL
+        // isn't linked, e.g. ROCm, meaning ROCm JIT never actually executed).
+        // mkstemps() keeps the fixed ".npy" suffix (4 chars) while randomizing
+        // the XXXXXX template.
         std::string tmpl = (std::filesystem::temp_directory_path() /
-                            "tenzor_iree_out_XXXXXX").string();
+                            "tenzor_iree_out_XXXXXX.npy").string();
         std::vector<char> buf(tmpl.begin(), tmpl.end());
         buf.push_back('\0');
-        int fd = ::mkstemp(buf.data());
+        int fd = ::mkstemps(buf.data(), 4);
         if (fd >= 0) {
             ::close(fd);
             npy_path.assign(buf.data());

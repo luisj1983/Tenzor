@@ -92,10 +92,12 @@ void py_tracer_refresh_hooks() {
     tenzor::detail::set_inplace_op_hook(
         [top](tenzor::OpId op, tenzor::Tensor& target,
               const tenzor::Tensor* others, std::size_t num_others,
-              const tenzor::OpAttributes& attrs) {
+              const tenzor::OpAttributes& attrs,
+              const tenzor::Tensor* pre_snapshot) {
             top->record_inplace(
                 op, target,
-                std::span<const tenzor::Tensor>(others, num_others), attrs);
+                std::span<const tenzor::Tensor>(others, num_others), attrs,
+                pre_snapshot);
         });
 }
 
@@ -666,62 +668,93 @@ void register_jit(py::module_& m) {
     // Python objects after the trace lambda's inner py::gil_scoped_acquire
     // re-enters for user callbacks, so we drop the GIL across the whole
     // call to let other Python threads make progress.
+    // Accept ONE example per argument of the traced function (py::args). The
+    // single-example form dropped every argument after the first, so a
+    // multi-input JIT function was re-traced with one example and errored.
     jit.def("show_graph",
-        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
-           const tenzor::Variable& example) {
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf, py::args examples) {
             if (!cf) {
                 throw std::runtime_error(
                     "show_graph: passed object is not a tz.jit-compiled "
                     "function (no _tz_compiled attribute)");
             }
+            std::vector<tenzor::Variable> inputs;
+            inputs.reserve(examples.size());
+            for (auto& a : examples) inputs.push_back(a.cast<tenzor::Variable>());
+            if (inputs.empty()) {
+                throw std::invalid_argument(
+                    "show_graph: expected at least one example Variable");
+            }
             py::gil_scoped_release release;
-            return cf->dump_graph(example);
+            return cf->dump_graph(std::span<const tenzor::Variable>(
+                inputs.data(), inputs.size()));
         },
-        py::arg("compiled"), py::arg("example"),
+        py::arg("compiled"),
         "Trace and dump the optimized tenzor::jit::Graph as text.");
 
     jit.def("show_mlir",
-        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
-           const tenzor::Variable& example) {
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf, py::args examples) {
             if (!cf) {
                 throw std::runtime_error(
                     "show_mlir: passed object is not a tz.jit-compiled "
                     "function");
             }
+            std::vector<tenzor::Variable> inputs;
+            inputs.reserve(examples.size());
+            for (auto& a : examples) inputs.push_back(a.cast<tenzor::Variable>());
+            if (inputs.empty()) {
+                throw std::invalid_argument(
+                    "show_mlir: expected at least one example Variable");
+            }
             py::gil_scoped_release release;
-            return cf->dump_mlir(example);
+            return cf->dump_mlir(std::span<const tenzor::Variable>(
+                inputs.data(), inputs.size()));
         },
-        py::arg("compiled"), py::arg("example"),
+        py::arg("compiled"),
         "Lower the traced graph and return the StableHLO text "
         "(plugin-enabled).");
 
     jit.def("show_stablehlo",
-        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
-           const tenzor::Variable& example) {
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf, py::args examples) {
             if (!cf) {
                 throw std::runtime_error(
                     "show_stablehlo: passed object is not a tz.jit-compiled "
                     "function");
             }
+            std::vector<tenzor::Variable> inputs;
+            inputs.reserve(examples.size());
+            for (auto& a : examples) inputs.push_back(a.cast<tenzor::Variable>());
+            if (inputs.empty()) {
+                throw std::invalid_argument(
+                    "show_stablehlo: expected at least one example Variable");
+            }
             py::gil_scoped_release release;
-            return cf->dump_stablehlo(example);
+            return cf->dump_stablehlo(std::span<const tenzor::Variable>(
+                inputs.data(), inputs.size()));
         },
-        py::arg("compiled"), py::arg("example"),
+        py::arg("compiled"),
         "Lower the traced graph with plugin_enabled=false (custom_call ops "
         "decomposed).");
 
     jit.def("show_iree",
-        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf,
-           const tenzor::Variable& example) {
+        [](std::shared_ptr<tenzor::jit::CompiledFunction> cf, py::args examples) {
             if (!cf) {
                 throw std::runtime_error(
                     "show_iree: passed object is not a tz.jit-compiled "
                     "function");
             }
+            std::vector<tenzor::Variable> inputs;
+            inputs.reserve(examples.size());
+            for (auto& a : examples) inputs.push_back(a.cast<tenzor::Variable>());
+            if (inputs.empty()) {
+                throw std::invalid_argument(
+                    "show_iree: expected at least one example Variable");
+            }
             py::gil_scoped_release release;
-            return cf->dump_iree(example);
+            return cf->dump_iree(std::span<const tenzor::Variable>(
+                inputs.data(), inputs.size()));
         },
-        py::arg("compiled"), py::arg("example"),
+        py::arg("compiled"),
         "Run iree-compile --mlir-print-ir-after-all on the lowered MLIR "
         "and return the captured pipeline trace.");
 

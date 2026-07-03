@@ -77,10 +77,16 @@ void notify_graph_break(const std::string& reason);
  * @param others Pointer to the additional input tensors (may be null if none).
  * @param num_others Count of additional inputs.
  * @param attrs  Op attributes (e.g. clamp bounds, leaky-relu slope).
+ * @param pre_snapshot Deep copy of `target` captured BEFORE the mutation, or
+ *        null if unavailable. The tracer needs this because the pre-op value id
+ *        it reuses for the node input may be a captured constant leaf that gets
+ *        baked into the graph — baking `target`'s post-mutation contents (they
+ *        share storage) would replay wrong (baked value already includes the
+ *        mutation, and the node re-applies it).
  */
 using InplaceOpHook = std::function<void(
     OpId op, Tensor& target, const Tensor* others, std::size_t num_others,
-    const OpAttributes& attrs)>;
+    const OpAttributes& attrs, const Tensor* pre_snapshot)>;
 
 /**
  * @brief Install an in-place op hook for the current thread.
@@ -96,7 +102,8 @@ void set_inplace_op_hook(InplaceOpHook hook);
  * installed, i.e. outside a trace.
  */
 void notify_inplace_op(OpId op, Tensor& target, const Tensor* others,
-                       std::size_t num_others, const OpAttributes& attrs);
+                       std::size_t num_others, const OpAttributes& attrs,
+                       const Tensor* pre_snapshot);
 
 /**
  * @brief True when an in-place hook is installed on this thread.

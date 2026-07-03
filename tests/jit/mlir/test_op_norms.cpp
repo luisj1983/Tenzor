@@ -12,6 +12,7 @@
 
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/mlir/lowering.hpp"
+#include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/tracer.hpp"
 #include "tenzor/tenzor.hpp"
@@ -144,7 +145,10 @@ void run_jit_vs_eager(::tenzor::jit::CompiledFunction::FnType fn,
     cfg.target  = "llvm-cpu";
     auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
     auto eager = fn(x);
+    ::tenzor::jit::mlir_jit::reset_cache_stats();
     auto jit   = compiled(x);
+    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
     auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
     auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))

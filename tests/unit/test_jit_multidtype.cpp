@@ -416,10 +416,23 @@ TEST_P(JITMultiDTypeTest, OptimizeDeadCodeElimination) {
     jit::optimize_for_inference(traced);
 
     auto graph = traced->graph();
-    // After DCE, the graph should still have at least one node for the used
-    // Linear layer's matmul. Assert the graph is well-formed rather than a
-    // specific node count (which depends on whether bias is fused in).
+    // NOTE (limitation): fc2 is registered but never CALLED in forward_impl, so
+    // it is never traced — there is no dead node in the graph for DCE to remove.
+    // This test therefore does not exercise DCE of a traced-but-unused node; it
+    // verifies the surviving fc1 path traces to a well-formed graph AND still
+    // computes the correct result after optimize_for_inference (the old test
+    // only checked nodes>0). Real DCE-on-traced-dead-node coverage would need a
+    // graph with a computed-then-discarded value.
     EXPECT_GT(graph->nodes().size(), 0u);
+    auto out = traced->forward(input);
+    EXPECT_EQ(out.tensor().dtype(), dtype());
+    auto out_shape = out.tensor().shape();
+    ASSERT_EQ(out_shape.size(), 2u);
+    EXPECT_EQ(out_shape[0], 2);   // batch
+    EXPECT_EQ(out_shape[1], 20);  // fc1: Linear(10 -> 20)
+    // Numerically equivalent to the un-traced model on the used path.
+    auto eager = model->forward(input);
+    expectTensorNear(out.tensor(), eager.tensor());
 }
 
 // ============================================================================
@@ -508,11 +521,21 @@ TEST_P(JITMultiDTypeTest, SerializeWithMetadata) {
     std::string filepath = get_test_path("model_with_metadata_" + dtype_str + "_" + backend_name() + ".pt");
     jit::save(traced, filepath);
 
-    // Metadata retrieval from the live traced module should work even if the
-    // replay-after-load path is broken (see SaveAndLoadModel).
+    // Metadata is retrievable from the live in-memory module.
     EXPECT_EQ(jit::get_metadata(traced, "model_name"), "SimpleLinearModel");
     EXPECT_EQ(jit::get_metadata(traced, "version"), "1.0");
     EXPECT_EQ(jit::get_metadata(traced, "dtype"), dtype_str);
+
+    // Full round-trip: user KV metadata is serialized with the graph (v4 format)
+    // and restored on load. Read it back from the RELOADED module — the old
+    // version queried the live in-memory module and so passed without testing
+    // save/load at all (and metadata persistence was in fact unimplemented until
+    // it was added alongside this assertion).
+    auto loaded = jit::load(filepath);
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(jit::get_metadata(loaded, "model_name"), "SimpleLinearModel");
+    EXPECT_EQ(jit::get_metadata(loaded, "version"), "1.0");
+    EXPECT_EQ(jit::get_metadata(loaded, "dtype"), dtype_str);
 }
 
 TEST_P(JITMultiDTypeTest, SerializeDifferentPrecisions) {
@@ -644,9 +667,15 @@ TEST_P(JITMultiDTypeTest, LoadIncompatibleDType) {
     std::string filepath = get_test_path("dtype_check_" + dtype_str + "_" + backend_name() + ".pt");
     jit::save(traced, filepath);
 
-    // Load and verify load succeeds
+    // Load and verify the round-trip PRESERVES the dtype (the old test only
+    // checked non-null, which SaveAndLoadModel already covers, and never
+    // exercised any dtype behavior despite the name). Run the loaded model and
+    // assert its output keeps the saved dtype.
     auto loaded = jit::load(filepath);
     ASSERT_NE(loaded, nullptr);
+    auto out = loaded->forward(input);
+    EXPECT_EQ(out.tensor().dtype(), dtype())
+        << "save/load did not preserve the model dtype";
 }
 
 // ============================================================================
