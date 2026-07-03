@@ -28,6 +28,7 @@
 #include "tenzor/tenzor.hpp"
 
 #include <gtest/gtest.h>
+#include "mlir_target_util.hpp"
 
 #include <functional>
 #include <string>
@@ -35,27 +36,20 @@
 
 namespace {
 
-auto ensure_core_init() -> void {
-    static const bool inited = []() {
-        ::tenzor::initialize();
-        return true;
-    }();
-    (void)inited;
-}
-
 using FnT = ::tenzor::jit::CompiledFunction::FnType;
 
+// Compile `fn` through the MLIR backend for EVERY IREE target usable on this
+// host (llvm-cpu always; cuda / rocm / vulkan-spirv when present) and assert
+// each target's JIT output matches the eager reference. Inputs live on CPU;
+// IREE marshals them onto the target device, so this exercises the GPU IREE
+// code paths without needing the corresponding Tenzor backend loaded.
 void check_matches_eager(const std::string& name, FnT fn,
                          std::vector<int64_t> shape = {16},
                          ::tenzor::DType dt = ::tenzor::DType::Float32,
                          float tol = 1e-5F,
                          bool positive_inputs = false) {
-    ensure_core_init();
-
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
 
     auto raw = ::tenzor::randn(shape, dt);
     if (positive_inputs) {
@@ -63,13 +57,24 @@ void check_matches_eager(const std::string& name, FnT fn,
         raw = ::tenzor::abs(raw) + 0.1F;
     }
     auto x = ::tenzor::Variable(raw, /*requires_grad=*/false);
+    auto eager = fn(x);
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
 
-    auto eager  = fn(x);
-    auto jitted = compiled(x);
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available (expected >=llvm-cpu)";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
 
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, tol) << "op=" << name << " diff=" << diff;
+        auto jitted = compiled(x);
+        auto jitted_cpu = jitted.tensor().to(::tenzor::Device::cpu());
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager_cpu - jitted_cpu)).template item<float>();
+        EXPECT_LT(diff, tol)
+            << "op=" << name << " target=" << target << " diff=" << diff;
+    }
 }
 
 }  // namespace

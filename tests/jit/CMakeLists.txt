@@ -57,6 +57,14 @@ add_executable(test_compile test_compile.cpp)
 target_link_libraries(test_compile PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_compile LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+# End-to-end trace/replay correctness for shape ops (transpose, flatten range)
+# and elementwise ops (sin, cos, rsqrt) + RMSNorm. Guards against traced
+# transpose/flatten losing their axes/range and against unmapped ops being
+# frozen as constants at trace time.
+add_executable(test_jit_trace_ops test_jit_trace_ops.cpp)
+target_link_libraries(test_jit_trace_ops PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_trace_ops LABELS "jit" DISCOVERY_TIMEOUT 60)
+
 add_executable(test_control_flow_compile test_control_flow_compile.cpp)
 target_link_libraries(test_control_flow_compile PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_control_flow_compile LABELS "jit" DISCOVERY_TIMEOUT 60)
@@ -84,6 +92,18 @@ tenzor_discover_tests(test_control_flow_hook_integration LABELS "jit" DISCOVERY_
 add_executable(test_jit_backend_parity test_jit_backend_parity.cpp)
 target_link_libraries(test_jit_backend_parity PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jit_backend_parity LABELS "jit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Scripted-if graph-break + in-place-op value-versioning correctness fixes (M7/M8)
+add_executable(test_jit_control_flow_inplace_fixes test_jit_control_flow_inplace_fixes.cpp)
+target_link_libraries(test_jit_control_flow_inplace_fixes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_control_flow_inplace_fixes LABELS "jit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# C4/M9: control-flow subgraph serialization round-trip + device-portable
+# constants. Verifies save/load preserves If/Loop then/else/body subgraphs and
+# that serialized constants replay on whatever backend the runtime inputs use.
+add_executable(test_jit_serialization_control_flow test_jit_serialization_control_flow.cpp)
+target_link_libraries(test_jit_serialization_control_flow PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_serialization_control_flow LABELS "jit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Graph-viz DOT schema validation (audit-2026-05-03 N4)
 add_executable(test_graph_viz_schema test_graph_viz_schema.cpp)

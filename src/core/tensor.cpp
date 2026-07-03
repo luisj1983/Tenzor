@@ -943,6 +943,35 @@ auto Tensor::to(DType dtype) const -> Tensor {
         return result;
     }
 
+    // CPU dtype conversion: route through the SAME OpId::Cast dispatch as the
+    // GPU branch above so a JIT trace records a `Cast` node uniformly on every
+    // backend. Previously the CPU path converted inline (no dispatch), so the
+    // dispatch interceptor never saw it and a traced mixed-precision model
+    // produced a DIFFERENT graph on CPU (Cast dropped) than on GPU. The CPU
+    // `Cast` kernel calls `cast_cpu_raw()` — not `to()` — so there is no
+    // re-dispatch recursion.
+    if (is_op_supported(OpId::Cast, Device::Type::CPU)) {
+        Tensor src = is_contiguous() ? *this : contiguous();
+        OpAttributes attrs;
+        attrs.set(AttrKey::TargetDtype, static_cast<int64_t>(static_cast<uint8_t>(dtype)));
+        Tensor result = dispatch_single(OpId::Cast, std::span<const Tensor>(&src, 1), attrs);
+        result.impl_->requires_grad = impl_->requires_grad;
+        return result;
+    }
+
+    // Fallback for the narrow window before the CPU backend registers its
+    // kernels (very early startup): perform the raw conversion directly.
+    return cast_cpu_raw(dtype);
+}
+
+auto Tensor::cast_cpu_raw(DType dtype) const -> Tensor {
+    if (!impl_) {
+        return *this;
+    }
+    if (impl_->dtype == dtype) {
+        return *this;
+    }
+
     // CPU dtype conversion (input is already on CPU; this is the genuine path).
     Tensor cpu_tensor = *this;
 

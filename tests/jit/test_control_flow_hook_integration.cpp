@@ -21,6 +21,7 @@
 #include <tenzor/jit/tracer.hpp>
 #include <tenzor/jit/control_flow.hpp>
 #include <tenzor/core/jit_hooks.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>  // is_op_supported, OpId
 
 namespace tenzor {
 namespace {
@@ -201,6 +202,108 @@ TEST_F(ControlFlowIntegrationTest, LoopBodySubgraphAttached) {
     // subgraph must contain at least one node.
     EXPECT_GE(loop_node->body()->nodes().size(), 1u);
     EXPECT_EQ(loop_node->body()->outputs().size(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// H5: a traced while_loop must replay through Graph::forward with EXACTLY the
+// same semantics as eager while_loop for 0, 1, and N iterations. The loop is
+// data-dependent: carried = {counter, limit}, cond = (limit - counter) > 0,
+// body increments counter. Replaying with different runtime `limit` values
+// drives a different iteration count, proving the compiled Loop executes the
+// body per-iteration (not baked to the trace-time count) and honours the
+// entry-condition-first (zero-iteration) contract.
+static void run_while_loop_replay_on(Device dev) {
+    // carried = {counter, limit}; cond = (limit - counter) > 0; body = counter+1.
+    // Constants live on `dev` so the body's Add stays on-device.
+    auto cond_fn = [](const std::vector<Variable>& s) -> Tensor {
+        return s[1].tensor() - s[0].tensor();  // positive while counter < limit
+    };
+    auto body_fn = [dev](const std::vector<Variable>& s) -> std::vector<Variable> {
+        auto one = Variable(full({1}, 1.0f, DType::Float32, dev), false);
+        return {s[0] + one, s[1]};
+    };
+
+    std::shared_ptr<jit::Graph> graph;
+    {
+        jit::TracingGuard guard;
+        auto counter = Variable(full({1}, 0.0f, DType::Float32, dev), false);
+        auto limit   = Variable(full({1}, 5.0f, DType::Float32, dev), false);
+        auto result = jit::while_loop(1000, cond_fn, body_fn, {counter, limit});
+        ASSERT_EQ(result.size(), 2u);
+        graph = Tracer::get_instance().end_trace({counter, limit}, {result[0], result[1]});
+    }
+    ASSERT_TRUE(graph);
+
+    std::shared_ptr<jit::Node> loop_node;
+    for (const auto& n : graph->nodes()) {
+        if (n->op_type() == jit::OpType::Loop) { loop_node = n; break; }
+    }
+    ASSERT_TRUE(loop_node);
+    ASSERT_TRUE(loop_node->body());
+
+    // For each runtime limit K (0 -> zero iterations), the compiled graph must
+    // produce the same final counter as eager while_loop.
+    for (float K : {0.0f, 1.0f, 3.0f, 7.0f, 20.0f}) {
+        auto counter_in = Variable(full({1}, 0.0f, DType::Float32, dev), false);
+        auto limit_in   = Variable(full({1}, K,    DType::Float32, dev), false);
+
+        auto eager = jit::while_loop(1000, cond_fn, body_fn, {counter_in, limit_in});
+        ASSERT_EQ(eager.size(), 2u);
+        float eager_counter = eager[0].tensor().to(Device::cpu()).data<float>()[0];
+        EXPECT_NEAR(eager_counter, K, 1e-5f)
+            << "eager sanity K=" << K << " dev=" << dev.to_string();
+
+        auto out = graph->forward({counter_in, limit_in});
+        ASSERT_EQ(out.size(), 2u) << "K=" << K << " dev=" << dev.to_string();
+        float replay_counter = out[0].tensor().to(Device::cpu()).data<float>()[0];
+        EXPECT_NEAR(replay_counter, eager_counter, 1e-5f)
+            << "compiled loop diverged from eager K=" << K << " dev=" << dev.to_string();
+    }
+}
+
+TEST_F(ControlFlowIntegrationTest, WhileLoopReplayMatchesEagerForVariousTripCounts) {
+    run_while_loop_replay_on(Device::cpu());
+    if (is_op_supported(OpId::Add, Device::Type::CUDA)) {
+        run_while_loop_replay_on(Device::cuda(0));
+    }
+    if (is_op_supported(OpId::Add, Device::Type::ROCm)) {
+        run_while_loop_replay_on(Device::rocm(0));
+    }
+}
+
+// H2: Tensor::to(dtype) must record a Cast node on CPU (previously it converted
+// inline with no dispatch, so a CPU trace silently dropped the conversion and
+// produced a different graph than GPU). Assert the trace contains Cast nodes
+// AND that the compiled graph replays identically to eager.
+TEST_F(ControlFlowIntegrationTest, ToDtypeRecordsCastNodeAndReplaysOnCpu) {
+    auto x = Variable(randn({2, 3}, DType::Float32, Device::cpu()), false);
+
+    std::shared_ptr<jit::Graph> graph;
+    {
+        jit::TracingGuard guard;
+        // F32 -> F64, double it, then F64 -> F32.
+        Variable f64(x.tensor().to(DType::Float64), false);
+        Variable doubled = f64 + f64;
+        Variable out(doubled.tensor().to(DType::Float32), false);
+        graph = Tracer::get_instance().end_trace({x}, {out});
+    }
+    ASSERT_TRUE(graph);
+
+    int cast_count = 0;
+    for (const auto& n : graph->nodes()) {
+        if (n->op_type() == jit::OpType::Cast) ++cast_count;
+    }
+    EXPECT_GE(cast_count, 2) << "CPU .to(dtype) must record Cast nodes in the trace";
+
+    auto xin = Variable(x.tensor().clone(), false);
+    auto out = graph->forward({xin});
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].tensor().dtype(), DType::Float32);
+
+    Tensor x64 = x.tensor().to(DType::Float64);
+    Tensor eager = (x64 + x64).to(DType::Float32);
+    auto diff = tenzor::max(tenzor::abs(out[0].tensor() - eager));
+    EXPECT_LT(diff.data<float>()[0], 1e-5f);
 }
 
 TEST_F(ControlFlowIntegrationTest, CondOutsideTraceRunsEagerly) {

@@ -54,29 +54,28 @@ TEST_P(ColorJitterTest, HueRotationChangesPixels) {
     // Pure red input — hue 0°, sat 1.0, val 1.0.
     auto input = make_rgb(1.0f, 0.0f, 0.0f);
 
-    // hue=0.5 ⇒ uniform draw in [-0.5, 0.5]: with seed=42 a non-zero shift
-    // is essentially guaranteed.  Force a non-trivial draw by sampling many
-    // times until we see a meaningful rotation.
-    bool any_changed = false;
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        ColorJitter jitter(/*brightness=*/0.0f, /*contrast=*/0.0f,
-                           /*saturation=*/0.0f, /*hue=*/0.5f);
-        auto cloned = input;  // ColorJitter writes to a copy already
-        auto [out, _] = jitter(cloned, Tensor{});
-        auto out_cpu = out.cpu();
-        const auto* o = out_cpu.data<float>();
-        // Original is (R=1, G=0, B=0).  After ANY non-zero hue shift it
-        // should differ in G or B by at least a small amount.
-        const float g_max = std::max({o[4], o[5], o[6], o[7]});
-        const float b_max = std::max({o[8], o[9], o[10], o[11]});
-        if (g_max > 1e-3f || b_max > 1e-3f) {
-            any_changed = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(any_changed)
-        << "hue shift did not change pixel values after 4 attempts — "
-           "audit item I.11 fix may have regressed";
+    // hue=0.5 ⇒ uniform draw in [-0.5, 0.5]. manual_seed(42) makes the draw
+    // DETERMINISTIC: the shift is a fixed non-zero value, so a single call must
+    // rotate pure red (R=1,G=0,B=0) into the blue channel. The value is stable
+    // and backend-independent (b_max ≈ 0.7528 on cpu/cuda/rocm/vulkan/oneapi).
+    // The previous 4-attempt retry loop was flakiness-masking: it re-drew the
+    // hue until one draw happened to be non-zero, which would have hidden a real
+    // regression where the hue transform stopped rotating (a zero draw + a
+    // broken transform both look like "no change" and the loop just tried again).
+    ColorJitter jitter(/*brightness=*/0.0f, /*contrast=*/0.0f,
+                       /*saturation=*/0.0f, /*hue=*/0.5f);
+    auto cloned = input;  // ColorJitter writes to a copy already
+    auto [out, _] = jitter(cloned, Tensor{});
+    auto out_cpu = out.cpu();
+    const auto* o = out_cpu.data<float>();
+    // Original is (R=1, G=0, B=0). A real hue rotation must move energy into G
+    // or B; assert a substantial (not epsilon) shift so a near-identity
+    // transform cannot sneak through.
+    const float g_max = std::max({o[4], o[5], o[6], o[7]});
+    const float b_max = std::max({o[8], o[9], o[10], o[11]});
+    EXPECT_GT(std::max(g_max, b_max), 0.1f)
+        << "hue shift did not rotate pure red into G/B — audit item I.11 fix "
+           "may have regressed (deterministic seed=42, expected b_max ≈ 0.75)";
 }
 
 // ---------------------------------------------------------------------------

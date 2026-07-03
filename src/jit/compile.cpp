@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -85,7 +86,37 @@ CompiledFunction::CompiledFunction(FnTypeN fn, CompileConfig config)
     }
 }
 
+CompiledFunction::CompiledFunction(FnTypeN fn,
+                                   std::vector<std::shared_ptr<Variable>> params,
+                                   CompileConfig config)
+    : CompiledFunction(std::move(fn), std::move(config)) {
+    parameters_ = std::move(params);
+}
+
 CompiledFunction::~CompiledFunction() = default;
+
+auto CompiledFunction::set_parameters(
+    std::vector<std::shared_ptr<Variable>> params) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    parameters_ = std::move(params);
+    // The cached graphs' parameter-leaf tables were built for the previous
+    // parameter set (or none); drop them so the next call re-traces with the
+    // new parameters bound.
+    cache_.clear();
+}
+
+auto CompiledFunction::with_parameters(
+    std::vector<std::shared_ptr<Variable>> params) -> CompiledFunction& {
+    set_parameters(std::move(params));
+    return *this;
+}
+
+auto CompiledFunction::any_parameter_requires_grad() const -> bool {
+    for (const auto& p : parameters_) {
+        if (p && p->requires_grad()) return true;
+    }
+    return false;
+}
 
 auto CompiledFunction::operator()(const Variable& input) -> Variable {
     const Variable arr[1] = {input};
@@ -110,23 +141,39 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
         return fn_(inputs);
     }
 
-    // Autograd guard: the compiled-graph / CUDA-graph executors replay raw
-    // tensor ops and do NOT rebuild an autograd graph. A cache HIT would return
-    // a non-differentiable result while a cache MISS (eager fn_) returns a
-    // differentiable one — inconsistent, and .backward() would silently yield no
-    // input grads after warmup. When any input requires grad, run eagerly so the
-    // result is always differentiable (the JIT fast-path is inference-only).
+    // Training-through-JIT: when any input requires grad, execute the CAPTURED
+    // graph differentiably (grad_invoke) so .backward() produces input/parameter
+    // gradients that match eager autograd — instead of the old unconditional
+    // eager short-circuit. The grad variant is compiled WITHOUT fusion and
+    // replayed through the autograd-aware executor, so no backward-less fused
+    // kernel is ever hit. grad_invoke replays through the autograd-aware
+    // INTERPRETER (Graph::forward grad_mode) and never uses the IREE runtime, so
+    // it is backend-agnostic: an MLIR-configured function trains through the same
+    // compiled graph (incl. captured-parameter leaves) as an nvrtc-configured one
+    // — only its INFERENCE forward uses IREE. This gives training parity across
+    // backends. grad_invoke degrades to eager autograd on the same device if the
+    // graph can't be built/replayed.
+    bool any_requires_grad = false;
     for (const auto& v : inputs) {
-        if (v.requires_grad()) {
-            return fn_(inputs);
-        }
+        if (v.requires_grad()) { any_requires_grad = true; break; }
+    }
+    // Closure-captured training: the explicit inputs (the batch) need not
+    // require grad, but the declared parameters do. Take the differentiable
+    // path whenever EITHER an input or a captured parameter requires grad, so
+    // .backward() reaches param->grad().
+    if (!any_requires_grad) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        any_requires_grad = any_parameter_requires_grad();
+    }
+    if (any_requires_grad) {
+        return grad_invoke(inputs);
     }
 
     if (config_.backend == "mlir") {
         return mlir_invoke(inputs);
     }
 
-    auto key = shape_key(inputs);
+    auto key = shape_key(inputs, /*grad_variant=*/false);
 
     // Fast path: look up the compiled module under the lock, copy the handle
     // out, then RELEASE the lock before executing. Previously mutex_ was held
@@ -258,17 +305,102 @@ auto CompiledFunction::num_cached() const -> size_t {
     return cache_.size();
 }
 
+auto CompiledFunction::num_grad_forwards() const -> size_t {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return grad_forward_count_;
+}
+
+auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable {
+    // shape_key's grad-variant marker (|G1) puts the differentiable graph in a
+    // DISTINCT cache entry from the inference (|G0) variant for the same
+    // shape/dtype/device — one never serves the other. The explicit-input _g
+    // flags are not enough here: training closes over parameters that require
+    // grad while the batch inputs do not.
+    auto key = shape_key(inputs, /*grad_variant=*/true);
+
+    std::shared_ptr<CompiledModule> compiled_module;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            compiled_module = it->second;
+        }
+    }
+
+    // Cache miss: build the differentiable (un-fused) variant now. Unlike the
+    // inference path we do NOT run an eager warmup first — we want THIS call to
+    // go through the compiled graph so grads provably come from the replay, not
+    // fn_. If tracing/compilation can't produce a graph (graph break, empty
+    // trace), fall back to eager autograd on the same backend (correct grads).
+    if (!compiled_module) {
+        try {
+            compiled_module = trace_and_compile(inputs, /*grad_mode=*/true);
+        } catch (const std::exception& e) {
+            bool strict = config_.strict;
+            if (!strict) {
+                if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
+                    strict = true;
+                }
+            }
+            if (strict) throw;
+            TENZOR_LOG_WARN("JIT grad compile failed: {}. Falling back to eager "
+                            "autograd on the input's backend.", e.what());
+            return fn_(inputs);
+        }
+        if (!compiled_module) {
+            // Graph break / empty trace → run eager autograd (same backend).
+            return fn_(inputs);
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (cache_.size() < static_cast<size_t>(config_.max_retraces)) {
+            cache_[key] = compiled_module;
+        }
+    }
+
+    // Replay the captured graph differentiably. If an op in the graph isn't
+    // wired for differentiable replay it throws (see Graph::execute_node); catch
+    // it and fall back to eager autograd on the SAME backend so gradients are
+    // still correct (requirement: dynamic/unsupported cases degrade, never crash
+    // or silently sever grad).
+    std::vector<Variable> input_vars(inputs.begin(), inputs.end());
+    std::vector<Variable> outs;
+    try {
+        outs = compiled_module->forward_grad(input_vars);
+    } catch (const std::exception& e) {
+        bool strict = config_.strict;
+        if (!strict) {
+            if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
+                strict = true;
+            }
+        }
+        if (strict) throw;
+        TENZOR_LOG_WARN("JIT grad replay fell back to eager autograd: {}", e.what());
+        return fn_(inputs);
+    }
+    if (outs.empty()) {
+        throw std::runtime_error(
+            "CompiledFunction: differentiable compiled graph produced no outputs");
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++grad_forward_count_;
+    }
+    return outs[0];
+}
+
 auto CompiledFunction::clear_cache() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     cache_.clear();
 }
 
-auto CompiledFunction::shape_key(const Variable& input) -> std::string {
+auto CompiledFunction::shape_key(const Variable& input, bool grad_variant)
+    -> std::string {
     const Variable arr[1] = {input};
-    return shape_key(std::span<const Variable>(arr, 1));
+    return shape_key(std::span<const Variable>(arr, 1), grad_variant);
 }
 
-auto CompiledFunction::shape_key(std::span<const Variable> inputs) -> std::string {
+auto CompiledFunction::shape_key(std::span<const Variable> inputs,
+                                 bool grad_variant) -> std::string {
     std::ostringstream ss;
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (i > 0) ss << "|";
@@ -289,16 +421,36 @@ auto CompiledFunction::shape_key(std::span<const Variable> inputs) -> std::strin
         // Keep them in separate cache entries so one never serves the other.
         ss << (inputs[i].requires_grad() ? "_g1" : "_g0");
     }
+    // Global grad-variant marker. The per-input `_g` flags above key on each
+    // input's own requires_grad, which is NOT sufficient when the grad path is
+    // driven by captured parameters while the explicit inputs do not require
+    // grad (training: x is a plain batch, only the weights need grads). Without
+    // this the differentiable graph and the inference graph would collide on the
+    // same key. `grad_variant` reflects the path actually taken by the caller.
+    ss << (grad_variant ? "|G1" : "|G0");
     return ss.str();
 }
 
-auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs)
+auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
+                                         bool grad_mode)
     -> std::shared_ptr<CompiledModule> {
     had_graph_break_ = false;
     size_t traced_op_count = 0;
 
     auto& tracer = Tracer::get_instance();
     tracer.start_trace();
+
+    // Declare the closure-captured trainable parameters (if any) BEFORE running
+    // the traced forward, so end_trace() can classify each captured parameter as
+    // a live parameter leaf instead of freezing it as a constant. start_trace()
+    // above already cleared any parameters from a prior trace on this
+    // thread-local tracer. Copy under the lock — parameters_ is mutable state.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!parameters_.empty()) {
+            tracer.set_parameters(parameters_);
+        }
+    }
 
     // Push a tracing interceptor onto the dispatch stack
     auto interceptor = make_tracing_interceptor(tracer,
@@ -325,7 +477,19 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs)
 
     DispatchInterceptorStack::pop();
 
-    if (had_graph_break_ && config_.fullgraph) {
+    // A graph break means an op that could not be represented in the IR ran
+    // during the trace. Its output has no producing node, so any later consumer
+    // resolves it to the *trace-time* tensor and end_trace() bakes that value in
+    // as a frozen constant (set_constant) — silently ignoring the runtime input
+    // for every subsequent replay. There is no way to distinguish such a frozen
+    // intermediate from a legitimate parameter constant after the fact, so we
+    // must NOT build/cache a compiled graph when a break occurred. Returning
+    // nullptr leaves the cache empty; CompiledFunction::operator() already ran
+    // fn_() eagerly for this (cache-miss) call and returns that correct result,
+    // and future calls re-trace and fall back to eager again. This is the only
+    // correct behavior short of true graph segmentation. (In fullgraph mode the
+    // interceptor callback has already thrown before reaching here.)
+    if (had_graph_break_) {
         tracer.clear();
         return nullptr;
     }
@@ -337,7 +501,22 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs)
         return nullptr;
     }
 
-    // Optimize the graph
+    // Optimize the graph.
+    //
+    // Differentiable variant (grad_mode): skip ALL fusion/layout/dtype passes.
+    // The fused GPU nodes (softmax/layernorm/rmsnorm/gemm-epilogue/small-MLP/
+    // reduction) have no backward, and DType downcasting to Float16 would change
+    // the numerics vs eager. The un-fused graph is replayed through the
+    // autograd-aware executor so .backward() matches eager exactly. Inference
+    // (grad_mode == false) keeps the full fast fused path unchanged.
+    if (grad_mode) {
+        return [&] {
+            auto compiled = std::make_shared<CompiledModule>();
+            compiled->set_graph(graph);
+            return compiled;
+        }();
+    }
+
     if (config_.enable_fusion) {
         Compiler compiler(true);
         compiler.optimize(*graph);
@@ -354,11 +533,6 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs)
         autotune_compiler.add_pass(std::move(dtype_pass));
 
         autotune_compiler.optimize(*graph, 1);
-    }
-
-    if (had_graph_break_ && !config_.fullgraph) {
-        // Graph breaks occurred - compile partial graph
-        // Future: segment into sub-graphs for mixed compiled/eager execution
     }
 
     // Wrap in a CompiledModule
@@ -384,10 +558,13 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
     -> std::shared_ptr<Graph> {
     auto& tracer = Tracer::get_instance();
     tracer.start_trace();
-    auto interceptor = make_tracing_interceptor(tracer, [](OpId /*op*/) {
-        // No graph-break handling here — the MLIR path treats any
-        // break as "fall back to eager" by returning a partial/empty
-        // graph from mlir_invoke().
+    bool had_break = false;
+    auto interceptor = make_tracing_interceptor(tracer, [&had_break](OpId /*op*/) {
+        // A break means an unmappable op ran; its output would be frozen as a
+        // constant in the built graph (see trace_and_compile for the full
+        // rationale). Record it so we discard the graph below and let
+        // mlir_invoke() degrade to eager for this invocation.
+        had_break = true;
     });
     DispatchInterceptorStack::push(std::move(interceptor));
 
@@ -400,6 +577,13 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
         throw;
     }
     DispatchInterceptorStack::pop();
+    if (had_break) {
+        // Returning nullptr routes mlir_invoke() into its "trace produced no
+        // graph -> fall back to eager (or throw in strict mode)" path instead
+        // of executing a graph with a baked-in frozen constant.
+        tracer.clear();
+        return nullptr;
+    }
     std::vector<Variable> input_vec(inputs.begin(), inputs.end());
     return tracer.end_trace(input_vec, {output});
 }
@@ -430,31 +614,97 @@ auto CompiledFunction::dump_graph(std::span<const Variable> inputs) -> std::stri
 #ifdef TENZOR_HAS_MLIR_JIT
 namespace {
 
-/// Resolve `cfg.target == "auto"` based on the input tensor's device.
+/// The native IREE HAL target for a device, or nullopt when the device has no
+/// IREE target at all (C1). IREE ships no Level-Zero/SYCL HAL for Intel
+/// OneAPI, and no Metal HAL for Apple MPS in this build — so a graph on those
+/// devices cannot be compiled natively and must run eagerly on that same
+/// backend. Everything with a HAL (CPU/CUDA/ROCm/Vulkan) maps 1:1.
+auto auto_target_for_device(const ::tenzor::Device& dev)
+    -> std::optional<std::string> {
+    switch (dev.type) {
+        case ::tenzor::Device::Type::CPU:    return std::string("llvm-cpu");
+        case ::tenzor::Device::Type::CUDA:   return std::string("cuda");
+        case ::tenzor::Device::Type::ROCm:   return std::string("rocm");
+        case ::tenzor::Device::Type::Vulkan: return std::string("vulkan-spirv");
+        default:                             return std::nullopt;
+    }
+}
+
+/// Resolve the effective IREE target string. Explicit (non-"auto") targets are
+/// normalized for documented aliases (H6: "vulkan" → "vulkan-spirv", which is
+/// the name IREE actually requires); "auto" derives from the device. Only
+/// reached for devices that have a native target — mlir_invoke() short-circuits
+/// to eager for OneAPI/MPS before this is called.
 auto resolve_target(const std::string& cfg_target,
                     const ::tenzor::Device& dev) -> std::string {
-    if (cfg_target != "auto") return cfg_target;
-    switch (dev.type) {
-        case ::tenzor::Device::Type::CPU:    return "llvm-cpu";
-        case ::tenzor::Device::Type::CUDA:   return "cuda";
-        case ::tenzor::Device::Type::ROCm:   return "rocm";
-        case ::tenzor::Device::Type::Vulkan: return "vulkan-spirv";
-        default:
-            throw std::runtime_error(
-                "MLIR backend: no IREE target mapped for device type " +
-                std::to_string(static_cast<int>(dev.type)));
+    if (cfg_target != "auto") {
+        if (cfg_target == "vulkan") return "vulkan-spirv";
+        if (cfg_target == "hip")    return "rocm";
+        return cfg_target;
     }
+    if (auto t = auto_target_for_device(dev)) return *t;
+    throw std::runtime_error(
+        "MLIR backend: no IREE target mapped for device '" + dev.to_string() +
+        "' (expected eager fallback to have handled this).");
 }
 
 }  // namespace
 
+// C1 + C2 wrapper: decide eager-vs-compile up front, then run the compile path
+// under a strict-aware eager safety net. This mirrors the NVRTC path's
+// try→eager degradation so an unmappable device (OneAPI/MPS), a lowering gap,
+// an unsupported-target throw, or a driver-load error degrades to eager on the
+// SAME backend instead of crashing — unless strict mode is on.
 auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable {
-    namespace mj = ::tenzor::jit::mlir_jit;
-
     if (inputs.empty()) {
         throw std::invalid_argument(
             "CompiledFunction::mlir_invoke: expected at least one input");
     }
+
+    const ::tenzor::Device dev = inputs[0].tensor().device();
+
+    // C1: a device with no IREE HAL target (OneAPI/MPS) can never compile
+    // natively. Under target="auto" this is a capability limit, not a
+    // failure — run eagerly on that same backend (never route to CPU) and
+    // warn once. (An explicit target on such a device is honoured below and,
+    // if it fails, caught by the C2 net.)
+    if (config_.target == "auto" && !auto_target_for_device(dev)) {
+        static std::once_flag warned_no_target;
+        std::call_once(warned_no_target, [&] {
+            TENZOR_LOG_WARN(
+                "MLIR JIT: device '{}' has no IREE target backend (Intel "
+                "OneAPI / Apple MPS have no IREE HAL); executing eagerly on "
+                "that backend. Use backend=\"nvrtc\" or a device with an IREE "
+                "target (CPU/CUDA/ROCm/Vulkan) to enable JIT.",
+                dev.to_string());
+        });
+        return fn_(inputs);
+    }
+
+    // C2: strict-aware eager fallback around the entire lower/compile/resolve/
+    // run section.
+    try {
+        return mlir_invoke_impl(inputs);
+    } catch (const std::exception& e) {
+        bool strict = config_.strict;
+        if (!strict) {
+            if (const char* s = std::getenv("TENZOR_JIT_STRICT");
+                s && *s && *s != '0') {
+                strict = true;
+            }
+        }
+        if (strict) throw;
+        TENZOR_LOG_WARN(
+            "MLIR JIT: compile/run failed (target={}): {}. Falling back to "
+            "eager execution on the input's backend.",
+            config_.target, e.what());
+        return fn_(inputs);
+    }
+}
+
+auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
+    -> Variable {
+    namespace mj = ::tenzor::jit::mlir_jit;
 
     const auto key = shape_key(inputs);
 
@@ -523,6 +773,28 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
         compiler.optimize(*graph);
     }
 
+    // M4: honour config_.mode on the MLIR path (previously a silent no-op —
+    // only enable_fusion ran). max-autotune applies the same Layout/DType
+    // passes the NVRTC path uses; reduce-overhead has no CUDA-graph capture on
+    // the IREE runtime here, so warn once rather than silently ignoring it.
+    if (config_.mode == "max-autotune") {
+        Compiler autotune_compiler(false);  // no default passes
+        autotune_compiler.add_pass(std::make_unique<LayoutOptimizationPass>());
+        auto dtype_pass = std::make_unique<DTypeOptimizationPass>();
+        dtype_pass->set_target_dtype(DType::Float16);
+        autotune_compiler.add_pass(std::move(dtype_pass));
+        autotune_compiler.optimize(*graph, 1);
+    } else if (config_.mode == "reduce-overhead") {
+        static std::once_flag warned_reduce_overhead;
+        std::call_once(warned_reduce_overhead, [] {
+            TENZOR_LOG_WARN(
+                "MLIR JIT: mode=\"reduce-overhead\" has no CUDA-graph capture "
+                "on the IREE runtime path; executing without it (results are "
+                "correct, latency is unchanged). Use backend=\"nvrtc\" for "
+                "CUDA-graph replay.");
+        });
+    }
+
     mj::GraphToMLIR lowerer;
     // Plugin path is the default — the lowering emits call @tenzor_plugin.<op>
     // for the 4 dialect ops and the in-process IreeInvoker registers a VM
@@ -531,9 +803,21 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
     lowerer.set_plugin_enabled(true);
     const std::string mlir_text = lowerer.lower(*graph);
 
+    const ::tenzor::Device in_dev = inputs[0].tensor().device();
+
     mj::CompileOptions opts;
-    opts.target          = resolve_target(config_.target, inputs[0].tensor().device());
+    opts.target          = resolve_target(config_.target, in_dev);
     opts.plugin_enabled  = true;
+    // M1: derive the ROCm GPU ISA from the actual device instead of a
+    // build-time constant. Ordinal is the input's Device::index when the
+    // tensor lives on a ROCm device; otherwise (e.g. a CPU-staged input with
+    // an explicit rocm target) default to the first ROCm device. An empty
+    // result makes compile_mlir fall back to the build default arch.
+    if (opts.target == "rocm") {
+        const int rocm_ordinal =
+            (in_dev.type == ::tenzor::Device::Type::ROCm) ? in_dev.index : 0;
+        opts.rocm_arch = mj::detect_rocm_gfx_arch(rocm_ordinal);
+    }
 
     auto artifact = mj::compile_mlir(mlir_text, opts);
     // Mode::InProcess registers the tenzor_plugin VM module before loading
@@ -542,10 +826,14 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
     // the HAL driver (e.g. distributions without cuda/vulkan compiled in)
     // we fall back to the subprocess driver, which carries its own driver
     // set; this preserves the GPU end-to-end path without a CPU fallback.
+    // M3: thread the input's device ordinal so the IREE HAL device matches the
+    // requested ordinal (cuda:1 runs on GPU 1, not the driver default).
+    const int hal_ordinal = in_dev.index < 0 ? 0 : in_dev.index;
     std::unique_ptr<mj::IreeInvoker> invoker;
     try {
         invoker = mj::IreeInvoker::load(artifact,
-                                        mj::IreeInvoker::Mode::InProcess);
+                                        mj::IreeInvoker::Mode::InProcess,
+                                        hal_ordinal);
     } catch (const mj::JitInvokeError& e) {
         const std::string what = e.what();
         if (what.find("NOT_FOUND") != std::string::npos &&
@@ -566,7 +854,8 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
             sh_opts.plugin_enabled = false;
             auto sh_artifact = mj::compile_mlir(sh_text, sh_opts);
             invoker = mj::IreeInvoker::load(sh_artifact,
-                                            mj::IreeInvoker::Mode::Subprocess);
+                                            mj::IreeInvoker::Mode::Subprocess,
+                                            hal_ordinal);
         } else {
             throw;
         }
@@ -852,6 +1141,12 @@ auto compile(CompiledFunction::FnType fn, CompileConfig config) -> CompiledFunct
 
 auto compile(CompiledFunction::FnTypeN fn, CompileConfig config) -> CompiledFunction {
     return CompiledFunction(std::move(fn), std::move(config));
+}
+
+auto compile(CompiledFunction::FnTypeN fn,
+             std::vector<std::shared_ptr<Variable>> params,
+             CompileConfig config) -> CompiledFunction {
+    return CompiledFunction(std::move(fn), std::move(params), std::move(config));
 }
 
 } // namespace jit

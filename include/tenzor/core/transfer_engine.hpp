@@ -501,6 +501,28 @@ public:
     void* pinned_buffer{nullptr};
     TransferEngine* engine{nullptr};  // For returning resources
 
+    // Deferred host-side copy for the async GPU->CPU pinned path.
+    //
+    // The D2H DMA lands the device bytes in `pinned_buffer` on a worker stream;
+    // the final `pinned_buffer -> deferred_dst` host memcpy must be sequenced
+    // AFTER the recorded `event` signals. It is deliberately NOT performed on
+    // the transfer worker thread (that would force a blocking event sync per
+    // transfer and fully serialize D2H copies). Instead it is run exactly once,
+    // lazily, at the completion point (wait()/is_ready()/dtor) via
+    // finalize_deferred_copy(). `deferred_dst` points into `result`'s buffer,
+    // and `pinned_buffer` stays reserved until this state is destroyed, so both
+    // endpoints of the copy outlive the DMA. When there is no deferred copy
+    // (non-pinned path, or H2D), `deferred_dst` is null and this is a no-op.
+    void* deferred_dst{nullptr};
+    size_t deferred_bytes{0};
+    bool host_copy_done{false};  // guarded by `mutex`
+
+    // Run the deferred D2H pinned->dst host memcpy exactly once, under `mutex`.
+    // Must only be called after the transfer's completion event has signalled.
+    // Safe to call from multiple threads and repeatedly; only the first call
+    // with a pending copy performs the memcpy. No-op if there is nothing to do.
+    void finalize_deferred_copy();
+
     // Error state
     bool has_error{false};
     std::string error_message;

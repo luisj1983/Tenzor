@@ -6,6 +6,8 @@
 #include "../../include/tenzor/jit/graph.hpp"
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/jit/serialization.hpp"
+#include "../../include/tenzor/jit/extended_codegen.hpp"
+#include "../../include/tenzor/ops/creation.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
@@ -22,6 +24,8 @@
 #include <unordered_map>
 #include <sstream>
 #include <stdexcept>
+#include <cstring>
+#include <optional>
 
 namespace tenzor {
 namespace jit {
@@ -434,6 +438,9 @@ auto Graph::infer_types() -> void {
             case OpType::Abs:
             case OpType::Neg:
             case OpType::Clamp:
+            case OpType::Sin:
+            case OpType::Cos:
+            case OpType::Rsqrt:
             case OpType::Dropout:
             case OpType::SiLU:
             case OpType::RMSNorm:
@@ -1257,6 +1264,9 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Abs:
             case OpType::Neg:
             case OpType::Clamp:
+            case OpType::Sin:
+            case OpType::Cos:
+            case OpType::Rsqrt:
             case OpType::Dropout:
             case OpType::SiLU:
             case OpType::RMSNorm:
@@ -2037,7 +2047,8 @@ auto Graph::infer_symbolic_types() -> void {
     }
 }
 
-auto Graph::forward(const std::vector<Variable>& runtime_inputs) -> std::vector<Variable> {
+auto Graph::forward(const std::vector<Variable>& runtime_inputs,
+                    bool grad_mode) -> std::vector<Variable> {
     // Map values to runtime variables
     std::unordered_map<std::string, Variable> value_map;
 
@@ -2054,13 +2065,64 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs) -> std::vector<
     // parameters, etc.) so ops that reference them don't fail with
     // "Input value not available". Constants are wrapped in Variables
     // with requires_grad=false — the graph is in inference mode.
+    //
+    // Device portability (M9): serialized constants are materialized on CPU
+    // (device-neutral). Place each constant on the SAME device as the runtime
+    // inputs — the device this replay actually runs on — so a graph traced on
+    // one backend can be loaded and executed on another. The target device is
+    // derived from the runtime inputs (NOT hardcoded to CPU: this is not a CPU
+    // fallback; the constant follows the inputs onto whatever backend they use).
+    // A freshly traced (not serialized) graph already has constants on the
+    // input device, so the move is a no-op there.
+    const Device target_device = runtime_inputs.empty()
+                                     ? Device::cpu()
+                                     : runtime_inputs.front().tensor().device();
     for (const auto& [id, tensor] : constants_) {
-        value_map.emplace(id, Variable(tensor, /*requires_grad=*/false));
+        Tensor placed = (tensor.device() == target_device)
+                            ? tensor
+                            : tensor.to(target_device);
+        value_map.emplace(id, Variable(std::move(placed), /*requires_grad=*/false));
+    }
+
+    // Closure-captured module parameters (training-through-JIT). Unlike
+    // constants, these are rebound to the LIVE parameter Variable each call so
+    // gradients reach param->grad() and updated weights are seen post-step.
+    //
+    //  - grad_mode:  bind the ACTUAL parameter Variable (shared impl, hence the
+    //                shared gradient accumulator). It is a leaf whose
+    //                requires_grad flag is honoured as-is, so the autograd graph
+    //                built during replay accumulates into param->grad() exactly
+    //                as eager does. Its leaf identity must be preserved (no
+    //                clone / no device move that would mint a fresh impl), so a
+    //                grad-mode replay MUST run on the parameters' own device
+    //                (the normal training case: params and inputs co-located).
+    //  - inference:  bind the parameter's CURRENT value as a non-grad input,
+    //                placed on the runtime device — fixing the staleness that a
+    //                frozen trace-time constant would cause. A fused kernel that
+    //                consumes this value reads it live from the value_map.
+    for (const auto& [id, param_index] : param_leaves_) {
+        if (param_index >= parameters_.size() || !parameters_[param_index]) {
+            throw std::runtime_error(
+                "JIT: parameter leaf '" + id + "' references parameter index " +
+                std::to_string(param_index) +
+                " but only " + std::to_string(parameters_.size()) +
+                " parameters were declared");
+        }
+        const Variable& param = *parameters_[param_index];
+        if (grad_mode) {
+            // Share the parameter's impl so backward accumulates into the very
+            // Variable the optimizer holds. Reads the current (live) value.
+            value_map[id] = param;
+        } else {
+            const Tensor& t = param.tensor();
+            Tensor placed = (t.device() == target_device) ? t : t.to(target_device);
+            value_map[id] = Variable(std::move(placed), /*requires_grad=*/false);
+        }
     }
 
     // Execute nodes in topological order
     for (const auto& node : nodes_) {
-        execute_node(node, value_map);
+        execute_node(node, value_map, grad_mode);
     }
 
     // Gather outputs
@@ -2077,8 +2139,187 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs) -> std::vector<
     return results;
 }
 
+namespace {
+
+// Reconstruct an ExtendedFusionGroup from a fused node's recorded attributes and
+// execute it via the native NVRTC/HIPRTC codegen (execute_extended_fused).
+//
+// ExtendedFusionPass collapses a matched subgraph (softmax/layernorm/rmsnorm/
+// reduction-with-pre-post/gemm-epilogue/small-MLP) into ONE node carrying the
+// FusionKind ("fusion_kind") plus every structural parameter the generator needs.
+// Eager execution of that collapsed node is only correct for the single-semantic
+// kinds (softmax/norm); GemmEpilogue (bias+activation), SmallMLP (second linear)
+// and Reduction (pre/post element-wise ops) would DROP computation if run eagerly.
+// So on GPU we must run the generated kernel. This helper gathers the input and
+// param tensors in the exact order each generated kernel's launch expects.
+auto execute_fused_gpu_node(const Node& node,
+                            const std::vector<Variable>& input_vars) -> Variable {
+    if (input_vars.empty()) {
+        throw std::runtime_error("JIT: fused node has no runtime inputs");
+    }
+    const FusionKind kind =
+        static_cast<FusionKind>(static_cast<int>(node.get_attr("fusion_kind")));
+    const Tensor x0 = input_vars[0].tensor();
+    const Device dev = x0.device();
+    const DType dt = x0.dtype();
+
+    // The generated kernels are CUDA/ROCm device kernels over Float32/Float64/
+    // Float16/BFloat16 only. ExtendedFusionPass never forms a fusion node outside
+    // those constraints, so reaching this on another device/dtype means a
+    // GPU-traced graph is being replayed on a foreign backend. Fail loudly rather
+    // than run a lossy eager collapse.
+    if (dev.type != Device::Type::CUDA && dev.type != Device::Type::ROCm) {
+        throw std::runtime_error(
+            "JIT: fused GPU node reached a non-CUDA/ROCm device (" +
+            dev.to_string() + "); retrace the graph for this device");
+    }
+
+    ExtendedFusionGroup group;
+    group.kind = kind;
+    group.dtype = dt;
+    group.eps = node.has_float_attr("eps") ? node.get_attr("eps") : 1e-5f;
+
+    auto tensors_from = [&](size_t from) {
+        std::vector<Tensor> v;
+        for (size_t i = from; i < input_vars.size(); ++i) {
+            v.push_back(input_vars[i].tensor());
+        }
+        return v;
+    };
+
+    std::vector<Tensor> inputs, params;
+    switch (kind) {
+        case FusionKind::Softmax: {
+            group.softmax_dim = node.has_int_attr("fused_reduce_dim")
+                ? static_cast<int>(node.get_int_attr("fused_reduce_dim")) : -1;
+            inputs = {x0};
+            break;
+        }
+        case FusionKind::LayerNorm:
+        case FusionKind::RMSNorm: {
+            group.norm_axis = node.has_int_attr("fused_reduce_dim")
+                ? static_cast<int>(node.get_int_attr("fused_reduce_dim")) : -1;
+            group.has_affine = node.has_attr("fused_has_affine")
+                ? node.get_bool_attr("fused_has_affine")
+                : (input_vars.size() > 1);
+            inputs = {x0};
+            // Affine params (gamma[, beta]) arrive after the normalized tensor in
+            // collect_external_inputs order: [x, gamma, beta].
+            if (group.has_affine) params = tensors_from(1);
+            break;
+        }
+        case FusionKind::Reduction: {
+            group.reduce_dim = node.has_int_attr("fused_reduce_dim")
+                ? static_cast<int>(node.get_int_attr("fused_reduce_dim")) : -1;
+            group.keepdim = node.has_attr("fused_keepdim")
+                ? node.get_bool_attr("fused_keepdim") : false;
+            group.reduce_kind = node.has_int_attr("fused_reduce_kind")
+                ? static_cast<OpType>(node.get_int_attr("fused_reduce_kind"))
+                : OpType::Sum;
+            // Deserialize the ElemStep quads (op, in, second, scalar_bits) the pass
+            // recorded so the fused kernel applies the exact pre/post ops.
+            auto load_steps = [&](const char* key) {
+                std::vector<ElemStep> steps;
+                auto raw = node.get_vec_attr(key);
+                for (size_t i = 0; i + 3 < raw.size(); i += 4) {
+                    ElemStep s;
+                    s.op = static_cast<ElemOp>(raw[i]);
+                    s.input_idx = static_cast<int>(raw[i + 1]);
+                    s.second_input_idx = static_cast<int>(raw[i + 2]);
+                    int64_t bits = raw[i + 3];
+                    std::memcpy(&s.scalar, &bits, sizeof(double));
+                    steps.push_back(s);
+                }
+                return steps;
+            };
+            group.pre_ops = load_steps("fused_pre_ops");
+            group.post_ops = load_steps("fused_post_ops");
+            inputs = {x0};
+            break;
+        }
+        case FusionKind::GemmEpilogue: {
+            group.has_bias = node.has_attr("fused_has_bias") &&
+                             node.get_bool_attr("fused_has_bias");
+            group.has_activation = node.has_attr("fused_has_activation") &&
+                                   node.get_bool_attr("fused_has_activation");
+            group.activation_type = node.has_int_attr("fused_activation_type")
+                ? static_cast<OpType>(node.get_int_attr("fused_activation_type"))
+                : OpType::ReLU;
+            if (input_vars.size() < 2) {
+                throw std::runtime_error(
+                    "JIT: fused GemmEpilogue requires two matmul inputs (A, B)");
+            }
+            Tensor A = x0;
+            Tensor B = input_vars[1].tensor();
+            // A Linear base (y = x @ W^T) needs the weight transposed before the
+            // kernel's plain A @ B; a MatMul base is already A @ B.
+            if (node.has_attr("fused_gemm_transpose_b") &&
+                node.get_bool_attr("fused_gemm_transpose_b")) {
+                B = B.transpose(0, 1);
+            }
+            inputs = {A, B};
+            if (group.has_bias) {
+                if (input_vars.size() < 3) {
+                    throw std::runtime_error(
+                        "JIT: fused GemmEpilogue marked has_bias but no bias input");
+                }
+                params = {input_vars[2].tensor()};
+            }
+            break;
+        }
+        case FusionKind::SmallMLP: {
+            // collect_external_inputs order: [x, W1, b1?, W2, b2?].
+            group.mlp_activation = node.has_int_attr("fused_mlp_activation")
+                ? static_cast<OpType>(node.get_int_attr("fused_mlp_activation"))
+                : OpType::GELU;
+            const bool hb1 = node.has_attr("fused_mlp_has_bias1") &&
+                             node.get_bool_attr("fused_mlp_has_bias1");
+            const bool hb2 = node.has_attr("fused_mlp_has_bias2") &&
+                             node.get_bool_attr("fused_mlp_has_bias2");
+            // Consume in collect_external_inputs order; a bias (when present)
+            // precedes the next weight. Linear weight is [out, in]; the fused MLP
+            // kernel indexes w1 as [in, hidden] and w2 as [hidden, out], so
+            // transpose both. The kernel always reads b1/b2, so synthesize a zero
+            // bias where the Linear had none (no bias term is silently added).
+            size_t idx = 1;
+            Tensor W1 = input_vars.at(idx++).tensor();
+            const int64_t hidden = W1.shape()[0];   // Linear1 out features
+            Tensor b1 = hb1 ? input_vars.at(idx++).tensor()
+                            : tenzor::zeros({hidden}, dt, dev);
+            Tensor W2 = input_vars.at(idx++).tensor();
+            const int64_t out_dim = W2.shape()[0];  // Linear2 out features
+            Tensor b2 = hb2 ? input_vars.at(idx++).tensor()
+                            : tenzor::zeros({out_dim}, dt, dev);
+            group.hidden_dim = hidden;
+            inputs = {x0};
+            params = {W1.transpose(0, 1), b1, W2.transpose(0, 1), b2};
+            break;
+        }
+        default:
+            throw std::runtime_error("JIT: unsupported fusion kind in executor");
+    }
+
+    Tensor out = execute_extended_fused(group, inputs, params);
+
+    // The SmallMLP kernel flattens the leading dims into `batch` and returns
+    // [batch, out_dim]. Restore the input's leading shape for a rank>2 input so
+    // downstream shape-sensitive ops see the logical [*, out_dim].
+    if (kind == FusionKind::SmallMLP) {
+        auto xs = x0.shape();
+        if (xs.size() > 2) {
+            std::vector<int64_t> os(xs.begin(), xs.end() - 1);
+            os.push_back(out.shape().back());
+            out = out.reshape(os);
+        }
+    }
+    return Variable(out, /*requires_grad=*/false);
+}
+
+}  // namespace
+
 auto Graph::execute_node(const std::shared_ptr<Node>& node,
-                         std::unordered_map<std::string, Variable>& value_map) const -> void {
+                         std::unordered_map<std::string, Variable>& value_map,
+                         bool grad_mode) const -> void {
     // Get input variables
     std::vector<Variable> input_vars;
     for (const auto& input : node->inputs()) {
@@ -2087,6 +2328,60 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             input_vars.push_back(it->second);
         } else {
             throw std::runtime_error("Input value not available: " + input->id());
+        }
+    }
+
+    // Fusion nodes (produced by ExtendedFusionPass, tagged with "fusion_kind")
+    // are executed via the native NVRTC/HIPRTC codegen — the REAL GPU path — not
+    // the eager op switch below, which would drop the epilogue/second-linear/
+    // pre-post computation for GemmEpilogue/SmallMLP/Reduction. A fusion node
+    // always has exactly one output.
+    //
+    // The generated fused kernels have NO backward. In differentiable replay
+    // (grad_mode) we must never run them — a training step would then hit a
+    // backward-less kernel and silently produce zero/garbage input grads. The
+    // grad variant of the graph is compiled WITHOUT fusion (see
+    // CompiledFunction::trace_and_compile), so a fusion node here in grad_mode
+    // means that contract was violated: fail loudly instead of corrupting grads.
+    if (node->has_attr("fusion_kind")) {
+        if (grad_mode) {
+            throw std::runtime_error(
+                "JIT: encountered a fused GPU node (" + node->name() +
+                ") during differentiable replay; the grad graph must be compiled "
+                "without fusion (backward-less fused kernels are forbidden in "
+                "grad mode)");
+        }
+        Variable fused = execute_fused_gpu_node(*node, input_vars);
+        for (const auto& out : node->outputs()) {
+            value_map[out->id()] = fused;
+        }
+        return;
+    }
+
+    // In differentiable replay, ops that have no autograd wrapper in this
+    // executor would silently sever the grad chain. Signal the caller to run
+    // the whole graph eagerly (correct autograd on the same backend) instead of
+    // returning wrong gradients. The common dense/transformer ops below all have
+    // grad-tracking implementations, so this only fires for the linalg /
+    // specialized ops that genuinely can't be replayed differentiably here.
+    if (grad_mode) {
+        switch (node->op_type()) {
+            case OpType::Det:
+            case OpType::Inv:
+            case OpType::Solve:
+            case OpType::Cholesky:
+            case OpType::Svd:
+            case OpType::Qr:
+            case OpType::Eigh:
+            case OpType::Eigvalsh:
+            case OpType::Norm:
+            case OpType::Slogdet:
+                throw std::runtime_error(
+                    "JIT grad replay: linear-algebra op " +
+                    op_type_to_string(node->op_type()) +
+                    " is not wired for differentiable replay; fall back to eager");
+            default:
+                break;
         }
     }
 
@@ -2209,6 +2504,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh);
                 pool_attrs.set(AttrKey::PaddingW,
                     node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph);
+                if (grad_mode) {
+                    const int64_t kw = node->has_attr("kernel_size_w") ? node->get_int_attr("kernel_size_w") : kh;
+                    const int64_t sw = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh;
+                    const int64_t pw = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph;
+                    outputs.push_back(nn::functional::max_pool2d(
+                        input_vars[0], {kh, kw}, {sh, sw}, {ph, pw}));
+                    break;
+                }
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::MaxPool2dForward, inputs, pool_attrs);
                 if (!result.empty()) {
@@ -2234,6 +2537,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh);
                 pool_attrs.set(AttrKey::PaddingW,
                     node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph);
+                if (grad_mode) {
+                    const int64_t kw = node->has_attr("kernel_size_w") ? node->get_int_attr("kernel_size_w") : kh;
+                    const int64_t sw = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh;
+                    const int64_t pw = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph;
+                    outputs.push_back(nn::functional::avg_pool2d(
+                        input_vars[0], {kh, kw}, {sh, sw}, {ph, pw}));
+                    break;
+                }
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::AvgPool2dForward, inputs, pool_attrs);
                 if (!result.empty()) {
@@ -2249,6 +2560,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 if (output_size.size() >= 2) {
                     pool_attrs.set(AttrKey::OutputSizeH, output_size[0]);
                     pool_attrs.set(AttrKey::OutputSizeW, output_size[1]);
+                }
+                if (grad_mode && output_size.size() >= 2) {
+                    outputs.push_back(nn::functional::adaptive_avg_pool2d(
+                        input_vars[0], {output_size[0], output_size[1]}));
+                    break;
                 }
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::AdaptiveAvgPool2d, inputs, pool_attrs);
@@ -2304,6 +2620,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 int64_t groups = node->has_attr("groups") ?
                     node->get_int_attr("groups") : static_cast<int64_t>(1);
 
+                if (grad_mode) {
+                    std::optional<Variable> bias;
+                    if (input_vars.size() >= 3) bias = input_vars[2];
+                    Variable conv_out = nn::functional::conv2d(
+                        input_vars[0], input_vars[1], bias,
+                        {stride_h, stride_w}, {padding_h, padding_w},
+                        {dilation_h, dilation_w}, groups);
+                    if (node->get_bool_attr("fused_relu")) {
+                        conv_out = nn::relu(conv_out);
+                    }
+                    outputs.push_back(conv_out);
+                    break;
+                }
+
                 OpAttributes conv_attrs;
                 // Per-axis keys are what the backend kernels actually read
                 // (see cpu_kernel_registry.cpp Conv2dForward). Set the scalar
@@ -2339,6 +2669,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::ConvTranspose:
             if (input_vars.size() >= 2) {
+                if (grad_mode) {
+                    throw std::runtime_error(
+                        "JIT grad replay: ConvTranspose is not wired for "
+                        "differentiable replay; fall back to eager");
+                }
                 const auto rank = input_vars[0].tensor().shape().size();
                 if (rank < 3 || rank > 5) {
                     throw std::runtime_error("ConvTranspose expects 3D, 4D, or 5D input");
@@ -2365,6 +2700,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // ====================================================================
         case OpType::BatchNorm2d:
             if (!input_vars.empty()) {
+                if (grad_mode) {
+                    // The traced BatchNorm2d node's input ordering (x / affine /
+                    // running-stats) is not reconstructable here unambiguously.
+                    // Rather than risk a wrong differentiable mapping, signal the
+                    // caller to run this graph eagerly (correct autograd on the
+                    // same backend). See CompiledFunction::operator() grad path.
+                    throw std::runtime_error(
+                        "JIT grad replay: BatchNorm2d is not wired for "
+                        "differentiable replay; fall back to eager");
+                }
                 OpAttributes bn_attrs;
                 bn_attrs.set(AttrKey::Eps, node->has_attr("eps") ?
                     static_cast<double>(node->get_attr("eps")) : 1e-5);
@@ -2383,6 +2728,22 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::LayerNorm:
             if (!input_vars.empty()) {
+                if (grad_mode) {
+                    auto normalized_shape = node->get_vec_attr("normalized_shape");
+                    if (normalized_shape.empty()) {
+                        // Fall back to the last dim of the input.
+                        auto sh = input_vars[0].tensor().shape();
+                        if (!sh.empty()) normalized_shape = {sh.back()};
+                    }
+                    double eps = node->has_attr("eps") ?
+                        static_cast<double>(node->get_attr("eps")) : 1e-5;
+                    std::optional<Variable> gamma, beta;
+                    if (input_vars.size() >= 2) gamma = input_vars[1];
+                    if (input_vars.size() >= 3) beta  = input_vars[2];
+                    outputs.push_back(nn::functional::layer_norm(
+                        input_vars[0], normalized_shape, gamma, beta, eps));
+                    break;
+                }
                 OpAttributes ln_attrs;
                 ln_attrs.set(AttrKey::Eps, node->has_attr("eps") ?
                     static_cast<double>(node->get_attr("eps")) : 1e-5);
@@ -2439,8 +2800,12 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Unsqueeze:
             if (!input_vars.empty()) {
                 int64_t dim = node->get_int_attr("dim");
-                auto result = input_vars[0].tensor().unsqueeze(dim);
-                outputs.push_back(Variable(result, false));
+                if (grad_mode) {
+                    outputs.push_back(tenzor::unsqueeze(input_vars[0], dim));
+                } else {
+                    auto result = input_vars[0].tensor().unsqueeze(dim);
+                    outputs.push_back(Variable(result, false));
+                }
             }
             break;
 
@@ -2448,8 +2813,12 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             if (!input_vars.empty()) {
                 int64_t start_dim = node->has_attr("start_dim") ? node->get_int_attr("start_dim") : 0;
                 int64_t end_dim = node->has_attr("end_dim") ? node->get_int_attr("end_dim") : -1;
-                auto result = input_vars[0].tensor().flatten(start_dim, end_dim);
-                outputs.push_back(Variable(result, false));
+                if (grad_mode) {
+                    outputs.push_back(tenzor::flatten(input_vars[0], start_dim, end_dim));
+                } else {
+                    auto result = input_vars[0].tensor().flatten(start_dim, end_dim);
+                    outputs.push_back(Variable(result, false));
+                }
             }
             break;
 
@@ -2550,8 +2919,27 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Min:
             if (!input_vars.empty()) {
-                // No autograd min — use raw tensor op and wrap
                 bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                if (grad_mode) {
+                    // Differentiable min (autograd overload routes the gradient to
+                    // the arg-min positions).
+                    if (node->has_int_attr("dim")) {
+                        int64_t dim = node->get_int_attr("dim");
+                        outputs.push_back(tenzor::min(input_vars[0], dim, keepdim));
+                    } else if (node->has_vec_attr("dims")) {
+                        auto norm = normalize_reduce_dims(
+                            node->get_vec_attr("dims"),
+                            static_cast<int64_t>(input_vars[0].tensor().shape().size()));
+                        Variable acc = input_vars[0];
+                        for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                            acc = tenzor::min(acc, *it, keepdim);
+                        }
+                        outputs.push_back(acc);
+                    } else {
+                        outputs.push_back(tenzor::min(input_vars[0]));
+                    }
+                    break;
+                }
                 if (node->has_int_attr("dim")) {
                     int64_t dim = node->get_int_attr("dim");
                     auto result = tenzor::min(input_vars[0].tensor(), dim, keepdim);
@@ -2589,8 +2977,45 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Sqrt:
             if (!input_vars.empty()) {
-                auto result = tenzor::sqrt(input_vars[0].tensor());
-                outputs.push_back(Variable(result, false));
+                if (grad_mode) {
+                    outputs.push_back(tenzor::sqrt(input_vars[0]));
+                } else {
+                    auto result = tenzor::sqrt(input_vars[0].tensor());
+                    outputs.push_back(Variable(result, false));
+                }
+            }
+            break;
+
+        case OpType::Sin:
+            if (!input_vars.empty()) {
+                if (grad_mode) {
+                    outputs.push_back(tenzor::sin(input_vars[0]));
+                } else {
+                    auto result = tenzor::sin(input_vars[0].tensor());
+                    outputs.push_back(Variable(result, false));
+                }
+            }
+            break;
+
+        case OpType::Cos:
+            if (!input_vars.empty()) {
+                if (grad_mode) {
+                    outputs.push_back(tenzor::cos(input_vars[0]));
+                } else {
+                    auto result = tenzor::cos(input_vars[0].tensor());
+                    outputs.push_back(Variable(result, false));
+                }
+            }
+            break;
+
+        case OpType::Rsqrt:
+            if (!input_vars.empty()) {
+                if (grad_mode) {
+                    outputs.push_back(tenzor::rsqrt(input_vars[0]));
+                } else {
+                    auto result = tenzor::rsqrt(input_vars[0].tensor());
+                    outputs.push_back(Variable(result, false));
+                }
             }
             break;
 
@@ -2602,12 +3027,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 // default value once the exponent has been moved to an input.
                 auto exp_cpu = input_vars[1].tensor().to(DType::Float32).to(Device::cpu());
                 float exponent = exp_cpu.data<float>()[0];
-                auto result = tenzor::pow(input_vars[0].tensor(), exponent);
-                outputs.push_back(Variable(result, false));
+                if (grad_mode) {
+                    outputs.push_back(tenzor::pow(input_vars[0], static_cast<double>(exponent)));
+                } else {
+                    auto result = tenzor::pow(input_vars[0].tensor(), exponent);
+                    outputs.push_back(Variable(result, false));
+                }
             } else if (!input_vars.empty()) {
                 float exponent = node->get_attr("exponent");
-                auto result = tenzor::pow(input_vars[0].tensor(), exponent);
-                outputs.push_back(Variable(result, false));
+                if (grad_mode) {
+                    outputs.push_back(tenzor::pow(input_vars[0], static_cast<double>(exponent)));
+                } else {
+                    auto result = tenzor::pow(input_vars[0].tensor(), exponent);
+                    outputs.push_back(Variable(result, false));
+                }
             }
             break;
 
@@ -2670,6 +3103,19 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 if (size.empty()) {
                     throw std::runtime_error("Interpolate JIT node is missing output_size");
                 }
+                if (grad_mode) {
+                    if (size.size() == 2) {
+                        outputs.push_back(nn::functional::interpolate(
+                            input_vars[0], {size[0], size[1]},
+                            mode_attr_to_string(*node),
+                            node->has_attr("align_corners") &&
+                                node->get_bool_attr("align_corners")));
+                        break;
+                    }
+                    throw std::runtime_error(
+                        "JIT grad replay: 1D/3D Interpolate is not wired for "
+                        "differentiable replay; fall back to eager");
+                }
                 std::string size_str;
                 for (size_t i = 0; i < size.size(); ++i) {
                     if (i > 0) size_str += ',';
@@ -2727,6 +3173,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Embedding:
             if (input_vars.size() >= 2) {
                 // input_vars[0] = weight table, input_vars[1] = indices
+                if (grad_mode) {
+                    outputs.push_back(nn::functional::embedding(
+                        input_vars[1].tensor(), input_vars[0]));
+                    break;
+                }
                 std::vector<Tensor> emb_inputs = {input_vars[0].tensor(), input_vars[1].tensor()};
                 auto result = dispatch(OpId::Embedding, emb_inputs, {});
                 if (!result.empty()) {
@@ -2749,9 +3200,29 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::RMSNorm:
             if (!input_vars.empty()) {
+                double eps = node->has_attr("eps") ?
+                    static_cast<double>(node->get_attr("eps")) : 1e-5;
+                if (grad_mode) {
+                    // Differentiable RMSNorm composed from autograd primitives so
+                    // gradients flow to x (and gamma, if affine). The backend
+                    // OpId::RMSNorm kernel has no autograd wrapper, so replaying it
+                    // raw would sever the graph. Semantics:
+                    //   y = x * rsqrt(mean(x^2, -1, keepdim) + eps) [* gamma]
+                    const Variable& x = input_vars[0];
+                    Variable x2 = x * x;
+                    Variable ms = tenzor::mean(x2, static_cast<int64_t>(-1), /*keepdim=*/true);
+                    Variable denom = tenzor::rsqrt(ms + Variable(
+                        tenzor::full({1}, static_cast<float>(eps),
+                                     ms.tensor().dtype(), ms.tensor().device()), false));
+                    Variable y = x * denom;  // broadcasts denom over last dim
+                    if (input_vars.size() >= 2) {
+                        y = y * input_vars[1];  // affine gamma
+                    }
+                    outputs.push_back(y);
+                    break;
+                }
                 OpAttributes attrs;
-                attrs.set(AttrKey::Eps, node->has_attr("eps") ?
-                    static_cast<double>(node->get_attr("eps")) : 1e-5);
+                attrs.set(AttrKey::Eps, eps);
                 std::vector<Tensor> inputs;
                 inputs.reserve(input_vars.size());
                 for (const auto& v : input_vars) {
@@ -2928,14 +3399,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 if (branch) {
                     // Pass remaining inputs to the chosen branch
                     std::vector<Variable> branch_inputs(input_vars.begin() + 1, input_vars.end());
-                    auto branch_outputs = branch->forward(branch_inputs);
+                    auto branch_outputs = branch->forward(branch_inputs, grad_mode);
                     for (auto& out : branch_outputs) {
                         outputs.push_back(std::move(out));
                     }
                 } else if (cond) {
                     // then_branch must exist (checked above), else_branch optional
                     auto branch_inputs = std::vector<Variable>(input_vars.begin() + 1, input_vars.end());
-                    auto branch_outputs = node->then_branch()->forward(branch_inputs);
+                    auto branch_outputs = node->then_branch()->forward(branch_inputs, grad_mode);
                     for (auto& out : branch_outputs) {
                         outputs.push_back(std::move(out));
                     }
@@ -3093,6 +3564,18 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 int64_t max_iter = static_cast<int64_t>(input_vars[0].tensor().to(DType::Float32).item<float>());
                 bool cond = input_vars[1].tensor().to(DType::Float32).item<float>() != 0.0f;
 
+                // The iteration counter / condition scalars fed to the body must
+                // live on the SAME device the loop runs on, otherwise the body's
+                // ops mix a CPU iter/cond with GPU carried values and fail at
+                // dispatch (device mismatch). Derive it from the CARRIED state
+                // (input_vars[2..]) — input_vars[0]/[1] (max_iter, entry cond) are
+                // CPU scalars synthesized by trace_loop, so they would wrongly pin
+                // the body to CPU. This is not a CPU fallback — it follows whatever
+                // backend the runtime carried tensors use.
+                const Device loop_dev = (input_vars.size() > 2)
+                                            ? input_vars[2].tensor().device()
+                                            : input_vars[0].tensor().device();
+
                 // Initialize loop-carried values
                 std::vector<Variable> carried(input_vars.begin() + 2, input_vars.end());
 
@@ -3100,14 +3583,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     // Build body inputs: [iter, cond, carried...]
                     std::vector<Variable> body_inputs;
                     body_inputs.push_back(Variable(
-                        tenzor::full({1}, static_cast<float>(i), DType::Float32), false));
+                        tenzor::full({1}, static_cast<float>(i), DType::Float32, loop_dev), false));
                     body_inputs.push_back(Variable(
-                        tenzor::full({1}, cond ? 1.0f : 0.0f, DType::Float32), false));
+                        tenzor::full({1}, cond ? 1.0f : 0.0f, DType::Float32, loop_dev), false));
                     for (auto& c : carried) {
                         body_inputs.push_back(c);
                     }
 
-                    auto body_outputs = node->body()->forward(body_inputs);
+                    auto body_outputs = node->body()->forward(body_inputs, grad_mode);
 
                     // body_outputs[0] = new condition, rest = updated carried values
                     if (!body_outputs.empty()) {
@@ -3132,6 +3615,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::LayoutConvert: {
             // Convert memory format
             if (!input_vars.empty()) {
+                if (grad_mode) {
+                    // A memory-format change does not alter tensor VALUES, so it is
+                    // a value-identity for autograd purposes. Pass the Variable
+                    // through unchanged to keep the grad chain intact (downstream
+                    // ops re-layout as needed). Re-laying out here would sever grad.
+                    outputs.push_back(input_vars[0]);
+                    break;
+                }
                 int64_t fmt = node->get_int_attr("target_format");
                 auto mem_fmt = (fmt == 1) ? MemoryFormat::ChannelsLast
                              : (fmt == 2) ? MemoryFormat::ChannelsLast3d
@@ -3144,6 +3635,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Cast: {
             // Convert dtype
             if (!input_vars.empty()) {
+                if (grad_mode) {
+                    throw std::runtime_error(
+                        "JIT grad replay: dtype Cast is not wired for "
+                        "differentiable replay; fall back to eager");
+                }
                 int64_t target_dtype_int = node->get_int_attr("target_dtype");
                 auto target_dtype = static_cast<DType>(target_dtype_int);
                 outputs.push_back(Variable(input_vars[0].tensor().to(target_dtype), false));

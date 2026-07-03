@@ -726,9 +726,18 @@ public:
      * @brief Execute graph with runtime inputs.
      *
      * @param runtime_inputs Input tensors/variables
+     * @param grad_mode If true, replay the graph differentiably: every node is
+     *        dispatched through its autograd (Variable-level) op so the result
+     *        carries a grad_fn chain back to any runtime input / constant that
+     *        requires grad. Used for training-through-JIT. When false (default)
+     *        the graph runs in inference mode (non-differentiable outputs), and
+     *        GPU fusion nodes are executed via native codegen. In grad_mode a
+     *        fusion node is a hard error — the differentiable graph variant is
+     *        compiled WITHOUT fusion so no backward-less fused kernel is ever hit.
      * @return Output tensors/variables
      */
-    auto forward(const std::vector<Variable>& runtime_inputs) -> std::vector<Variable>;
+    auto forward(const std::vector<Variable>& runtime_inputs,
+                 bool grad_mode = false) -> std::vector<Variable>;
 
     /**
      * @brief Save graph to file.
@@ -807,6 +816,55 @@ public:
         return constants_;
     }
 
+    // ========================================================================
+    // Closure-captured module parameters (training-through-JIT)
+    // ========================================================================
+
+    /**
+     * @brief Declare the trainable parameters this graph closes over.
+     *
+     * The tracer records, for every op input that resolves to one of these
+     * parameter Variables (matched by storage identity), a PARAMETER LEAF —
+     * a graph value bound at forward() time to the LIVE parameter Variable
+     * instead of being frozen as an opaque constant. This is what lets a
+     * compiled function that captures `model` (rather than receiving its
+     * weights as explicit inputs) produce correct gradients into
+     * `param->grad()` and read updated weights after an optimizer step.
+     *
+     * The vector holds the SAME shared_ptr<Variable> the caller/optimizer
+     * holds (from nn::Module::parameters()), so binding is by-reference:
+     * gradients accumulate into, and live values are read from, the very
+     * Variables the optimizer updates.
+     */
+    auto set_parameters(std::vector<std::shared_ptr<Variable>> params) -> void {
+        parameters_ = std::move(params);
+    }
+
+    /// The declared trainable parameters (empty for a paramless graph).
+    auto parameters() const
+        -> const std::vector<std::shared_ptr<Variable>>& {
+        return parameters_;
+    }
+
+    /**
+     * @brief Record that a graph value is a PARAMETER LEAF bound to parameter
+     *        index `param_index`.
+     *
+     * Called by the tracer during end_trace() for a non-produced op input
+     * whose storage matches a declared parameter. Unlike set_constant(), the
+     * value is NOT frozen: Graph::forward() rebinds it to the live parameter
+     * Variable each call (with grad in grad_mode, live value in inference).
+     */
+    auto add_param_leaf(const std::string& value_id, size_t param_index) -> void {
+        param_leaves_[value_id] = param_index;
+    }
+
+    /// Read the parameter-leaf table (value id -> parameter index).
+    auto param_leaves() const
+        -> const std::unordered_map<std::string, size_t>& {
+        return param_leaves_;
+    }
+
 private:
     std::vector<std::shared_ptr<Node>> nodes_;              ///< All nodes (topologically sorted)
     std::unordered_map<std::string, std::shared_ptr<Value>> values_;  ///< ID -> Value map
@@ -818,6 +876,15 @@ private:
     /// are pre-populated into the runtime value_map before any node
     /// executes.
     std::unordered_map<std::string, Tensor> constants_;
+    /// Declared trainable parameters this graph closes over. Shared with the
+    /// caller/optimizer (nn::Module::parameters()), so binding is by-reference.
+    std::vector<std::shared_ptr<Variable>> parameters_;
+    /// Parameter-leaf table: graph value id -> index into parameters_. These
+    /// values are rebound to the LIVE parameter Variable at every forward()
+    /// (differentiably in grad_mode, live-valued in inference) instead of being
+    /// frozen as constants — the fix for stale weights and severed grads when a
+    /// compiled function captures module parameters via closure.
+    std::unordered_map<std::string, size_t> param_leaves_;
     int64_t next_node_id_{0};                               ///< Node ID counter
     mutable bool needs_retrace_{false};                        ///< Set when ShapeGuard detects mismatch
 
@@ -835,7 +902,8 @@ private:
      * @param value_map Runtime value map
      */
     auto execute_node(const std::shared_ptr<Node>& node,
-                      std::unordered_map<std::string, Variable>& value_map) const -> void;
+                      std::unordered_map<std::string, Variable>& value_map,
+                      bool grad_mode = false) const -> void;
 
     friend class Compiler;  // Allow compiler to access internals
 };

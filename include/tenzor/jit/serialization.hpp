@@ -41,8 +41,17 @@ namespace jit {
  *                  v1 silently dropped all three which made loaded
  *                  graphs lose their inputs/outputs and fail to
  *                  execute traced modules.
+ * v3 (2026-07-02): serialize control-flow subgraphs. Each Node now emits
+ *                  its then/else/body Graphs (presence flag + full nested
+ *                  Graph, recursively). v1/v2 dropped them, so every loaded
+ *                  If/Loop node had null branches and produced no outputs.
+ *                  Also makes constants device-neutral: tensor/value device
+ *                  fields are written as CPU (the byte domain), and the
+ *                  executor moves each constant onto the runtime-input
+ *                  device at execution time, so a graph traced on one
+ *                  backend can replay on any other.
  */
-constexpr uint32_t SERIALIZATION_VERSION = 2;
+constexpr uint32_t SERIALIZATION_VERSION = 3;
 
 /**
  * @brief Magic number for Tenzor JIT files.
@@ -84,6 +93,23 @@ private:
      * @brief Write magic number and version header.
      */
     auto write_header() -> void;
+
+    /**
+     * @brief Write a full graph body (metadata, values, nodes, I/O lists,
+     *        constants) WITHOUT the file header.
+     *
+     * Factored out of write() so control-flow subgraphs (If then/else,
+     * Loop body) can be serialized recursively by write_subgraph().
+     */
+    auto write_graph(const Graph& graph) -> void;
+
+    /**
+     * @brief Write an optional nested subgraph (presence flag + body).
+     *
+     * A null subgraph is a single `false` byte; a present subgraph is a
+     * `true` byte followed by a full write_graph() body.
+     */
+    auto write_subgraph(const std::shared_ptr<Graph>& sub) -> void;
 
     /**
      * @brief Write metadata section.
@@ -173,6 +199,25 @@ public:
 private:
     std::ifstream file_;
     uint32_t version_;
+
+    /**
+     * @brief Read a full graph body (metadata, values, nodes, I/O lists,
+     *        constants) WITHOUT the file header.
+     *
+     * Factored out of read() so control-flow subgraphs can be reconstructed
+     * recursively by read_subgraph(). Recursion-safe: read_nodes() captures
+     * its node count into a local before any nested read clobbers the shared
+     * meta_num_nodes_ member.
+     */
+    auto read_graph() -> std::shared_ptr<Graph>;
+
+    /**
+     * @brief Read an optional nested subgraph (presence flag + body).
+     *
+     * @return The reconstructed subgraph, or nullptr if the presence flag
+     *         was false.
+     */
+    auto read_subgraph() -> std::shared_ptr<Graph>;
     // Counts from the metadata section — saved so read_nodes() knows
     // exactly how many nodes to read (the old code used a peek+try/catch
     // loop that conflicted with any trailing section past the nodes).

@@ -23,10 +23,19 @@
 #include <iostream>
 #include <functional>
 
+// Runtime GPU codegen can target CUDA (NVRTC) and/or ROCm (HIPRTC). A combined
+// build compiles this ONE host TU with TENZOR_USE_CUDA defined AND TENZOR_HAS_ROCM
+// defined (the build never defines TENZOR_USE_ROCM — that macro previously gated a
+// dead HIPRTC branch, so ROCm runtime codegen never ran). Both RTCs are selected
+// at RUNTIME by the tensor's device type. NVRTC's CUDA driver types (CUresult,
+// CUmodule…) and HIP's host-API types (hipError_t, hipModule_t…) have distinct
+// names and coexist in one g++ TU as long as we include HIP's HOST api header
+// (<hip/hip_runtime_api.h>) rather than <hip/hip_runtime.h> (whose device
+// vector-type helpers collide with CUDA's — see core/rocm_transfer.hpp).
 #if defined(TENZOR_USE_CUDA)
 #include <nvrtc.h>
 #include <cuda.h>
-#define CODEGEN_AVAILABLE 1
+#define CODEGEN_CUDA_AVAILABLE 1
 #define NVRTC_CHECK(call) do { \
     nvrtcResult res = call; \
     if (res != NVRTC_SUCCESS) { \
@@ -41,25 +50,31 @@
         throw std::runtime_error(std::string("CUDA Driver error: ") + (msg ? msg : "unknown")); \
     } \
 } while(0)
-#elif defined(TENZOR_USE_ROCM)
+#else
+#define CODEGEN_CUDA_AVAILABLE 0
+#endif
+
+#if defined(TENZOR_HAS_ROCM)
 #include <hip/hiprtc.h>
-#include <hip/hip_runtime.h>
-#define CODEGEN_AVAILABLE 1
-#define NVRTC_CHECK(call) do { \
+#include <hip/hip_runtime_api.h>
+#define CODEGEN_HIP_AVAILABLE 1
+#define HIPRTC_CHECK(call) do { \
     hiprtcResult res = call; \
     if (res != HIPRTC_SUCCESS) { \
         throw std::runtime_error(std::string("HIPRTC error: ") + hiprtcGetErrorString(res)); \
     } \
 } while(0)
-#define CU_CHECK(call) do { \
+#define HIP_CHECK(call) do { \
     hipError_t res = call; \
     if (res != hipSuccess) { \
         throw std::runtime_error(std::string("HIP error: ") + hipGetErrorString(res)); \
     } \
 } while(0)
 #else
-#define CODEGEN_AVAILABLE 0
+#define CODEGEN_HIP_AVAILABLE 0
 #endif
+
+#define CODEGEN_AVAILABLE (CODEGEN_CUDA_AVAILABLE || CODEGEN_HIP_AVAILABLE)
 
 namespace tenzor::jit {
 
@@ -108,11 +123,36 @@ auto build_fusion(std::vector<ElemStep> steps, int num_inputs, DType dtype)
 
 auto KernelCodegen::dtype_to_cuda_type(DType dtype) -> std::string {
     switch (dtype) {
-        case DType::Float32: return "float";
+        case DType::Float32:  return "float";
+        case DType::Float64:  return "double";
+        case DType::Float16:  return "__half";   // same spelling under NVRTC/HIPRTC
+        // Neutral bfloat16 typedef defined in the generated preamble off the
+        // device compiler (__nv_bfloat16 under NVRTC, __hip_bfloat16 under HIPRTC),
+        // so the same source compiles on either backend in a combined build.
+        case DType::BFloat16: return "tz_bf16";
+        case DType::Int32:    return "int";
+        case DType::Int64:    return "long long";
+        default:
+            // No lossy "float" default: reinterpreting an Int8/Complex buffer as
+            // float reads the wrong element size and yields garbage / OOB. Fail
+            // loudly (execute_fused also rejects non-float dtypes before this).
+            throw std::runtime_error(
+                "KernelCodegen: unsupported element dtype for fused GPU kernel: " +
+                std::string(dtype_name(dtype)));
+    }
+}
+
+// In-kernel compute/accumulation type for a storage dtype. Float64 computes in
+// double; Float32 and the 16-bit storage types (Float16/BFloat16) compute in
+// float — half-precision math is numerically wrong and the device math
+// intrinsics don't apply to __half/bfloat16 directly, so those load as float,
+// compute in float, and narrow back on store (matching the eager widen-narrow).
+static auto elementwise_compute_type(DType dtype) -> std::string {
+    switch (dtype) {
         case DType::Float64: return "double";
         case DType::Int32:   return "int";
         case DType::Int64:   return "long long";
-        default: return "float";  // Default to float
+        default:             return "float";  // Float32/Float16/BFloat16
     }
 }
 
@@ -120,9 +160,14 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
                             DType dtype) -> std::string {
     // vp = variable prefix. step.input_idx refers to either an input array or
     // the previous result (if -1, means "previous result" = vp + "val")
+    // Inputs are referenced through per-iteration locals x0,x1,… that generate()
+    // pre-widens to the compute type. Reading inpN[i] (the storage type) directly
+    // would make comparisons / ?: on __half/bfloat16 ambiguous against float
+    // literals (e.g. `half < 0.0f ? 0.0f : half`); widening once fixes that and
+    // keeps every op in the compute type.
     auto input = [&](int idx) -> std::string {
         if (idx < 0) return vp + "val";
-        return "inp" + std::to_string(idx) + "[i]";
+        return "x" + std::to_string(idx);
     };
 
     auto a = input(step.input_idx);
@@ -160,35 +205,45 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         return fmt_double(step.scalar != 0.0 ? step.scalar : dflt);
     };
 
+    // Device math intrinsic name for this kernel's compute precision. The
+    // unsuffixed names (exp, sqrt, erf…) resolve to the DOUBLE overload even in a
+    // Float32 kernel, so a Float32 fusion computed in double and diverged from the
+    // eager Float32 (expf) path (and was slower). Emit the single-precision
+    // variants (expf, sqrtf, erff…) for everything except Float64. F is already
+    // "" for Float64 and "f" otherwise, so `fn(base)` == base + F is exactly the
+    // right overload. Half/BFloat16 compute in float, so they take the f-suffixed
+    // intrinsics too.
+    auto fn = [&](const char* base) -> std::string { return std::string(base) + F; };
+
     switch (step.op) {
         // Unary
         case ElemOp::Neg:        return vp + "val = -" + a + ";";
-        case ElemOp::Abs:        return vp + "val = fabs(" + a + ");";
+        case ElemOp::Abs:        return vp + "val = " + fn("fabs") + "(" + a + ");";
         case ElemOp::Sign:       return vp + "val = (" + a + " > 0) - (" + a + " < 0);";
         case ElemOp::Reciprocal: return vp + "val = " + ONE + " / " + a + ";";
-        case ElemOp::Exp:        return vp + "val = exp(" + a + ");";
-        case ElemOp::Log:        return vp + "val = log(" + a + ");";
-        case ElemOp::Sqrt:       return vp + "val = sqrt(" + a + ");";
-        case ElemOp::Pow:        return vp + "val = pow(" + a + ", " + b + ");";
-        case ElemOp::Sin:        return vp + "val = sin(" + a + ");";
-        case ElemOp::Cos:        return vp + "val = cos(" + a + ");";
-        case ElemOp::Tan:        return vp + "val = tan(" + a + ");";
-        case ElemOp::Asin:       return vp + "val = asin(" + a + ");";
-        case ElemOp::Acos:       return vp + "val = acos(" + a + ");";
-        case ElemOp::Atan:       return vp + "val = atan(" + a + ");";
-        case ElemOp::Sinh:       return vp + "val = sinh(" + a + ");";
-        case ElemOp::Cosh:       return vp + "val = cosh(" + a + ");";
-        case ElemOp::Tanh:       return vp + "val = tanh(" + a + ");";
-        case ElemOp::Sigmoid:    return vp + "val = " + ONE + " / (" + ONE + " + exp(-" + a + "));";
+        case ElemOp::Exp:        return vp + "val = " + fn("exp") + "(" + a + ");";
+        case ElemOp::Log:        return vp + "val = " + fn("log") + "(" + a + ");";
+        case ElemOp::Sqrt:       return vp + "val = " + fn("sqrt") + "(" + a + ");";
+        case ElemOp::Pow:        return vp + "val = " + fn("pow") + "(" + a + ", " + b + ");";
+        case ElemOp::Sin:        return vp + "val = " + fn("sin") + "(" + a + ");";
+        case ElemOp::Cos:        return vp + "val = " + fn("cos") + "(" + a + ");";
+        case ElemOp::Tan:        return vp + "val = " + fn("tan") + "(" + a + ");";
+        case ElemOp::Asin:       return vp + "val = " + fn("asin") + "(" + a + ");";
+        case ElemOp::Acos:       return vp + "val = " + fn("acos") + "(" + a + ");";
+        case ElemOp::Atan:       return vp + "val = " + fn("atan") + "(" + a + ");";
+        case ElemOp::Sinh:       return vp + "val = " + fn("sinh") + "(" + a + ");";
+        case ElemOp::Cosh:       return vp + "val = " + fn("cosh") + "(" + a + ");";
+        case ElemOp::Tanh:       return vp + "val = " + fn("tanh") + "(" + a + ");";
+        case ElemOp::Sigmoid:    return vp + "val = " + ONE + " / (" + ONE + " + " + fn("exp") + "(-" + a + "));";
         // Match the CPU fallback (clamp_min(x, 0) == `x < 0 ? 0 : x`), which
         // propagates NaN; fmax(NaN, 0) returns 0 and diverged from CPU/eager.
         case ElemOp::Relu:       return vp + "val = (" + a + " < " + ZERO + ") ? " + ZERO + " : " + a + ";";
         case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(0.01) + F + " * " + a + ";";
-        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(1.0) + F + " * (exp(" + a + ") - " + ONE + ");";
+        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(1.0) + F + " * (" + fn("exp") + "(" + a + ") - " + ONE + ");";
         case ElemOp::Selu: {
             std::string lam = "1.0507009873554805" + F;
             std::string alp = "1.6732632423543772" + F;
-            return vp + "val = " + a + " > 0 ? " + lam + " * " + a + " : " + lam + " * " + alp + " * (exp(" + a + ") - " + ONE + ");";
+            return vp + "val = " + a + " > 0 ? " + lam + " * " + a + " : " + lam + " * " + alp + " * (" + fn("exp") + "(" + a + ") - " + ONE + ");";
         }
         case ElemOp::Gelu:
             // Exact erf GELU 0.5*x*(1 + erf(x / sqrt(2))) to match the CPU/eager
@@ -196,9 +251,9 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
             // 0.7071067811865476. erf is available in NVRTC/HIPRTC device math.
             // The older tanh approximation diverged from CPU by ~1e-3, breaking
             // cross-backend parity / gradcheck for any fused group with GELU.
-            return vp + "val = 0.5" + F + " * " + a + " * (" + ONE + " + erf(" + a + " * 0.7071067811865476" + F + "));";
+            return vp + "val = 0.5" + F + " * " + a + " * (" + ONE + " + " + fn("erf") + "(" + a + " * 0.7071067811865476" + F + "));";
         case ElemOp::Mish:
-            return vp + "val = " + a + " * tanh(log(" + ONE + " + exp(" + a + ")));";
+            return vp + "val = " + a + " * " + fn("tanh") + "(" + fn("log") + "(" + ONE + " + " + fn("exp") + "(" + a + ")));";
         case ElemOp::Softplus: {
             // Match the CPU fallback (OpId::Softplus, beta from scalar/default 1,
             // threshold 20): softplus_beta(x) = (1/beta)*log1p(exp(beta*x)), but
@@ -206,74 +261,104 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
             // overflowed to +inf for large x (CPU returns x).
             std::string beta = activation_scalar(1.0);
             return vp + "val = (" + beta + F + " * " + a + " > 20.0" + F + ") ? " +
-                   a + " : log1p(exp(" + beta + F + " * " + a + ")) / (" + beta + F + ");";
+                   a + " : " + fn("log1p") + "(" + fn("exp") + "(" + beta + F + " * " + a + ")) / (" + beta + F + ");";
         }
-        case ElemOp::Erf:        return vp + "val = erf(" + a + ");";
-        case ElemOp::Erfc:       return vp + "val = erfc(" + a + ");";
-        case ElemOp::Log2:       return vp + "val = log2(" + a + ");";
-        case ElemOp::Log10:      return vp + "val = log10(" + a + ");";
-        case ElemOp::Log1p:      return vp + "val = log1p(" + a + ");";
-        case ElemOp::Exp2:       return vp + "val = exp2(" + a + ");";
-        case ElemOp::Expm1:      return vp + "val = expm1(" + a + ");";
-        case ElemOp::Floor:      return vp + "val = floor(" + a + ");";
-        case ElemOp::Ceil:       return vp + "val = ceil(" + a + ");";
-        case ElemOp::Round:      return vp + "val = round(" + a + ");";
+        case ElemOp::Erf:        return vp + "val = " + fn("erf") + "(" + a + ");";
+        case ElemOp::Erfc:       return vp + "val = " + fn("erfc") + "(" + a + ");";
+        case ElemOp::Log2:       return vp + "val = " + fn("log2") + "(" + a + ");";
+        case ElemOp::Log10:      return vp + "val = " + fn("log10") + "(" + a + ");";
+        case ElemOp::Log1p:      return vp + "val = " + fn("log1p") + "(" + a + ");";
+        case ElemOp::Exp2:       return vp + "val = " + fn("exp2") + "(" + a + ");";
+        case ElemOp::Expm1:      return vp + "val = " + fn("expm1") + "(" + a + ");";
+        case ElemOp::Floor:      return vp + "val = " + fn("floor") + "(" + a + ");";
+        case ElemOp::Ceil:       return vp + "val = " + fn("ceil") + "(" + a + ");";
+        case ElemOp::Round:      return vp + "val = " + fn("round") + "(" + a + ");";
 
         // Binary
         case ElemOp::Add:  return vp + "val = " + a + " + " + b + ";";
         case ElemOp::Sub:  return vp + "val = " + a + " - " + b + ";";
         case ElemOp::Mul:  return vp + "val = " + a + " * " + b + ";";
         case ElemOp::Div:  return vp + "val = " + a + " / " + b + ";";
-        case ElemOp::Max:  return vp + "val = fmax(" + a + ", " + b + ");";
-        case ElemOp::Min:  return vp + "val = fmin(" + a + ", " + b + ");";
-        case ElemOp::Fmod: return vp + "val = fmod(" + a + ", " + b + ");";
+        case ElemOp::Max:  return vp + "val = " + fn("fmax") + "(" + a + ", " + b + ");";
+        case ElemOp::Min:  return vp + "val = " + fn("fmin") + "(" + a + ", " + b + ");";
+        case ElemOp::Fmod: return vp + "val = " + fn("fmod") + "(" + a + ", " + b + ");";
 
         // Scalar ops
         case ElemOp::AddScalar:  return vp + "val = " + a + " + " + s + F + ";";
         case ElemOp::MulScalar:  return vp + "val = " + a + " * " + s + F + ";";
-        case ElemOp::PowScalar:  return vp + "val = pow(" + a + ", " + s + F + ");";
-        case ElemOp::ClampMin:   return vp + "val = fmax(" + a + ", " + s + F + ");";
-        case ElemOp::ClampMax:   return vp + "val = fmin(" + a + ", " + s + F + ");";
+        case ElemOp::PowScalar:  return vp + "val = " + fn("pow") + "(" + a + ", " + s + F + ");";
+        case ElemOp::ClampMin:   return vp + "val = " + fn("fmax") + "(" + a + ", " + s + F + ");";
+        case ElemOp::ClampMax:   return vp + "val = " + fn("fmin") + "(" + a + ", " + s + F + ");";
 
         default: return vp + "val = " + a + "; // unknown op";
     }
 }
 
 auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
-    auto ctype = dtype_to_cuda_type(group.dtype);
+    const std::string T = dtype_to_cuda_type(group.dtype);        // storage type
+    const std::string C = elementwise_compute_type(group.dtype);  // compute type
     std::string kernel_name = "fused_elementwise_" +
         std::to_string(group.steps.size()) + "_ops";
 
-    std::ostringstream ss;
+    std::ostringstream body;
 
-    // Header
-    ss << "extern \"C\" __global__ void " << kernel_name << "(\n";
-
-    // Input pointers
+    // Header. Pointers use the STORAGE type T (e.g. __half); the per-element
+    // computation runs in the COMPUTE type C (float for the 16-bit types), so the
+    // half operands widen to float on load and narrow back on the single store —
+    // matching the eager widen-compute-narrow kernels.
+    body << "extern \"C\" __global__ void " << kernel_name << "(\n";
     for (int i = 0; i < group.num_inputs; ++i) {
-        ss << "    const " << ctype << "* __restrict__ inp" << i << ",\n";
+        body << "    const " << T << "* __restrict__ inp" << i << ",\n";
     }
-    ss << "    " << ctype << "* __restrict__ out,\n";
-    ss << "    long long numel\n";
-    ss << ") {\n";
+    body << "    " << T << "* __restrict__ out,\n";
+    body << "    long long numel\n";
+    body << ") {\n";
 
     // Grid-stride loop
-    ss << "    for (long long i = blockIdx.x * blockDim.x + threadIdx.x;\n";
-    ss << "         i < numel;\n";
-    ss << "         i += blockDim.x * gridDim.x) {\n";
+    body << "    for (long long i = blockIdx.x * blockDim.x + threadIdx.x;\n";
+    body << "         i < numel;\n";
+    body << "         i += blockDim.x * gridDim.x) {\n";
 
-    // Emit operations
-    ss << "        " << ctype << " val;\n";
-    for (size_t s = 0; s < group.steps.size(); ++s) {
-        ss << "        " << emit_op(group.steps[s], "", group.dtype) << "\n";
+    // Compute in C. Widen each input operand to the compute type once (x0,x1,…);
+    // the 16-bit storage types (__half/bfloat16) promote to float here so all
+    // subsequent ops (including comparisons / ?:) are unambiguous. The result
+    // narrows back to the storage type T on the single store.
+    for (int i = 0; i < group.num_inputs; ++i) {
+        body << "        " << C << " x" << i << " = static_cast<" << C
+             << ">(inp" << i << "[i]);\n";
     }
+    body << "        " << C << " val;\n";
+    for (size_t s = 0; s < group.steps.size(); ++s) {
+        body << "        " << emit_op(group.steps[s], "", group.dtype) << "\n";
+    }
+    body << "        out[i] = static_cast<" << T << ">(val);\n";
+    body << "    }\n";
+    body << "}\n";
 
-    // Store result
-    ss << "        out[i] = val;\n";
-    ss << "    }\n";
-    ss << "}\n";
-
-    return ss.str();
+    // Preamble: pull in the half/bfloat16 device headers and define the neutral
+    // tz_bf16 type when the kernel references those storage types. The header
+    // names AND the bfloat16 type name differ between CUDA and HIP, so both are
+    // selected off the DEVICE compiler (__CUDACC_RTC__ only under NVRTC) — the
+    // same source then compiles under either NVRTC or HIPRTC in a combined build.
+    std::string src = body.str();
+    std::ostringstream pre;
+    if (src.find("__half") != std::string::npos) {
+        pre << "#if defined(__CUDACC_RTC__)\n"
+               "#include <cuda_fp16.h>\n"
+               "#else\n"
+               "#include <hip/hip_fp16.h>\n"
+               "#endif\n";
+    }
+    if (src.find("tz_bf16") != std::string::npos) {
+        pre << "#if defined(__CUDACC_RTC__)\n"
+               "#include <cuda_bf16.h>\n"
+               "typedef __nv_bfloat16 tz_bf16;\n"
+               "#else\n"
+               "#include <hip/hip_bf16.h>\n"
+               "typedef __hip_bfloat16 tz_bf16;\n"
+               "#endif\n";
+    }
+    return pre.str() + src;
 }
 
 // ============================================================================
@@ -281,12 +366,14 @@ auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
 // ============================================================================
 
 CompiledKernel::~CompiledKernel() {
-#if CODEGEN_AVAILABLE
+#if CODEGEN_HIP_AVAILABLE
+    if (is_hip) {
+        if (module) hipModuleUnload(static_cast<hipModule_t>(module));
+        return;
+    }
+#endif
 #if defined(TENZOR_USE_CUDA)
     if (module) cuModuleUnload(static_cast<CUmodule>(module));
-#elif defined(TENZOR_USE_ROCM)
-    if (module) hipModuleUnload(static_cast<hipModule_t>(module));
-#endif
 #endif
 }
 
@@ -326,6 +413,20 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
     args.push_back(&output_ptr);
     args.push_back(&numel);
 
+#if CODEGEN_HIP_AVAILABLE
+    if (is_hip) {
+        HIP_CHECK(hipSetDevice(device_index));
+        HIP_CHECK(hipModuleLaunchKernel(
+            static_cast<hipFunction_t>(function),
+            grid_size, 1, 1,
+            block_size, 1, 1,
+            0,
+            static_cast<hipStream_t>(stream),
+            args.data(),
+            nullptr));
+        return;
+    }
+#endif
 #if defined(TENZOR_USE_CUDA)
     CU_CHECK(cuLaunchKernel(
         static_cast<CUfunction>(function),
@@ -336,16 +437,8 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
         args.data(),
         nullptr
     ));
-#elif defined(TENZOR_USE_ROCM)
-    CU_CHECK(hipModuleLaunchKernel(
-        static_cast<hipFunction_t>(function),
-        grid_size, 1, 1,
-        block_size, 1, 1,
-        0,
-        static_cast<hipStream_t>(stream),
-        args.data(),
-        nullptr
-    ));
+#else
+    throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
 #endif
 #else
     throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
@@ -364,6 +457,20 @@ auto CompiledKernel::launch_raw(const std::vector<void*>& kernel_args,
     // cuLaunchKernel/hipModuleLaunchKernel want a non-const void** to the array
     // of argument pointers; the pointed-to values are owned by the caller.
     std::vector<void*> args = kernel_args;
+#if CODEGEN_HIP_AVAILABLE
+    if (is_hip) {
+        HIP_CHECK(hipSetDevice(device_index));
+        HIP_CHECK(hipModuleLaunchKernel(
+            static_cast<hipFunction_t>(function),
+            grid_size, 1, 1,
+            block_size, 1, 1,
+            shared_bytes,
+            static_cast<hipStream_t>(stream),
+            args.data(),
+            nullptr));
+        return;
+    }
+#endif
 #if defined(TENZOR_USE_CUDA)
     CU_CHECK(cuLaunchKernel(
         static_cast<CUfunction>(function),
@@ -373,15 +480,8 @@ auto CompiledKernel::launch_raw(const std::vector<void*>& kernel_args,
         static_cast<CUstream>(stream),
         args.data(),
         nullptr));
-#elif defined(TENZOR_USE_ROCM)
-    CU_CHECK(hipModuleLaunchKernel(
-        static_cast<hipFunction_t>(function),
-        grid_size, 1, 1,
-        block_size, 1, 1,
-        shared_bytes,
-        static_cast<hipStream_t>(stream),
-        args.data(),
-        nullptr));
+#else
+    throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
 #endif
 #else
     (void)kernel_args; (void)grid_size; (void)block_size; (void)shared_bytes; (void)stream;
@@ -413,8 +513,9 @@ auto KernelCache::get_or_compile(const FusionGroup& group) -> std::shared_ptr<Co
         std::to_string(group.steps.size()) + "_ops";
 
     // Compile for the group's target GPU (its context + compute arch), not a
-    // hardcoded device 0.
-    auto kernel = compile(source, kernel_name, group.device.index);
+    // hardcoded device 0. Select CUDA vs ROCm runtime by the group's device type.
+    auto kernel = compile(source, kernel_name, group.device.index,
+                          group.device.type == Device::Type::ROCm);
     kernel->source = source;
     kernel->num_inputs = group.num_inputs;
     cache_[group.signature] = kernel;
@@ -426,7 +527,8 @@ auto KernelCache::get_or_compile(const FusionGroup& group) -> std::shared_ptr<Co
 auto KernelCache::get_or_compile_source(const std::string& signature,
                                         const std::string& source,
                                         const std::string& kernel_name,
-                                        int device_index)
+                                        int device_index,
+                                        bool is_rocm)
     -> std::shared_ptr<CompiledKernel> {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -438,8 +540,9 @@ auto KernelCache::get_or_compile_source(const std::string& signature,
 
     // Compile for the requesting device's context/compute arch, not a hardcoded
     // device 0. The caller must also fold the device into `signature` so a
-    // kernel built for one device is never served to another.
-    auto kernel = compile(source, kernel_name, device_index);
+    // kernel built for one device is never served to another. is_rocm selects
+    // HIPRTC vs NVRTC at runtime (combined build compiles both).
+    auto kernel = compile(source, kernel_name, device_index, is_rocm);
     if (kernel) {
         kernel->source = source;
         cache_[signature] = kernel;
@@ -449,13 +552,77 @@ auto KernelCache::get_or_compile_source(const std::string& signature,
 }
 
 auto KernelCache::compile(const std::string& source, const std::string& kernel_name,
-                          int device_index)
+                          int device_index, bool is_rocm)
     -> std::shared_ptr<CompiledKernel> {
 #if CODEGEN_AVAILABLE
     auto kernel = std::make_shared<CompiledKernel>();
     kernel->name = kernel_name;
+    kernel->device_index = device_index;
 
+    // ---- ROCm target: compile with HIPRTC and load via the HIP driver. ----
+#if CODEGEN_HIP_AVAILABLE
+    if (is_rocm) {
+        HIP_CHECK(hipInit(0));
+        // Bind to the target device so hipModuleLoadData/launch use its context
+        // and HIPRTC compiles for its architecture.
+        HIP_CHECK(hipSetDevice(device_index));
+        hipDeviceProp_t prop;
+        HIP_CHECK(hipGetDeviceProperties(&prop, device_index));
+        // Compile for the resident GPU's ISA. Without an explicit --offload-arch,
+        // HIPRTC has no target and either fails or emits code for the wrong arch
+        // (e.g. gfx1150 wavefronts are 64-wide — the mask/reduction correctness in
+        // the generated source depends on the right target).
+        std::string arch_flag = std::string("--offload-arch=") + prop.gcnArchName;
+
+        hiprtcProgram prog;
+        HIPRTC_CHECK(hiprtcCreateProgram(&prog, source.c_str(), "fused_kernel.hip",
+                                         0, nullptr, nullptr));
+        // Provide the ROCm include dir so <hip/hip_fp16.h> / <hip/hip_bf16.h>
+        // (Float16/BFloat16 fusions) resolve under HIPRTC.
+        std::vector<std::string> opt_storage = {arch_flag, "--std=c++17"};
+#ifdef TENZOR_HIPRTC_INCLUDE
+        opt_storage.push_back(std::string("-I") + TENZOR_HIPRTC_INCLUDE);
+#endif
+        std::vector<const char*> opts;
+        opts.reserve(opt_storage.size());
+        for (const auto& o : opt_storage) opts.push_back(o.c_str());
+        hiprtcResult compile_result =
+            hiprtcCompileProgram(prog, static_cast<int>(opts.size()), opts.data());
+        if (compile_result != HIPRTC_SUCCESS) {
+            size_t log_size = 0;
+            hiprtcGetProgramLogSize(prog, &log_size);
+            std::string log(log_size, '\0');
+            hiprtcGetProgramLog(prog, log.data());
+            hiprtcDestroyProgram(&prog);
+            throw std::runtime_error("HIPRTC compilation failed:\n" + log +
+                                     "\nSource:\n" + source);
+        }
+        size_t code_size = 0;
+        HIPRTC_CHECK(hiprtcGetCodeSize(prog, &code_size));
+        std::string code(code_size, '\0');
+        HIPRTC_CHECK(hiprtcGetCode(prog, code.data()));
+        hiprtcDestroyProgram(&prog);
+
+        hipModule_t hip_module;
+        HIP_CHECK(hipModuleLoadData(&hip_module, code.data()));
+        kernel->module = hip_module;
+        hipFunction_t hip_func;
+        HIP_CHECK(hipModuleGetFunction(&hip_func, hip_module, kernel_name.c_str()));
+        kernel->function = hip_func;
+        kernel->is_hip = true;
+        return kernel;
+    }
+#else
+    if (is_rocm) {
+        throw std::runtime_error(
+            "KernelCache::compile: ROCm (HIPRTC) codegen requested but this build "
+            "has no ROCm runtime");
+    }
+#endif
+
+    // ---- CUDA target: compile with NVRTC and load via the CUDA driver. ----
 #if defined(TENZOR_USE_CUDA)
+    (void)is_rocm;
     // Initialize CUDA driver API and ensure a context is active. Bind to the
     // caller's target device (multi-GPU): a module compiled/loaded under device
     // 0's context yields a CUfunction that is illegal to launch on cuda:1.
@@ -497,12 +664,20 @@ auto KernelCache::compile(const std::string& source, const std::string& kernel_n
     NVRTC_CHECK(nvrtcCreateProgram(&prog, source.c_str(), "fused_kernel.cu",
                                     0, nullptr, nullptr));
 
-    const char* opts[] = {
-        arch_flag.c_str(),
-        "--std=c++17",
-        "-default-device"
+    // NVRTC bundles no headers: a kernel that #includes <cuda_fp16.h> /
+    // <cuda_bf16.h> (Float16/BFloat16 fusions) fails to open the file unless we
+    // hand it the CUDA include directory (baked in at build time).
+    std::vector<std::string> opt_storage = {
+        arch_flag, "--std=c++17", "-default-device"
     };
-    nvrtcResult compile_result = nvrtcCompileProgram(prog, 3, opts);
+#ifdef TENZOR_NVRTC_INCLUDE
+    opt_storage.push_back(std::string("--include-path=") + TENZOR_NVRTC_INCLUDE);
+#endif
+    std::vector<const char*> opts;
+    opts.reserve(opt_storage.size());
+    for (const auto& o : opt_storage) opts.push_back(o.c_str());
+    nvrtcResult compile_result =
+        nvrtcCompileProgram(prog, static_cast<int>(opts.size()), opts.data());
 
     if (compile_result != NVRTC_SUCCESS) {
         size_t log_size;
@@ -529,41 +704,17 @@ auto KernelCache::compile(const std::string& source, const std::string& kernel_n
     CU_CHECK(cuModuleGetFunction(&cu_func, cu_module, kernel_name.c_str()));
     kernel->function = cu_func;
 
-#elif defined(TENZOR_USE_ROCM)
-    // Compile with HIPRTC
-    hiprtcProgram prog;
-    NVRTC_CHECK(hiprtcCreateProgram(&prog, source.c_str(), "fused_kernel.hip",
-                                    0, nullptr, nullptr));
-
-    const char* opts[] = {"--std=c++17"};
-    hiprtcResult compile_result = hiprtcCompileProgram(prog, 1, opts);
-
-    if (compile_result != HIPRTC_SUCCESS) {
-        size_t log_size;
-        hiprtcGetProgramLogSize(prog, &log_size);
-        std::string log(log_size, '\0');
-        hiprtcGetProgramLog(prog, log.data());
-        hiprtcDestroyProgram(&prog);
-        throw std::runtime_error("HIPRTC compilation failed:\n" + log + "\nSource:\n" + source);
-    }
-
-    size_t code_size;
-    NVRTC_CHECK(hiprtcGetCodeSize(prog, &code_size));
-    std::string code(code_size, '\0');
-    NVRTC_CHECK(hiprtcGetCode(prog, code.data()));
-    hiprtcDestroyProgram(&prog);
-
-    hipModule_t hip_module;
-    CU_CHECK(hipModuleLoadData(&hip_module, code.data()));
-    kernel->module = hip_module;
-
-    hipFunction_t hip_func;
-    CU_CHECK(hipModuleGetFunction(&hip_func, hip_module, kernel_name.c_str()));
-    kernel->function = hip_func;
-#endif
-
     return kernel;
 #else
+    // No CUDA runtime in this build. A ROCm-only build reaches here only if
+    // is_rocm was false (handled/thrown above), so a CUDA kernel was requested
+    // without a CUDA runtime.
+    throw std::runtime_error(
+        "KernelCache::compile: CUDA (NVRTC) codegen requested but this build has "
+        "no CUDA runtime");
+#endif
+#else
+    (void)device_index; (void)is_rocm;
     throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
 #endif
 }
@@ -603,17 +754,19 @@ auto execute_fused(const FusionGroup& group,
     }
 
 #if CODEGEN_AVAILABLE
-    // The generated kernel only implements Float32/Float64 math. Reject any
-    // other dtype up front — before any device transfer, kernel compilation, or
-    // output allocation — instead of reinterpreting its bytes as float (which
-    // silently produced garbage / OOB for Int32/Int64 whose element size
-    // differs). Validating here (rather than after get_or_compile/allocation)
-    // also avoids compiling and caching a dead NVRTC/HIPRTC kernel and wasting
-    // CPU->GPU transfers for a dtype that always throws.
-    if (group.dtype != DType::Float32 && group.dtype != DType::Float64) {
+    // The generated kernel loads/stores Float32/Float64/Float16/BFloat16 (the
+    // 16-bit types widen to float for the math, compute in float, and narrow back
+    // on store — see KernelCodegen::generate). Reject any OTHER dtype up front —
+    // before any device transfer, kernel compilation, or output allocation —
+    // instead of reinterpreting its bytes as float (which silently produced
+    // garbage / OOB for Int*/Complex whose element size differs). Validating here
+    // also avoids compiling/caching a dead kernel and wasting CPU->GPU transfers.
+    if (group.dtype != DType::Float32 && group.dtype != DType::Float64 &&
+        group.dtype != DType::Float16 && group.dtype != DType::BFloat16) {
         throw std::runtime_error(
             "KernelCodegen::execute_fused: fused GPU codegen only supports "
-            "Float32/Float64; got " + std::string(dtype_name(group.dtype)) +
+            "Float32/Float64/Float16/BFloat16; got " +
+            std::string(dtype_name(group.dtype)) +
             " — route this dtype through the eager fallback");
     }
 
@@ -669,19 +822,17 @@ auto execute_fused(const FusionGroup& group,
     for (auto& inp : gpu_inputs) {
         inp = inp.contiguous();
     }
+    // Raw device pointers, dtype-agnostic: the kernel's pointer type (float /
+    // double / __half / bfloat16) matches group.dtype, and data_ptr() returns the
+    // untyped base of the contiguous storage. Using data<float>() for every dtype
+    // would misread a half/double buffer.
     std::vector<const void*> input_ptrs;
     input_ptrs.reserve(gpu_inputs.size());
     for (auto& inp : gpu_inputs) {
-        if (group.dtype == DType::Float32) {
-            input_ptrs.push_back(inp.data<float>());
-        } else {  // Float64 (guarded above)
-            input_ptrs.push_back(inp.data<double>());
-        }
+        input_ptrs.push_back(inp.data_ptr());
     }
 
-    void* output_ptr = (group.dtype == DType::Float32)
-                           ? static_cast<void*>(output.data<float>())
-                           : static_cast<void*>(output.data<double>());
+    void* output_ptr = output.data_ptr();
 
     // Launch on default stream
     kernel->launch(input_ptrs, output_ptr, numel, nullptr);

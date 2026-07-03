@@ -12,6 +12,19 @@ sys.path.insert(0, build_python_dir)
 import tenzor.tenzor_core as tz
 
 
+def _as_tensor(x):
+    return x.tensor() if hasattr(x, 'tensor') else x
+
+
+def _max_abs_diff(a, b):
+    """Max |a-b| over two Tensor/Variable outputs, on CPU."""
+    a_t = _as_tensor(a).to('cpu')
+    b_t = _as_tensor(b).to('cpu')
+    assert list(a_t.shape) == list(b_t.shape), (
+        f"shape mismatch {list(a_t.shape)} vs {list(b_t.shape)}")
+    return float((a_t - b_t).abs().max().item())
+
+
 def test_tracer_lifecycle():
     """Test Tracer start/is_tracing lifecycle."""
     print("Testing tracer lifecycle...")
@@ -38,7 +51,13 @@ def test_trace_linear_model():
     graph = tz.jit.trace(model, dummy)
     assert graph is not None, "trace() returned None"
     print(f"  traced graph: {graph.num_nodes()} nodes, {graph.num_values()} values")
-    # Graph may have 0 nodes if tracing only captures inputs/outputs
+    # A traced Linear MUST record at least one op (the matmul/linear) and its
+    # values — a 0-node graph means the dispatch interceptor recorded nothing,
+    # which is a real binding regression, not an acceptable outcome.
+    assert graph.num_nodes() > 0, (
+        "JIT trace of a Linear returned an empty graph — the tracing "
+        "interceptor is not recording ops")
+    assert graph.num_values() > 0, "traced graph has no values"
     text = graph.to_string()
     assert isinstance(text, str), "to_string() didn't return string"
     print("  trace linear model OK")
@@ -67,17 +86,21 @@ def test_jit_graph_execution():
     dummy = tz.Variable(tz.randn([2, 8]))
 
     graph = tz.jit.trace(model, dummy)
+    assert graph.num_nodes() > 0, "JIT trace returned an empty graph"
 
-    # Execute with new input — may return empty if graph has no nodes.
-    # A raised exception here is a real failure: let it propagate.
+    # Execute the traced graph on a FRESH input and require it to reproduce the
+    # eager forward's VALUES — not merely "not throw" and not "may be empty".
+    # An empty output list or a value mismatch is a real replay bug.
     # Graph.forward takes Variables (its C++ signature is
     # forward(std::vector<Variable>)), consistent with the rest of the JIT API.
-    new_input = tz.Variable(tz.randn([2, 8]))
+    new_input = tz.Variable(tz.randn([2, 8]), False)
+    eager = model.forward(new_input)
     outputs = graph.forward([new_input])
-    if len(outputs) > 0:
-        print(f"  got {len(outputs)} outputs, shape: {outputs[0].shape}")
-    else:
-        print("  graph returned empty (no traced ops)")
+    assert len(outputs) > 0, "traced graph produced no outputs on replay"
+    diff = _max_abs_diff(outputs[0], eager)
+    assert diff < 1e-4, f"traced replay diverged from eager: max|diff|={diff}"
+    print(f"  got {len(outputs)} outputs, shape: {outputs[0].shape}, "
+          f"replay max|diff| vs eager = {diff:.2e}")
     print("  graph execution OK")
 
 

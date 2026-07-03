@@ -137,7 +137,37 @@ option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 
 # MLIR/StableHLO/IREE JIT pipeline (Phase 13)
-option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" OFF)
+#
+# Auto-detect a usable IREE distribution so a plain `cmake -B build` on a host
+# that HAS IREE enables the MLIR/IREE JIT tests BY DEFAULT — otherwise a default
+# build compiles zero cross-backend IREE coverage (the numeric IREE tests live
+# behind TENZOR_USE_MLIR_JIT). Detection keys off the same locations the enabled
+# block below searches — an explicit IREE dir env var, the project-local
+# third_party/iree_dist, or an iree-compile on PATH — and NEVER triggers the
+# heavy from-source FetchContent build. This only sets the option DEFAULT: an
+# explicit -DTENZOR_USE_MLIR_JIT=ON/OFF still wins, existing build dirs keep
+# their cached value, and a host without IREE defaults to OFF (no IREE deps, no
+# build break).
+set(_tenzor_iree_marker "lib/cmake/IREE/IREECompilerConfig.cmake")
+set(_tenzor_iree_autodetect OFF)
+if(DEFINED ENV{IREE_DIR} AND EXISTS "$ENV{IREE_DIR}/${_tenzor_iree_marker}")
+    set(_tenzor_iree_autodetect ON)
+elseif(DEFINED ENV{TENZOR_IREE_DIR} AND EXISTS "$ENV{TENZOR_IREE_DIR}/${_tenzor_iree_marker}")
+    set(_tenzor_iree_autodetect ON)
+elseif(EXISTS "${PROJECT_SOURCE_DIR}/third_party/iree_dist/${_tenzor_iree_marker}")
+    set(_tenzor_iree_autodetect ON)
+else()
+    find_program(_tenzor_iree_compile NAMES iree-compile)
+    if(_tenzor_iree_compile)
+        set(_tenzor_iree_autodetect ON)
+    endif()
+endif()
+if(_tenzor_iree_autodetect)
+    message(STATUS "Tenzor: IREE distribution detected — TENZOR_USE_MLIR_JIT "
+                   "defaults to ON (override with -DTENZOR_USE_MLIR_JIT=OFF)")
+endif()
+
+option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" ${_tenzor_iree_autodetect})
 option(TENZOR_USE_INPROCESS_IREE "Link IREE compiler in-process (Phase 3C)" OFF)
 
 # Pinned version — IREE distribution bundles MLIR + StableHLO. The 2026-05-19

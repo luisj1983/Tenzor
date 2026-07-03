@@ -269,6 +269,11 @@ TransferState::~TransferState() {
 #ifdef TENZOR_USE_CUDA
     if (event && !completed.load(std::memory_order_acquire)) {
         cudaEventSynchronize(event);  // ignore errors at teardown
+        // The async D2H pinned path may have a pending pinned->dst host copy
+        // that no wait()/is_ready() ever ran. Complete it now (once the DMA has
+        // synced above) so any holder of `result` sees the transferred bytes,
+        // and before `pinned_buffer` is returned to the pool for reuse.
+        finalize_deferred_copy();
     }
 #endif
 #ifdef TENZOR_USE_ROCM
@@ -311,6 +316,19 @@ TransferState::~TransferState() {
 #endif
 }
 
+void TransferState::finalize_deferred_copy() {
+    // Sequenced after the completion event has signalled by every caller.
+    // The mutex guarantees the memcpy runs exactly once and that its effects
+    // are visible to any thread that subsequently observes `completed` (which
+    // is stored with release ordering only after this returns): a waiter that
+    // sees completion is therefore guaranteed to see the copied host bytes.
+    std::lock_guard lock(mutex);
+    if (deferred_dst && pinned_buffer && !host_copy_done) {
+        std::memcpy(deferred_dst, pinned_buffer, deferred_bytes);
+        host_copy_done = true;
+    }
+}
+
 // ============================================================================
 // TransferHandle Implementation
 // ============================================================================
@@ -340,6 +358,9 @@ auto TransferHandle::is_ready() const -> bool {
     if (state_->event) {
         cudaError_t result = cudaEventQuery(state_->event);
         if (result == cudaSuccess) {
+            // Event signalled => device->pinned DMA done. Run the deferred
+            // pinned->dst host copy (if any) before publishing completion.
+            state_->finalize_deferred_copy();
             state_->completed.store(true, std::memory_order_release);
             return true;
         }
@@ -406,6 +427,9 @@ auto TransferHandle::wait() -> void {
 #ifdef TENZOR_USE_CUDA
     if (state_->event) {
         CUDA_CHECK(cudaEventSynchronize(state_->event));
+        // DMA done: run the deferred pinned->dst host copy (if any) before
+        // publishing completion so a subsequent get_tensor() sees the bytes.
+        state_->finalize_deferred_copy();
         state_->completed.store(true, std::memory_order_release);
         state_->cv.notify_all();
         return;
@@ -458,6 +482,9 @@ auto TransferHandle::wait() -> void {
     if (state_->event) {
         lock.unlock();
         CUDA_CHECK(cudaEventSynchronize(state_->event));
+        // DMA done: run the deferred pinned->dst host copy (if any) before
+        // publishing completion so a subsequent get_tensor() sees the bytes.
+        state_->finalize_deferred_copy();
         state_->completed.store(true, std::memory_order_release);
         state_->cv.notify_all();
         return;
@@ -1504,28 +1531,38 @@ auto TransferEngine::process_transfer(const TransferRequest& request) -> void {
         if (config_.use_pinned_memory) {
             void* pinned = get_pinned_buffer(bytes);
             if (pinned) {
+                // Issue the device->pinned DMA and return WITHOUT blocking the
+                // worker. Previously this recorded an event and immediately
+                // cudaEventSynchronize'd it, then did the pinned->dst memcpy
+                // inline — that stalled the single worker thread per transfer
+                // and fully serialized all D2H copies (they could not overlap
+                // across streams the way H2D does). Instead we record the event
+                // (below) and DEFER the pinned->dst host copy to the completion
+                // point (wait()/is_ready()/dtor via finalize_deferred_copy()),
+                // so multiple D2H DMAs are in flight concurrently. `pinned`
+                // stays reserved (in_use) in this state until it is destroyed,
+                // and `dst_ptr` lives in `cpu_tensor`/`result`, so both copy
+                // endpoints outlive the DMA.
                 CUDA_CHECK(cudaMemcpyAsync(pinned, src_ptr, bytes, cudaMemcpyDeviceToHost, stream));
-
-                cudaEvent_t event = get_event();
-                CUDA_CHECK(cudaEventRecord(event, stream));
-                CUDA_CHECK(cudaEventSynchronize(event));
-
-                std::memcpy(dst_ptr, pinned, bytes);
-
-                return_event(event);
                 request.state->pinned_buffer = pinned;
+                request.state->deferred_dst = dst_ptr;
+                request.state->deferred_bytes = bytes;
             } else {
+                // No pinned buffer available: DMA straight into pageable dst;
+                // no deferred host copy is needed.
                 CUDA_CHECK(cudaMemcpyAsync(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost, stream));
             }
         } else {
             CUDA_CHECK(cudaMemcpyAsync(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost, stream));
         }
 
-        if (!config_.use_pinned_memory || !request.state->pinned_buffer) {
-            cudaEvent_t event = get_event();
-            CUDA_CHECK(cudaEventRecord(event, stream));
-            request.state->event = event;
-        }
+        // Always record a single completion event for the D2H path (both the
+        // deferred-pinned and the direct pageable variants). Completion — and
+        // the deferred pinned->dst copy, if any — is finalized in wait()/
+        // is_ready(), never by stalling the worker here.
+        cudaEvent_t event = get_event();
+        CUDA_CHECK(cudaEventRecord(event, stream));
+        request.state->event = event;
 
         request.state->result = cpu_tensor;
         request.state->cv.notify_all();

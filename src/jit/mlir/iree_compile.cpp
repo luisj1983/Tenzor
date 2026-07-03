@@ -273,6 +273,24 @@ auto embedding_api_supported_targets() -> const std::set<std::string>& {
 }
 
 // ============================================================================
+// Target-name normalization (H6).
+// ============================================================================
+
+/// Canonicalize a user-facing target name to the exact string IREE's
+/// `--iree-hal-target-backends` flag expects. The Python docs (jit.py /
+/// jit.pyi) advertise `target="vulkan"`, but IREE requires `vulkan-spirv`;
+/// passed verbatim, iree-compile rejects `vulkan`. Accepting the documented
+/// aliases here — at the single compile boundary every path funnels through —
+/// makes the documented names actually work while leaving canonical names and
+/// any target the local dist supports untouched (validation against the
+/// dist's real target set still happens below in compile_mlir()).
+auto normalize_iree_target(const std::string& t) -> std::string {
+    if (t == "vulkan") return "vulkan-spirv";
+    if (t == "hip")    return "rocm";
+    return t;
+}
+
+// ============================================================================
 // Subprocess fallback: iree-compile <mlir> --output-format=vm-bytecode
 // ============================================================================
 
@@ -439,6 +457,7 @@ auto run_iree_compile_subprocess(const std::string& binary,
 /// libIREECompiler.so does not register. Writes the vmfb to `vmfb_path`.
 auto compile_via_subprocess(const std::string& mlir_text,
                             const std::string& target,
+                            const std::string& rocm_arch,
                             const fs::path& vmfb_path,
                             const fs::path& mlir_path) -> void {
     const std::string& bin = ::tenzor::jit::mlir_jit::resolve_iree_compile();
@@ -452,15 +471,12 @@ auto compile_via_subprocess(const std::string& mlir_text,
         "--iree-input-type=auto",
         "--output-format=vm-bytecode",
     };
-    // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. Mirror
-    // the in-process path's logic (see ireeCompilerSessionSetFlags above)
-    // so subprocess and in-process behaviour stay aligned.
+    // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. The arch
+    // is derived from the actual ROCm device by the caller (M1); compile_mlir
+    // guarantees `rocm_arch` is non-empty for a rocm target (falling back to
+    // the build constant only when device detection fails).
     if (target == "rocm") {
-#ifdef TENZOR_DEFAULT_ROCM_TARGET
-        args.push_back("--iree-rocm-target=" TENZOR_DEFAULT_ROCM_TARGET);
-#else
-        args.push_back("--iree-rocm-target=gfx1150");
-#endif
+        args.push_back("--iree-rocm-target=" + rocm_arch);
     }
     // Write MLIR text to a temp file rather than piping via stdin. The
     // stdin pipe path was hitting auto-input-type detection failures on
@@ -625,6 +641,25 @@ auto compile_mlir(const std::string& mlir_text,
             "compile_mlir: CompileOptions::target is empty", {});
     }
 
+    // H6: canonicalize documented aliases (e.g. "vulkan" → "vulkan-spirv")
+    // before the target string reaches --iree-hal-target-backends / the cache
+    // key / the runtime device map, so every downstream user sees the exact
+    // name IREE expects.
+    const std::string target = normalize_iree_target(opts.target);
+
+    // M1: the ROCm ISA to compile for. The caller (mlir_invoke) fills
+    // opts.rocm_arch from the actual device; only if that detection failed do
+    // we fall back to the build-time constant / default so a rocm compile is
+    // never left without an explicit chip.
+    std::string rocm_arch = opts.rocm_arch;
+    if (target == "rocm" && rocm_arch.empty()) {
+#ifdef TENZOR_DEFAULT_ROCM_TARGET
+        rocm_arch = TENZOR_DEFAULT_ROCM_TARGET;
+#else
+        rocm_arch = "gfx1150";
+#endif
+    }
+
     bool is_shared_temp = false;
     fs::path cache_dir;
     if (opts.cache_dir.empty()) {
@@ -635,7 +670,13 @@ auto compile_mlir(const std::string& mlir_text,
     }
     secure_cache_dir(cache_dir, is_shared_temp);
 
-    const std::string key = compute_cache_key(mlir_text, opts.target);
+    // Fold the ROCm arch into the cache key: two GPUs with different ISAs
+    // (e.g. gfx1150 vs gfx90a) produce different bytecode from the same MLIR,
+    // and must not alias to one .vmfb. Non-rocm targets keep the bare target.
+    const std::string key_target =
+        (target == "rocm" && !rocm_arch.empty()) ? (target + ":" + rocm_arch)
+                                                 : target;
+    const std::string key = compute_cache_key(mlir_text, key_target);
     const fs::path vmfb_path = cache_dir / (key + ".vmfb");
     const fs::path mlir_path = cache_dir / (key + ".mlir");
 
@@ -650,20 +691,20 @@ auto compile_mlir(const std::string& mlir_text,
     if (fs::exists(vmfb_path) && fs::file_size(vmfb_path) > 0 &&
         cache_file_is_trustworthy(vmfb_path, is_shared_temp) &&
         vmfb_has_valid_magic(vmfb_path)) {
-        return CompiledArtifact{vmfb_path, opts.target};
+        return CompiledArtifact{vmfb_path, target};
     }
 
     // Cache miss — measure the actual compile time end-to-end so that
     // cache_stats().total_compile_ms reflects only real iree-compile work.
     const auto compile_t0 = std::chrono::steady_clock::now();
 
-    // Path selection: if the linked libIREECompiler registers `opts.target`,
+    // Path selection: if the linked libIREECompiler registers `target`,
     // use the in-process embedding API (fast, no fork). Otherwise fall
     // through to the iree-compile subprocess, which is the full-GPU pip
     // wheel on this host. Both paths produce the same vmfb format.
     const auto& embedded = embedding_api_supported_targets();
-    if (embedded.count(opts.target) == 0) {
-        if (!iree_compile_supports(opts.target)) {
+    if (embedded.count(target) == 0) {
+        if (!iree_compile_supports(target)) {
             std::ostringstream available;
             available << "[";
             bool first = true;
@@ -674,23 +715,26 @@ auto compile_mlir(const std::string& mlir_text,
             }
             available << "]";
             throw JitCompileError(
-                "compile_mlir: target '" + opts.target +
+                "compile_mlir: target '" + target +
                     "' is not supported by either the linked libIREECompiler "
                     "or the discovered iree-compile binary " +
                     resolve_iree_compile() +
-                    ". Subprocess-available targets=" + available.str(),
+                    ". Supported target names=[llvm-cpu, cuda, rocm, "
+                    "vulkan-spirv (alias: vulkan)]. "
+                    "Subprocess-available targets=" + available.str(),
                 mlir_path);
         }
         write_vmfb_atomically(vmfb_path, cache_dir,
                               [&](const fs::path& tmp_out) {
-            compile_via_subprocess(mlir_text, opts.target, tmp_out, mlir_path);
+            compile_via_subprocess(mlir_text, target, rocm_arch, tmp_out,
+                                   mlir_path);
         });
         const auto compile_t1 = std::chrono::steady_clock::now();
         const double compile_ms =
             std::chrono::duration<double, std::milli>(compile_t1 - compile_t0)
                 .count();
         internal::record_compile_ms(compile_ms);
-        return CompiledArtifact{vmfb_path, opts.target};
+        return CompiledArtifact{vmfb_path, target};
     }
 
     iree_compiler_session_t* session = ireeCompilerSessionCreate();
@@ -707,7 +751,7 @@ auto compile_mlir(const std::string& mlir_text,
     // (target field) and we translate it 1:1 to IREE's --iree-hal-target-backends
     // string. StableHLO is the default input form on IREE 3.11+ (auto-detected).
     const std::string target_flag =
-        "--iree-hal-target-backends=" + opts.target;
+        "--iree-hal-target-backends=" + target;
     // IREE 3.11+ dropped the explicit "stablehlo" input-type alias in
     // favour of "auto" (analyze-and-pick). "auto" is the right value on
     // both old (3.0–3.10, where it was already accepted alongside
@@ -720,13 +764,9 @@ auto compile_mlir(const std::string& mlir_text,
     // chip-independent.
     std::string rocm_target_flag;
     std::vector<const char*> flags = {target_flag.c_str(), input_flag.c_str()};
-    if (opts.target == "rocm") {
-#ifdef TENZOR_DEFAULT_ROCM_TARGET
-        rocm_target_flag = std::string("--iree-rocm-target=")
-                           + TENZOR_DEFAULT_ROCM_TARGET;
-#else
-        rocm_target_flag = std::string("--iree-rocm-target=gfx1150");
-#endif
+    if (target == "rocm") {
+        // Device-derived arch (M1); rocm_arch is guaranteed non-empty above.
+        rocm_target_flag = std::string("--iree-rocm-target=") + rocm_arch;
         flags.push_back(rocm_target_flag.c_str());
     }
     if (auto* set_err = ireeCompilerSessionSetFlags(
@@ -876,7 +916,7 @@ auto compile_mlir(const std::string& mlir_text,
             .count();
     internal::record_compile_ms(compile_ms);
 
-    return CompiledArtifact{vmfb_path, opts.target};
+    return CompiledArtifact{vmfb_path, target};
 }
 
 }  // namespace tenzor::jit::mlir_jit

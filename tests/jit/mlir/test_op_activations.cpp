@@ -27,37 +27,43 @@
 #include <string>
 #include <vector>
 
-namespace {
+#include "mlir_target_util.hpp"
 
-auto ensure_core_init() -> void {
-    static const bool inited = []() {
-        ::tenzor::initialize();
-        return true;
-    }();
-    (void)inited;
-}
+namespace {
 
 using FnT = ::tenzor::jit::CompiledFunction::FnType;
 
+// Fan out over every IREE target usable on this host (llvm-cpu always; cuda /
+// rocm / vulkan-spirv when the hardware AND the iree-compile dist support them)
+// and assert each target's JIT output matches the eager reference. Previously
+// hardcoded to llvm-cpu only, giving the IREE GPU code paths zero coverage.
 void check_matches_eager(const std::string& name, FnT fn,
                          float tol = 1e-5F,
                          std::vector<int64_t> shape = {16},
                          ::tenzor::DType dt = ::tenzor::DType::Float32) {
-    ensure_core_init();
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
 
     auto raw = ::tenzor::randn(shape, dt);
     auto x = ::tenzor::Variable(raw, /*requires_grad=*/false);
+    auto eager = fn(x);
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
 
-    auto eager  = fn(x);
-    auto jitted = compiled(x);
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available (expected >=llvm-cpu)";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
 
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, tol) << "op=" << name << " diff=" << diff;
+        auto jitted = compiled(x);
+        auto jitted_cpu = jitted.tensor().to(::tenzor::Device::cpu());
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager_cpu - jitted_cpu)).template item<float>();
+        EXPECT_LT(diff, tol)
+            << "op=" << name << " target=" << target << " diff=" << diff;
+    }
 }
 
 }  // namespace
@@ -102,7 +108,7 @@ TEST(OpActivations, GELU) {
 // Direct lowering test for the SiLU handler — constructs the graph by hand
 // so the case in GraphToMLIR::dispatch is actually exercised.
 TEST(LowerSiLU, EmitsSigmoidAndMultiply) {
-    ensure_core_init();
+    ::tenzor::testing::mlir::ensure_core_init();
     ::tenzor::jit::Graph g;
     auto x = g.create_value("x", {4}, ::tenzor::DType::Float32,
                             ::tenzor::Device::cpu());

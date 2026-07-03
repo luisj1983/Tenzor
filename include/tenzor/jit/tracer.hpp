@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <functional>
 #include "../core/tensor.hpp"
+#include "../core/jit_hooks.hpp"  // OpId / OpAttributes fwd decls for record_inplace
 #include "../autograd/variable.hpp"
 #include "../nn/module.hpp"
 #include "graph.hpp"
@@ -81,6 +82,9 @@ enum class OpType {
     Abs,
     Neg,
     Clamp,
+    Sin,      ///< Elementwise sine
+    Cos,      ///< Elementwise cosine
+    Rsqrt,    ///< Elementwise reciprocal square root (1/sqrt(x))
 
     // Indexing
     Slice,
@@ -287,6 +291,26 @@ public:
     auto record_op(TracedOp op) -> void;
 
     /**
+     * @brief Record an in-place mutation as a value-versioned node.
+     *
+     * In-place ops (add_/sub_/mul_/div_/relu_ …) mutate `target` in place, so
+     * its storage — and therefore its tracer fingerprint — is unchanged. If we
+     * simply looked the tensor up again, later reads would resolve to the
+     * PRE-mutation graph value. Instead this records a functional node
+     * `new = op(old, others...)` and remaps the tensor's id to `new` (SSA
+     * renaming), so subsequent reads of `target` see the post-op value. Called
+     * by the in-place hook installed in TracingGuard; no-op when not tracing.
+     *
+     * @param op     The in-place OpId (mapped to its functional OpType).
+     * @param target The just-mutated tensor.
+     * @param others Additional inputs the op consumed.
+     * @param attrs  Op attributes (clamp bounds, leaky-relu slope, …).
+     */
+    auto record_inplace(OpId op, Tensor& target,
+                        std::span<const Tensor> others,
+                        const OpAttributes& attrs) -> void;
+
+    /**
      * @brief Register a tensor in the trace.
      *
      * Assigns a unique ID to the tensor and records its metadata.
@@ -320,6 +344,20 @@ public:
      * @return Newly-allocated unique tensor ID
      */
     auto register_new_tensor(const Tensor& tensor) -> std::string;
+
+    /**
+     * @brief Declare the trainable parameters the traced function closes over.
+     *
+     * Records each parameter's storage identity so end_trace() can classify a
+     * non-produced op input that reads a parameter as a PARAMETER LEAF (bound
+     * to the parameter index) instead of freezing it as an opaque constant.
+     * The parameters vector is forwarded onto the built Graph so replay can
+     * rebind the live Variables. Must be called AFTER start_trace() (which
+     * clear()s any previously declared parameters). No-op with an empty list.
+     *
+     * @param params Trainable parameter Variables (e.g. nn::Module::parameters()).
+     */
+    auto set_parameters(std::vector<std::shared_ptr<Variable>> params) -> void;
 
     /**
      * @brief Get metadata for a tensor ID.
@@ -440,6 +478,13 @@ private:
     /// capture module parameters as graph constants that live inside
     /// the Graph and get pre-populated into value_map at forward time.
     std::unordered_map<std::string, Tensor> tensor_storage_;
+    /// Declared trainable parameters the traced function closes over. Forwarded
+    /// onto the built Graph by end_trace() so replay can rebind live Variables.
+    std::vector<std::shared_ptr<Variable>> parameters_;
+    /// Parameter storage identity (tensor data pointer) -> parameter index.
+    /// end_trace() uses this to classify a non-produced op input as a parameter
+    /// leaf when its storage matches a declared parameter.
+    std::unordered_map<const void*, size_t> param_storage_index_;
     int64_t next_tensor_id_{0};                                 ///< Counter for unique IDs
 
     /**

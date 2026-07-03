@@ -117,6 +117,21 @@ public:
      */
     CompiledFunction(FnTypeN fn, CompileConfig config = {});
 
+    /**
+     * @brief Construct a parameter-aware compiled function from an N-input fn.
+     *
+     * `params` are the trainable parameters the callable closes over (the
+     * natural source is `model->parameters()`). Declaring them lets the tracer
+     * classify each captured parameter as a PARAMETER LEAF rather than freezing
+     * it as a constant, so a training loop that runs forward through the
+     * compiled function, backprops, and steps an optimizer gets correct
+     * gradients into `param->grad()` and sees updated weights on the next call.
+     * The paramless constructors above remain unchanged.
+     */
+    CompiledFunction(FnTypeN fn,
+                     std::vector<std::shared_ptr<Variable>> params,
+                     CompileConfig config = {});
+
     /// Destructor declared out-of-line because `mlir_cache_` holds a
     /// std::unique_ptr to an incomplete type.
     ~CompiledFunction();
@@ -166,6 +181,23 @@ public:
     }
 
     /**
+     * @brief Declare the trainable parameters this function closes over.
+     *
+     * See the parameter-aware constructor for semantics. Overwrites any
+     * previously declared parameters and clears the compilation cache (the
+     * cached graphs' parameter-leaf tables no longer apply). Returns *this so
+     * calls can be chained onto a freshly compiled function:
+     * @code
+     * auto fn = jit::compile(fwd).with_parameters(model->parameters());
+     * @endcode
+     */
+    auto with_parameters(std::vector<std::shared_ptr<Variable>> params)
+        -> CompiledFunction&;
+
+    /// Set the trainable parameters (see with_parameters); does not chain.
+    auto set_parameters(std::vector<std::shared_ptr<Variable>> params) -> void;
+
+    /**
      * @brief Get the number of cached shape specializations.
      */
     auto num_cached() const -> size_t;
@@ -179,6 +211,14 @@ public:
      * @brief Check if a graph break occurred during the last trace.
      */
     auto had_graph_break() const -> bool { return had_graph_break_; }
+
+    /**
+     * @brief Number of times a compiled graph was replayed DIFFERENTIABLY
+     *        (training-through-JIT, grad mode). Zero means every requires_grad
+     *        call fell back to eager. Tests assert this is > 0 to prove the
+     *        compiled graph — not fn_ — produced the gradients.
+     */
+    auto num_grad_forwards() const -> size_t;
 
     /**
      * @brief Trace the function (if needed) and dump the post-optimization
@@ -225,9 +265,19 @@ private:
     mutable std::mutex mutex_;
     bool had_graph_break_{false};
 
+    /// Trainable parameters this function closes over (empty for functional-
+    /// style callers that pass parameters as explicit inputs). Shared with the
+    /// caller/optimizer; threaded into the tracer at trace time and onto the
+    /// built Graph so replay rebinds the live Variables. Guarded by mutex_.
+    std::vector<std::shared_ptr<Variable>> parameters_;
+
     /// Track warmup calls for reduce-overhead mode (CUDA graph capture)
     int warmup_count_{0};
     static constexpr int kReduceOverheadWarmupCalls = 2;
+
+    /// Count of differentiable compiled-graph replays (training-through-JIT).
+    /// Incremented whenever operator() runs the captured graph in grad mode.
+    mutable size_t grad_forward_count_{0};
 
 
 
@@ -239,19 +289,47 @@ private:
     /// Empty/null when `config_.backend != "mlir"`.
     std::unique_ptr<mlir_detail::MlirInvokerCache> mlir_cache_;
 
-    /// Compute cache key from input tensor properties.
-    static auto shape_key(const Variable& input) -> std::string;
-    static auto shape_key(std::span<const Variable> inputs) -> std::string;
+    /// Compute cache key from input tensor properties. `grad_variant` selects
+    /// the differentiable cache slot: the grad path (grad_invoke) and the
+    /// inference path must never share an entry even when the inputs alone do
+    /// not require grad (e.g. training where only the captured parameters do).
+    static auto shape_key(const Variable& input, bool grad_variant = false)
+        -> std::string;
+    static auto shape_key(std::span<const Variable> inputs,
+                          bool grad_variant = false) -> std::string;
+
+    /// True if any declared parameter requires grad (drives the grad path even
+    /// when the explicit inputs do not). Caller holds mutex_.
+    auto any_parameter_requires_grad() const -> bool;
 
     /// Trace and compile the function for the given inputs.
-    auto trace_and_compile(std::span<const Variable> inputs)
+    ///
+    /// @param grad_mode When true, compile the DIFFERENTIABLE variant: fusion
+    ///        passes are skipped so the replay never contains a backward-less
+    ///        fused GPU node. The un-fused graph is replayed through the
+    ///        autograd-aware executor (Graph::forward(inputs, grad_mode=true)).
+    auto trace_and_compile(std::span<const Variable> inputs,
+                           bool grad_mode = false)
         -> std::shared_ptr<CompiledModule>;
+
+    /// Differentiable replay path for requires_grad inputs (nvrtc backend).
+    /// Uses/creates a grad-variant CompiledModule (fusion disabled), replays it
+    /// through the autograd-aware executor, and returns a differentiable output
+    /// whose .backward() matches eager. Falls back to eager on the SAME backend
+    /// when the graph can't be built/replayed differentiably.
+    auto grad_invoke(std::span<const Variable> inputs) -> Variable;
 
     /// MLIR backend invoke path. Routes inputs → trace → lower → iree-compile →
     /// IreeInvoker. Cached on a shape-key basis the same way the NVRTC path
     /// is. Falls back to eager when the inputs are not on a device the MLIR
     /// pipeline supports yet.
     auto mlir_invoke(std::span<const Variable> inputs) -> Variable;
+
+    /// The compile-and-run body of the MLIR path (trace → lower → compile →
+    /// load invoker → invoke). `mlir_invoke` wraps this in the C1 up-front
+    /// eager check and the C2 strict-aware eager fallback; on its own this
+    /// method may throw (unsupported target, lowering gap, driver-load error).
+    auto mlir_invoke_impl(std::span<const Variable> inputs) -> Variable;
 };
 
 /**
@@ -277,6 +355,13 @@ auto compile(CompiledFunction::FnType fn, CompileConfig config = {})
 /// N-input overload of compile().
 auto compile(CompiledFunction::FnTypeN fn, CompileConfig config = {})
     -> CompiledFunction;
+
+/// Parameter-aware overload: compile `fn` and declare the trainable parameters
+/// it closes over (e.g. `model->parameters()`). Enables correct gradients and
+/// live weights for closure-captured parameters in a training loop.
+auto compile(CompiledFunction::FnTypeN fn,
+             std::vector<std::shared_ptr<Variable>> params,
+             CompileConfig config = {}) -> CompiledFunction;
 
 } // namespace jit
 } // namespace tenzor

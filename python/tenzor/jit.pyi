@@ -31,7 +31,8 @@ def jit(
 
     Args:
         fn: function to JIT. If None, returns a parametrised decorator.
-        target: "auto" (default), "llvm-cpu", "cuda", "vulkan", or "rocm".
+        target: "auto" (default), "llvm-cpu", "cuda", "rocm", or
+            "vulkan-spirv" ("vulkan" is accepted as an alias).
         fallback_to_eager: if True, ops not yet lowered fall back to eager
             execution silently; default False raises on coverage gaps.
     """

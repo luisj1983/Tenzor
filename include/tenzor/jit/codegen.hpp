@@ -155,6 +155,13 @@ struct CompiledKernel {
     std::string name;          ///< Kernel function name
     std::string source;        ///< Original source (for debugging)
     int num_inputs{0};
+    /// True when this kernel was compiled via HIPRTC and must be launched/unloaded
+    /// through the HIP driver (module/function hold hipModule_t/hipFunction_t).
+    /// False = CUDA (NVRTC + CUDA driver). A combined CUDA+ROCm build compiles
+    /// both runtimes into one TU and selects here at runtime by the tensor device.
+    bool is_hip{false};
+    /// GPU ordinal the module is bound to; the HIP launch path re-selects it.
+    int device_index{0};
 
     ~CompiledKernel();
 
@@ -231,7 +238,8 @@ public:
     auto get_or_compile_source(const std::string& signature,
                                const std::string& source,
                                const std::string& kernel_name,
-                               int device_index = 0)
+                               int device_index = 0,
+                               bool is_rocm = false)
         -> std::shared_ptr<CompiledKernel>;
 
     /**
@@ -250,7 +258,7 @@ private:
     KernelCache() = default;
 
     auto compile(const std::string& source, const std::string& kernel_name,
-                 int device_index = 0)
+                 int device_index = 0, bool is_rocm = false)
         -> std::shared_ptr<CompiledKernel>;
 
     std::unordered_map<std::string, std::shared_ptr<CompiledKernel>> cache_;

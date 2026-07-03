@@ -257,6 +257,37 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     return results;
 }
 
+auto CompiledModule::forward_grad(const std::vector<Variable>& inputs)
+    -> std::vector<Variable> {
+    // Serialise access to graph_ like the inference forwards do.
+    std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
+
+    if (!graph_) {
+        throw std::runtime_error("CompiledModule has no graph");
+    }
+
+    // Bind dynamic dims if configured (same as inference forward).
+    if (!dynamic_dims_.empty()) {
+        SymbolicShapeEnvironment env;
+        for (const auto& dd : dynamic_dims_) {
+            if (dd.input_idx >= 0 &&
+                static_cast<size_t>(dd.input_idx) < inputs.size()) {
+                auto shape = inputs[static_cast<size_t>(dd.input_idx)].tensor().shape();
+                if (dd.dim >= 0 &&
+                    static_cast<size_t>(dd.dim) < shape.size()) {
+                    env.bind(dd.name, shape[static_cast<size_t>(dd.dim)]);
+                }
+            }
+        }
+        graph_->bind_symbolic_shapes(env);
+    }
+
+    // Differentiable replay. No CUDA-graph capture and no fused-kernel path is
+    // reachable here: the grad variant was compiled without fusion, and
+    // Graph::execute_node throws on any fusion node in grad mode.
+    return graph_->forward(inputs, /*grad_mode=*/true);
+}
+
 auto CompiledModule::optimize_for_inference() -> int {
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph to optimize");

@@ -1129,6 +1129,24 @@ public:
     auto forward(const std::vector<Variable>& inputs) -> std::vector<Variable>;
 
     /**
+     * @brief Execute the compiled graph DIFFERENTIABLY (training-through-JIT).
+     *
+     * Replays the captured graph through the autograd-aware executor
+     * (Graph::forward(inputs, grad_mode=true)) so the outputs carry a grad_fn
+     * chain and .backward() computes input/parameter gradients that match eager
+     * autograd. The graph must have been compiled WITHOUT fusion (no
+     * backward-less fused GPU node); a fusion node encountered here throws.
+     *
+     * Unlike the inference forwards this does NOT run the device/dtype-mismatch
+     * or ShapeGuard retrace machinery (those rebuild an inference graph); the
+     * caller keys the grad variant on shape/device/dtype already.
+     *
+     * @param inputs Input variables (any subset may require grad)
+     * @return Differentiable output variables
+     */
+    auto forward_grad(const std::vector<Variable>& inputs) -> std::vector<Variable>;
+
+    /**
      * @brief Apply inference optimizations to the graph.
      *
      * Runs the full suite of optimization passes: fusion, DCE, CSE,

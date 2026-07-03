@@ -14,9 +14,21 @@
 #include <limits>
 #include <string>
 #include <stdexcept>
+#include <atomic>
 
 namespace tenzor {
 namespace jit {
+
+namespace {
+// Monotonic count of native fused GPU kernel launches (see
+// extended_fused_launch_count). Atomic so a multi-threaded executor still yields
+// a coherent nonzero count.
+std::atomic<uint64_t> g_extended_fused_launches{0};
+}  // namespace
+
+auto extended_fused_launch_count() -> uint64_t {
+    return g_extended_fused_launches.load(std::memory_order_relaxed);
+}
 
 // ============================================================================
 // Signature computation
@@ -77,15 +89,16 @@ auto ExtendedKernelCodegen::dtype_to_cuda_type(DType dtype) -> std::string {
     switch (dtype) {
         case DType::Float32:  return "float";
         case DType::Float64:  return "double";
-        case DType::Float16:  return "__half";
+        case DType::Float16:  return "__half";  // same spelling under NVRTC/HIPRTC
         case DType::BFloat16:
-            // CUDA and HIP spell bfloat16 differently. Both provide implicit
-            // float conversions, so only the type name/header differ.
-#if defined(TENZOR_USE_ROCM)
-            return "__hip_bfloat16";
-#else
-            return "__nv_bfloat16";
-#endif
+            // CUDA and HIP spell bfloat16 differently (__nv_bfloat16 vs
+            // __hip_bfloat16). This host TU is compiled for a single backend, but
+            // the SAME generated source may be handed to EITHER NVRTC or HIPRTC at
+            // runtime (a combined CUDA+ROCm build routes by the tensor's device),
+            // so the type name must NOT be fixed by a host-side #if. Emit the
+            // neutral "tz_bf16" typedef instead; generate() defines it to the
+            // correct target type off the device compiler (__CUDACC_RTC__).
+            return "tz_bf16";
         default:
             // Never silently fall back to "float": for Int*/Complex the element
             // size differs, so reinterpreting the buffer as float yields garbage
@@ -162,35 +175,51 @@ auto ExtendedKernelCodegen::generate(const ExtendedFusionGroup& group) -> std::s
         default:                       return "";
     }
     if (body.empty()) return "";
-    // NVRTC/hiprtc has no system headers, and the extended kernel signatures use
-    // int64_t (the element-wise codegen uses `long long`). Provide the typedefs
-    // so the generated source compiles at runtime.
-    static const char* kPreamble =
-        "typedef long long int64_t;\n"
-        "typedef unsigned long long uint64_t;\n";
-    // Float16/BFloat16 kernels reference __half / bfloat16 (see
-    // dtype_to_cuda_type) which are not built-in; pull in the corresponding
-    // device headers when those types appear, otherwise the runtime compile
-    // fails with "identifier __half is undefined". CUDA and HIP use different
-    // header names, so select by the active codegen backend rather than always
-    // emitting the CUDA headers (which do not exist under HIPRTC).
-    std::string includes;
-#if defined(TENZOR_USE_ROCM)
-    if (body.find("__hip_bfloat16") != std::string::npos) {
-        includes += "#include <hip/hip_bf16.h>\n";
-    }
+    // The preamble is emitted ahead of the kernel body and, crucially, is
+    // resolved by the DEVICE compiler (NVRTC or HIPRTC) at runtime — NOT by this
+    // host TU's preprocessor. A combined CUDA+ROCm build compiles this file once
+    // (with TENZOR_USE_CUDA) yet must feed correct source to whichever RTC the
+    // tensor's device selects, so every target-dependent choice is made with the
+    // device compiler's own macro (__CUDACC_RTC__ is defined ONLY by NVRTC).
+    std::ostringstream pre;
+    // NVRTC/HIPRTC expose no system headers by default; the kernel signatures use
+    // int64_t (the element-wise codegen uses `long long`). Provide the typedefs.
+    pre << "typedef long long int64_t;\n"
+           "typedef unsigned long long uint64_t;\n";
+    // Warp-shuffle full-lane mask (BUG H4). __shfl_*_sync's mask must name every
+    // participating lane. NVRTC targets a 32-lane warp, so 0xffffffff is the full
+    // warp. HIPRTC targets AMD wavefronts that are 64 lanes wide on this hardware:
+    // the reduction loop folds lanes 32..63 into 0..31 (offset starts at
+    // warpSize/2 == 32), but a 32-bit 0xffffffff mask EXCLUDES lanes 32..63, so
+    // those shuffles are undefined and the sum/max/mean/variance is wrong for any
+    // reduced extent needing more than 32 lanes. Emit a 64-bit all-ones mask off
+    // the device compiler so ROCm gets full-wavefront coverage.
+    pre << "#if defined(__CUDACC_RTC__)\n"
+           "#define TZ_WARP_MASK 0xffffffffu\n"
+           "#else\n"
+           "#define TZ_WARP_MASK 0xffffffffffffffffULL\n"
+           "#endif\n";
+    // Float16/BFloat16 kernels reference __half / tz_bf16, which are not built-in;
+    // include the correct device headers and define tz_bf16 to the target's
+    // bfloat16 type. Header names AND the bf16 type name differ between CUDA and
+    // HIP, so both are selected off the device compiler (see dtype_to_cuda_type).
     if (body.find("__half") != std::string::npos) {
-        includes += "#include <hip/hip_fp16.h>\n";
+        pre << "#if defined(__CUDACC_RTC__)\n"
+               "#include <cuda_fp16.h>\n"
+               "#else\n"
+               "#include <hip/hip_fp16.h>\n"
+               "#endif\n";
     }
-#else
-    if (body.find("__nv_bfloat16") != std::string::npos) {
-        includes += "#include <cuda_bf16.h>\n";
+    if (body.find("tz_bf16") != std::string::npos) {
+        pre << "#if defined(__CUDACC_RTC__)\n"
+               "#include <cuda_bf16.h>\n"
+               "typedef __nv_bfloat16 tz_bf16;\n"
+               "#else\n"
+               "#include <hip/hip_bf16.h>\n"
+               "typedef __hip_bfloat16 tz_bf16;\n"
+               "#endif\n";
     }
-    if (body.find("__half") != std::string::npos) {
-        includes += "#include <cuda_fp16.h>\n";
-    }
-#endif
-    return includes + std::string(kPreamble) + body;
+    return pre.str() + body;
 }
 
 // ============================================================================
@@ -203,7 +232,9 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
     const std::string F = literal_suffix(group.dtype);
     const std::string abs_fn = fn_for("fabs", group.dtype);
     const std::string exp_fn = fn_for("exp", group.dtype);
+    const std::string log_fn = fn_for("log", group.dtype);
     const std::string sqrt_fn = fn_for("sqrt", group.dtype);
+    const std::string pow_fn = fn_for("pow", group.dtype);
     const std::string max_fn = fn_for("fmax", group.dtype);
     const std::string min_fn = fn_for("fmin", group.dtype);
     std::ostringstream ss;
@@ -225,6 +256,88 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
         if (is_min) return acc + " = " + min_fn + "(" + acc + ", " + x + ");";
         return acc + " += " + x + ";";
     };
+
+    // Lower one pre/post element-wise op that operates in place on `v` (either the
+    // per-element "val" before reduction or the scalar "result" after). The fused
+    // reduction kernel loads a SINGLE input stream, so any op needing a distinct
+    // second operand tensor cannot be represented here. BUG M5: the old code hit
+    // `default: break` for such ops and SILENTLY OMITTED them from the kernel
+    // (producing a wrong result), and hardcoded ElemOp::Mul to `v*v` even for a
+    // genuine binary Mul(x, y). This helper instead emits every representable op
+    // and, on an unrepresentable one, sets ok=false so generate_reduction refuses
+    // to emit the fused kernel (returns "") — the caller then runs the ops via
+    // normal, correct op dispatch rather than getting a silently-wrong kernel.
+    const std::string indent = "        ";
+    auto emit_elem = [&](std::ostringstream& out, const std::string& v,
+                         const ElemStep& op, bool& ok) {
+        const std::string sc = fmt_scalar(op.scalar, group.dtype);
+        switch (op.op) {
+            case ElemOp::Neg:        out << indent << v << " = -" << v << ";\n"; break;
+            case ElemOp::Abs:        out << indent << v << " = " << abs_fn << "(" << v << ");\n"; break;
+            case ElemOp::Sign:       out << indent << v << " = (" << v << " > 0) - (" << v << " < 0);\n"; break;
+            case ElemOp::Reciprocal: out << indent << v << " = 1.0" << F << " / " << v << ";\n"; break;
+            case ElemOp::Exp:        out << indent << v << " = " << exp_fn << "(" << v << ");\n"; break;
+            case ElemOp::Log:        out << indent << v << " = " << log_fn << "(" << v << ");\n"; break;
+            case ElemOp::Sqrt:       out << indent << v << " = " << sqrt_fn << "(" << v << ");\n"; break;
+            case ElemOp::Sin:        out << indent << v << " = " << fn_for("sin", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Cos:        out << indent << v << " = " << fn_for("cos", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Tan:        out << indent << v << " = " << fn_for("tan", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Sinh:       out << indent << v << " = " << fn_for("sinh", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Cosh:       out << indent << v << " = " << fn_for("cosh", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Tanh:       out << indent << v << " = " << fn_for("tanh", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Erf:        out << indent << v << " = erf(" << v << ");\n"; break;
+            case ElemOp::Erfc:       out << indent << v << " = erfc(" << v << ");\n"; break;
+            case ElemOp::Log2:       out << indent << v << " = " << fn_for("log2", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Log10:      out << indent << v << " = " << fn_for("log10", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Log1p:      out << indent << v << " = " << fn_for("log1p", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Exp2:       out << indent << v << " = " << fn_for("exp2", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Expm1:      out << indent << v << " = " << fn_for("expm1", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Floor:      out << indent << v << " = " << fn_for("floor", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Ceil:       out << indent << v << " = " << fn_for("ceil", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Round:      out << indent << v << " = " << fn_for("round", group.dtype) << "(" << v << ");\n"; break;
+            case ElemOp::Sigmoid:
+                out << indent << v << " = 1.0" << F << " / (1.0" << F << " + " << exp_fn << "(-" << v << "));\n"; break;
+            case ElemOp::Relu:
+                // NaN-propagating select, matching codegen.cpp / clamp_min(x,0).
+                out << indent << v << " = (" << v << " < 0) ? 0 : " << v << ";\n"; break;
+            case ElemOp::Gelu:
+                out << indent << v << " = 0.5" << F << " * " << v << " * (1.0" << F
+                    << " + erf(" << v << " * 0.7071067811865476" << F << "));\n"; break;
+            case ElemOp::MulScalar:  out << indent << v << " = " << v << " * " << sc << ";\n"; break;
+            case ElemOp::AddScalar:  out << indent << v << " = " << v << " + " << sc << ";\n"; break;
+            case ElemOp::PowScalar:  out << indent << v << " = " << pow_fn << "(" << v << ", " << sc << ");\n"; break;
+            case ElemOp::ClampMin:   out << indent << v << " = " << max_fn << "(" << v << ", " << sc << ");\n"; break;
+            case ElemOp::ClampMax:   out << indent << v << " = " << min_fn << "(" << v << ", " << sc << ");\n"; break;
+            case ElemOp::Mul:
+                // Only a self-square (x*x, same operand) is representable with a
+                // single input stream — this is RMSNorm's x². A binary Mul(x, y)
+                // with a DISTINCT second operand has no second stream to read, so
+                // refuse rather than silently square (the old bug).
+                if (op.input_idx == op.second_input_idx) {
+                    out << indent << v << " = " << v << " * " << v << ";\n";
+                } else {
+                    ok = false;
+                }
+                break;
+            default:
+                // Add/Sub/Div/Max/Min/Fmod/Pow(binary) and any op needing a second
+                // operand stream cannot be faithfully lowered — refuse to fuse.
+                ok = false;
+                break;
+        }
+    };
+
+    bool representable = true;
+    std::ostringstream pre_block;
+    for (const auto& op : group.pre_ops) {
+        emit_elem(pre_block, "val", op, representable);
+        if (!representable) return "";
+    }
+    std::ostringstream post_block;
+    for (const auto& op : group.post_ops) {
+        emit_elem(post_block, "result", op, representable);
+        if (!representable) return "";
+    }
 
     ss << R"(
 extern "C" __global__ void fused_reduction_kernel(
@@ -248,18 +361,8 @@ extern "C" __global__ void fused_reduction_kernel(
         )" << C << R"( val = static_cast<)" << C << R"(>(input[outer * reduce_size * inner_size + r * inner_size + inner]);
 )";
 
-    // Inline pre-reduction element-wise ops
-    for (auto& op : group.pre_ops) {
-        switch (op.op) {
-            case ElemOp::Mul:    ss << "        val = val * val;\n"; break;
-            case ElemOp::Abs:    ss << "        val = " << abs_fn << "(val);\n"; break;
-            case ElemOp::Exp:    ss << "        val = " << exp_fn << "(val);\n"; break;
-            case ElemOp::Neg:    ss << "        val = -val;\n"; break;
-            case ElemOp::MulScalar:
-                ss << "        val = val * " << fmt_scalar(op.scalar, group.dtype) << ";\n"; break;
-            default: break;
-        }
-    }
+    // Pre-reduction element-wise ops (lowered + representability-checked above).
+    ss << pre_block.str();
 
     ss << "        " << combine("sum", "val") << "\n";
     ss << R"(    }
@@ -267,7 +370,7 @@ extern "C" __global__ void fused_reduction_kernel(
     // Warp-level reduction
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
 )";
-    ss << "        " << combine("sum", "__shfl_down_sync(0xffffffff, sum, offset)") << "\n";
+    ss << "        " << combine("sum", "__shfl_down_sync(TZ_WARP_MASK, sum, offset)") << "\n";
     ss << R"(    }
 
     // Block-level reduction via shared memory
@@ -282,7 +385,7 @@ extern "C" __global__ void fused_reduction_kernel(
         sum = (lane < blockDim.x / warpSize) ? shared[lane] : )" << ident << R"(;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
 )";
-    ss << "            " << combine("sum", "__shfl_down_sync(0xffffffff, sum, offset)") << "\n";
+    ss << "            " << combine("sum", "__shfl_down_sync(TZ_WARP_MASK, sum, offset)") << "\n";
     ss << R"(        }
     }
 
@@ -294,18 +397,8 @@ extern "C" __global__ void fused_reduction_kernel(
         ss << "        result = result / static_cast<" << C << ">(reduce_size);\n";
     }
 
-    // Inline post-reduction element-wise ops
-    for (auto& op : group.post_ops) {
-        switch (op.op) {
-            case ElemOp::Sqrt:       ss << "        result = " << sqrt_fn << "(result);\n"; break;
-            case ElemOp::Reciprocal: ss << "        result = 1.0" << F << " / result;\n"; break;
-            case ElemOp::MulScalar:
-                ss << "        result = result * " << fmt_scalar(op.scalar, group.dtype) << ";\n"; break;
-            case ElemOp::AddScalar:
-                ss << "        result = result + " << fmt_scalar(op.scalar, group.dtype) << ";\n"; break;
-            default: break;
-        }
-    }
+    // Post-reduction element-wise ops (lowered + representability-checked above).
+    ss << post_block.str();
 
     ss << "        output[outer * inner_size + inner] = static_cast<" << T << ">(result);\n";
     ss << R"(    }
@@ -394,7 +487,7 @@ extern "C" __global__ void fused_softmax_kernel(
 
     // Warp reduction for max
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        )" << C << R"( other = __shfl_down_sync(0xffffffff, thread_max, offset);
+        )" << C << R"( other = __shfl_down_sync(TZ_WARP_MASK, thread_max, offset);
         thread_max = other > thread_max ? other : thread_max;
     }
 
@@ -408,7 +501,7 @@ extern "C" __global__ void fused_softmax_kernel(
     if (warp_id == 0) {
         thread_max = (lane < blockDim.x / warpSize) ? shared_max[lane] : -1e30)" << F << R"(;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            )" << C << R"( other = __shfl_down_sync(0xffffffff, thread_max, offset);
+            )" << C << R"( other = __shfl_down_sync(TZ_WARP_MASK, thread_max, offset);
             thread_max = other > thread_max ? other : thread_max;
         }
         if (lane == 0) shared_max[0] = thread_max;
@@ -429,7 +522,7 @@ extern "C" __global__ void fused_softmax_kernel(
 
     // Warp reduction for sum
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        thread_sum += __shfl_down_sync(0xffffffff, thread_sum, offset);
+        thread_sum += __shfl_down_sync(TZ_WARP_MASK, thread_sum, offset);
     }
 
     __shared__ )" << C << R"( shared_sum[32];
@@ -439,7 +532,7 @@ extern "C" __global__ void fused_softmax_kernel(
     if (warp_id == 0) {
         thread_sum = (lane < blockDim.x / warpSize) ? shared_sum[lane] : 0;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            thread_sum += __shfl_down_sync(0xffffffff, thread_sum, offset);
+            thread_sum += __shfl_down_sync(TZ_WARP_MASK, thread_sum, offset);
         }
         if (lane == 0) shared_sum[0] = thread_sum;
     }
@@ -506,9 +599,9 @@ extern "C" __global__ void fused_layer_norm_kernel(
 
     // Warp-level Welford merge
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        )" << C << R"( other_mean = __shfl_down_sync(0xffffffff, mean, offset);
-        )" << C << R"( other_m2 = __shfl_down_sync(0xffffffff, m2, offset);
-        int other_count = __shfl_down_sync(0xffffffff, count, offset);
+        )" << C << R"( other_mean = __shfl_down_sync(TZ_WARP_MASK, mean, offset);
+        )" << C << R"( other_m2 = __shfl_down_sync(TZ_WARP_MASK, m2, offset);
+        int other_count = __shfl_down_sync(TZ_WARP_MASK, count, offset);
 
         int total = count + other_count;
         if (total > 0) {
@@ -539,9 +632,9 @@ extern "C" __global__ void fused_layer_norm_kernel(
         count = (lane < nwarps) ? s_count[lane] : 0;
 
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            )" << C << R"( other_mean = __shfl_down_sync(0xffffffff, mean, offset);
-            )" << C << R"( other_m2 = __shfl_down_sync(0xffffffff, m2, offset);
-            int other_count = __shfl_down_sync(0xffffffff, count, offset);
+            )" << C << R"( other_mean = __shfl_down_sync(TZ_WARP_MASK, mean, offset);
+            )" << C << R"( other_m2 = __shfl_down_sync(TZ_WARP_MASK, m2, offset);
+            int other_count = __shfl_down_sync(TZ_WARP_MASK, count, offset);
 
             int total = count + other_count;
             if (total > 0) {
@@ -619,7 +712,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
 
     // Warp reduction
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+        sum_sq += __shfl_down_sync(TZ_WARP_MASK, sum_sq, offset);
     }
 
     __shared__ )" << C << R"( shared[32];
@@ -632,7 +725,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
     if (warp_id == 0) {
         sum_sq = (lane < blockDim.x / warpSize) ? shared[lane] : 0;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+            sum_sq += __shfl_down_sync(TZ_WARP_MASK, sum_sq, offset);
         }
         if (lane == 0) shared[0] = sum_sq;
     }
@@ -792,7 +885,8 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     }
 
     auto kernel = cache.get_or_compile_source(signature, source, kernel_name,
-                                              dev.index);
+                                              dev.index,
+                                              dev.type == Device::Type::ROCm);
     if (!kernel) {
         throw std::runtime_error("Extended codegen: failed to compile kernel: " + signature);
     }
@@ -970,6 +1064,10 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
     if (has_eps) args.push_back(static_cast<void*>(&eps_val));
 
     kernel->launch_raw(args, grid, kBlock, shared, nullptr);
+
+    // Record that the native codegen path actually launched a kernel (observable
+    // proof for the JIT executor that a fusion node ran on the GPU, not eager).
+    g_extended_fused_launches.fetch_add(1, std::memory_order_relaxed);
 
     return output;
 }

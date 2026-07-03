@@ -1230,7 +1230,10 @@ static void register_cpu_kernels_elementwise_math(BackendDispatchTable& table) {
             throw std::runtime_error("cast: missing 'target_dtype' attribute");
         }
         DType target_dtype = static_cast<DType>(attrs.get_int(AttrKey::TargetDtype));
-        return inputs[0].to(target_dtype);
+        // Call the raw (non-dispatching) conversion, NOT to(): to() routes CPU
+        // casts back through OpId::Cast dispatch, which would re-enter this
+        // kernel and recurse forever.
+        return inputs[0].cast_cpu_raw(target_dtype);
     });
 
     table.register_single_output_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

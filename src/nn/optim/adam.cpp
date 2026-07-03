@@ -428,8 +428,16 @@ auto Adam::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
     }
 
-    // Save AMSGrad max second moment buffers
+    // Save AMSGrad max second moment buffers. The slot is only allocated for
+    // params whose (resolved per-group) amsgrad flag is true; non-amsgrad
+    // params keep an empty placeholder Tensor{} so the vector stays index-
+    // aligned with parameters_ (see on_parameters_appended_). Serialising an
+    // uninitialized placeholder would throw "Operation on uninitialized tensor"
+    // as soon as the state_dict is pickled/cloned, so skip invalid slots. On
+    // load, absent keys are tolerated (the guarded state.count() check leaves
+    // the corresponding placeholder untouched).
     for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
+        if (!max_exp_avg_sq_[i].is_valid()) continue;
         state["max_exp_avg_sq_" + std::to_string(i)] = max_exp_avg_sq_[i].clone();
     }
 
@@ -809,8 +817,12 @@ auto AdamW::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
     }
 
-    // Save AMSGrad max second moment buffers
+    // Save AMSGrad max second moment buffers. Skip uninitialized placeholder
+    // slots (non-amsgrad params) — cloning/pickling an invalid Tensor throws
+    // "Operation on uninitialized tensor". See Adam::state_dict for details;
+    // load tolerates the absent keys via a guarded state.count() check.
     for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
+        if (!max_exp_avg_sq_[i].is_valid()) continue;
         state["max_exp_avg_sq_" + std::to_string(i)] = max_exp_avg_sq_[i].clone();
     }
 

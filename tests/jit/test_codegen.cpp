@@ -4,11 +4,45 @@
  */
 
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/codegen.hpp>
+#include <cmath>
+#include <vector>
 
 using namespace tenzor;
 using namespace tenzor::jit;
+
+namespace {
+// GPU backends the element-wise codegen can target (see the extended-codegen
+// test for the rationale). The dtype tests run on EVERY available backend so a
+// combined build exercises NVRTC and HIPRTC; they GTEST_SKIP only with no GPU.
+auto available_gpu_devices() -> std::vector<Device> {
+    std::vector<Device> devs;
+    const std::vector<float> probe = {0.0f};
+    for (const auto& dev : {Device::cuda(0), Device::rocm(0)}) {
+        try {
+            Tensor t = from_data(probe.data(), {1}).to(dev);
+            (void)t.to(Device::cpu());
+            devs.push_back(dev);
+        } catch (const std::exception&) {
+        }
+    }
+    return devs;
+}
+
+// Honor TENZOR_REQUIRE_MULTI_BACKEND: when set, a run with NO GPU backend is a
+// hard failure (a host expected to have a GPU silently skipping GPU codegen
+// coverage hides a broken environment). Otherwise skip as before.
+#define SKIP_OR_FAIL_NO_GPU()                                                  \
+    do {                                                                       \
+        const char* _req = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");        \
+        if (_req && *_req && *_req != '0')                                     \
+            FAIL() << "TENZOR_REQUIRE_MULTI_BACKEND set but no GPU backend "   \
+                      "present for GPU codegen test";                          \
+        GTEST_SKIP() << "no GPU backend present";                             \
+    } while (0)
+}  // namespace
 
 class CodegenTestEnv : public ::testing::Environment {
 public:
@@ -160,6 +194,74 @@ TEST(Codegen, ExecuteFused_ChainedMath) {
 // =========================================================================
 // Cache tests
 // =========================================================================
+
+// =========================================================================
+// GPU execution tests across dtypes + backends (BUG M6 / H-mask coverage)
+// =========================================================================
+
+// Float32 fusion must use the single-precision math intrinsics (expf, …) and
+// match the eager Float32 exp. Runs on every available GPU backend.
+TEST(Codegen, ExecuteFusedF32ExpAllBackends) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    auto group = build_fusion({
+        {ElemOp::Exp, 0, -1, 0.0},
+        {ElemOp::MulScalar, -1, -1, 0.5},
+    }, 1, DType::Float32);
+
+    std::vector<float> in(1024);
+    for (size_t i = 0; i < in.size(); ++i) in[i] = -2.0f + 4.0f * (i / 1024.0f);
+    Tensor cpu = from_data(in.data(), {1024});
+
+    for (const auto& dev : devs) {
+        Tensor gpu = cpu.to(dev);
+        auto out = execute_fused(group, {gpu}).to(Device::cpu()).contiguous();
+        const float* o = out.data<float>();
+        for (size_t i = 0; i < in.size(); ++i) {
+            float ref = std::exp(in[i]) * 0.5f;
+            EXPECT_NEAR(o[i], ref, 1e-5f + 1e-5f * std::abs(ref))
+                << dev.to_string() << " i=" << i;
+        }
+    }
+}
+
+// Float16 / BFloat16 fusion: load the 16-bit storage type, compute in float,
+// narrow back. The header claims Float16/BFloat16 support — this asserts it on
+// every backend. Reference uses the SAME 16-bit-rounded inputs the kernel sees.
+static void run_half_chain(DType dt, double tol) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    // chain: relu(x) * 1.5 -> tanh
+    auto group = build_fusion({
+        {ElemOp::Relu, 0, -1, 0.0},
+        {ElemOp::MulScalar, -1, -1, 1.5},
+        {ElemOp::Tanh, -1, -1, 0.0},
+    }, 1, dt);
+
+    std::vector<float> in(512);
+    for (size_t i = 0; i < in.size(); ++i) in[i] = -3.0f + 6.0f * (i / 512.0f);
+    // The exact values the kernel sees are the input rounded to the 16-bit type.
+    Tensor rounded_cpu = from_data(in.data(), {512}).to(dt).to(DType::Float32).contiguous();
+    const float* xr = rounded_cpu.data<float>();
+
+    for (const auto& dev : devs) {
+        Tensor gpu = from_data(in.data(), {512}).to(dt).to(dev);
+        auto out = execute_fused(group, {gpu}).to(Device::cpu()).to(DType::Float32).contiguous();
+        const float* o = out.data<float>();
+        for (size_t i = 0; i < in.size(); ++i) {
+            float relu = xr[i] < 0.0f ? 0.0f : xr[i];
+            float ref = std::tanh(relu * 1.5f);
+            EXPECT_NEAR(o[i], ref, tol) << dev.to_string() << " i=" << i;
+        }
+    }
+}
+
+TEST(Codegen, ExecuteFusedFloat16Chain)  { run_half_chain(DType::Float16, 3e-3); }
+TEST(Codegen, ExecuteFusedBFloat16Chain) { run_half_chain(DType::BFloat16, 3e-2); }
 
 TEST(Codegen, KernelCacheHit) {
     auto& cache = KernelCache::instance();

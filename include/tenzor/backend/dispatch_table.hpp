@@ -24,6 +24,7 @@
 #include <string>
 #include "../core/tensor.hpp"
 #include "../core/device.hpp"
+#include "../core/jit_hooks.hpp"  // For in-place tracing notification
 #include "../ops/op_id.hpp"
 #include "backend.hpp"  // For OpAttributes
 
@@ -416,6 +417,16 @@ struct alignas(64) BackendDispatchTable {
         // Auto-bump version counter only if kernel didn't already bump
         if (result.version() == pre_version) {
             result.bump_version();
+        }
+        // Notify the JIT tracer of the in-place mutation. dispatch_inplace
+        // bypasses the DispatchInterceptorStack (autocast on in-place ops is
+        // unsafe), so without this the tracer never observes the mutation and
+        // later reads of `target` resolve to its PRE-op graph value. The hook
+        // is thread-local and only installed during a trace; the guard makes
+        // the common non-traced path a single atomic-free null check.
+        if (detail::inplace_op_hook_active()) [[unlikely]] {
+            detail::notify_inplace_op(op, result, others.data(), others.size(),
+                                      attrs);
         }
         return result;
     }

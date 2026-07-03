@@ -206,5 +206,16 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
                             const std::vector<Tensor>& inputs,
                             const std::vector<Tensor>& params = {}) -> Tensor;
 
+/**
+ * @brief Total number of native fused GPU kernels launched.
+ *
+ * Incremented once per successful execute_extended_fused() launch (across all
+ * FusionKinds and both NVRTC/HIPRTC backends). The JIT graph executor calls the
+ * codegen path for fusion nodes, so a monotonically increasing count is the
+ * observable proof that a fused node actually ran on the GPU codegen path rather
+ * than silently falling back to eager ops. Tests read this to fail closed.
+ */
+auto extended_fused_launch_count() -> uint64_t;
+
 } // namespace jit
 } // namespace tenzor

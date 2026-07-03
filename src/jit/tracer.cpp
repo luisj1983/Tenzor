@@ -8,6 +8,7 @@
 #include "../../include/tenzor/jit/tracing_interceptor.hpp"
 #include "../../include/tenzor/backend/dispatch_interceptor.hpp"
 #include "../../include/tenzor/core/jit_hooks.hpp"
+#include "../../include/tenzor/ops/creation.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -59,6 +60,9 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Abs: return "Abs";
         case OpType::Neg: return "Neg";
         case OpType::Clamp: return "Clamp";
+        case OpType::Sin: return "Sin";
+        case OpType::Cos: return "Cos";
+        case OpType::Rsqrt: return "Rsqrt";
         case OpType::Slice: return "Slice";
         case OpType::Cat: return "Cat";
         case OpType::Dropout: return "Dropout";
@@ -140,6 +144,9 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Abs", OpType::Abs},
         {"Neg", OpType::Neg},
         {"Clamp", OpType::Clamp},
+        {"Sin", OpType::Sin},
+        {"Cos", OpType::Cos},
+        {"Rsqrt", OpType::Rsqrt},
         {"Slice", OpType::Slice},
         {"Cat", OpType::Cat},
         {"Dropout", OpType::Dropout},
@@ -245,6 +252,28 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
     // Create graph
     auto graph = std::make_shared<Graph>();
 
+    // Forward the declared trainable parameters onto the graph so replay can
+    // rebind the live Variables (see classify_captured below and
+    // Graph::forward's parameter-leaf binding).
+    graph->set_parameters(parameters_);
+
+    // Classify a non-produced op input (one that has no producing node and is
+    // not a graph input): a captured module PARAMETER (storage matches a
+    // declared parameter) becomes a parameter leaf bound to the live Variable;
+    // anything else is frozen as an opaque constant. This is the single point
+    // where a closure-captured parameter stops being baked as a frozen value.
+    auto classify_captured = [&](Graph& g, const std::string& input_id) {
+        auto storage_it = tensor_storage_.find(input_id);
+        if (storage_it == tensor_storage_.end()) return;
+        const void* ident = storage_it->second.data_ptr();
+        auto pit = param_storage_index_.find(ident);
+        if (pit != param_storage_index_.end()) {
+            g.add_param_leaf(input_id, pit->second);
+        } else {
+            g.set_constant(input_id, storage_it->second);
+        }
+    };
+
     // Map tensor IDs to graph values
     std::unordered_map<std::string, std::shared_ptr<Value>> value_map;
 
@@ -314,6 +343,11 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
                          const std::vector<std::string>& output_ids)
             -> std::shared_ptr<Graph> {
         auto sub = std::make_shared<Graph>();
+        // Forward the declared trainable parameters onto the sub-graph too, so a
+        // closure-captured parameter used INSIDE an If branch / Loop body is
+        // rebound to the live Variable at replay (grad flows to param->grad(),
+        // and inference sees updated weights) rather than frozen as a constant.
+        sub->set_parameters(parameters_);
         std::unordered_map<std::string, std::shared_ptr<Value>> sub_values;
 
         // Carried inputs become sub-graph inputs.
@@ -368,10 +402,10 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
                     auto v = sub->create_value(iid, info.shape, info.dtype, info.device);
                     sub_values[iid] = v;
                     node->add_input(v);
-                    auto storage_it = tensor_storage_.find(iid);
-                    if (storage_it != tensor_storage_.end()) {
-                        sub->set_constant(iid, storage_it->second);
-                    }
+                    // Same parameter-vs-constant classification as the top-level
+                    // graph: a captured module parameter becomes a parameter leaf
+                    // (live-rebound at replay); anything else is a frozen constant.
+                    classify_captured(*sub, iid);
                 }
             }
             for (const auto& oid : op.outputs) {
@@ -450,10 +484,7 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
                 auto value = graph->create_value(input_id, info.shape, info.dtype, info.device);
                 value_map[input_id] = value;
                 node->add_input(value);
-                auto storage_it = tensor_storage_.find(input_id);
-                if (storage_it != tensor_storage_.end()) {
-                    graph->set_constant(input_id, storage_it->second);
-                }
+                classify_captured(*graph, input_id);
             }
         }
 
@@ -532,6 +563,74 @@ auto Tracer::record_op(TracedOp op) -> void {
     }
 }
 
+namespace {
+// Map an in-place OpId to the FUNCTIONAL OpType used to replay it. Graph replay
+// is functional (new = op(old, others...)), so an in-place add_ replays as a
+// plain Add producing a fresh value — exactly the SSA-renamed semantics.
+auto inplace_opid_to_optype(OpId op) -> std::optional<OpType> {
+    switch (op) {
+        case OpId::AddInplace:     return OpType::Add;
+        case OpId::SubInplace:     return OpType::Sub;
+        case OpId::MulInplace:     return OpType::Mul;
+        case OpId::DivInplace:     return OpType::Div;
+        case OpId::ReLUInplace:    return OpType::ReLU;
+        case OpId::SigmoidInplace: return OpType::Sigmoid;
+        case OpId::TanhInplace:    return OpType::Tanh;
+        case OpId::GeluInplace:    return OpType::GELU;
+        default:                   return std::nullopt;
+    }
+}
+} // namespace
+
+auto Tracer::record_inplace(OpId op, Tensor& target,
+                            std::span<const Tensor> others,
+                            const OpAttributes& attrs) -> void {
+    if (!tracing_) return;
+
+    auto op_type = inplace_opid_to_optype(op);
+    if (!op_type) {
+        // Un-mappable in-place op: a graph break (strict throws) rather than a
+        // silently dropped mutation.
+        record_graph_break(
+            "in-place operation (OpId=" +
+            std::to_string(static_cast<int>(op)) +
+            ") has no IR OpType mapping");
+        return;
+    }
+
+    // Old (pre-mutation) value id. An in-place op leaves storage/shape/strides
+    // — and therefore the tracer fingerprint — unchanged, so the fingerprint
+    // still resolves to the pre-op value at this point.
+    std::string old_id = register_tensor(target);
+
+    std::vector<std::string> input_ids;
+    input_ids.reserve(others.size() + 1);
+    input_ids.push_back(old_id);
+    for (const auto& o : others) {
+        input_ids.push_back(register_tensor(o));
+    }
+
+    // Mint a fresh SSA value for the mutated tensor and REMAP its fingerprint
+    // to that new id, so every later read of `target` resolves to the post-op
+    // value. Without this, the node's own output would alias its input (a
+    // self-referential node) and downstream reads would see the stale value.
+    std::string new_id = register_new_tensor(target);
+
+    TracedOp traced(*op_type, std::move(input_ids), {new_id});
+    // Carry the scalar attrs the functional replay may need.
+    if (attrs.has(AttrKey::Min)) {
+        traced.attrs["min"] = static_cast<float>(attrs.get_float(AttrKey::Min));
+    }
+    if (attrs.has(AttrKey::Max)) {
+        traced.attrs["max"] = static_cast<float>(attrs.get_float(AttrKey::Max));
+    }
+    if (attrs.has(AttrKey::Negative_slope)) {
+        traced.attrs["negative_slope"] =
+            static_cast<float>(attrs.get_float(AttrKey::Negative_slope));
+    }
+    record_op(std::move(traced));
+}
+
 // Identity of a *logical* tensor view. The same storage viewed with different
 // shape/strides (e.g. a square-matrix transpose, which keeps the same data_ptr
 // AND shape but flips strides) is a DISTINCT value and must get its own id;
@@ -596,6 +695,26 @@ auto Tracer::register_new_tensor(const Tensor& tensor) -> std::string {
     return id;
 }
 
+auto Tracer::set_parameters(std::vector<std::shared_ptr<Variable>> params) -> void {
+    parameters_ = std::move(params);
+    param_storage_index_.clear();
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        const auto& p = parameters_[i];
+        if (!p) continue;
+        // Key on the parameter tensor's data pointer — the same identity a
+        // traced op input that reads this parameter will present at
+        // register_tensor() time. A view/reshape of the parameter created
+        // INSIDE the traced forward produces its own graph value (the view op
+        // is recorded), so only the parameter's own leaf value matches here.
+        const void* id = p->tensor().data_ptr();
+        if (id != nullptr) {
+            // First declaration wins if two params alias the same storage
+            // (they shouldn't); keep the lower index deterministically.
+            param_storage_index_.emplace(id, i);
+        }
+    }
+}
+
 auto Tracer::get_tensor_info(const std::string& tensor_id) const -> const TensorInfo& {
     auto it = tensor_info_.find(tensor_id);
     if (it == tensor_info_.end()) {
@@ -609,6 +728,8 @@ auto Tracer::clear() -> void {
     tensor_info_.clear();
     tensor_id_map_.clear();
     tensor_storage_.clear();
+    parameters_.clear();
+    param_storage_index_.clear();
     next_tensor_id_ = 0;
     graph_break_count_ = 0;
     // clear() is the tracer's full reset — it stops tracing too, so
@@ -667,12 +788,26 @@ TracingGuard::TracingGuard() : tracer_(Tracer::get_instance()) {
         [this](const std::string& reason) {
             tracer_.record_graph_break(reason);
         });
+
+    // Install the in-place op hook. In-place kernels dispatch through
+    // dispatch_inplace, which bypasses the DispatchInterceptorStack; without
+    // this hook their mutations are invisible to the trace and later reads
+    // resolve to the pre-op value. record_inplace() records a value-versioned
+    // functional node so replay applies the mutation.
+    tenzor::detail::set_inplace_op_hook(
+        [this](OpId op, Tensor& target, const Tensor* others,
+               std::size_t num_others, const OpAttributes& attrs) {
+            tracer_.record_inplace(
+                op, target,
+                std::span<const Tensor>(others, num_others), attrs);
+        });
 }
 
 TracingGuard::~TracingGuard() {
-    // Tear down the graph-break hook so subsequent non-traced calls to
-    // .item() don't walk into a stale Tracer reference.
+    // Tear down the hooks so subsequent non-traced calls (e.g. .item(),
+    // add_) don't walk into a stale Tracer reference.
     tenzor::detail::set_graph_break_hook(nullptr);
+    tenzor::detail::set_inplace_op_hook(nullptr);
 
     if (interceptor_installed_) {
         DispatchInterceptorStack::pop();
@@ -805,40 +940,72 @@ auto Tracer::trace_loop(int64_t max_iter,
                         std::function<std::vector<Variable>(const std::vector<Variable>&)> body_fn,
                         const std::vector<Variable>& carried) -> std::vector<Variable> {
 
-    // Register carried state
+    // The interpreter (graph.cpp Loop case) implements ONNX-style loop
+    // semantics and expects:
+    //   * node inputs      = [max_iter, cond, carried...]
+    //   * body sub-graph in = [iter, cond, carried...]
+    //   * body sub-graph out= [cond, carried...]   (first output is the new cond)
+    // and it evaluates the condition BEFORE each body run (`i < max_iter &&
+    // cond`), so a zero-iteration loop returns the initial carried state —
+    // matching eager `while_loop` (control_flow.cpp), which checks cond first.
+    // We build a Loop node + body subgraph that satisfies this contract exactly.
+
+    // Register carried state. These become node inputs 2.. and body inputs 2..
     std::vector<std::string> carried_ids;
+    carried_ids.reserve(carried.size());
     for (const auto& v : carried) {
         carried_ids.push_back(register_tensor(v));
     }
 
-    // Save ops state before body
-    auto body_ops_start = ops_.size();
+    // Loop trip-count constant (node input[0]). Built on CPU where `full` is a
+    // direct fill with NO OpId dispatch, so it does not record a spurious op
+    // into the trace. The interpreter reads it via `.to(Float32).item()`.
+    Tensor max_iter_tensor = tenzor::full({1}, static_cast<double>(max_iter),
+                                          DType::Float32, Device::cpu());
+    std::string max_iter_id = register_tensor(max_iter_tensor);
 
-    // Trace one iteration of the body
+    // Entry condition (node input[1]) evaluated on the ENTRY state, BEFORE the
+    // body runs. Recording these ops here — before body_ops_start — keeps them
+    // in the PARENT op stream so they are replayed in the outer graph (they are
+    // outside every [body_ops_start, body_ops_end) skip range). This is what
+    // makes a zero-iteration loop possible: if the entry cond is false the
+    // interpreter never enters the body.
+    Tensor entry_cond = cond_fn(carried);
+    std::string entry_cond_id = register_tensor(entry_cond);
+
+    // Trace one iteration of the body.
+    auto body_ops_start = ops_.size();
     auto body_outputs = body_fn(carried);
 
-    // Trace the loop's exit condition on the post-body (next-iteration) state,
-    // mirroring the eager path (control_flow.cpp while_loop: the loop runs while
-    // cond_fn(state) is non-zero). Recording these ops INSIDE the body op range
-    // [body_ops_start, body_ops_end) makes them part of the body subgraph, and
-    // surfacing the result as the body's first output lets the executor
-    // (graph.cpp Loop case: `body outputs = [cond, carried...]`) terminate the
-    // loop early instead of always running to max_iter. Without this the traced
-    // condition was dropped and a compiled loop over-iterated.
-    Tensor cond_tensor = cond_fn(body_outputs);
-    std::string cond_id = register_tensor(cond_tensor);
+    // Post-body exit condition, evaluated on the updated state. Recorded INSIDE
+    // the body op range so it becomes part of the body subgraph and is surfaced
+    // as the body's FIRST output (loop_cond_output) — the interpreter reads
+    // body_outputs[0] as the next-iteration condition.
+    Tensor post_cond = cond_fn(body_outputs);
+    std::string post_cond_id = register_tensor(post_cond);
 
     auto body_ops_end = ops_.size();
 
-    // Register output IDs
+    // Register output IDs (updated carried state).
     std::vector<std::string> output_ids;
+    output_ids.reserve(body_outputs.size());
     for (const auto& v : body_outputs) {
         output_ids.push_back(register_tensor(v));
     }
 
-    // Create Loop operation
-    TracedOp loop_op(OpType::Loop, carried_ids, output_ids);
-    loop_op.loop_cond_output = cond_id;
+    // Loop node inputs: [max_iter, entry_cond, carried...]. build_subgraph uses
+    // op.inputs verbatim as the body subgraph inputs, giving body inputs
+    // [iter, cond, carried...] — the interpreter binds the runtime iter/cond
+    // into the first two placeholders (the body never references them here) and
+    // the carried into the rest.
+    std::vector<std::string> loop_inputs;
+    loop_inputs.reserve(2 + carried_ids.size());
+    loop_inputs.push_back(max_iter_id);
+    loop_inputs.push_back(entry_cond_id);
+    loop_inputs.insert(loop_inputs.end(), carried_ids.begin(), carried_ids.end());
+
+    TracedOp loop_op(OpType::Loop, std::move(loop_inputs), output_ids);
+    loop_op.loop_cond_output = post_cond_id;
     loop_op.int_attrs["max_iter"] = max_iter;
     loop_op.int_attrs["body_ops_start"] = static_cast<int64_t>(body_ops_start);
     loop_op.int_attrs["body_ops_end"] = static_cast<int64_t>(body_ops_end);
@@ -846,7 +1013,8 @@ auto Tracer::trace_loop(int64_t max_iter,
 
     record_op(std::move(loop_op));
 
-    // Return body outputs as the result (representing final carried state)
+    // Return body outputs as the trace-time result (represents final carried
+    // state; the compiled graph surfaces output_ids -> final carried).
     return body_outputs;
 }
 

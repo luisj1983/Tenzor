@@ -13,3 +13,11 @@ TEST(OpTypeRoundtrip, NewMVP1Ops) {
         EXPECT_EQ(tj::string_to_op_type(s), op);
     }
 }
+
+TEST(OpTypeRoundtrip, ElementwiseTrigAndRsqrt) {
+    for (auto op : {tj::OpType::Sin, tj::OpType::Cos, tj::OpType::Rsqrt}) {
+        auto s = tj::op_type_to_string(op);
+        EXPECT_NE(s, "Unknown") << "op " << static_cast<int>(op) << " has no string";
+        EXPECT_EQ(tj::string_to_op_type(s), op);
+    }
+}

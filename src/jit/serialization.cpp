@@ -31,6 +31,13 @@ GraphWriter::~GraphWriter() {
 
 auto GraphWriter::write(const Graph& graph) -> void {
     write_header();
+    write_graph(graph);
+}
+
+// Write a full graph body without the file header. Shared between the
+// top-level write() and the recursive write_subgraph() used for control-flow
+// subgraphs (If then/else branches, Loop body).
+auto GraphWriter::write_graph(const Graph& graph) -> void {
     write_metadata(graph);
     write_values(graph);
     write_nodes(graph);
@@ -38,6 +45,17 @@ auto GraphWriter::write(const Graph& graph) -> void {
     // v2 additions: graph input/output ID lists, captured constants.
     write_io_lists(graph);
     write_constants(graph);
+}
+
+// v3: write an optional nested subgraph. A null branch/body is a single
+// `false` byte; a present one is `true` followed by a full graph body.
+auto GraphWriter::write_subgraph(const std::shared_ptr<Graph>& sub) -> void {
+    if (sub) {
+        write_bool(true);
+        write_graph(*sub);
+    } else {
+        write_bool(false);
+    }
 }
 
 auto GraphWriter::write_header() -> void {
@@ -87,8 +105,14 @@ auto GraphWriter::write_values(const Graph& graph) -> void {
         write_string(value->id());
         write_int64_vector(value->shape());
         write_uint32(static_cast<uint32_t>(value->dtype()));
-        write_uint32(static_cast<uint32_t>(value->device().type));
-        write_int64(value->device().index);
+        // v3: device-neutral serialization. The Value device is metadata only
+        // (execution device is decided at runtime from the input tensors), so
+        // recording the trace-time GPU device would device-lock the file and
+        // make it unloadable on a host lacking that backend. Write CPU so the
+        // graph is portable; Graph::forward() places everything on whatever
+        // device the runtime inputs use.
+        write_uint32(static_cast<uint32_t>(Device::Type::CPU));
+        write_int64(0);
     }
 }
 
@@ -165,6 +189,19 @@ auto GraphWriter::write_nodes(const Graph& graph) -> void {
             write_string(name);
             write_tensor(val);
         }
+
+        // v3: serialize control-flow subgraphs. Without these, every loaded
+        // If/Loop node had null then_branch_/else_branch_/body_, so the
+        // executor produced no outputs (If throws "Output value not
+        // computed"; Loop silently no-ops). Each subgraph is itself a full
+        // Graph and is written recursively. The subgraph's own input/output
+        // lists already encode the control-flow sidecars the executor needs:
+        // the Loop body's FIRST output is the loop condition (loop_cond_output)
+        // and each If branch surfaces its own outputs (then vs. else_outputs),
+        // so a loaded If/Loop replays identically.
+        write_subgraph(node->then_branch());
+        write_subgraph(node->else_branch());
+        write_subgraph(node->body());
     }
 }
 
@@ -210,9 +247,15 @@ auto GraphWriter::write_tensor(const Tensor& tensor) -> void {
     // Write dtype
     write_uint32(static_cast<uint32_t>(tensor.dtype()));
 
-    // Write device
-    write_uint32(static_cast<uint32_t>(tensor.device().type));
-    write_int64(tensor.device().index);
+    // v3: device-neutral serialization. The bytes below are always a CPU copy,
+    // so the recorded device MUST match that byte domain: write CPU. Recording
+    // the trace-time GPU device instead would device-lock the constant — a
+    // CUDA-traced graph would try to migrate the constant back to CUDA on load
+    // (crashing on a CUDA-absent host, and pinning it to the wrong backend
+    // otherwise). The executor moves each constant onto the runtime-input
+    // device at execution time, so replay works on any backend.
+    write_uint32(static_cast<uint32_t>(Device::Type::CPU));
+    write_int64(0);
 
     // Write data. fstream::write expects a host pointer — if the tensor
     // lives on a GPU backend, data_ptr() returns a device pointer which
@@ -251,7 +294,12 @@ GraphReader::~GraphReader() {
 
 auto GraphReader::read() -> std::shared_ptr<Graph> {
     read_header();
+    return read_graph();
+}
 
+// Read a full graph body (no file header). Shared between the top-level
+// read() and the recursive read_subgraph() used for control-flow subgraphs.
+auto GraphReader::read_graph() -> std::shared_ptr<Graph> {
     auto graph = std::make_shared<Graph>();
 
     read_metadata(*graph);
@@ -263,6 +311,15 @@ auto GraphReader::read() -> std::shared_ptr<Graph> {
     read_constants(*graph);
 
     return graph;
+}
+
+// v3: read an optional nested subgraph written by write_subgraph.
+auto GraphReader::read_subgraph() -> std::shared_ptr<Graph> {
+    bool present = read_bool();
+    if (!present) {
+        return nullptr;
+    }
+    return read_graph();
 }
 
 auto GraphReader::read_header() -> void {
@@ -329,11 +386,16 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
     // bound the declared count against the remaining file length before looping,
     // mirroring read_io_lists / read_constants / read_int64_vector. This keeps
     // the count-hardening consistent with the sibling readers.
-    if (meta_num_nodes_ > remaining_bytes() / sizeof(uint64_t)) {
+    // Capture the count into a local BEFORE the loop: reading a node's
+    // control-flow subgraphs recurses into read_graph()/read_metadata(),
+    // which overwrites the shared meta_num_nodes_ member. Using the member
+    // as the loop bound would then read the wrong (nested) count.
+    const uint64_t num_nodes = meta_num_nodes_;
+    if (num_nodes > remaining_bytes() / sizeof(uint64_t)) {
         throw std::runtime_error(
             "GraphReader::read_nodes: num_nodes exceeds remaining file");
     }
-    for (uint64_t n = 0; n < meta_num_nodes_; ++n) {
+    for (uint64_t n = 0; n < num_nodes; ++n) {
         OpType op_type = static_cast<OpType>(read_uint32());
         std::string name = read_string();
 
@@ -446,6 +508,18 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
             Tensor val = read_tensor();
             node->set_tensor_attr(attr_name, std::move(val));
         }
+
+        // v3: reconstruct control-flow subgraphs (If then/else, Loop body) in
+        // the same order write_nodes emitted them. Each read_subgraph() recurses
+        // into read_graph() (which uses the same bounded readers, so the
+        // count/shape hardening applies to nested graphs too). A null branch/
+        // body is a single false byte. The subgraphs carry their own
+        // input/output lists, which encode the loop_cond_output (body's first
+        // output) and per-branch else_outputs, so the loaded node replays
+        // identically to the pre-serialization graph.
+        node->set_then_branch(read_subgraph());
+        node->set_else_branch(read_subgraph());
+        node->set_body(read_subgraph());
 
         graph.add_node(node);
     }
@@ -674,10 +748,16 @@ auto GraphReader::read_tensor() -> Tensor {
             std::to_string(remaining_bytes()) + ")");
     }
 
-    // Mirror write_tensor: bytes were serialized from a CPU copy. Read into
-    // a CPU tensor first (fstream::read needs a host pointer), then migrate
-    // to the recorded device if needed. Allocation happens only after the
-    // size check above has validated the declared shape against data_size.
+    // v3: device-neutral load. Bytes were serialized from a CPU copy, and the
+    // recorded device is CPU (write_tensor). Materialize the tensor on CPU and
+    // return it WITHOUT migrating to any GPU device: pinning a constant to a
+    // trace-time backend here is exactly the device-lock bug — it crashes on a
+    // host lacking that backend and defeats backend-agnostic replay. The
+    // executor (Graph::forward) moves constants onto the runtime-input device
+    // at execution time. Allocation happens only after the size check above.
+    // original_device is read for format compatibility but intentionally not
+    // used for placement.
+    (void)original_device;
     Tensor tensor(shape, dtype, Device::cpu());
 
     file_.read(reinterpret_cast<char*>(tensor.data_ptr()),
@@ -686,9 +766,6 @@ auto GraphReader::read_tensor() -> Tensor {
         throw std::runtime_error("GraphReader::read_tensor: truncated tensor data");
     }
 
-    if (original_device.type != Device::Type::CPU) {
-        tensor = tensor.to(original_device);
-    }
     return tensor;
 }
 

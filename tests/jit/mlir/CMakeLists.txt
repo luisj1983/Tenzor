@@ -49,6 +49,14 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_end_to_end_add
         DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
 
+    # Backend-parity fixes (C1/C2/H6/M1/M3): eager-fallback safety net,
+    # target-alias normalization, device-derived ROCm arch, HAL ordinal.
+    add_executable(test_jit_eager_fallback test_jit_eager_fallback.cpp)
+    target_link_libraries(test_jit_eager_fallback
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_jit_eager_fallback
+        DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task C.1 — Elementwise ops lower to StableHLO primitives.
     add_executable(test_op_elementwise test_op_elementwise.cpp)
     target_link_libraries(test_op_elementwise
@@ -220,6 +228,16 @@ if(TENZOR_USE_MLIR_JIT)
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_model_resnet
         DISCOVERY_TIMEOUT 600 BACKENDS none LABELS "jit;mlir;iree")
+
+    # Training-through-JIT parity for the MLIR-configured backend: a
+    # requires-grad / captured-parameter call must train through the COMPILED
+    # graph (grad_invoke interpreter) exactly like nvrtc, while no-grad
+    # inference still uses IREE. Runs on CPU / CUDA / ROCm.
+    add_executable(test_jit_training_parity test_jit_training_parity.cpp)
+    target_link_libraries(test_jit_training_parity
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_jit_training_parity
+        DISCOVERY_TIMEOUT 300 BACKENDS none LABELS "jit;mlir;iree")
 
     # Group F — Debug UX (show_graph / show_mlir / show_stablehlo /
     # show_iree / cache_stats + TENZOR_JIT_DUMP env var).

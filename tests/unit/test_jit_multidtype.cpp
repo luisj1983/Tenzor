@@ -169,6 +169,12 @@ TEST_P(JITMultiDTypeTest, TraceSimpleModel) {
     EXPECT_EQ(output.tensor().shape()[0], 2);
     EXPECT_EQ(output.tensor().shape()[1], 5);
     EXPECT_EQ(output.tensor().dtype(), dtype());
+
+    // JIT correctness: the traced graph must reproduce the eager forward on the
+    // SAME input, not merely produce a right-shaped tensor. A shape-only check
+    // silently passes a traced graph that dropped an op or transposed a weight.
+    auto eager = model->forward(input).tensor();
+    expectTensorNear(output.tensor(), eager);
 }
 
 TEST_P(JITMultiDTypeTest, TraceConvolutionalModel) {
@@ -450,6 +456,11 @@ TEST_P(JITMultiDTypeTest, SaveAndLoadModel) {
 
     ASSERT_EQ(loaded_output.tensor().numel(), original_output.tensor().numel());
     EXPECT_EQ(loaded_output.tensor().dtype(), dtype());
+
+    // Round-trip correctness: the reloaded module must reproduce the original
+    // module's output VALUES, not just its shape/count. A save/load that
+    // dropped a parameter or mangled a constant would pass the count check.
+    expectTensorNear(loaded_output.tensor(), original_output.tensor());
 }
 
 TEST_P(JITMultiDTypeTest, SaveAndLoadConvModel) {
@@ -664,6 +675,9 @@ TEST_P(JITMultiDTypeTest, BenchmarkTracedVsEager) {
     for (size_t i = 0; i < t_shape.size(); ++i) {
         EXPECT_EQ(t_shape[i], e_shape[i]);
     }
+    // The optimized traced graph must be numerically equivalent to eager — an
+    // inference optimization that changed the result is a bug, not a speedup.
+    expectTensorNear(traced_out.tensor(), eager_out.tensor());
 }
 
 // ============================================================================

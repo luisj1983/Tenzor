@@ -12,6 +12,7 @@
 #include <iostream>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/compile.hpp>
+#include <tenzor/jit/extended_codegen.hpp>
 #include "../backend_parity/parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -409,12 +410,14 @@ TEST(JITBackendParity, MultiHeadAttentionBlock) {
                 Variable(q_dev, false), Variable(k_dev, false), Variable(v_dev, false));
             auto out = out_dev.tensor();
             backends[i].synchronize();
-            // Relaxed from 1e-3 → 1e-1: MHA is a long BMM/softmax/BMM
-            // chain whose floating-point accumulation order differs
-            // between CPU (sequential) and CUDA (parallel warp reduces),
-            // producing ~0.49 max abs diff in practice. Not a code bug.
-            // Tracked in #53.
-            EXPECT_TENSORS_CLOSE(ref, out, 1e-1f, 1e-1f);
+            // Tightened 1e-1 → 1e-3. The old 1e-1 bound (and its "~0.49 max abs
+            // diff / #53" note) is stale: after the intervening backend fixes the
+            // measured MHA parity is 2.1e-4 on CUDA (genuine GEMM reduction-order
+            // between CPU-sequential and warp-parallel accumulation) and ~6e-8 on
+            // ROCm/Vulkan/OneAPI. 1e-3 covers the legitimate reduction-order gap
+            // with margin while rejecting any real per-backend regression that a
+            // 1e-1 bound would silently swallow.
+            EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "MultiHeadAttentionBlock failed on "
                           << backend_name(backends[i]) << ": " << e.what();
@@ -511,12 +514,109 @@ TEST(JITBackendParity, JITCompiledMLP) {
             auto out1 = compiled(Variable(in_dev, false)).tensor();
             backends[i].synchronize();
             SCOPED_TRACE("JIT parity on " + backend_name(backends[i]));
+
+            // Prove the COMPILED path was actually taken and did not silently
+            // fall back to eager: a CompiledModule must have been cached. Without
+            // this, a trace_and_compile() that throws would leave out0/out1 as
+            // eager results that trivially match `ref` — a vacuous pass.
+            EXPECT_GT(compiled.num_cached(), 0u)
+                << "JIT compilation silently fell back to eager on "
+                << backend_name(backends[i]);
+
             EXPECT_TENSORS_CLOSE(ref, out0, 1e-3f, 1e-3f);  // compile+run path
             EXPECT_TENSORS_CLOSE(ref, out1, 1e-3f, 1e-3f);  // cache-hit path
         } catch (const std::exception& e) {
             ADD_FAILURE() << "JITCompiledMLP failed on "
                           << backend_name(backends[i]) << ": " << e.what();
         }
+    }
+}
+
+// ============================================================================
+// JIT-COMPILED GemmEpilogue parity — Linear(with bias) -> activation lowers to
+// the native fused GemmEpilogue GPU codegen path (bias + activation fused onto
+// the GEMM). This test drives that path through jit::compile and asserts:
+//   (a) the compiled output equals the eager CPU reference on every backend,
+//   (b) the compiled path was actually taken (num_cached > 0 everywhere; and on
+//       CUDA/ROCm the native codegen kernel launched — extended_fused_launch_count
+//       increased), and
+//   (c) the CUDA-compiled and ROCm-compiled outputs agree (cross-backend).
+//
+// Regression guard: the GemmEpilogue fusion previously DROPPED the Linear's
+// built-in bias (it only honoured a separate Add node), so tanh(x·Wᵀ) was
+// computed instead of tanh(x·Wᵀ + b), diverging from eager by ~0.1-0.3 on both
+// CUDA and ROCm. The 1e-3 bound below (GEMM reduction-order only) rejects that.
+// ============================================================================
+
+TEST(JITBackendParity, JITCompiledGemmEpilogueBias) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled GemmEpilogue parity");
+
+    nn::Linear fc(32, 16);  // bias enabled by default
+    auto input = randn({4, 32}, DType::Float32, Device::cpu());
+
+    // Eager CPU reference: tanh(x·Wᵀ + b).
+    auto ref = nn::tanh(fc.forward(Variable(input, false))).tensor();
+
+    std::vector<Tensor> gpu_outputs;   // compiled outputs, on CPU, for cross-check
+    std::vector<std::string> gpu_names;
+
+    for (size_t i = 0; i < backends.size(); ++i) {
+        const bool is_gpu = backends[i].type == Device::Type::CUDA ||
+                            backends[i].type == Device::Type::ROCm;
+        try {
+            nn::Linear fc_dev(32, 16);
+            copy_params(fc, fc_dev);
+            fc_dev.to(backends[i]);
+            auto in_dev = input.to(backends[i]);
+
+            auto fn = [&fc_dev](const Variable& x) -> Variable {
+                return nn::tanh(fc_dev.forward(x));
+            };
+            jit::CompiledFunction compiled(fn, {});
+
+            const uint64_t fused_before = jit::extended_fused_launch_count();
+            auto out0 = compiled(Variable(in_dev, false)).tensor();  // compile+cache
+            auto out1 = compiled(Variable(in_dev, false)).tensor();  // cache hit -> compiled graph
+            backends[i].synchronize();
+            const uint64_t fused_after = jit::extended_fused_launch_count();
+
+            SCOPED_TRACE("JIT GemmEpilogue parity on " + backend_name(backends[i]));
+
+            // (b) compiled path actually taken (not silent eager fallback).
+            EXPECT_GT(compiled.num_cached(), 0u)
+                << "JIT compilation silently fell back to eager on "
+                << backend_name(backends[i]);
+
+            // (b') On a GPU the native fused GemmEpilogue kernel MUST have
+            //      launched — otherwise the bias-drop regression is unobservable.
+            if (is_gpu) {
+                EXPECT_GT(fused_after, fused_before)
+                    << "native GemmEpilogue codegen path NOT taken on "
+                    << backend_name(backends[i])
+                    << " (extended_fused_launch_count unchanged)";
+            }
+
+            // (a) compiled output == eager reference on the same backend.
+            EXPECT_TENSORS_CLOSE(ref, out0, 1e-3f, 1e-3f);
+            EXPECT_TENSORS_CLOSE(ref, out1, 1e-3f, 1e-3f);
+
+            if (is_gpu) {
+                gpu_outputs.push_back(out1.to(Device::cpu()));
+                gpu_names.push_back(backend_name(backends[i]));
+            }
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "JITCompiledGemmEpilogueBias failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+
+    // (c) Genuine cross-backend numeric check between COMPILED GPU outputs
+    //     (e.g. CUDA-compiled vs ROCm-compiled), independent of the CPU pivot.
+    for (size_t a = 0; a + 1 < gpu_outputs.size(); ++a) {
+        SCOPED_TRACE("cross-backend compiled parity " + gpu_names[a] +
+                     " vs " + gpu_names[a + 1]);
+        EXPECT_TENSORS_CLOSE(gpu_outputs[a], gpu_outputs[a + 1], 1e-3f, 1e-3f);
     }
 }
 

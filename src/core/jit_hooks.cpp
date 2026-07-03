@@ -8,6 +8,7 @@ namespace {
 // Tracer::get_instance) so pairing the hook with the tracer 1:1 is
 // correct.
 thread_local GraphBreakHook tls_graph_break_hook;
+thread_local InplaceOpHook tls_inplace_op_hook;
 } // namespace
 
 void set_graph_break_hook(GraphBreakHook hook) {
@@ -18,6 +19,21 @@ void notify_graph_break(const std::string& reason) {
     if (tls_graph_break_hook) {
         tls_graph_break_hook(reason);
     }
+}
+
+void set_inplace_op_hook(InplaceOpHook hook) {
+    tls_inplace_op_hook = std::move(hook);
+}
+
+void notify_inplace_op(OpId op, Tensor& target, const Tensor* others,
+                       std::size_t num_others, const OpAttributes& attrs) {
+    if (tls_inplace_op_hook) {
+        tls_inplace_op_hook(op, target, others, num_others, attrs);
+    }
+}
+
+bool inplace_op_hook_active() noexcept {
+    return static_cast<bool>(tls_inplace_op_hook);
 }
 
 } // namespace tenzor::detail

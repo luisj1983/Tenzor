@@ -559,6 +559,23 @@ public:
     auto to(DType dtype) const -> Tensor;
 
     /**
+     * @brief Raw CPU dtype conversion that performs the element-wise cast
+     *        WITHOUT going through the OpId::Cast backend dispatch.
+     *
+     * `to(DType)` routes CPU casts through `dispatch_single(OpId::Cast, ...)`
+     * so a JIT trace records a `Cast` node uniformly across every backend
+     * (matching the GPU path). The CPU `Cast` kernel therefore cannot call
+     * `to(DType)` again — that would recurse forever. It calls this method
+     * instead, which contains the actual conversion (all dtype pairs,
+     * including Float16/BFloat16/FP8/Complex). Not intended for direct use;
+     * prefer `to(DType)`.
+     *
+     * @param dtype Target data type
+     * @return New CPU tensor with converted data type
+     */
+    auto cast_cpu_raw(DType dtype) const -> Tensor;
+
+    /**
      * @brief Move tensor to specified device and convert dtype in one operation.
      *
      * More efficient than chaining `.to(device).to(dtype)` — performs device

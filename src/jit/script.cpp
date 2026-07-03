@@ -21,9 +21,15 @@
  *   unary      := NUMBER | IDENT | '(' expr ')' | '-' factor
  *   method_suffix := '.' IDENT '(' ')'
  *
- * Control flow routes through jit::cond (for if/else — integrates with
- * trace_if when tracing) and static unrolling for `for i in range(N)`
- * (each iteration produces a distinct chain in the traced graph).
+ * Control flow semantics (trace-based JIT):
+ *  - `if`/`else`: the condition is data-dependent and not representable in the
+ *    IR, so reading it to pick a branch is a graph break. It is read through
+ *    Tensor::item(), which fires the tracer's graph-break hook — under
+ *    TENZOR_JIT_STRICT this throws; otherwise it warns and the taken branch's
+ *    ops are baked into the compiled graph (standard trace-based semantic).
+ *  - `for i in range(N)` (constant N): statically unrolled, so each iteration
+ *    produces a distinct chain in the traced graph. This is fully captured (no
+ *    data-dependent condition is read), so it is not a graph break.
  */
 
 #include <tenzor/jit/script.hpp>
@@ -669,23 +675,26 @@ private:
     }
 
     void exec_one(const IfStmt& iff, Env& env, std::optional<Variable>& returned) const {
-        // Eager evaluation of if/else. Rationale: the tracer's trace_if
-        // records both branches inline without building dispatch
-        // subgraphs, so replay always re-runs whichever branch happened
-        // to execute at trace time — meaning jit::cond does not currently
-        // give us dynamic-at-replay dispatch anyway. Eager evaluation
-        // captures only the taken branch's ops, which matches the
-        // standard trace-based JIT semantic ("the branch taken during
-        // tracing is the branch baked into the compiled module").
+        // Trace-based JIT semantic: a scripted `if` bakes in whichever branch is
+        // taken at trace time. The condition is data-dependent (it is derived
+        // from the traced tensors) and cannot be represented in the IR — the
+        // comparison ops that produce it (lt/gt) have no OpType, and even a
+        // representable scalar condition would need trace_if subgraph dispatch.
+        // So reading the scalar to pick a branch is a GRAPH BREAK: under
+        // TENZOR_JIT_STRICT it must throw (rather than silently freezing one
+        // branch); otherwise it warns and the taken branch is recorded, which
+        // matches eager for the traced configuration.
+        //
+        // Route the scalar read through Tensor::item(), which fires the
+        // graph-break hook (see core/jit_hooks.hpp). A raw data<float>()[0]
+        // bypasses the hook and would silently bake one branch even in strict
+        // mode — the bug this replaces.
         Variable cond_var = eval(*iff.cond, env);
-        // Read the condition as a scalar Float32 value. The condition tensor
-        // inherits ctx_dtype_ (baked into literals/binops), so it may be
-        // Float64/Float16/BFloat16; item<float>() throws on dtype != Float32.
-        // Mirror eval_scalar: cast to CPU Float32 before reading the scalar.
         Tensor cond_t = cond_var.tensor();
+        // item<float>() requires a single-element Float32 tensor; the condition
+        // inherits ctx_dtype_ so it may be Float64/Float16/BFloat16.
         if (cond_t.dtype() != DType::Float32) cond_t = cond_t.to(DType::Float32);
-        if (cond_t.device().type != Device::Type::CPU) cond_t = cond_t.to(Device::cpu());
-        bool cond_val = cond_t.data<float>()[0] != 0.0f;
+        bool cond_val = cond_t.item<float>() != 0.0f;
         const auto& body = cond_val ? iff.then_body : iff.else_body;
         exec_block(body, env, returned);
     }

@@ -53,6 +53,13 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::BatchNorm2dForward:       return OpType::BatchNorm2d;
         case OpId::BatchNorm2dForwardAffine: return OpType::BatchNorm2d;
         case OpId::LayerNorm:  return OpType::LayerNorm;
+        // nn::functional::layer_norm dispatches OpId::FusedLayerNorm (x, gamma,
+        // beta + NormalizedShape/Eps). Without this mapping every traced
+        // LayerNorm was an unmappable op → graph break → the whole graph was
+        // discarded and the call silently fell back to eager (no JIT, and no
+        // training-through-JIT). Map it to the same OpType::LayerNorm node the
+        // executor already knows how to run/differentiate.
+        case OpId::FusedLayerNorm: return OpType::LayerNorm;
 
         // Reductions
         case OpId::Sum:        return OpType::Sum;
@@ -68,6 +75,15 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Abs:        return OpType::Abs;
         case OpId::Neg:        return OpType::Neg;
         case OpId::Clamp:      return OpType::Clamp;
+        case OpId::Sin:        return OpType::Sin;
+        case OpId::Cos:        return OpType::Cos;
+        case OpId::Rsqrt:      return OpType::Rsqrt;
+
+        // Normalization (dispatched form; the nn RMSNorm layer's SIMD fast
+        // path records via jit_record_rms_norm, but a raw OpId::RMSNorm
+        // dispatch must map too so its output is a real node, not a frozen
+        // constant).
+        case OpId::RMSNorm:    return OpType::RMSNorm;
 
         // Shape operations
         case OpId::Reshape:    return OpType::Reshape;
@@ -96,7 +112,8 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         // Dropout
         case OpId::Dropout:    return OpType::Dropout;
 
-        // Cast (GPU dispatch path; CPU rewrites in Tensor::to(dtype)).
+        // Cast: dispatched by Tensor::to(dtype) on EVERY backend (CPU and GPU),
+        // so a mixed-precision trace records a Cast node uniformly.
         case OpId::Cast:       return OpType::Cast;
 
         // Index ops
@@ -107,6 +124,53 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
 
         default:
             return std::nullopt;
+    }
+}
+
+// A deterministic tensor-CREATION op takes no tensor inputs and produces a
+// value that is fully determined at trace time (a fill / range / identity). On
+// CPU some of these are direct fills that never dispatch an OpId, but on GPU
+// they DO dispatch (e.g. Variable::operator*(double) builds its scalar operand
+// via `full`, which lowers to OpId::Full on CUDA/ROCm). Without special
+// handling the tracer sees an unmapped OpId and declares a GRAPH BREAK, which
+// discards the ENTIRE compiled graph and silently falls back to eager — so any
+// compiled function that uses a scalar op (`x * 2.0`, `sum(z) * scale`, …) or a
+// literal creation op was un-JIT-able on GPU. These outputs are genuine
+// constants: registering them (so a downstream consumer resolves them via
+// end_trace's constant-baking path) is correct and device-independent. Random
+// creation ops are deliberately EXCLUDED — baking a single draw would freeze
+// the randomness, so those still break.
+static auto is_constant_creation_op(OpId op) -> bool {
+    switch (op) {
+        case OpId::Full:
+        case OpId::Zeros:
+        case OpId::Ones:
+        case OpId::Arange:
+        case OpId::Linspace:
+        case OpId::Eye:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// A pure view/shape op returns a tensor that shares its input's storage and,
+// when the target shape/strides match exactly, the SAME logical view — a
+// genuine no-op the tracer should drop. Any OTHER op whose output aliases an
+// input is an in-place COMPUTE mutation (data changed under the same storage)
+// and MUST be recorded as a value-versioned node instead of being dropped.
+static auto is_view_optype(OpType t) -> bool {
+    switch (t) {
+        case OpType::Reshape:
+        case OpType::Transpose:
+        case OpType::Permute:
+        case OpType::Squeeze:
+        case OpType::Unsqueeze:
+        case OpType::Flatten:
+        case OpType::Broadcast:
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -132,6 +196,17 @@ auto make_tracing_interceptor(
         auto results = next(op, inputs, attrs);
 
         if (!op_type) {
+            // A deterministic, input-less creation op (e.g. GPU `full` behind a
+            // scalar operation) is NOT a graph break: its output is a constant.
+            // Register the output tensors so a downstream consumer resolves them
+            // through end_trace's constant-baking path, and record NO node. This
+            // makes scalar/creation ops JIT-able uniformly on CPU and GPU.
+            if (inputs.empty() && is_constant_creation_op(op)) {
+                for (auto& t : results) {
+                    tracer.register_tensor(t);
+                }
+                return results;
+            }
             // Graph break: unmappable operation
             if (on_graph_break) {
                 on_graph_break(op);
@@ -187,17 +262,36 @@ auto make_tracing_interceptor(
         // This is exactly how a batched matmul (which decomposes into identity
         // expand/reshape around a bmm) lost its bmm node. The output tensor id
         // still resolves to the real producer, so dropping the no-op is correct.
+        //
+        // BUT this must fire only for genuine VIEW no-ops. A COMPUTE op whose
+        // output aliases an input is an in-place mutation (relu_-style): the
+        // storage is the same but the data changed, so it must be recorded as a
+        // value-versioned node (new = op(old)) rather than dropped — otherwise
+        // later reads of the mutated tensor resolve to the pre-op value.
         if (!output_ids.empty()) {
-            bool all_identity = true;
+            bool all_alias_input = true;
             for (const auto& oid : output_ids) {
                 bool is_input = false;
                 for (const auto& iid : input_ids) {
                     if (iid == oid) { is_input = true; break; }
                 }
-                if (!is_input) { all_identity = false; break; }
+                if (!is_input) { all_alias_input = false; break; }
             }
-            if (all_identity) {
-                return results;
+            if (all_alias_input) {
+                if (is_view_optype(*op_type)) {
+                    // Genuine identity view op — drop it.
+                    return results;
+                }
+                // In-place compute mutation reaching the interceptor: mint fresh
+                // SSA values for the outputs and REMAP their fingerprints so
+                // downstream reads resolve to the post-op value. Fall through to
+                // record a real node (new = op(old, ...)).
+                std::vector<std::string> versioned;
+                versioned.reserve(results.size());
+                for (auto& t : results) {
+                    versioned.push_back(tracer.register_new_tensor(t));
+                }
+                output_ids = std::move(versioned);
             }
         }
 
@@ -241,6 +335,17 @@ auto make_tracing_interceptor(
         copy_float(AttrKey::Eps,      "eps");
         copy_float(AttrKey::Negative_slope, "negative_slope");
         copy_int(AttrKey::Dim,         "dim");
+        // Transpose axes: eager transpose dispatches with Dim0/Dim1 and the
+        // graph executor + shape inference read "dim0"/"dim1". Without these
+        // the traced transpose replayed as transpose(0,0) — a silent no-op.
+        copy_int(AttrKey::Dim0,        "dim0");
+        copy_int(AttrKey::Dim1,        "dim1");
+        // Flatten range: eager flatten dispatches with StartDim/EndDim and the
+        // executor reads "start_dim"/"end_dim". Without these the traced
+        // flatten replayed over the full [0, -1] range regardless of the
+        // recorded sub-range.
+        copy_int(AttrKey::StartDim,    "start_dim");
+        copy_int(AttrKey::EndDim,      "end_dim");
         // Reduction keepdim flag — graph.cpp's infer_types() needs this to
         // correctly compute reduced shapes (without it, infer_types
         // defaults to keepdim=false and silently drops the kept dim).
@@ -267,6 +372,27 @@ auto make_tracing_interceptor(
         };
         copy_int_list_to_vec(AttrKey::Shape, "shape");
         copy_int_list_to_vec(AttrKey::OutputSize, "output_size");
+        // LayerNorm normalized_shape: dispatched as a comma-separated STRING
+        // (AttrKey::NormalizedShape). Parse it to an int-list so the executor's
+        // LayerNorm node (which reads the "normalized_shape" vec attr) replays
+        // over the correct trailing dims instead of defaulting to the last dim.
+        if (attrs.has(AttrKey::NormalizedShape)) {
+            const std::string ns{attrs.get_string(AttrKey::NormalizedShape, "")};
+            std::vector<int64_t> dims;
+            size_t start = 0;
+            while (start < ns.size()) {
+                size_t comma = ns.find(',', start);
+                std::string tok = ns.substr(start, comma == std::string::npos
+                                                        ? std::string::npos
+                                                        : comma - start);
+                if (!tok.empty()) {
+                    try { dims.push_back(std::stoll(tok)); } catch (...) {}
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+            if (!dims.empty()) traced.vec_attrs["normalized_shape"] = std::move(dims);
+        }
         copy_int_list_to_vec(AttrKey::Dims,  "dims");
         copy_int_list_to_vec(AttrKey::Starts, "starts");
         copy_int_list_to_vec(AttrKey::Ends,   "ends");

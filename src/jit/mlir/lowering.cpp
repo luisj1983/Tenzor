@@ -3415,6 +3415,9 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Exp:          handle_unary(ctx, *node, body, "exponential"); break;
             case OpType::Log:          handle_unary(ctx, *node, body, "log");         break;
             case OpType::Sqrt:         handle_unary(ctx, *node, body, "sqrt");        break;
+            case OpType::Sin:          handle_unary(ctx, *node, body, "sine");        break;
+            case OpType::Cos:          handle_unary(ctx, *node, body, "cosine");      break;
+            case OpType::Rsqrt:        handle_unary(ctx, *node, body, "rsqrt");       break;
 
             // ── Special-shape elementwise ──
             case OpType::Pow:          handle_pow(ctx, *node, body);   break;

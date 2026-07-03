@@ -29,6 +29,14 @@ struct CompileOptions {
     /// resolvers. When false, the compiled module is expected to be free of
     /// `stablehlo.custom_call @tenzor_*` invocations (used by IR-only tests).
     bool plugin_enabled = true;
+
+    /// For target=="rocm": the AMD GPU ISA to compile for (e.g. "gfx1150"),
+    /// derived from the *actual* ROCm device rather than a build-time
+    /// constant. When empty, compile_mlir() falls back to the
+    /// TENZOR_DEFAULT_ROCM_TARGET build constant / "gfx1150". Ignored for
+    /// non-rocm targets. The value participates in the on-disk cache key so
+    /// artifacts for different GPU ISAs never alias.
+    std::string rocm_arch;
 };
 
 /// Result of a successful compile invocation.

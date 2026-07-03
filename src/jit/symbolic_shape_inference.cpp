@@ -53,6 +53,9 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::Abs:
         case OpType::Neg:
         case OpType::Clamp:
+        case OpType::Sin:
+        case OpType::Cos:
+        case OpType::Rsqrt:
         case OpType::Dropout:
         case OpType::GELU:
         case OpType::Softmax:
@@ -399,13 +402,14 @@ auto SymbolicShapeInference::infer_transpose(const Node* node) -> std::vector<Sy
         if (dim0 < 0) dim0 += rank;
         if (dim1 < 0) dim1 += rank;
     } else {
-        // The tracing interceptor copies AttrKey::Dim->"dim" but does not emit
-        // the "dim0"/"dim1" string keys, so a traced Transpose node lacks them.
-        // get_int_attr would silently return 0 for both, making the swap a
-        // no-op (the symbolic shape would equal the input — transpose not
-        // reflected) and corrupting downstream matmul/linear shape checks.
-        // Fall back to swapping the last two dims, matching the concrete
-        // graph executor and MLIR lowering (lowering.cpp:1251-1257).
+        // The tracing interceptor now copies AttrKey::Dim0/Dim1 -> "dim0"/"dim1",
+        // and the autograd shape-op recorder emits them too, so a freshly traced
+        // Transpose carries the axes. This fallback only fires for legacy graphs
+        // that predate that fix: without the keys, get_int_attr would silently
+        // return 0 for both, making the swap a no-op (the symbolic shape would
+        // equal the input — transpose not reflected) and corrupting downstream
+        // matmul/linear shape checks. Fall back to swapping the last two dims,
+        // matching the concrete graph executor and MLIR lowering.
         if (rank < 2) {
             return {std::move(sym_shape)};
         }

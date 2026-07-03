@@ -56,9 +56,20 @@ public:
     /// plugin path light up automatically; callers needing the subprocess
     /// path (e.g. targets without a registered HAL driver in the linked
     /// runtime) can pass Mode::Subprocess explicitly.
+    ///
+    /// `device_index` is the HAL device ordinal to run on (M3). On a
+    /// multi-GPU host a `cuda:1` model must execute on GPU 1, not the driver
+    /// default (GPU 0). The ordinal is threaded into the HAL device URI
+    /// (`cuda://1`, `hip://1`, `vulkan://1`) for both the in-process and
+    /// subprocess paths. CPU (`local-task`) has no ordinal and ignores it.
     static auto load(const CompiledArtifact& artifact,
-                     Mode mode = Mode::InProcess)
+                     Mode mode = Mode::InProcess,
+                     int device_index = 0)
         -> std::unique_ptr<IreeInvoker>;
+
+    /// The HAL device URI this invoker selects (e.g. "hip://0", "cuda://1",
+    /// or "local-task" for CPU). Reflects the ordinal that `load()` resolved.
+    auto device_uri() const -> const std::string& { return device_uri_; }
 
     /// Invoke the `@main` function with the given input tensors. Returns the
     /// output tensors in the order they were returned by the MLIR function.
@@ -88,6 +99,8 @@ private:
     std::string vmfb_path_;
     std::string target_;
     std::string device_;            ///< HAL driver name ("local-task" etc.)
+    std::string device_uri_;        ///< HAL device URI incl. ordinal (M3).
+    int         device_index_ = 0;  ///< Requested HAL device ordinal (M3).
     std::string iree_run_module_;   ///< Subprocess CLI path (subprocess mode).
 
     // In-process fields. Stored as void* in the header so we don't drag
@@ -121,6 +134,23 @@ private:
 /// probes (each takes ~30ms on a warm laptop).
 auto iree_can_initialize_default_device(const std::string& driver_name)
     -> bool;
+
+/// Build the IREE HAL device URI for a driver + ordinal (M3). GPU drivers
+/// ("cuda", "hip", "vulkan") get a `driver://<index>` path so the requested
+/// ordinal is honored; the CPU driver ("local-task"/"local-sync") has no
+/// ordinal and is returned unchanged. Exposed for direct testing of the
+/// ordinal-threading contract.
+auto hal_device_uri(const std::string& driver, int device_index)
+    -> std::string;
+
+/// Query the AMD GPU ISA (e.g. "gfx1150") of the physical ROCm device at the
+/// given ordinal (M1), by running the ROCm toolchain's device enumerator
+/// (`amdgpu-arch` / `rocm_agent_enumerator`). This reads the *actual* device
+/// arch rather than a build-time constant, so a JIT compile targets the ISA
+/// the code will run on. Returns an empty string if no enumerator is found or
+/// the ordinal is out of range — callers then fall back to the build default.
+/// Results are cached per ordinal.
+auto detect_rocm_gfx_arch(int device_index) -> std::string;
 
 /// Thrown when iree-run-module reports a runtime failure. Carries the full
 /// stderr text for debugging.

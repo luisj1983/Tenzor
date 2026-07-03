@@ -551,6 +551,14 @@ if(TENZOR_BUILD_CUDA)
     target_link_libraries(tenzor_core PRIVATE
         CUDA::cudart
     )
+    # NVRTC ships no headers of its own: a runtime-generated kernel that does
+    # `#include <cuda_fp16.h>` (Float16/BFloat16 fusions) fails with "could not
+    # open source file" unless we hand NVRTC the CUDA include dir. Bake it in so
+    # codegen.cpp can pass it as --include-path.
+    list(GET CUDAToolkit_INCLUDE_DIRS 0 _TENZOR_CUDA_INC0)
+    target_compile_definitions(tenzor_core PRIVATE
+        TENZOR_NVRTC_INCLUDE="${_TENZOR_CUDA_INC0}"
+    )
 
     # Link NVRTC and CUDA Driver API for runtime kernel codegen
     if(TARGET CUDA::nvrtc)
@@ -614,12 +622,26 @@ if(TENZOR_BUILD_ROCM)
     if(hip_FOUND)
         target_compile_definitions(tenzor_core PRIVATE
             TENZOR_HAS_ROCM
+            # HIPRTC include dir for runtime-generated kernels that pull in
+            # <hip/hip_fp16.h> / <hip/hip_bf16.h> (Float16/BFloat16 fusions).
+            TENZOR_HIPRTC_INCLUDE="${_ROCM_ROOT}/include"
         )
         target_include_directories(tenzor_core PRIVATE
             ${_ROCM_ROOT}/include
         )
         target_link_libraries(tenzor_core PRIVATE
             hip::host
+        )
+        # Runtime GPU kernel codegen for ROCm (src/jit/codegen.cpp) compiles HIP
+        # source at runtime via HIPRTC and loads it through the HIP driver. These
+        # symbols live in libhiprtc / libamdhip64 (host API only — the TU includes
+        # <hip/hip_runtime_api.h>, NOT the device header, so no vector-type clash
+        # with CUDA). Link them so a combined CUDA+ROCm build can target ROCm GPUs.
+        find_library(TENZOR_HIPRTC_LIB hiprtc HINTS ${_ROCM_ROOT}/lib REQUIRED)
+        find_library(TENZOR_AMDHIP_LIB amdhip64 HINTS ${_ROCM_ROOT}/lib REQUIRED)
+        target_link_libraries(tenzor_core PRIVATE
+            ${TENZOR_HIPRTC_LIB}
+            ${TENZOR_AMDHIP_LIB}
         )
         # Real CPU<->GPU DMA lives in this isolated HIP TU (compiled by hipcc)
         # so HIP's vector-type headers never collide with CUDA's in the host TUs

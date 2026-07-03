@@ -3745,6 +3745,19 @@ auto fill_kernel(const Tensor& tensor, double value, hipStream_t stream) -> Tens
     } else if (tensor.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)), n);
+    } else if (tensor.dtype() == DType::FP8_E4M3) {
+        // FP8 is 1 byte/element; broadcast the host-encoded bit pattern of value.
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E4M3(static_cast<float>(value)).bits, n);
+    } else if (tensor.dtype() == DType::FP8_E5M2) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E5M2(static_cast<float>(value)).bits, n);
+    } else if (tensor.dtype() == DType::FP8_E4M3FNUZ) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E4M3FNUZ(static_cast<float>(value)).bits, n);
+    } else if (tensor.dtype() == DType::FP8_E5M2FNUZ) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E5M2FNUZ(static_cast<float>(value)).bits, n);
     } else {
         throw std::runtime_error("Unsupported dtype for fill operation");
     }
@@ -3823,10 +3836,13 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         compute_launch_config_1d(n * 2, g2, b2);
         hipLaunchKernelGGL(fill_kernel_device<double>, g2, b2, 0, stream,
             reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), 0.0, n * 2);
-    } else if (dtype == DType::QInt8 || dtype == DType::QUInt8 || dtype == DType::QInt4x2) {
-        // Quantized types use 1-byte-per-element storage. All-bits-zero is a
-        // valid zeroed buffer (dequantizes to 0 for zero_point=0). QInt4x2
-        // packs two 4-bit values per byte; n equals the byte count here.
+    } else if (dtype == DType::QInt8 || dtype == DType::QUInt8 || dtype == DType::QInt4x2 ||
+               dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2 ||
+               dtype == DType::FP8_E4M3FNUZ || dtype == DType::FP8_E5M2FNUZ) {
+        // 1-byte-per-element storage. All-bits-zero is a valid zeroed buffer:
+        // quantized types dequantize to 0 (zero_point=0), and 0x00 is the +0
+        // encoding for every FP8 format (E4M3/E5M2 and the FNUZ variants).
+        // QInt4x2 packs two 4-bit values per byte; n equals the byte count here.
         hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
             reinterpret_cast<uint8_t*>(const_cast<void*>(result.data_ptr())),
             static_cast<uint8_t>(0), n);
@@ -3913,6 +3929,19 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), 0.0, n * 2);
         hipLaunchKernelGGL(fill_strided_kernel<double>, grid, block, 0, stream,
             reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), 1.0, n, 2);
+    } else if (dtype == DType::FP8_E4M3) {
+        // FP8 is 1 byte/element; broadcast the host-encoded bit pattern of 1.0.
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E4M3(1.0f).bits, n);
+    } else if (dtype == DType::FP8_E5M2) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E5M2(1.0f).bits, n);
+    } else if (dtype == DType::FP8_E4M3FNUZ) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E4M3FNUZ(1.0f).bits, n);
+    } else if (dtype == DType::FP8_E5M2FNUZ) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E5M2FNUZ(1.0f).bits, n);
     } else {
         throw std::runtime_error("Unsupported dtype for ones operation");
     }
@@ -3989,6 +4018,19 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, D
         hipLaunchKernelGGL(fill_kernel_device<hipDoubleComplex>, grid, block, 0, stream,
             reinterpret_cast<hipDoubleComplex*>(result.data_ptr()),
             make_hipDoubleComplex(value, 0.0), n);
+    } else if (dtype == DType::FP8_E4M3) {
+        // FP8 is 1 byte/element; broadcast the host-encoded bit pattern of value.
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E4M3(static_cast<float>(value)).bits, n);
+    } else if (dtype == DType::FP8_E5M2) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E5M2(static_cast<float>(value)).bits, n);
+    } else if (dtype == DType::FP8_E4M3FNUZ) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E4M3FNUZ(static_cast<float>(value)).bits, n);
+    } else if (dtype == DType::FP8_E5M2FNUZ) {
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(result.data_ptr()), FP8_E5M2FNUZ(static_cast<float>(value)).bits, n);
     } else {
         throw std::runtime_error("Unsupported dtype for full operation");
     }

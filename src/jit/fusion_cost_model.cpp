@@ -85,8 +85,10 @@ auto FusionCostModel::estimate_speedup(const FusionCandidate& candidate) const -
             return 2.0;
         case FusionKind::LayerNorm:
             return 1.8;
-        case FusionKind::SwiGLU:
-            return 1.5;
+        // SwiGLU removed from the cost model: the pattern matcher no longer emits
+        // FusionKind::SwiGLU (the extended codegen cannot generate it), so a 1.5x
+        // speedup estimate here would only ever mis-score a kind that can never be
+        // formed. Its constituent ops run via normal dispatch.
         case FusionKind::GemmEpilogue:
             return 1.3;
         default:

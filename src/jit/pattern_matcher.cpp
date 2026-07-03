@@ -163,15 +163,17 @@ auto PatternMatcher::find_all(const Graph& graph) -> std::vector<FusionMatch> {
         } else if (auto m = match_rms_norm(graph, i, used)) {
             for (auto& n : m->nodes) used.insert(n.get());
             matches.push_back(std::move(*m));
-        } else if (auto m = match_swiglu(graph, i, used)) {
-            for (auto& n : m->nodes) used.insert(n.get());
-            matches.push_back(std::move(*m));
-        } else if (auto m = match_rotary_embedding(graph, i, used)) {
-            for (auto& n : m->nodes) used.insert(n.get());
-            matches.push_back(std::move(*m));
-        } else if (auto m = match_gelu_variant(graph, i, used)) {
-            for (auto& n : m->nodes) used.insert(n.get());
-            matches.push_back(std::move(*m));
+        // NOTE: SwiGLU / RotaryEmbedding / GeluVariant are intentionally NOT
+        // matched here. The extended-fusion executor (execute_extended_fused /
+        // ExtendedKernelCodegen::generate) has no generator or launch geometry
+        // for those FusionKinds — the ExtendedFusionGroup ABI carries none of
+        // the required structure (slice offsets, the second Linear's weights, or
+        // the cos/sin rotation tensors). A matched-but-ungeneratable kind is a
+        // hard runtime throw ("unsupported fusion kind") once codegen is the real
+        // execution path, and the SwiGLU cost model even actively selected it.
+        // Removing them from the matcher (and the cost model) makes their
+        // constituent ops run via normal, correct op dispatch instead. Element-
+        // wise GELU is still fused by the separate element-wise codegen path.
         } else if (auto m = match_small_mlp(graph, i, used)) {
             for (auto& n : m->nodes) used.insert(n.get());
             matches.push_back(std::move(*m));
@@ -215,10 +217,14 @@ auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
     if (!has_single_use(n1)) return std::nullopt;
     if (!consumes_output(n1, n2)) return std::nullopt;
 
-    // Sum after Exp
+    // Sum after Exp. Do NOT require Exp to be single-use here: a numerically
+    // stable softmax reuses exp(x-max) for BOTH the denominator (Sum) and the
+    // numerator (Div), so Exp legitimately has two consumers, both inside the
+    // pattern. Requiring single-use rejected every real softmax and left this
+    // fusion dead. The "no escaping use" check below enforces the real
+    // constraint (no consumer outside the matched group).
     auto& n3 = nodes[start_idx + 3];
     if (n3->op_type() != OpType::Sum || used.count(n3.get())) return std::nullopt;
-    if (!has_single_use(n2)) return std::nullopt;
     if (!consumes_output(n2, n3)) return std::nullopt;
 
     // Div after Sum
@@ -227,8 +233,25 @@ auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
     if (n4->op_type() != OpType::Div || used.count(n4.get())) return std::nullopt;
     if (!has_single_use(n3)) return std::nullopt;
     // Div consumes both Exp's output (numerator) and Sum's output (denominator);
-    // require the n3->n4 (denominator) edge.
+    // require BOTH the n3->n4 (denominator) and n2->n4 (numerator) edges so the
+    // matched Div is the real softmax normalization, not an unrelated divide.
     if (!consumes_output(n3, n4)) return std::nullopt;
+    if (!consumes_output(n2, n4)) return std::nullopt;
+
+    // Every intermediate output (Max, Sub, Exp, Sum) must be consumed only within
+    // the matched group; an external consumer would make the eager collapse
+    // lossy. Exp is allowed its two internal uses (Sum + Div) under this rule.
+    {
+        std::unordered_set<Node*> grp{n0.get(), n1.get(), n2.get(),
+                                      n3.get(), n4.get()};
+        for (const auto* n : {&n0, &n1, &n2, &n3}) {
+            if ((*n)->outputs().empty()) return std::nullopt;
+            for (const auto& u : (*n)->outputs()[0]->uses()) {
+                auto up = u.lock();
+                if (up && grp.count(up.get()) == 0) return std::nullopt;
+            }
+        }
+    }
 
     // The fused softmax kernel runs over a SINGLE reduction axis (it copies the
     // Max node's `dim`). A numerically-stable softmax always reduces Max (n0)
@@ -354,9 +377,22 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     // Need at least 6 nodes for a meaningful LayerNorm fusion
     if (matched.size() < 6) return std::nullopt;
 
-    // Verify single-use constraint for intermediate nodes
-    for (size_t i = 0; i + 1 < matched.size(); ++i) {
-        if (!has_single_use(matched[i])) return std::nullopt;
+    // Intermediates may be consumed by MULTIPLE nodes inside the pattern — the
+    // canonical LayerNorm reuses (x - mean) for both the variance branch and the
+    // final normalization, so Sub has two internal consumers. Requiring strict
+    // single-use rejected every real LayerNorm and left this fusion dead. Enforce
+    // the real constraint instead: no intermediate output may escape the matched
+    // group (an external consumer would make the eager collapse lossy).
+    {
+        std::unordered_set<Node*> grp;
+        for (const auto& n : matched) grp.insert(n.get());
+        for (size_t i = 0; i + 1 < matched.size(); ++i) {
+            if (matched[i]->outputs().empty()) return std::nullopt;
+            for (const auto& u : matched[i]->outputs()[0]->uses()) {
+                auto up = u.lock();
+                if (up && grp.count(up.get()) == 0) return std::nullopt;
+            }
+        }
     }
 
     FusionMatch match;
@@ -459,11 +495,21 @@ auto PatternMatcher::match_gemm_epilogue(const Graph& graph, size_t start_idx,
     std::vector<std::shared_ptr<Node>> matched = {n0};
     size_t next = start_idx + 1;
 
+    // A Linear op already carries its bias internally (inputs [x, W, b]); the
+    // epilogue kernel adds exactly one per-column bias. So only ATTACH a
+    // separate Add as the bias when the base is a bias-less MatMul (or a Linear
+    // with no bias input). Absorbing an Add after a bias-carrying Linear would
+    // either double-count a bias or, for a residual Add (a full-tensor operand,
+    // not a [cols] vector), be misapplied as a per-column bias — both wrong.
+    const bool base_linear_has_bias =
+        n0->op_type() == OpType::Linear && n0->inputs().size() >= 3;
+
     // Optional: Add(bias). Require a real data-dependency edge (the Add must
     // consume the MatMul/Linear output) — matching purely on op-type and
     // topological position fuses an unrelated Add, dangling its true producer's
     // output. Every sibling matcher uses consumes_output() for this reason.
-    if (next < nodes.size() && nodes[next]->op_type() == OpType::Add &&
+    if (!base_linear_has_bias && next < nodes.size() &&
+        nodes[next]->op_type() == OpType::Add &&
         !used.count(nodes[next].get()) &&
         consumes_output(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
@@ -589,228 +635,6 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
 
     FusionMatch match;
     match.kind = FusionKind::Reduction;
-    match.nodes = std::move(matched);
-    match.inputs = collect_external_inputs(match.nodes);
-    match.outputs = collect_external_outputs(match.nodes);
-    match.estimated_elements = estimate_elements(match.inputs);
-    match.compute_signature();
-    return match;
-}
-
-// ============================================================================
-// SwiGLU pattern: Linear -> Slice -> Sigmoid -> Mul (gate) -> Linear
-// The gated linear unit with SiLU activation: gate = sigmoid(x_slice) * x_slice
-// then output = Linear(gate). Slice represents the split operation.
-// ============================================================================
-
-auto PatternMatcher::match_swiglu(const Graph& graph, size_t start_idx,
-                                   const std::unordered_set<Node*>& used)
-    -> std::optional<FusionMatch> {
-    auto& nodes = graph.nodes();
-    if (start_idx + 4 >= nodes.size()) return std::nullopt;
-
-    auto& n0 = nodes[start_idx];
-    if (n0->op_type() != OpType::Linear || used.count(n0.get())) return std::nullopt;
-    if (!has_single_use(n0)) return std::nullopt;
-
-    // Slice (split the linear output into two halves)
-    auto& n1 = nodes[start_idx + 1];
-    if (n1->op_type() != OpType::Slice || used.count(n1.get())) return std::nullopt;
-    if (!consumes_output(n0, n1)) return std::nullopt;
-
-    // Sigmoid (the SiLU activation component: silu(x) = x * sigmoid(x))
-    auto& n2 = nodes[start_idx + 2];
-    if (n2->op_type() != OpType::Sigmoid || used.count(n2.get())) return std::nullopt;
-    if (!has_single_use(n1)) return std::nullopt;
-    if (!consumes_output(n1, n2)) return std::nullopt;
-
-    // Mul (gating: element-wise product of the two split halves after activation)
-    auto& n3 = nodes[start_idx + 3];
-    if (n3->op_type() != OpType::Mul || used.count(n3.get())) return std::nullopt;
-    if (!has_single_use(n2)) return std::nullopt;
-    if (!consumes_output(n2, n3)) return std::nullopt;
-
-    // Final Linear projection
-    auto& n4 = nodes[start_idx + 4];
-    if (n4->op_type() != OpType::Linear || used.count(n4.get())) return std::nullopt;
-    if (!has_single_use(n3)) return std::nullopt;
-    if (!consumes_output(n3, n4)) return std::nullopt;
-
-    FusionMatch match;
-    match.kind = FusionKind::SwiGLU;
-    match.nodes = {n0, n1, n2, n3, n4};
-    match.inputs = collect_external_inputs(match.nodes);
-    match.outputs = collect_external_outputs(match.nodes);
-    match.estimated_elements = estimate_elements(match.inputs);
-    match.compute_signature();
-    return match;
-}
-
-// ============================================================================
-// GELU variant pattern (tanh-based approximation):
-//   Pow(x, 3) -> Mul(0.044715) -> Add(x) -> Mul(sqrt(2/pi)) -> Tanh -> Add(1) -> Mul(0.5) -> Mul(x)
-// Also matches erf-based variant:
-//   Mul(x, 0.7071) -> Erf-like chain -> Add(1) -> Mul(0.5) -> Mul(x)
-// We match the tanh-based form: starts with Pow, walks through the chain.
-// ============================================================================
-
-auto PatternMatcher::match_gelu_variant(const Graph& graph, size_t start_idx,
-                                         const std::unordered_set<Node*>& used)
-    -> std::optional<FusionMatch> {
-    auto& nodes = graph.nodes();
-    if (start_idx + 5 >= nodes.size()) return std::nullopt;
-
-    auto& n0 = nodes[start_idx];
-    if (n0->op_type() != OpType::Pow || used.count(n0.get())) return std::nullopt;
-
-    // Mul (scale the cubic term by 0.044715)
-    auto& n1 = nodes[start_idx + 1];
-    if (n1->op_type() != OpType::Mul || used.count(n1.get())) return std::nullopt;
-    if (!has_single_use(n0)) return std::nullopt;
-    if (!consumes_output(n0, n1)) return std::nullopt;
-
-    // Add (x + 0.044715 * x^3)
-    auto& n2 = nodes[start_idx + 2];
-    if (n2->op_type() != OpType::Add || used.count(n2.get())) return std::nullopt;
-    if (!has_single_use(n1)) return std::nullopt;
-    if (!consumes_output(n1, n2)) return std::nullopt;
-
-    // Mul (scale by sqrt(2/pi)) or Tanh directly if pre-scaled
-    size_t next = start_idx + 3;
-    std::vector<std::shared_ptr<Node>> matched = {n0, n1, n2};
-
-    // Optional: another Mul for the sqrt(2/pi) scaling
-    if (next < nodes.size() && nodes[next]->op_type() == OpType::Mul &&
-        !used.count(nodes[next].get()) && has_single_use(matched.back()) &&
-        consumes_output(matched.back(), nodes[next])) {  // require a real data edge, not just adjacency
-        matched.push_back(nodes[next]);
-        ++next;
-    }
-
-    // Tanh
-    if (next >= nodes.size() || nodes[next]->op_type() != OpType::Tanh ||
-        used.count(nodes[next].get()) || !has_single_use(matched.back())) {
-        return std::nullopt;
-    }
-    matched.push_back(nodes[next]);
-    ++next;
-
-    // Consume remaining Add(1) -> Mul(0.5) -> Mul(x) tail
-    while (next < nodes.size() && matched.size() < 9) {
-        auto& nk = nodes[next];
-        if (used.count(nk.get())) break;
-
-        auto op = nk->op_type();
-        if (op == OpType::Add || op == OpType::Mul) {
-            // require a real producer->consumer data edge, not mere adjacency
-            if (!has_single_use(matched.back()) || !consumes_output(matched.back(), nk)) break;
-            matched.push_back(nk);
-            ++next;
-        } else {
-            break;
-        }
-    }
-
-    // Need at least 6 nodes: Pow -> Mul -> Add -> Tanh -> Add -> Mul
-    if (matched.size() < 6) return std::nullopt;
-
-    // Verify single-use for all intermediate nodes
-    for (size_t i = 0; i + 1 < matched.size(); ++i) {
-        if (!has_single_use(matched[i])) return std::nullopt;
-    }
-
-    FusionMatch match;
-    match.kind = FusionKind::GeluVariant;
-    match.nodes = std::move(matched);
-    match.inputs = collect_external_inputs(match.nodes);
-    match.outputs = collect_external_outputs(match.nodes);
-    match.estimated_elements = estimate_elements(match.inputs);
-    match.compute_signature();
-    return match;
-}
-
-// ============================================================================
-// Rotary embedding pattern: cos/sin position rotation applied to Q/K tensors.
-// Typical decomposition: Slice -> Mul -> Slice -> Neg -> Mul -> Add
-// This applies: out = x_even * cos(theta) + (-x_odd) * sin(theta) for even,
-//               out = x_even * sin(theta) + x_odd * cos(theta) for odd.
-// We match: Slice -> Mul -> Slice -> Neg -> Mul -> Add
-// ============================================================================
-
-auto PatternMatcher::match_rotary_embedding(const Graph& graph, size_t start_idx,
-                                             const std::unordered_set<Node*>& used)
-    -> std::optional<FusionMatch> {
-    auto& nodes = graph.nodes();
-    if (start_idx + 5 >= nodes.size()) return std::nullopt;
-
-    // Slice (extract even-indexed elements or first half)
-    auto& n0 = nodes[start_idx];
-    if (n0->op_type() != OpType::Slice || used.count(n0.get())) return std::nullopt;
-
-    // Mul (x_even * cos(theta)) — consumes the even-slice output.
-    auto& n1 = nodes[start_idx + 1];
-    if (n1->op_type() != OpType::Mul || used.count(n1.get())) return std::nullopt;
-    if (!has_single_use(n0)) return std::nullopt;
-    if (!consumes_output(n0, n1)) return std::nullopt;
-
-    // Slice (extract odd-indexed elements or second half) — a separate branch,
-    // not fed by n1, so no n1->n2 data edge is expected.
-    auto& n2 = nodes[start_idx + 2];
-    if (n2->op_type() != OpType::Slice || used.count(n2.get())) return std::nullopt;
-
-    // Neg (negate for the rotation) — consumes the odd-slice output.
-    auto& n3 = nodes[start_idx + 3];
-    if (n3->op_type() != OpType::Neg || used.count(n3.get())) return std::nullopt;
-    if (!has_single_use(n2)) return std::nullopt;
-    if (!consumes_output(n2, n3)) return std::nullopt;
-
-    // Mul ((-x_odd) * sin(theta)) — consumes the negated odd slice.
-    auto& n4 = nodes[start_idx + 4];
-    if (n4->op_type() != OpType::Mul || used.count(n4.get())) return std::nullopt;
-    if (!has_single_use(n3)) return std::nullopt;
-    if (!consumes_output(n3, n4)) return std::nullopt;
-
-    // Add (combine the two rotated components) — consumes n4's output.
-    auto& n5 = nodes[start_idx + 5];
-    if (n5->op_type() != OpType::Add || used.count(n5.get())) return std::nullopt;
-    if (!has_single_use(n4)) return std::nullopt;
-    if (!consumes_output(n4, n5)) return std::nullopt;
-
-    // Optionally consume a second rotation half (odd output):
-    // Slice -> Mul -> Slice -> Mul -> Add
-    std::vector<std::shared_ptr<Node>> matched = {n0, n1, n2, n3, n4, n5};
-    size_t next = start_idx + 6;
-
-    // Try to match the second rotation component (for the other half)
-    if (next + 4 < nodes.size()) {
-        auto& m0 = nodes[next];
-        auto& m1 = nodes[next + 1];
-        auto& m2 = nodes[next + 2];
-        auto& m3 = nodes[next + 3];
-        auto& m4 = nodes[next + 4];
-
-        if (m0->op_type() == OpType::Slice && !used.count(m0.get()) &&
-            m1->op_type() == OpType::Mul && !used.count(m1.get()) &&
-            m2->op_type() == OpType::Slice && !used.count(m2.get()) &&
-            m3->op_type() == OpType::Mul && !used.count(m3.get()) &&
-            m4->op_type() == OpType::Add && !used.count(m4.get()) &&
-            has_single_use(m0) && has_single_use(m1) &&
-            has_single_use(m2) && has_single_use(m3)) {
-            matched.push_back(m0);
-            matched.push_back(m1);
-            matched.push_back(m2);
-            matched.push_back(m3);
-            matched.push_back(m4);
-        }
-    }
-
-    // Verify single-use for all intermediate nodes
-    for (size_t i = 0; i + 1 < matched.size(); ++i) {
-        if (!has_single_use(matched[i])) return std::nullopt;
-    }
-
-    FusionMatch match;
-    match.kind = FusionKind::RotaryEmbedding;
     match.nodes = std::move(matched);
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);

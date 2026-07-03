@@ -20,6 +20,7 @@
 #include "tenzor/ops/creation.hpp"
 
 #include <iree/runtime/api.h>
+#include <iree/hal/api.h>
 #include <iree/vm/api.h>
 
 #include <array>
@@ -608,16 +609,22 @@ auto status_to_string(iree_status_t status) -> std::string {
 
 }  // namespace
 
-auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode)
+auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode,
+                       int device_index)
     -> std::unique_ptr<IreeInvoker> {
     if (!fs::exists(artifact.vmfb_path)) {
         throw JitInvokeError("vmfb not found: " + artifact.vmfb_path.string());
     }
     auto inv = std::unique_ptr<IreeInvoker>(new IreeInvoker());
-    inv->mode_      = mode;
-    inv->vmfb_path_ = artifact.vmfb_path.string();
-    inv->target_    = artifact.target;
-    inv->device_    = device_for_target(artifact.target);
+    inv->mode_         = mode;
+    inv->vmfb_path_    = artifact.vmfb_path.string();
+    inv->target_       = artifact.target;
+    inv->device_       = device_for_target(artifact.target);
+    inv->device_index_ = device_index < 0 ? 0 : device_index;
+    // M3: bake the requested ordinal into the device URI so both paths run on
+    // the HAL device matching the input's Device::index, not the driver
+    // default (GPU 0).
+    inv->device_uri_   = hal_device_uri(inv->device_, inv->device_index_);
 
     if (mode == Mode::Subprocess) {
         inv->iree_run_module_ =
@@ -637,15 +644,32 @@ auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode)
         "iree_runtime_instance_create");
     inv->instance_ = instance;
 
-    // 2. Acquire the HAL device for the requested driver.
+    // 2. Acquire the HAL device. For ordinal 0 (the common single-GPU / CPU
+    //    case) use the driver's default device, preserving the long-tested
+    //    path. For a non-zero ordinal (M3) select the specific device by URI
+    //    ("cuda://1", "hip://1", "vulkan://1") via the instance's driver
+    //    registry so a cuda:1 model actually runs on GPU 1.
     iree_hal_device_t* device = nullptr;
-    iree_string_view_t driver_sv =
-        iree_make_string_view(inv->device_.data(), inv->device_.size());
-    TENZOR_IREE_CHECK(
-        iree_runtime_instance_try_create_default_device(instance, driver_sv,
-                                                         &device),
-        std::string("iree_runtime_instance_try_create_default_device(") +
-            inv->device_ + ")");
+    if (inv->device_index_ > 0 &&
+        inv->device_ != "local-task" && inv->device_ != "local-sync") {
+        iree_hal_driver_registry_t* registry =
+            iree_runtime_instance_driver_registry(instance);
+        iree_string_view_t uri_sv = iree_make_string_view(
+            inv->device_uri_.data(), inv->device_uri_.size());
+        TENZOR_IREE_CHECK(
+            iree_hal_create_device(registry, uri_sv,
+                                   iree_runtime_instance_host_allocator(instance),
+                                   &device),
+            std::string("iree_hal_create_device(") + inv->device_uri_ + ")");
+    } else {
+        iree_string_view_t driver_sv =
+            iree_make_string_view(inv->device_.data(), inv->device_.size());
+        TENZOR_IREE_CHECK(
+            iree_runtime_instance_try_create_default_device(instance, driver_sv,
+                                                            &device),
+            std::string("iree_runtime_instance_try_create_default_device(") +
+                inv->device_ + ")");
+    }
     inv->device_handle_ = device;
 
     // 3. Create the session bound to the device.
@@ -732,7 +756,12 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
     // invoker is shared across callers via the compile cache.
     std::lock_guard<std::mutex> lock(invoke_mutex_);
     if (mode_ == Mode::Subprocess) {
-        return invoke_subprocess(*this, inputs, vmfb_path_, device_,
+        // Ordinal 0: pass the bare driver name (long-tested default-device
+        // path). Non-zero ordinal (M3): pass the full "driver://<ordinal>"
+        // URI so iree-run-module selects the requested GPU.
+        const std::string& dev =
+            (device_index_ > 0) ? device_uri_ : device_;
+        return invoke_subprocess(*this, inputs, vmfb_path_, dev,
                                  iree_run_module_);
     }
 
@@ -854,6 +883,102 @@ auto prepend_to_ld_library_path(const std::string& dir) -> void {
 }
 
 }  // namespace
+
+auto hal_device_uri(const std::string& driver, int device_index)
+    -> std::string {
+    // The CPU HAL drivers have no device ordinal — a URI path would be
+    // rejected. GPU drivers select a specific device via `driver://<ordinal>`.
+    if (driver == "local-task" || driver == "local-sync") {
+        return driver;
+    }
+    return driver + "://" + std::to_string(device_index < 0 ? 0 : device_index);
+}
+
+namespace {
+
+/// Locate a ROCm device-arch enumerator (`amdgpu-arch`, else
+/// `rocm_agent_enumerator`). Returns an absolute path or "" if none is found.
+auto find_rocm_arch_tool() -> std::string {
+    auto usable = [](const std::string& p) {
+        return !p.empty() && access(p.c_str(), X_OK) == 0;
+    };
+    std::vector<std::string> roots;
+#ifdef TENZOR_ROCM_RUNTIME_LIB_DIR
+    {
+        const fs::path lib{TENZOR_ROCM_RUNTIME_LIB_DIR};  // e.g. /opt/rocm/lib
+        roots.push_back(lib.parent_path().string());       // e.g. /opt/rocm
+        roots.push_back(lib.string());
+    }
+#endif
+    if (const char* r = std::getenv("ROCM_PATH"); r != nullptr && *r != '\0') {
+        roots.push_back(r);
+    }
+    roots.push_back("/opt/rocm");
+
+    // amdgpu-arch prints exactly one gfx name per GPU (HIP ordinal order).
+    for (const auto& root : roots) {
+        for (const char* sub : {"/llvm/bin/amdgpu-arch",
+                                "/lib/llvm/bin/amdgpu-arch",
+                                "/bin/amdgpu-arch"}) {
+            const std::string cand = root + sub;
+            if (usable(cand)) return cand;
+        }
+    }
+    // rocm_agent_enumerator additionally lists the host CPU agent ("gfx000"),
+    // filtered out below.
+    for (const auto& root : roots) {
+        const std::string cand = root + "/bin/rocm_agent_enumerator";
+        if (usable(cand)) return cand;
+    }
+    return {};
+}
+
+}  // namespace
+
+auto detect_rocm_gfx_arch(int device_index) -> std::string {
+    if (device_index < 0) return {};
+    static std::mutex mu;
+    static std::unordered_map<int, std::string> cache;
+    {
+        std::lock_guard<std::mutex> g(mu);
+        auto it = cache.find(device_index);
+        if (it != cache.end()) return it->second;
+    }
+
+    std::string result;
+    try {
+        const std::string tool = find_rocm_arch_tool();
+        if (!tool.empty()) {
+            const std::string out =
+                exec_capture(tool, {}, /*capture_stderr=*/false);
+            std::vector<std::string> archs;
+            std::istringstream is(out);
+            std::string line;
+            while (std::getline(is, line)) {
+                const auto b = line.find_first_not_of(" \t\r\n");
+                if (b == std::string::npos) continue;
+                const auto e = line.find_last_not_of(" \t\r\n");
+                std::string tok = line.substr(b, e - b + 1);
+                // Keep gfx ISA names; drop the CPU agent that
+                // rocm_agent_enumerator emits as "gfx000".
+                if (tok.rfind("gfx", 0) == 0 && tok != "gfx000") {
+                    archs.push_back(std::move(tok));
+                }
+            }
+            if (device_index < static_cast<int>(archs.size())) {
+                result = archs[static_cast<std::size_t>(device_index)];
+            }
+        }
+    } catch (...) {
+        // Best-effort: on any failure leave `result` empty so the caller
+        // falls back to the build-time default arch.
+        result.clear();
+    }
+
+    std::lock_guard<std::mutex> g(mu);
+    cache[device_index] = result;
+    return result;
+}
 
 auto iree_can_initialize_default_device(const std::string& driver_name)
     -> bool {

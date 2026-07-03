@@ -101,12 +101,10 @@ private:
                          const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
     auto match_reduction_chain(const Graph& graph, size_t start_idx,
                                const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
-    auto match_swiglu(const Graph& graph, size_t start_idx,
-                      const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
-    auto match_gelu_variant(const Graph& graph, size_t start_idx,
-                            const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
-    auto match_rotary_embedding(const Graph& graph, size_t start_idx,
-                                const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
+    // match_swiglu / match_gelu_variant / match_rotary_embedding were removed:
+    // the extended codegen has no generator or launch geometry for the SwiGLU,
+    // GeluVariant, or RotaryEmbedding FusionKinds, so matching them produced a
+    // fused node that throws at execution. Those ops now run via normal dispatch.
 
     /// Estimate the element count of a fusion from the shape of its first
     /// external input. Returns FusionMatch::kUnknownElements if any dimension

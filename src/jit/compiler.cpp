@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <unordered_set>
 #include <cmath>
+#include <cstring>
 
 namespace tenzor {
 namespace jit {
@@ -2322,6 +2323,88 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
         // Skip fusion if device-aware cost model predicts no speedup
         if (cost_model_.estimate_speedup(candidate) < 1.0) continue;
 
+        // The extended kernels only load/store Float32/Float64/Float16/BFloat16
+        // (math runs in float/double). Fusing an Int*/Complex pattern would form
+        // a node the GPU codegen cannot faithfully run, and eager collapse of
+        // GemmEpilogue/SmallMLP/Reduction drops computation — so refuse to fuse
+        // unsupported dtypes and let the ops run via normal op dispatch.
+        if (!match.inputs.empty()) {
+            DType dt = match.inputs[0]->dtype();
+            if (dt != DType::Float32 && dt != DType::Float64 &&
+                dt != DType::Float16 && dt != DType::BFloat16) {
+                continue;
+            }
+        }
+
+        // For a Reduction match, pre/post element-wise ops must be lowered into
+        // the fused kernel's single input stream. Build their ElemStep sequences
+        // NOW (before rewiring the graph) so an unrepresentable op — a binary
+        // op needing a distinct second operand — aborts the fusion cleanly rather
+        // than silently dropping the op at execution. The serialized quads
+        // (op, input_idx, second_input_idx, scalar_bits) are attached to the
+        // fused node and reconstructed by the executor into ExtendedFusionGroup
+        // pre_ops/post_ops. Mirrors ExtendedKernelCodegen::generate_reduction's
+        // representability rules (only unary math + a same-operand self-square).
+        std::vector<int64_t> pre_ops_serial, post_ops_serial;
+        if (match.kind == FusionKind::Reduction) {
+            auto to_elem = [](const std::shared_ptr<Node>& n,
+                              std::optional<ElemStep>& step) -> bool {
+                auto push_unary = [&](ElemOp e) {
+                    step = ElemStep{e, -1, -1, 0.0};
+                };
+                switch (n->op_type()) {
+                    case OpType::Exp:     push_unary(ElemOp::Exp);     return true;
+                    case OpType::Log:     push_unary(ElemOp::Log);     return true;
+                    case OpType::Sqrt:    push_unary(ElemOp::Sqrt);    return true;
+                    case OpType::Abs:     push_unary(ElemOp::Abs);     return true;
+                    case OpType::Neg:     push_unary(ElemOp::Neg);     return true;
+                    case OpType::ReLU:    push_unary(ElemOp::Relu);    return true;
+                    case OpType::Sigmoid: push_unary(ElemOp::Sigmoid); return true;
+                    case OpType::Tanh:    push_unary(ElemOp::Tanh);    return true;
+                    case OpType::GELU:    push_unary(ElemOp::Gelu);    return true;
+                    case OpType::Mul:
+                        // Only a same-operand self-square x*x is representable in
+                        // the single-stream reduction kernel (RMS/L2 pre-op). A
+                        // Mul of two distinct tensors has no second stream.
+                        if (n->inputs().size() == 2 &&
+                            n->inputs()[0].get() == n->inputs()[1].get()) {
+                            step = ElemStep{ElemOp::Mul, 0, 0, 0.0};
+                            return true;
+                        }
+                        return false;
+                    default:
+                        return false;
+                }
+            };
+            auto append = [](std::vector<int64_t>& out, const ElemStep& s) {
+                int64_t bits;
+                std::memcpy(&bits, &s.scalar, sizeof(bits));
+                out.push_back(static_cast<int64_t>(s.op));
+                out.push_back(static_cast<int64_t>(s.input_idx));
+                out.push_back(static_cast<int64_t>(s.second_input_idx));
+                out.push_back(bits);
+            };
+            bool seen_reduction = false;
+            bool representable = true;
+            for (auto& n : match.nodes) {
+                OpType op = n->op_type();
+                if (op == OpType::Sum || op == OpType::Mean ||
+                    op == OpType::Max || op == OpType::Min) {
+                    seen_reduction = true;
+                    // The fused kernel reduces exactly ONE explicit axis. A full
+                    // reduction (no "dim") or a multi-axis reduction ("dims" vec)
+                    // cannot be represented — fusing it would silently reduce only
+                    // the last axis. Refuse so the ops run via correct dispatch.
+                    if (!n->has_int_attr("dim")) { representable = false; break; }
+                    continue;
+                }
+                std::optional<ElemStep> step;
+                if (!to_elem(n, step) || !step) { representable = false; break; }
+                append(seen_reduction ? post_ops_serial : pre_ops_serial, *step);
+            }
+            if (!representable) continue;  // leave the ops unfused (correct eager)
+        }
+
         // Map the match kind to the appropriate fused OpType
         OpType fused_type;
         switch (match.kind) {
@@ -2427,7 +2510,15 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
                 break;
             }
             case FusionKind::GemmEpilogue: {
-                bool has_bias = false;
+                // A Linear base carries its bias internally (external inputs are
+                // [x, W, b]); a MatMul base expresses bias as a separate Add
+                // node. Either source must set has_bias so the executor adds the
+                // [cols] bias vector at input index 2 — otherwise the fused
+                // kernel silently drops the bias and diverges from eager.
+                const bool base_linear_has_bias =
+                    match.nodes[0]->op_type() == OpType::Linear &&
+                    match.nodes[0]->inputs().size() >= 3;
+                bool has_bias = base_linear_has_bias;
                 bool has_activation = false;
                 OpType act_type = OpType::ReLU;
                 for (auto& node : match.nodes) {
@@ -2445,10 +2536,45 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
                     fused_node->set_int_attr("fused_activation_type",
                                              static_cast<int64_t>(act_type));
                 }
+                // The fused GEMM kernel computes a plain A @ B. When the base op
+                // is a Linear (y = x @ W^T), the executor must transpose the
+                // second operand before the matmul, otherwise the product is
+                // wrong. Record which base semantics applied.
+                fused_node->set_bool_attr("fused_gemm_transpose_b",
+                                          match.nodes[0]->op_type() == OpType::Linear);
+                break;
+            }
+            case FusionKind::SmallMLP: {
+                // nodes: [Linear1, activation, Linear2]. The fused MLP kernel
+                // takes {w1, b1, w2, b2} params and always reads b1/b2, so record
+                // the activation, the hidden dim, and whether each Linear carried
+                // a bias (executor synthesizes zero bias when absent).
+                const auto& lin1 = match.nodes[0];
+                const auto& act = match.nodes[1];
+                const auto& lin2 = match.nodes[2];
+                int64_t hidden = 0;
+                if (!lin1->outputs().empty() &&
+                    !lin1->outputs()[0]->shape().empty()) {
+                    hidden = lin1->outputs()[0]->shape().back();
+                }
+                fused_node->set_int_attr("fused_hidden_dim", hidden);
+                fused_node->set_int_attr("fused_mlp_activation",
+                                         static_cast<int64_t>(act->op_type()));
+                fused_node->set_bool_attr("fused_mlp_has_bias1",
+                                          lin1->inputs().size() >= 3);
+                fused_node->set_bool_attr("fused_mlp_has_bias2",
+                                          lin2->inputs().size() >= 3);
                 break;
             }
             default:
                 break;
+        }
+
+        // Persist the reduction pre/post ElemStep sequences (built + representability
+        // checked above) so the executor reconstructs the exact fused reduction.
+        if (match.kind == FusionKind::Reduction) {
+            fused_node->set_vec_attr("fused_pre_ops", std::move(pre_ops_serial));
+            fused_node->set_vec_attr("fused_post_ops", std::move(post_ops_serial));
         }
 
         // Replace first matched node with fused node, remove the rest.

@@ -73,7 +73,10 @@ def jit(fn: Callable[..., Any] | None = None, *,
 
     Args:
         fn: function to JIT. If None, returns a parametrised decorator.
-        target: "auto" (default), "llvm-cpu", "cuda", "vulkan", "rocm".
+        target: "auto" (default), "llvm-cpu", "cuda", "rocm", or
+            "vulkan-spirv" (the alias "vulkan" is accepted and normalized
+            to "vulkan-spirv", the name IREE requires). "auto" picks the
+            target from the input tensor's device.
         fallback_to_eager: if True, ops not yet supported by the MLIR
             lowering fall back to eager execution silently. Default False
             — coverage gaps throw JitLoweringError loudly.

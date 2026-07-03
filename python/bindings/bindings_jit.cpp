@@ -222,7 +222,10 @@ void register_jit(py::module_& m) {
              "Topologically sorted list of all nodes in the graph")
         .def("forward", &tenzor::jit::Graph::forward,
              py::arg("inputs"),
-             "Execute graph with runtime inputs",
+             py::arg("grad_mode") = false,
+             "Execute graph with runtime inputs. grad_mode=True replays the "
+             "graph differentiably (training-through-JIT) so .backward() on the "
+             "outputs matches eager autograd.",
              py::call_guard<py::gil_scoped_release>())
         // Audit-8 II.11: Graph::save / Graph::load are pure disk I/O on the
         // already-built C++ IR — no Python objects touched. Drop the GIL so
@@ -517,7 +520,34 @@ void register_jit(py::module_& m) {
                  py::gil_scoped_release release;
                  return self(std::span<const tenzor::Variable>(
                      inputs.data(), inputs.size()));
-             });
+             })
+        // Training-through-JIT for CLOSURE-captured parameters: declare the
+        // trainable parameters (e.g. `model.parameters()`) the compiled function
+        // reads via closure. Without this they are traced as frozen constants
+        // (no grads, stale weights); with it they become live parameter leaves
+        // so backward reaches each parameter's .grad and post-step weights are
+        // seen on the next call. Returns self so callers can chain onto the
+        // handle: `fn.with_parameters(model.parameters())`.
+        .def("with_parameters",
+             [](std::shared_ptr<tenzor::jit::CompiledFunction> self,
+                py::iterable params)
+                 -> std::shared_ptr<tenzor::jit::CompiledFunction> {
+                 std::vector<std::shared_ptr<tenzor::Variable>> ps;
+                 for (auto& p : params) {
+                     // Cast to the held shared_ptr so the SAME Variable the
+                     // optimizer updates is bound (gradients accumulate into it,
+                     // live values are read from it).
+                     ps.push_back(
+                         py::reinterpret_borrow<py::object>(p)
+                             .cast<std::shared_ptr<tenzor::Variable>>());
+                 }
+                 self->set_parameters(std::move(ps));
+                 return self;
+             },
+             py::arg("parameters"),
+             "Declare the closure-captured trainable parameters (e.g. "
+             "model.parameters()) so training-through-JIT produces correct "
+             "gradients and uses updated weights. Returns self for chaining.");
 
     jit.def("compile_function",
         [](py::function fn, std::string backend, std::string target,
