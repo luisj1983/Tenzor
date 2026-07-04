@@ -164,7 +164,7 @@ auto ReshapeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto ReshapeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {reshape(grad_outputs[0], input_shape_)};
+    return {clone(reshape(grad_outputs[0], input_shape_))};
 }
 
 // PermuteBackward implementation
@@ -180,7 +180,7 @@ auto PermuteBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto PermuteBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {permute(grad_outputs[0], inv_dims_)};
+    return {clone(permute(grad_outputs[0], inv_dims_))};
 }
 
 // TransposeBackward implementation
@@ -195,7 +195,7 @@ auto TransposeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 }
 
 auto TransposeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {transpose(grad_outputs[0], dim0_, dim1_)};
+    return {clone(transpose(grad_outputs[0], dim0_, dim1_))};
 }
 
 // RollBackward implementation

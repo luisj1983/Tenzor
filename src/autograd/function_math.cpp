@@ -41,8 +41,10 @@ auto SqrtBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto SqrtBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& output = saved_tensors_[0];  // sqrt(x)
-    // grad / (2 * output)
-    auto two_output = mul(output, 2.0);
+    // grad / (2 * output). For complex inputs the codebase's Wirtinger
+    // convention is grad_input = conj(f'(z))*grad, so the denominator must be
+    // 2*conj(output) (mirrors ExpBackward/LogBackward is_complex() branches).
+    auto two_output = output.is_complex() ? mul(conj(output), 2.0) : mul(output, 2.0);
     return {div(grad, two_output)};
 }
 
@@ -57,7 +59,10 @@ auto SqrtBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     } else {
         output_var = Variable(saved_tensors_[0], false);
     }
-    auto two_output = output_var * 2.0;
+    // Complex Wirtinger convention: denominator is 2*conj(output).
+    Variable denom_base = output_var.tensor().is_complex() ? tenzor::conj(output_var)
+                                                           : output_var;
+    auto two_output = denom_base * 2.0;
     return {grad_outputs[0] / two_output};
 }
 

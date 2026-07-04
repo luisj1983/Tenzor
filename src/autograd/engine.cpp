@@ -168,21 +168,25 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
             int64_t finite_count_val = finite_count_t.item<int64_t>();
             if (finite_count_val > 0) {
                 auto grad_shape_vec = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
-                Tensor grad_f32 = (grad.dtype() != DType::Float32) ? grad.to(DType::Float32) : grad;
-                Tensor zero_t = zeros(grad_shape_vec, DType::Float32, grad.device());
-                Tensor finite_vals = where(finite_mask, grad_f32, zero_t);
+                // S.3 (finite-stat widening): reduce the diagnostic min/max/mean
+                // in Float64 (not Float32). A Float32 sum() saturates beyond 2^24,
+                // so Float64 gradients were being narrowed in the reported mean.
+                // This is purely diagnostic — no gradient VALUE is affected.
+                Tensor grad_f64 = (grad.dtype() != DType::Float64) ? grad.to(DType::Float64) : grad;
+                Tensor zero_t = zeros(grad_shape_vec, DType::Float64, grad.device());
+                Tensor finite_vals = where(finite_mask, grad_f64, zero_t);
                 Tensor sum_t = sum(finite_vals);
-                float finite_sum = sum_t.item<float>();
+                double finite_sum = sum_t.item<double>();
                 // For min: replace non-finite with +max so they don't affect min
-                Tensor max_fill = full(grad_shape_vec, std::numeric_limits<float>::max(), DType::Float32, grad.device());
-                Tensor for_min = where(finite_mask, grad_f32, max_fill);
+                Tensor max_fill = full(grad_shape_vec, std::numeric_limits<double>::max(), DType::Float64, grad.device());
+                Tensor for_min = where(finite_mask, grad_f64, max_fill);
                 Tensor min_t = min(for_min);
-                float min_val = min_t.item<float>();
+                double min_val = min_t.item<double>();
                 // For max: replace non-finite with -max so they don't affect max
-                Tensor min_fill = full(grad_shape_vec, std::numeric_limits<float>::lowest(), DType::Float32, grad.device());
-                Tensor for_max = where(finite_mask, grad_f32, min_fill);
+                Tensor min_fill = full(grad_shape_vec, std::numeric_limits<double>::lowest(), DType::Float64, grad.device());
+                Tensor for_max = where(finite_mask, grad_f64, min_fill);
                 Tensor max_t = max(for_max);
-                float max_val = max_t.item<float>();
+                double max_val = max_t.item<double>();
                 detail += "\n  Finite values: min=" + std::to_string(min_val)
                         + " max=" + std::to_string(max_val)
                         + " mean=" + std::to_string(finite_sum / finite_count_val);
@@ -678,22 +682,48 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                             // graph store, leaf .grad(), and next_functions
                             // propagation all see the same hooked cotangent.
                             Variable graph_grad = var_input_grads[i];
-                            std::shared_ptr<VariableImpl> new_impl;
-                            if (!existing_graph_impl) {
-                                new_impl = graph_grad.impl_;
-                            } else {
-                                Variable existing_var;
-                                existing_var.impl_ = existing_graph_impl;
-                                new_impl =
-                                    (existing_var + graph_grad).impl_;
-                            }
-                            {
+                            // E-01 (lost-update race): the read-modify-write of
+                            // grad_with_graph_impl_ is split across the unlock
+                            // window (the Variable sum is computed OUTSIDE the
+                            // lock to avoid a re-entrant grad_mutex_ lock). Two
+                            // concurrent create_graph backwards could snapshot
+                            // the same existing impl and the second store would
+                            // clobber the first. Use a compare-and-retry loop:
+                            // recompute the combine from a fresh snapshot and
+                            // only commit if grad_with_graph_impl_ is still the
+                            // value we based our sum on. The value-grad
+                            // accumulation (accumulate_unlocked) already ran
+                            // exactly once above; ONLY this graph-grad combine
+                            // retries. In the single-threaded / non-contended
+                            // path the CAS succeeds on the first iteration, so
+                            // behavior is unchanged.
+                            std::shared_ptr<VariableImpl> snapshot = existing_graph_impl;
+                            while (true) {
+                                std::shared_ptr<VariableImpl> new_impl;
+                                if (!snapshot) {
+                                    new_impl = graph_grad.impl_;
+                                } else {
+                                    Variable existing_var;
+                                    existing_var.impl_ = snapshot;
+                                    new_impl =
+                                        (existing_var + graph_grad).impl_;
+                                }
+                                {
 #ifndef NDEBUG
-                                GradMutexDebugGuard single_lock_check;
+                                    GradMutexDebugGuard single_lock_check;
 #endif
-                                std::lock_guard lock(*var.impl_->grad_mutex_);
-                                var.impl_->grad_with_graph_impl_ = new_impl;
-                                var.impl_->grad_with_graph_cache_storage_.reset();
+                                    std::lock_guard lock(*var.impl_->grad_mutex_);
+                                    if (var.impl_->grad_with_graph_impl_ == snapshot) {
+                                        // Unchanged since our snapshot → commit.
+                                        var.impl_->grad_with_graph_impl_ = new_impl;
+                                        var.impl_->grad_with_graph_cache_storage_.reset();
+                                        break;
+                                    }
+                                    // Another thread updated it; reload the
+                                    // current value and retry the combine so its
+                                    // contribution is not lost.
+                                    snapshot = var.impl_->grad_with_graph_impl_;
+                                }
                             }
                         }
                     } else {
@@ -1269,22 +1299,48 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                             // graph store, leaf .grad(), and next_functions
                             // propagation all see the same hooked cotangent.
                             Variable graph_grad = var_input_grads[i];
-                            std::shared_ptr<VariableImpl> new_impl;
-                            if (!existing_graph_impl) {
-                                new_impl = graph_grad.impl_;
-                            } else {
-                                Variable existing_var;
-                                existing_var.impl_ = existing_graph_impl;
-                                new_impl =
-                                    (existing_var + graph_grad).impl_;
-                            }
-                            {
+                            // E-01 (lost-update race): the read-modify-write of
+                            // grad_with_graph_impl_ is split across the unlock
+                            // window (the Variable sum is computed OUTSIDE the
+                            // lock to avoid a re-entrant grad_mutex_ lock). Two
+                            // concurrent create_graph backwards could snapshot
+                            // the same existing impl and the second store would
+                            // clobber the first. Use a compare-and-retry loop:
+                            // recompute the combine from a fresh snapshot and
+                            // only commit if grad_with_graph_impl_ is still the
+                            // value we based our sum on. The value-grad
+                            // accumulation (accumulate_unlocked) already ran
+                            // exactly once above; ONLY this graph-grad combine
+                            // retries. In the single-threaded / non-contended
+                            // path the CAS succeeds on the first iteration, so
+                            // behavior is unchanged.
+                            std::shared_ptr<VariableImpl> snapshot = existing_graph_impl;
+                            while (true) {
+                                std::shared_ptr<VariableImpl> new_impl;
+                                if (!snapshot) {
+                                    new_impl = graph_grad.impl_;
+                                } else {
+                                    Variable existing_var;
+                                    existing_var.impl_ = snapshot;
+                                    new_impl =
+                                        (existing_var + graph_grad).impl_;
+                                }
+                                {
 #ifndef NDEBUG
-                                GradMutexDebugGuard single_lock_check;
+                                    GradMutexDebugGuard single_lock_check;
 #endif
-                                std::lock_guard lock(*var.impl_->grad_mutex_);
-                                var.impl_->grad_with_graph_impl_ = new_impl;
-                                var.impl_->grad_with_graph_cache_storage_.reset();
+                                    std::lock_guard lock(*var.impl_->grad_mutex_);
+                                    if (var.impl_->grad_with_graph_impl_ == snapshot) {
+                                        // Unchanged since our snapshot → commit.
+                                        var.impl_->grad_with_graph_impl_ = new_impl;
+                                        var.impl_->grad_with_graph_cache_storage_.reset();
+                                        break;
+                                    }
+                                    // Another thread updated it; reload the
+                                    // current value and retry the combine so its
+                                    // contribution is not lost.
+                                    snapshot = var.impl_->grad_with_graph_impl_;
+                                }
                             }
                         }
                     } else {

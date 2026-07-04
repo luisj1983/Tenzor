@@ -588,6 +588,20 @@ public:
     auto clear_hooks() -> void;
 
     /**
+     * @brief Check whether any backward hooks are registered on this variable.
+     *
+     * Used by the graph optimizer to avoid splicing out an intermediate node
+     * that carries a user backward hook (which would silently drop the hook).
+     *
+     * @return true if at least one hook is registered.
+     */
+    auto has_hooks() const -> bool {
+        if (!impl_) return false;
+        std::shared_lock<std::shared_mutex> lock(impl_->hooks_mutex_);
+        return !impl_->hooks_.empty();
+    }
+
+    /**
      * @brief Enable thread-safe gradient access for this variable.
      *
      * When enabled, gradient reads/writes are protected by a mutex,

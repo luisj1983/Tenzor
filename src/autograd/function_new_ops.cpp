@@ -2225,12 +2225,22 @@ auto LogitBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Var
 auto LogitBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& x = saved_tensors_[0];
-    // (1 - x) = -(x - 1)
-    auto neg_one_minus_x = sub(x, 1.0);
-    auto one_minus_x = neg(neg_one_minus_x);
-    // x * (1 - x)
-    auto denom = mul(x, one_minus_x);
-    // grad / (x * (1 - x))
+    if (eps_ > 0) {
+        // Forward clamped x to [eps, 1-eps]. Inside the window the derivative is
+        // 1/(xc(1-xc)); outside, the clamp is constant so the derivative is 0.
+        // clamping keeps the denominator finite (>= eps(1-eps) > 0) everywhere.
+        auto xc = clamp(x, eps_, 1.0 - eps_);
+        auto denom = mul(xc, neg(sub(xc, 1.0)));         // xc * (1 - xc)
+        auto lo = tenzor::full_like(x, eps_);
+        auto hi = tenzor::full_like(x, 1.0 - eps_);
+        auto in_window = mul(ge(x, lo).to(grad.dtype()),
+                             le(x, hi).to(grad.dtype()));
+        return {mul(div(grad, denom), in_window)};
+    }
+    // eps <= 0: no clamp. Outside (0,1) the derivative is undefined; let the
+    // natural arithmetic propagate inf/NaN so the caller sees the invalid region.
+    auto one_minus_x = neg(sub(x, 1.0));                  // (1 - x) = -(x - 1)
+    auto denom = mul(x, one_minus_x);                     // x * (1 - x)
     return {div(grad, denom)};
 }
 
@@ -4667,11 +4677,10 @@ auto MelScaleBackward::backward(std::vector<Tensor> grad_outputs)
 //   DCT-I   self-adjoint
 //   DCT-IV  self-adjoint
 // For the "ortho" normalisation DCT is unitary, so its adjoint equals its
-// inverse: idct(grad_y) with the same type/norm. For "backward"/"forward"
-// norms the inverse equals the adjoint up to a scaling; this implementation
-// uses idct() which the public fft API matches to the same type+norm pair,
-// so dx = idct(grad_y) is the correct adjoint up to scaling that idct
-// already accounts for.
+// inverse: idct_ortho(grad_y). For "backward"/"forward" norms the inverse is
+// NOT the adjoint (they differ by an O(1/N) scaling and a DC-bin weighting),
+// so the backward computes the true transpose C^T generally via the
+// orthonormal transform plus an exact per-frequency rescale (see backward()).
 auto DCTBackward::forward(std::vector<Variable> inputs)
     -> std::vector<Variable> {
     if (inputs.size() != 1) {
@@ -4690,19 +4699,61 @@ auto DCTBackward::forward(std::vector<Variable> inputs)
 auto DCTBackward::backward(std::vector<Tensor> grad_outputs)
     -> std::vector<Tensor> {
     const auto& saved = saved_tensors();
-    // Use the input shape's `dim` size as the natural n for idct.
-    int64_t n_val = n_;
-    if (n_val <= 0 && !saved.empty()) {
-        int64_t actual_dim = (dim_ < 0) ? (dim_ + saved[0].ndim()) : dim_;
-        n_val = saved[0].shape()[actual_dim];
-    }
-    OpAttributes attrs;
-    attrs.set(AttrKey::DCTType, static_cast<int64_t>(type_));
-    attrs.set(AttrKey::Dim, dim_);
-    attrs.set(AttrKey::Norm, norm_);
-    if (n_val > 0) attrs.set(AttrKey::N, n_val);
+    const Tensor& g = grad_outputs[0];            // grad w.r.t. DCT output
+    const int64_t g_dim = (dim_ < 0) ? (dim_ + g.ndim()) : dim_;
+    // Original input length along dim (== adjoint output length).
+    const int64_t L = (!saved.empty())
+        ? saved[0].shape()[(dim_ < 0) ? (dim_ + saved[0].ndim()) : dim_]
+        : g.shape()[g_dim];
+    // DCT transform length (== grad_output length along dim).
+    const int64_t n_val = (n_ > 0) ? n_ : L;
+
+    // The gradient of a linear op is its Hermitian TRANSPOSE C^T, not its
+    // inverse C^{-1}. idct() is the inverse and equals the transpose only for
+    // the orthonormal ("ortho") DCT (which is unitary). For "backward"/"forward"
+    // norms idct() is mis-scaled by ~O(1/N) plus a DC-bin weighting.
+    //
+    // Compute the true adjoint generally, with no per-(type,norm) constants:
+    // write C_norm = D * C_ortho, where D is the per-frequency normalisation
+    // scaling (the DCT basis vectors are identical across norms; only the
+    // scaling differs). Then
+    //     C_norm^T g = C_ortho^T (D g) = idct_ortho(w ⊙ g)
+    // where w = diag(D) is recovered EXACTLY (numerically stable) via
+    //     w = dct_norm(idct_ortho(1)) = C_norm C_ortho^{-1} 1 = D 1.
+    // For norm=="ortho" this reduces to w==1 and dx == idct_ortho(g) as before.
+    auto make_attrs = [&](const std::string& norm) {
+        OpAttributes a;
+        a.set(AttrKey::DCTType, static_cast<int64_t>(type_));
+        a.set(AttrKey::Dim, dim_);
+        a.set(AttrKey::Norm, norm);
+        a.set(AttrKey::N, n_val);
+        return a;
+    };
+    const auto ortho_attrs = make_attrs("ortho");
+    const auto norm_attrs = make_attrs(norm_);
+
+    auto ones = tenzor::ones_like(g);
+    auto probe = tenzor::dispatch(OpId::IDCT,
+        std::vector<Tensor>{ones}, ortho_attrs)[0];
+    auto w = tenzor::dispatch(OpId::DCT,
+        std::vector<Tensor>{probe}, norm_attrs)[0];
     auto dx = tenzor::dispatch(OpId::IDCT,
-        std::vector<Tensor>{grad_outputs[0]}, attrs)[0];
+        std::vector<Tensor>{tenzor::mul(w, g)}, ortho_attrs)[0];
+
+    // Adjoint of the forward input pad/truncate (length L <-> n_val): the
+    // forward zero-pads (L < n_val) or truncates (L > n_val) the input to
+    // n_val, so the adjoint truncates or zero-pads the gradient back to L.
+    if (n_val != L) {
+        if (n_val > L) {
+            dx = tenzor::narrow(dx, g_dim, 0, L);
+        } else {
+            auto pad_shape = std::vector<int64_t>(dx.shape().begin(),
+                                                  dx.shape().end());
+            pad_shape[g_dim] = L - n_val;
+            auto pad = tenzor::zeros(pad_shape, dx.dtype(), dx.device());
+            dx = tenzor::cat({dx, pad}, g_dim);
+        }
+    }
     return {dx};
 }
 
@@ -4820,10 +4871,12 @@ auto MFCCBackward::backward(std::vector<Tensor> grad_outputs)
     auto d_im = tenzor::mul(tenzor::mul(im, d_power), two);
     auto d_complex = tenzor::complex(d_re, d_im);
 
-    // ISTFT adjoint of STFT.
-    auto d_wave = tenzor::fft::istft(d_complex, n_fft_, hop_length_,
-                                     -1, Tensor(), true, false, true,
-                                     std::optional<int64_t>(waveform.shape().back()));
+    // True STFT linear adjoint (STFT^H, no window-sum normalisation) — matches
+    // STFTBackward. istft() is the INVERSE (STFT^H / window_sum) and would
+    // mis-scale the gradient by ~1/window_sum and mishandle the signal edges.
+    auto d_wave = tenzor::fft::stft_adjoint(d_complex, n_fft_, hop_length_,
+                                            -1, Tensor(), true, false, true,
+                                            waveform.shape().back());
     return {d_wave};
 }
 

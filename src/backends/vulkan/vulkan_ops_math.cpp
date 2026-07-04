@@ -12,8 +12,12 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     // the SSBO uploads see logically-contiguous data. Non-contiguous slice
     // views would otherwise produce wrong values (same root cause as the
     // CPU/CUDA/ROCm sum/sigmoid/tanh kernel fixes).
-    auto a = a_raw.contiguous();
-    auto b = b_raw.contiguous();
+    // dispatchContiguous (not .contiguous()): a stride-contiguous slice with a
+    // non-zero storage offset (e.g. a vmap per-row narrow) is is_contiguous()==
+    // true, so .contiguous() leaves the offset view unmaterialized and it hits
+    // the non-16-aligned descriptor-offset guard. dispatchContiguous rebases it.
+    auto a = dispatchContiguous(a_raw);
+    auto b = dispatchContiguous(b_raw);
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
@@ -1105,7 +1109,13 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     // contiguous element stream — non-contiguous slice/view inputs would
     // produce only the first contiguous run correctly and garbage afterwards
     // (LSTM `tanh(slice(gates))` was the failing path).
-    auto input = input_raw.contiguous();
+    // Use dispatchContiguous, NOT .contiguous(): a stride-contiguous slice with
+    // a non-zero storage offset (e.g. vmap's per-row narrow) reports
+    // is_contiguous()==true, so .contiguous() returns it unmaterialized and the
+    // offset view reaches the descriptor write (which rejects a non-16-aligned
+    // storage-buffer offset). dispatchContiguous materializes it to a
+    // zero-offset buffer.
+    auto input = dispatchContiguous(input_raw);
 
     // Map operation name to opcode (see hyperbolic.comp shader)
     // 0=sinh, 1=cosh, 2=tanh
@@ -1767,9 +1777,12 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
 // isSimpleTranspose2D is defined in vulkan_helpers.hpp
 
 auto VulkanBackend::dispatchMatmul(const Tensor& a_raw, const Tensor& b_raw) -> Tensor {
-    // audit-2026-05-03 bug #15 mirror: ensure contiguous inputs.
-    auto a = a_raw.contiguous();
-    auto b = b_raw.contiguous();
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous inputs. dispatchContiguous
+    // (not .contiguous()) so a stride-contiguous but non-zero-offset slice view
+    // (e.g. vmap per-row narrow) is rebased to a zero-offset buffer rather than
+    // reaching the non-16-aligned descriptor-offset guard.
+    auto a = dispatchContiguous(a_raw);
+    auto b = dispatchContiguous(b_raw);
     // Optimized matmul with proper buffer binding and tiled execution
 
     // Float16: upcast to Float32 for numerical stability

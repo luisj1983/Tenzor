@@ -239,36 +239,15 @@ auto CholeskyBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 
 auto CholeskyBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     auto grad_L = grad_outputs[0];          // dL/dL, (..., N, N)
-    const auto& L = saved_tensors_[0];      // Cholesky factor, (..., N, N)
+    Tensor L = saved_tensors_[0];           // Cholesky factor, (..., N, N)
 
     if (upper_) {
-        // If upper triangular was returned, transpose to work with lower
-        auto ndim = L.ndim();
-        grad_L = transpose(grad_L, ndim - 2, ndim - 1);
-        // L is actually U, transpose it
-        auto L_lower = transpose(L, ndim - 2, ndim - 1);
-
-        auto Lt = transpose(L_lower, ndim - 2, ndim - 1);
-        auto S = matmul(Lt, grad_L);
-
-        // phi(S): take lower triangle and halve diagonal
-        auto S_tril = tril(S);
-        auto S_strict_lower = tril(S, -1);
-        // phi(S): tril(S) with diagonal halved
-        auto phi_S = add(S_strict_lower, mul(sub(S_tril, S_strict_lower), 0.5));
-
-        // dL/dA = L^{-T} @ phi_S @ L^{-1}
-        // = solve(L^T, phi_S) then solve(L, result^T)^T
-        // Simpler: use solve twice
-        auto temp = tenzor::linalg::solve(Lt, phi_S);
-        auto grad_A = tenzor::linalg::solve(Lt, transpose(temp, ndim - 2, ndim - 1));
-        grad_A = transpose(grad_A, ndim - 2, ndim - 1);
-
-        // Symmetrize: dL/dA = 0.5 * (dL/dA + dL/dA^T)
-        auto grad_At = transpose(grad_A, ndim - 2, ndim - 1);
-        grad_A = mul(add(grad_A, grad_At), 0.5);
-
-        return {grad_A};
+        // Forward returned the upper factor U with A = U^H U. Convert to the
+        // lower factor L = U^H (and the cotangent accordingly) via conjugate
+        // transpose, then apply the lower-triangular formula below. For real
+        // inputs `adjoint` is a plain transpose, so this path is unchanged there.
+        L = adjoint(L);
+        grad_L = adjoint(grad_L);
     }
 
     // Use Hermitian (conjugate) transposes so the formula generalizes to
@@ -810,16 +789,18 @@ auto EigvalshBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
     const auto& grad_W = grad_outputs[0];   // dL/dW, (..., N)
     const auto& V = saved_tensors_[0];      // eigenvectors, (..., N, N)
 
-    auto Vt = transpose(V, V.ndim() - 2, V.ndim() - 1);
+    // Use the conjugate transpose so the formula generalizes to complex
+    // Hermitian A (V is unitary); for real symmetric A `adjoint` == transpose.
+    auto Vt = adjoint(V);
 
-    // dL/dA = V @ diag(dL/dW) @ V^T
+    // dL/dA = V @ diag(dL/dW) @ V^H
     // GG.7: diag_embed is batch-aware; the earlier diag(grad_W) threw on
     // batched input (ndim > 2).
     auto grad_diag = linalg::diag_embed(grad_W, 0, -2, -1);  // (..., N, N)
     auto grad_A = matmul(matmul(V, grad_diag), Vt);
 
-    // Symmetrize (since A is symmetric)
-    auto grad_At = transpose(grad_A, grad_A.ndim() - 2, grad_A.ndim() - 1);
+    // Hermitian-symmetrize (since A is Hermitian)
+    auto grad_At = adjoint(grad_A);
     grad_A = mul(add(grad_A, grad_At), 0.5);
 
     return {grad_A};
@@ -1026,16 +1007,17 @@ auto EigvalshBackward::backward_with_variables(std::vector<Variable> grad_output
     const auto& V_tensor = saved_tensors_[0];  // eigenvectors, (..., N, N)
     auto V = Variable(V_tensor, false);
 
-    auto ndim = V_tensor.ndim();
-    auto Vt = tenzor::transpose(V, ndim - 2, ndim - 1);
+    // Conjugate transpose so the formula generalizes to complex Hermitian A
+    // (V is unitary); for real symmetric A `adjoint_var` == transpose.
+    auto Vt = adjoint_var(V);
 
     // Variable-level batch-aware diag_embed and matmul (grad_W may be
     // (..., N); plain diag throws on ndim>2).
     auto grad_diag = diag_embed_var(grad_outputs[0]);  // (..., N, N)
     auto grad_A = tenzor::matmul(tenzor::matmul(V, grad_diag), Vt);
 
-    // Symmetrize (since A is symmetric)
-    auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+    // Hermitian-symmetrize (since A is Hermitian)
+    auto grad_At = adjoint_var(grad_A);
     grad_A = (grad_A + grad_At) * 0.5;
 
     return {grad_A};
@@ -1050,41 +1032,21 @@ auto CholeskyBackward::backward_with_variables(std::vector<Variable> grad_output
     const auto& L_tensor = saved_tensors_[0];
     auto L = Variable(L_tensor, false);
 
-    auto ndim = L_tensor.ndim();
-
     if (upper_) {
-        // If upper triangular was returned, transpose to work with lower
-        grad_L_var = tenzor::transpose(grad_L_var, ndim - 2, ndim - 1);
-        auto L_lower = tenzor::transpose(L, ndim - 2, ndim - 1);
-
-        auto Lt = tenzor::transpose(L_lower, ndim - 2, ndim - 1);
-
-        // S = L^T @ grad_L  (Variable-level matmul)
-        auto S = tenzor::matmul(Lt, grad_L_var);
-
-        // phi(S): tril(S) with diagonal halved
-        // phi(S) = tril(S, -1) + 0.5 * diag(diag(S))
-        // Equivalently: phi(S) = tril(S) - 0.5 * (tril(S) - tril(S, -1))
-        auto S_tril = tenzor::tril(S);
-        auto S_strict_lower = tenzor::tril(S, -1);
-        auto phi_S = S_strict_lower + (S_tril - S_strict_lower) * 0.5;
-
-        // grad_A = L^{-T} @ phi_S @ L^{-1}
-        // = solve(L^T, phi_S), then solve(L^T, result^T)^T
-        auto temp = tenzor::solve(Lt, phi_S);
-        auto grad_A = tenzor::solve(Lt, tenzor::transpose(temp, ndim - 2, ndim - 1));
-        grad_A = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
-
-        // Symmetrize
-        auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
-        grad_A = (grad_A + grad_At) * 0.5;
-
-        return {grad_A};
+        // Forward returned the upper factor U with A = U^H U. Convert to the
+        // lower factor L = U^H (and the cotangent accordingly) via conjugate
+        // transpose, then fall through to the lower-triangular formula. For
+        // real inputs `adjoint_var` is a plain transpose, so this is unchanged.
+        L = adjoint_var(L);
+        grad_L_var = adjoint_var(grad_L_var);
     }
 
-    auto Lt = tenzor::transpose(L, ndim - 2, ndim - 1);
+    // Use Hermitian (conjugate) transposes so the formula generalizes to
+    // complex Hermitian-positive-definite A; for real A `adjoint_var` is a
+    // plain transpose and the result is unchanged.
+    auto Lt = adjoint_var(L);
 
-    // S = L^T @ grad_L
+    // S = L^H @ grad_L
     auto S = tenzor::matmul(Lt, grad_L_var);
 
     // phi(S): tril(S) with diagonal halved
@@ -1092,13 +1054,13 @@ auto CholeskyBackward::backward_with_variables(std::vector<Variable> grad_output
     auto S_strict_lower = tenzor::tril(S, -1);
     auto phi_S = S_strict_lower + (S_tril - S_strict_lower) * 0.5;
 
-    // grad_A = L^{-T} @ phi_S @ L^{-1}
+    // grad_A = L^{-H} @ phi_S @ L^{-1}
     auto temp = tenzor::solve(Lt, phi_S);
-    auto grad_A = tenzor::solve(Lt, tenzor::transpose(temp, ndim - 2, ndim - 1));
-    grad_A = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+    auto grad_A = tenzor::solve(Lt, adjoint_var(temp));
+    grad_A = adjoint_var(grad_A);
 
-    // Symmetrize
-    auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+    // Hermitian-symmetrize
+    auto grad_At = adjoint_var(grad_A);
     grad_A = (grad_A + grad_At) * 0.5;
 
     return {grad_A};
@@ -1179,8 +1141,8 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // S_diag as Variable — batch-aware diag_embed (S may be (..., K)).
     auto S_diag = diag_embed_var(S);  // (..., K, K)
 
-    auto Ut = tenzor::transpose(U, ndim - 2, ndim - 1);
-    auto V = tenzor::transpose(Vh, saved_tensors_[2].ndim() - 2, saved_tensors_[2].ndim() - 1);
+    auto Ut = adjoint_var(U);
+    auto V = adjoint_var(Vh);
 
     auto UtgU = tenzor::matmul(Ut, grad_U_var);       // (..., K, K)
     auto gVhV = tenzor::matmul(grad_Vh_var, V);       // (..., K, K)
@@ -1190,8 +1152,8 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // and breaks gradcheck.
     //   skew_U = U^T grad_U - (U^T grad_U)^T
     //   skew_V = (grad_Vh V)^T - (grad_Vh V)
-    auto UtgU_t = tenzor::transpose(UtgU, ndim - 2, ndim - 1);
-    auto gVhV_t = tenzor::transpose(gVhV, ndim - 2, ndim - 1);
+    auto UtgU_t = adjoint_var(UtgU);
+    auto gVhV_t = adjoint_var(gVhV);
     auto skew_U = UtgU - UtgU_t;
     auto skew_V = gVhV_t - gVhV;
 
@@ -1223,7 +1185,7 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         }
         if (N > K) {
             auto eye_N = Variable(eye(N, std::nullopt, S_tensor.dtype(), S_tensor.device()), false);
-            auto Vt = tenzor::transpose(V, ndim - 2, ndim - 1);
+            auto Vt = adjoint_var(V);
             auto VVt = tenzor::matmul(V, Vt);
             auto proj_N = eye_N - VVt;
             grad_A = grad_A + tenzor::matmul(
@@ -1358,10 +1320,11 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
 
     auto F = Variable(F_tensor, false);
 
-    auto ndim = V_tensor.ndim();
-    auto Vt = tenzor::transpose(V, ndim - 2, ndim - 1);
+    // Conjugate transpose so the formula generalizes to complex Hermitian A
+    // (V is unitary); for real symmetric A `adjoint_var` == transpose.
+    auto Vt = adjoint_var(V);
 
-    // V^T @ dL/dV (Variable-level)
+    // V^H @ dL/dV (Variable-level)
     auto VtgV = tenzor::matmul(Vt, grad_V_var);
 
     // F * (V^T @ dL/dV) + diag(dL/dW) — batch-aware diag_embed (grad_W may
@@ -1371,8 +1334,8 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     // dL/dA = V @ middle @ V^T
     auto grad_A = tenzor::matmul(tenzor::matmul(V, middle), Vt);
 
-    // Symmetrize
-    auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+    // Hermitian-symmetrize
+    auto grad_At = adjoint_var(grad_A);
     grad_A = (grad_A + grad_At) * 0.5;
 
     return {grad_A};
@@ -1771,8 +1734,9 @@ auto LUSolveBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto LUSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& A_inv = saved_tensors_[0];
-    auto ndim = A_inv.ndim();
-    auto A_inv_t = transpose(A_inv, ndim - 2, ndim - 1).contiguous();
+    // Conjugate transpose so the formula generalizes to complex A; for real A
+    // `adjoint` is a plain transpose and the result is unchanged.
+    auto A_inv_t = adjoint(A_inv).contiguous();
     return {tenzor::matmul(A_inv_t, grad)};
 }
 

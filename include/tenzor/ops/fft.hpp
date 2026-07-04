@@ -157,6 +157,29 @@ auto stft(const Tensor& input,
           bool onesided = true) -> Tensor;
 
 /**
+ * @brief Linear adjoint (Hermitian transpose) of the STFT.
+ *
+ * Applies STFT^H — the overlap-add of windowed inverse-FFT frames WITHOUT
+ * ISTFT's window-sum normalisation. This is the true reverse-mode adjoint of
+ * stft() (what STFTBackward uses); istft() is the INVERSE (= STFT^H / window_sum)
+ * and is NOT the adjoint. Use this when back-propagating through a magnitude/
+ * power STFT (e.g. MFCC), not istft().
+ *
+ * @param grad Gradient w.r.t. the STFT output (..., freq_bins, num_frames)
+ * @param signal_length Output signal length (-1 to infer from frames/hop)
+ * @return Gradient w.r.t. the input waveform (..., signal_length)
+ */
+auto stft_adjoint(const Tensor& grad,
+                  int64_t n_fft,
+                  int64_t hop_length = -1,
+                  int64_t win_length = -1,
+                  const Tensor& window = Tensor{},
+                  bool center = true,
+                  bool normalized = false,
+                  bool onesided = true,
+                  int64_t signal_length = -1) -> Tensor;
+
+/**
  * @brief Inverse Short-time Fourier Transform (ISTFT).
  *
  * Reconstructs signal from STFT output via overlap-add.

@@ -4010,10 +4010,16 @@ public:
  */
 class LogitBackward : public Function {
 public:
+    // eps mirrors the forward logit(x, eps): when eps > 0 the input is clamped
+    // to [eps, 1-eps], so the derivative is 1/(x(1-x)) inside that window and 0
+    // outside. eps <= 0 (default) means no clamping.
+    explicit LogitBackward(double eps = -1.0) : eps_(eps) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "LogitBackward"; }
     auto op_id() const -> OpId override { return OpId::Logit; }
+private:
+    double eps_;
 };
 
 /**

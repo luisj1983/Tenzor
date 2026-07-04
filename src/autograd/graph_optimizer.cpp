@@ -81,6 +81,12 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
                 if (v.requires_grad() && (v.is_leaf() || v.retains_grad())) {
                     return true;
                 }
+                // A user backward hook registered on a spliced-out non-leaf
+                // intermediate would be silently dropped by the transpose-pair
+                // elimination. Suppress the splice so the hook still fires.
+                if (v.has_hooks()) {
+                    return true;
+                }
             }
             return false;
         };

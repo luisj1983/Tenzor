@@ -45,44 +45,16 @@ namespace tenzor {
 
 namespace {
 
-// Host-portable Philox4x32-10 (matches CPU flash_attention.cpp constants /
-// algorithm). Used by the composed backward to replay the forward dropout
-// mask using the saved seed. Counter convention matches the CUDA/ROCm flash
-// kernels: (batch_head, query_idx, kv_pos, 0) so backward + forward
-// produce identical masks within those backends. CPU forward uses a
-// different convention (b, h, qi, ki), so for CPU-saved seeds the composed
-// backward isn't bit-exact — but the CPU backward kernel handles its own
-// replay (per src/backends/cpu/kernels/flash_attention.cpp), so this code
-// path only runs for GPU-saved seeds where the conventions match.
-namespace {
-inline void host_philox_round(uint32_t ctr[4], const uint32_t key[2]) {
-    constexpr uint64_t M0 = 0xD2511F53ULL;
-    constexpr uint64_t M1 = 0xCD9E8D57ULL;
-    uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
-    uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
-    uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
-    uint32_t lo0 = static_cast<uint32_t>(prod0);
-    uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
-    uint32_t lo1 = static_cast<uint32_t>(prod1);
-    uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
-    uint32_t new1 = lo1;
-    uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
-    uint32_t new3 = lo0;
-    ctr[0] = new0; ctr[1] = new1; ctr[2] = new2; ctr[3] = new3;
-}
-inline float host_philox_uniform(uint32_t batch_head, uint32_t query_idx,
-                                  uint32_t kv_pos, uint32_t rng_seed) {
-    uint32_t ctr[4] = {batch_head, query_idx, kv_pos, 0};
-    uint32_t k[2] = {rng_seed, rng_seed ^ 0x1BD11BDAU};
-    constexpr uint32_t W0 = 0x9E3779B9U;
-    constexpr uint32_t W1 = 0xBB67AE85U;
-    for (int r = 0; r < 10; ++r) {
-        host_philox_round(ctr, k);
-        if (r < 9) { k[0] += W0; k[1] += W1; }
-    }
-    return (static_cast<float>(ctr[0] >> 8)) * (1.0f / 16777216.0f);
-}
-}  // anonymous namespace
+// NOTE (audit A-04): the composed backward replays the forward dropout mask
+// via the shared `philox_dropout_mask` op (see composed_attention_backward
+// below), which uses the counter convention (bh, qi, ki, 0). The CPU
+// FlashAttention forward kernel uses the SAME convention — counter key
+// (b*num_heads + h, qi, ki, 0) == the (bh, qi, ki, 0) of philox_dropout_mask
+// (src/backends/cpu/kernels/flash_attention.cpp) — so the composed backward is
+// bit-exact against the CPU forward, not merely against the GPU kernels. The
+// former hand-rolled host Philox helper (host_philox_uniform / host_philox_round)
+// was removed as dead code; philox_dropout_mask is now the single source of
+// truth for the replay, on every backend.
 
 // Composed-ops fallback for FlashAttention backward when the fused dispatch
 // path is unavailable. Mathematically equivalent to the fused kernel; uses
@@ -199,7 +171,9 @@ auto composed_attention_backward(const Tensor& dO,
     // Replay forward Philox dropout (audit M4-rem follow-up, A.11):
     // Build the same dropout mask the forward applied using the shared
     // `philox_dropout_mask` op (same counter convention `(bh, qi, ki, 0)`
-    // as host_philox_uniform / forward replay). The mask is generated on
+    // used by every backend's flash forward, including the CPU kernel's
+    // `(b*num_heads + h, qi, ki, 0)` key — so this replay is bit-exact against
+    // the forward on CPU as well as on GPU). The mask is generated on
     // CPU then ferried to P's device — replaces the previous host triple-
     // for-loop, which was effectively a hand-rolled re-implementation of
     // philox_dropout_mask. The mask op returns scale=1/(1-p) for kept
@@ -333,6 +307,12 @@ auto try_fused_or_compose_backward(const Tensor& dO,
                                             offset_for_replay);
     }
     try {
+        // A-03: canonical fused-backward input order is
+        //   [dO, Q, K, V, O, L, (seed?), (offset?)].
+        // The trailing optionals are disambiguated upstream by save-time boolean
+        // predicates (has_lse, and dropout_p_ && is_training_ for the seed/offset
+        // dropout-state pair) in FlashAttentionBackward::backward — NOT by vector
+        // size or slot position. See the A-02 decode there.
         std::vector<Tensor> bwd_inputs = {dO, Q, K, V, O, L};
         if (philox_seed.is_valid() && philox_offset.is_valid()) {
             bwd_inputs.push_back(philox_seed);
@@ -370,6 +350,11 @@ auto try_flex_backward_or_throw(const Tensor& dO,
                                 int64_t score_mod_id,
                                 const Tensor& block_mask) -> std::vector<Tensor> {
     // V.8: double scale; the FlexAttentionBackward holds `double scale_`.
+    // A-03: canonical flex-backward input order is
+    //   [dO, Q, K, V, O, (L?), (block_mask?)].
+    // The trailing optionals are disambiguated upstream by save-time boolean
+    // predicates (has_lse, and has_block_mask_) in FlexAttentionBackward::backward
+    // — NOT by vector size or slot position. See the A-01 decode there.
     std::vector<Tensor> bwd_inputs = {dO, Q, K, V, O};
     if (L.is_valid() && L.shape().size() > 0) bwd_inputs.push_back(L);
     if (block_mask.is_valid() && block_mask.shape().size() > 0) bwd_inputs.push_back(block_mask);
@@ -406,9 +391,23 @@ auto FlashAttentionBackward::backward(std::vector<Tensor> grad_outputs) -> std::
     const Tensor& K = saved[1];
     const Tensor& V = saved[2];
     const Tensor& O = saved[3];
-    Tensor L = (saved.size() > 4) ? saved[4] : Tensor{};
-    Tensor seed = (saved.size() > 5) ? saved[5] : Tensor{};
-    Tensor offset = (saved.size() > 6) ? saved[6] : Tensor{};
+    // A-02: L, seed and offset are each INDEPENDENTLY optional at save time, so
+    // their saved positions must not be inferred from raw indices — an absent L
+    // with a present seed/offset pair would otherwise alias seed into L. Decode
+    // by a running index driven by the same predicates the forward used to push:
+    //   * seed+offset are saved as a dropout-state PAIR (both or neither), gated
+    //     on whether the forward actually sampled a Philox mask == exactly
+    //     (dropout_p_ > 0 && is_training_) — the predicate run_flash_dispatch
+    //     uses to request a seed. This is a persisted flag, so save/read cannot
+    //     diverge.
+    //   * whether L (logsumexp) was saved is then the only remaining degree of
+    //     freedom and is recovered from the trailing count.
+    const bool has_dropout_state = (dropout_p_ > 0.0f && is_training_);
+    const bool has_lse = saved.size() > (4u + (has_dropout_state ? 2u : 0u));
+    size_t idx = 4;
+    Tensor L      = has_lse           ? saved[idx++] : Tensor{};
+    Tensor seed   = has_dropout_state ? saved[idx++] : Tensor{};
+    Tensor offset = has_dropout_state ? saved[idx++] : Tensor{};
 
     return try_fused_or_compose_backward(dO, Q, K, V, O, L,
                                           scale_, causal_, dropout_p_, seed, offset);
@@ -461,8 +460,18 @@ auto FlexAttentionBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
     const Tensor& K = saved[1];
     const Tensor& V = saved[2];
     const Tensor& O = saved[3];
-    Tensor L = (saved.size() > 4) ? saved[4] : Tensor{};
-    Tensor block_mask = (saved.size() > 5) ? saved[5] : Tensor{};
+    // A-01: L (logsumexp) and block_mask are each INDEPENDENTLY optional at save
+    // time, so their saved positions must not be inferred from raw indices — an
+    // absent L with a present block_mask would otherwise alias block_mask into L.
+    // Decode by a running index driven by the same predicate the forward used to
+    // push: has_block_mask_ is the persisted flag recording whether block_mask
+    // was saved, so save/read cannot diverge. Whether L was saved is then the
+    // only remaining degree of freedom and is recovered from the trailing count.
+    const bool has_block_mask = has_block_mask_;
+    const bool has_lse = saved.size() > (4u + (has_block_mask ? 1u : 0u));
+    size_t idx = 4;
+    Tensor L          = has_lse        ? saved[idx++] : Tensor{};
+    Tensor block_mask = has_block_mask ? saved[idx++] : Tensor{};
 
     return try_flex_backward_or_throw(dO, Q, K, V, O, L, scale_, score_mod_id_, block_mask);
 }
@@ -619,6 +628,10 @@ auto FlashAttentionBackward::backward_with_variables(std::vector<Variable> grad_
                      "with dropout_p > 0 is not supported (structural zero stub).");
     }
     Variable dO = grad_outputs[0];
+    // A-02: this higher-order path reads only the FIXED leading slots Q,K,V
+    // (saved[0..2]); it never touches the independently-optional trailing tensors
+    // (L, seed, offset), so the running-index decode used in ::backward is not
+    // needed here — the positional collision cannot occur for slots 0..2.
     // audit-10 NN.1: prefer saved Variables (with grad_fn) when available so
     // the second derivative path through Q/K/V projections stays connected.
     Variable Q = has_saved_variables() ? saved_variables()[0] : Variable(saved[0], false);
@@ -661,6 +674,10 @@ auto FlexAttentionBackward::backward_with_variables(std::vector<Variable> grad_o
         return passthrough_stub_backward(std::move(grad_outputs));
     }
     Variable dO = grad_outputs[0];
+    // A-01: reads only the FIXED leading slots Q,K,V (saved[0..2]); the
+    // independently-optional trailing tensors (L, block_mask) are never read
+    // here, so the running-index decode used in ::backward is unnecessary — the
+    // positional collision cannot occur for slots 0..2.
     // audit-10 NN.1: see FlashAttentionBackward — preserve Q/K/V graph.
     Variable Q = has_saved_variables() ? saved_variables()[0] : Variable(saved[0], false);
     Variable K = has_saved_variables() ? saved_variables()[1] : Variable(saved[1], false);

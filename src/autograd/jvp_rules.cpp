@@ -197,6 +197,16 @@ auto jvp_cos(const DualTensor& x) -> DualTensor {
 
 auto jvp_abs(const DualTensor& x) -> DualTensor {
     auto primal = tenzor::abs(x.primal());
+    if (x.primal().is_complex()) {
+        // |z| is real; d|z| = Re(conj(z)·dz) / |z|.  (J-03)
+        // Natural div: at |z|=0 this yields 0/0 -> NaN, matching the way the
+        // real branch's sign(0)=0 leaves the subgradient undefined at the cusp;
+        // no epsilon convention exists for abs elsewhere in this file, so we do
+        // not fabricate one.
+        auto num = tenzor::real(tenzor::mul(tenzor::conj(x.primal()), x.tangent()));
+        auto tangent = tenzor::div(num, primal);
+        return DualTensor(std::move(primal), std::move(tangent));
+    }
     auto tangent = tenzor::mul(x.tangent(), tenzor::sign(x.primal()));
     return DualTensor(std::move(primal), std::move(tangent));
 }
@@ -4949,11 +4959,32 @@ auto jvp_rad2deg(const DualTensor& x) -> DualTensor {
 // (0) where the clamp pins the value. We implement the open-interval form,
 // matching PyTorch's behaviour at non-clamped points (the clamp boundary is a
 // measure-zero set in the unclamped case).
-auto jvp_logit(const DualTensor& x, double /*eps*/) -> DualTensor {
-    auto primal = tenzor::logit(x.primal(), -1.0);
+auto jvp_logit(const DualTensor& x, double eps) -> DualTensor {
+    // Pass the real eps through so the primal matches the eager forward
+    // tenzor::logit, which clamps x to [eps, 1-eps] only when eps > 0.  (J-02)
+    auto primal = tenzor::logit(x.primal(), eps);
     auto one = tenzor::ones_like(x.primal());
-    auto one_minus = tenzor::sub(one, x.primal());
-    auto denom = tenzor::mul(x.primal(), one_minus);
+    if (eps > 0.0) {
+        // Denominator uses the clamped x (inside [eps,1-eps] the clamp is a
+        // no-op, so this equals x(1-x) there); zero the tangent where the
+        // ORIGINAL x is outside [eps,1-eps], because the eager forward pins the
+        // primal to a constant there (slope 0).  We branch on eps > 0 (not the
+        // spec's eps >= 0) to stay consistent with the primal above: at eps==0
+        // the eager forward does not clamp, so the tangent must be 1/(x(1-x))
+        // over all x, which the eps<=0 path below provides.
+        auto xc = tenzor::clamp(x.primal(), eps, 1.0 - eps);
+        auto denom = tenzor::mul(xc, tenzor::sub(one, xc));
+        auto raw = tenzor::div(x.tangent(), denom);
+        auto lo = tenzor::mul(tenzor::ones_like(x.primal()), eps);
+        auto hi = tenzor::mul(tenzor::ones_like(x.primal()), 1.0 - eps);
+        auto outside = tenzor::logical_or(tenzor::lt(x.primal(), lo),
+                                          tenzor::gt(x.primal(), hi));
+        auto zero = tenzor::zeros_like(raw);
+        auto tangent = tenzor::where(outside, zero, raw);
+        return DualTensor(std::move(primal), std::move(tangent));
+    }
+    // eps <= 0 (unset): open-interval derivative 1/(x(1-x)) over all x.
+    auto denom = tenzor::mul(x.primal(), tenzor::sub(one, x.primal()));
     auto tangent = tenzor::div(x.tangent(), denom);
     return DualTensor(std::move(primal), std::move(tangent));
 }
@@ -5278,6 +5309,17 @@ JvpResult jvp_adapter_complex_tensor(std::span<const Tensor> primals,
 // which is a.e. constant → tangent = 0; this matches PyTorch.
 auto jvp_angle(const DualTensor& z) -> DualTensor {
     auto primal = tenzor::angle(z.primal());
+    if (z.primal().is_complex()) {
+        // angle(z) = atan2(Im z, Re z); d(angle) = Im(conj(z)·dz)/|z|^2.  (J-01)
+        // imag() returns a real tensor, matching the real-valued primal.
+        auto num = tenzor::imag(tenzor::mul(tenzor::conj(z.primal()), z.tangent()));
+        auto re = tenzor::real(z.primal());
+        auto im = tenzor::imag(z.primal());
+        auto denom = tenzor::add(tenzor::mul(re, re), tenzor::mul(im, im));
+        auto tangent = tenzor::div(num, denom);
+        return DualTensor(std::move(primal), std::move(tangent));
+    }
+    // Real input: angle is a.e. constant (0 for x>=0, π for x<0) → tangent 0.
     auto tangent = tenzor::zeros_like(primal);
     return DualTensor(std::move(primal), std::move(tangent));
 }

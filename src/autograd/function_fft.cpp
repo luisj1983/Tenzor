@@ -1093,4 +1093,32 @@ auto ISTFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     return {grad_t};
 }
 
+namespace fft {
+
+// Public wrapper exposing the STFT linear adjoint (STFT^H, WITHOUT ISTFT's
+// window-sum normalisation) for callers in other translation units (e.g.
+// MFCCBackward). Mirrors STFTBackward::backward; working precision follows the
+// gradient's dtype family so a Float64/Complex128 gradient stays double.
+auto stft_adjoint(const Tensor& grad,
+                  int64_t n_fft,
+                  int64_t hop_length,
+                  int64_t win_length,
+                  const Tensor& window,
+                  bool center,
+                  bool normalized,
+                  bool onesided,
+                  int64_t signal_length) -> Tensor {
+    const bool use_double = (grad.dtype() == DType::Complex128
+                             || grad.dtype() == DType::Float64);
+    return use_double
+        ? stft_adjoint_impl<double, DType::Float64, DType::Complex128>(
+              grad, n_fft, hop_length, win_length, window, center,
+              normalized, onesided, signal_length)
+        : stft_adjoint_impl<float, DType::Float32, DType::Complex64>(
+              grad, n_fft, hop_length, win_length, window, center,
+              normalized, onesided, signal_length);
+}
+
+} // namespace fft
+
 } // namespace tenzor

@@ -1581,7 +1581,7 @@ auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
     const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
     const int64_t padding_h = attrs.get_int(AttrKey::PaddingH, p_scalar);
     const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
-    const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
+    const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
 
 #ifdef TENZOR_HAS_ONEDNN
     // oneDNN avgpool2d_forward has no FP64 primitive; route FP64 to native SYCL.
@@ -1770,7 +1770,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
     const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
     const int64_t padding_h = attrs.get_int(AttrKey::PaddingH, p_scalar);
     const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
-    const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
+    const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
 
     const int64_t N = input_shape[0];
     const int64_t C = input_shape[1];

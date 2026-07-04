@@ -11,6 +11,8 @@
 #include "../../include/tenzor/utils/log.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/utils/variable_cast.hpp"
+#include "../../include/tenzor/backend/loader.hpp"
+#include "../../include/tenzor/backend/backend.hpp"
 #include <chrono>
 #include <unordered_set>
 #include <unordered_map>
@@ -262,6 +264,30 @@ auto CheckpointFunction::save_rng_state(const std::vector<Device>& input_devices
     }
     Device cpu_dev = Device::cpu();
     if (!already_have(cpu_dev)) devs.push_back(cpu_dev);
+
+    // V-06: also snapshot every available backend device's default generator.
+    // A stochastic op inside forward_fn_ may draw on a device that is neither an
+    // input device nor CPU (e.g. inputs on CPU but a parameter/op on CUDA); if
+    // that device's generator is not restored on recompute, the replayed random
+    // draw (dropout mask, etc.) diverges from the original forward and produces
+    // gradients that disagree with the non-checkpointed path — and differently
+    // across backends. Enumerate defensively; never let RNG bookkeeping throw.
+    if (is_backend_registry_alive()) {
+        try {
+            auto& reg = backend_registry();
+            for (const auto& name : reg.available_backends()) {
+                Backend* b = reg.get_backend(name);
+                if (b == nullptr) continue;
+                const int32_t count = b->device_count();
+                for (int32_t i = 0; i < count; ++i) {
+                    Device d = Device::from_string(name + ":" + std::to_string(i));
+                    if (!already_have(d)) devs.push_back(d);
+                }
+            }
+        } catch (const std::exception&) {
+            // Best-effort: fall back to the input-device + CPU set already built.
+        }
+    }
 
     saved_generator_states_.clear();
     saved_generator_states_.reserve(devs.size());

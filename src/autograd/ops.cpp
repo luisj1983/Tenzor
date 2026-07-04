@@ -3470,7 +3470,7 @@ auto logit(const Variable& input, double eps) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(tenzor::logit(input.tensor(), eps), false);
     }
-    auto grad_fn = std::make_shared<LogitBackward>();
+    auto grad_fn = std::make_shared<LogitBackward>(eps);
     grad_fn->save_for_backward({input.tensor()});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -3510,10 +3510,10 @@ auto heaviside(const Variable& input, const Variable& values) -> Variable {
         return Variable(result, false);
     }
     auto grad_fn = std::make_shared<HeavisideBackward>();
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
-    if (auto fn = values.grad_fn()) next_funcs.push_back(fn);
-    grad_fn->set_next_functions(std::move(next_funcs));
+    // Preserve nullptr placeholders so the engine's positional pairing with
+    // input_variables stays aligned in the leaf/non-leaf mixed case (mirror
+    // WhereBackward): always push both slots.
+    grad_fn->set_next_functions({input.grad_fn(), values.grad_fn()});
     grad_fn->set_input_variables({input, values});
     Variable output(result, true);
     output.set_grad_fn(grad_fn);
@@ -3737,10 +3737,9 @@ auto logical_and(const Variable& a, const Variable& b) -> Variable {
         return Variable(result, false);
     }
     auto grad_fn = std::make_shared<LogicalAndBackward>();
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
-    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
-    grad_fn->set_next_functions(std::move(next_funcs));
+    // Preserve nullptr placeholders so positional pairing with input_variables
+    // stays aligned in the leaf/non-leaf mixed case (mirror WhereBackward).
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn()});
     grad_fn->set_input_variables({a, b});
     Variable output(result, true);
     output.set_grad_fn(grad_fn);
@@ -3917,10 +3916,9 @@ auto bitwise_and(const Variable& a, const Variable& b) -> Variable {
         return Variable(result, false);
     }
     auto grad_fn = std::make_shared<BitwiseAndBackward>();
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
-    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
-    grad_fn->set_next_functions(std::move(next_funcs));
+    // Preserve nullptr placeholders so positional pairing with input_variables
+    // stays aligned in the leaf/non-leaf mixed case (mirror WhereBackward).
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn()});
     grad_fn->set_input_variables({a, b});
     Variable output(result, true);
     output.set_grad_fn(grad_fn);
@@ -3946,10 +3944,9 @@ auto eq(const Variable& a, const Variable& b) -> Variable {
         return Variable(result, false);
     }
     auto grad_fn = std::make_shared<EqBackward>();
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
-    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
-    grad_fn->set_next_functions(std::move(next_funcs));
+    // Preserve nullptr placeholders so positional pairing with input_variables
+    // stays aligned in the leaf/non-leaf mixed case (mirror WhereBackward).
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn()});
     grad_fn->set_input_variables({a, b});
     Variable output(result, true);
     output.set_grad_fn(grad_fn);
@@ -3975,10 +3972,9 @@ auto make_nondiff_binary(const Variable& a, const Variable& b, EagerFn&& eager)
         return Variable(result, false);
     }
     auto grad_fn = std::make_shared<BackwardCls>();
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (auto fn = a.grad_fn()) next_funcs.push_back(fn);
-    if (auto fn = b.grad_fn()) next_funcs.push_back(fn);
-    grad_fn->set_next_functions(std::move(next_funcs));
+    // Preserve nullptr placeholders so positional pairing with input_variables
+    // stays aligned in the leaf/non-leaf mixed case (mirror WhereBackward).
+    grad_fn->set_next_functions({a.grad_fn(), b.grad_fn()});
     grad_fn->set_input_variables({a, b});
     Variable output(result, true);
     output.set_grad_fn(grad_fn);

@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/ops/fft.hpp>
 #include <cmath>
 
 #include "gradcheck_complex.hpp"
@@ -734,4 +735,137 @@ TEST_P(GradCheckComprehensiveTest, IRFFT) {
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
+// ============================================================================
+// Finding-fix regression coverage (2026-07 autograd review)
+// ============================================================================
+
+// Helper: build a gradient-tracked DCT node (no fft_autograd::dct wrapper
+// exists). For the square (unset-n) case DCTBackward reconstructs the adjoint
+// length from grad_output, so no saved input is required here.
+static auto dct_autograd(const Variable& v, const std::string& norm) -> Variable {
+    auto out_t = ::tenzor::fft::dct(v.tensor(), 2, std::nullopt, -1, norm);
+    auto out = Variable(out_t, true);
+    auto gf = std::make_shared<DCTBackward>(2, static_cast<int64_t>(-1),
+                                            static_cast<int64_t>(-1), norm);
+    gf->set_next_functions({v.grad_fn()});
+    gf->set_input_variables({v});
+    out.set_grad_fn(gf);
+    return out;
+}
+
+// N-01: DCT backward for the default "backward" norm must be the true adjoint
+// (transpose C^T), not the inverse idct. This is the case the old code got
+// wrong (mis-scaled by ~O(1/N)); gradcheck it on every backend.
+TEST_P(GradCheckComprehensiveTest, DCTBackwardDefaultNorm) {
+    auto x = make_centered_var({8}, device);
+    auto f = [](const Variable& v) { return dct_autograd(v, "backward"); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
+}
+
+// N-01: the orthonormal path (already correct) must still gradcheck.
+TEST_P(GradCheckComprehensiveTest, DCTBackwardOrtho) {
+    auto x = make_centered_var({8}, device);
+    auto f = [](const Variable& v) { return dct_autograd(v, "ortho"); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
+}
+
+// N-01: forward normalisation should not matter for correctness — "forward"
+// norm must also produce the true adjoint.
+TEST_P(GradCheckComprehensiveTest, DCTBackwardForwardNorm) {
+    auto x = make_centered_var({8}, device);
+    auto f = [](const Variable& v) { return dct_autograd(v, "forward"); };
+    EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
+}
+
+// J-02 companion: LogitBackward must honour eps — zero gradient outside
+// [eps, 1-eps] (the forward clamps there, so the derivative is 0), and
+// 1/(x(1-x)) strictly inside. The pre-fix reverse-mode ignored eps.
+TEST_P(GradCheckComprehensiveTest, LogitEpsClampsGradient) {
+    const double eps = 0.1;
+    auto xc = zeros({4}, DType::Float32, Device::cpu());
+    xc.data<float>()[0] = 0.02f;  // below eps      -> grad 0
+    xc.data<float>()[1] = 0.50f;  // inside window  -> 1/(0.5*0.5) = 4
+    xc.data<float>()[2] = 0.97f;  // above 1-eps    -> grad 0
+    xc.data<float>()[3] = 0.30f;  // inside window  -> 1/(0.3*0.7)
+    Variable x(xc.to(device), true);
+    auto y = logit(x, eps);
+    y.backward(ones_like(y.tensor()));
+    auto g = x.grad().value().to(Device::cpu());
+    EXPECT_NEAR(g.data<float>()[0], 0.0f, 1e-4);
+    EXPECT_NEAR(g.data<float>()[1], 4.0f, 2e-3);
+    EXPECT_NEAR(g.data<float>()[2], 0.0f, 1e-4);
+    EXPECT_NEAR(g.data<float>()[3], 1.0f / (0.3f * 0.7f), 2e-3);
+}
+
+// N-02: MFCC backward now uses the true STFT adjoint (stft_adjoint = STFT^H
+// without window-sum normalisation) instead of istft (the inverse). STFTBackward
+// routes through the same stft_adjoint_impl, so gradchecking STFT validates the
+// adjoint MFCC reuses. Real input, complex output → gradcheck_complex.
+TEST_P(GradCheckComprehensiveTest, STFTAdjoint) {
+    auto x = make_centered_var({16}, device);
+    auto f = [](const Variable& v) {
+        return fft_autograd::stft(v, /*n_fft=*/8, /*hop=*/4);
+    };
+    EXPECT_TRUE(tenzor_test::gradcheck_complex(f, x, 1e-3, 5e-2, 5e-2));
+}
+
 INSTANTIATE_BACKEND_TESTS(GradCheckComprehensiveTest);
+
+// M-01: complex sqrt backward must use the Wirtinger conjugate:
+// grad_input = grad_output / (2 * conj(sqrt(z))). Complex sqrt is a CPU forward
+// path, so this is a CPU-targeted check. The second assertion proves the test is
+// discriminating (the pre-fix formula g/(2*sqrt(z)) genuinely differs here).
+class ComplexCpuAutogradTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        ::tenzor::testing::EnsureInitialized();
+        set_grad_enabled(true);
+    }
+};
+
+TEST_F(ComplexCpuAutogradTest, SqrtComplexConjugation) {
+    const auto dev = Device::cpu();
+    auto re = zeros({3}, DType::Float32, dev);
+    auto im = zeros({3}, DType::Float32, dev);
+    re.data<float>()[0] = 1.5f; re.data<float>()[1] = 2.0f; re.data<float>()[2] = 0.7f;
+    im.data<float>()[0] = 0.4f; im.data<float>()[1] = -0.3f; im.data<float>()[2] = 0.9f;
+    Variable z(tenzor::complex(re, im), true);
+    auto y = sqrt(z);
+    auto g = tenzor::complex(full({3}, 1.0f, DType::Float32, dev),
+                             full({3}, 0.5f, DType::Float32, dev));
+    y.backward(g);
+    auto grad = z.grad().value();
+    auto expected = tenzor::div(g, tenzor::mul(tenzor::conj(y.tensor()), 2.0));
+    float max_err = tenzor::max(tenzor::abs(tenzor::sub(grad, expected))).item<float>();
+    EXPECT_LT(max_err, 1e-5f);
+    // Sanity: conjugation must matter for these inputs, else the test is vacuous.
+    auto unfixed = tenzor::div(g, tenzor::mul(y.tensor(), 2.0));
+    float conj_gap = tenzor::max(tenzor::abs(tenzor::sub(expected, unfixed))).item<float>();
+    EXPECT_GT(conj_gap, 1e-3f);
+}
+
+// L-01: EigvalshBackward for a complex Hermitian input must use the conjugate
+// transpose V^H (like EighBackward), not V^T. Verify by consistency: the
+// gradient of sum(eigenvalues) via eigvalsh must equal the eigh path (whose
+// backward already used adjoint). A V^T bug would make the two disagree.
+TEST_F(ComplexCpuAutogradTest, EigvalshComplexMatchesEigh) {
+    const auto dev = Device::cpu();
+    const int64_t n = 3;
+    auto B = tenzor::complex(randn({n, n}, DType::Float32, dev),
+                             randn({n, n}, DType::Float32, dev));
+    auto Bh = tenzor::conj(tenzor::transpose(B, 0, 1));
+    auto A = tenzor::mul(tenzor::add(B, Bh), 0.5);  // Hermitian
+
+    Variable a1(A, true);
+    auto w1 = eigvalsh(a1);
+    sum(w1).backward();
+    auto g1 = a1.grad().value();
+
+    Variable a2(A, true);
+    auto eh = eigh(a2);
+    sum(std::get<0>(eh)).backward();
+    auto g2 = a2.grad().value();
+
+    float err = tenzor::max(tenzor::abs(tenzor::sub(g1, g2))).item<float>();
+    EXPECT_LT(err, 1e-4f);
+}

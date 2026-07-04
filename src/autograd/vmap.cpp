@@ -253,8 +253,12 @@ void init_builtin_batching_rules() {
     // ====================================================================
     // Concatenation/Indexing ops
     // ====================================================================
-    register_batching_rule("CatBackward", passthrough_rule);
-    register_batching_rule("SliceBackward", passthrough_rule);
+    // V-01: SliceBackward carries a `dim` attr that indexes the *unbatched*
+    // view. vmap prepends a batch axis, so a raw passthrough would slice along
+    // the batch axis instead of the user's intended axis. dim_shifted_passthrough
+    // runs func per slice (so the user's own `dim` already indexes the correct
+    // unbatched axis) and stitches the batched result back together.
+    register_batching_rule("SliceBackward", dim_shifted_passthrough(AttrKey::Dim));
     // R.4: Gather / IndexSelect carry a `dim` attr AND an index tensor that
     // the user captures in the closure. The captured index is shaped for
     // the *unbatched* input; broadcasting it across the batch axis would
@@ -271,6 +275,13 @@ void init_builtin_batching_rules() {
     register_batching_rule("IndexSelectBackward", multi_input_dim_loop_rule);
     register_batching_rule(OpId::Gather,      multi_input_dim_loop_rule);
     register_batching_rule(OpId::IndexSelect, multi_input_dim_loop_rule);
+    // V-01: CatBackward concatenates variadic inputs along a `dim` that indexes
+    // the unbatched view; the sibling operands are captured in the user's
+    // closure rather than exposed via saved_attributes. A raw passthrough would
+    // concat along the prepended batch axis. Like Gather/Scatter, the
+    // loop-and-stack fallback runs func per slice so both the concat dim and the
+    // captured operands line up with each unbatched sample.
+    register_batching_rule("CatBackward", multi_input_dim_loop_rule);
     register_batching_rule("WhereBackward", passthrough_rule);
 
     // ====================================================================
@@ -395,29 +406,46 @@ void init_builtin_batching_rules() {
     // ====================================================================
     // Loss functions: operate element-wise or along a dim
     // ====================================================================
-    register_batching_rule("MSELossBackward", passthrough_rule);
-    register_batching_rule("L1LossBackward", passthrough_rule);
-    register_batching_rule("CrossEntropyLossBackward", passthrough_rule);
-    register_batching_rule("BCELossBackward", passthrough_rule);
-    register_batching_rule("NLLLossBackward", passthrough_rule);
+    // V-03: with reduction != none, the loss collapses its whole input to a
+    // single scalar. A raw passthrough on the batched tensor therefore reduces
+    // across the prepended batch axis too, so vmap(loss) returns ONE scalar for
+    // the entire batch instead of B per-sample losses (and one shared grad).
+    // The loop-and-stack fallback runs func per slice, yielding B independent
+    // per-sample results and per-sample grads that stack back into shape (B, ...).
+    register_batching_rule("MSELossBackward", multi_input_dim_loop_rule);
+    register_batching_rule("L1LossBackward", multi_input_dim_loop_rule);
+    register_batching_rule("CrossEntropyLossBackward", multi_input_dim_loop_rule);
+    register_batching_rule("BCELossBackward", multi_input_dim_loop_rule);
+    register_batching_rule("NLLLossBackward", multi_input_dim_loop_rule);
 
     // ====================================================================
     // Linalg ops: batch dim is naturally the leading dimension
     // ====================================================================
-    register_batching_rule("DetBackward", passthrough_rule);
-    register_batching_rule("InvBackward", passthrough_rule);
-    register_batching_rule("SolveBackward", passthrough_rule);
-    register_batching_rule("CholeskyBackward", passthrough_rule);
-    register_batching_rule("SvdBackward", passthrough_rule);
-    register_batching_rule("QrBackward", passthrough_rule);
+    // V-02: these ops treat the trailing two axes as the matrix. A raw
+    // passthrough discards batch_dim, so for batch_dim != 0 the prepended batch
+    // axis is mistaken for a matrix axis (and for batch_dim == 0 they only work
+    // by luck of already being batch-first). shape_passthrough moves the batch
+    // axis to the front, applies the op, and moves it back — the same treatment
+    // Conv/Norm/Pool get — so any batch_dim is handled correctly.
+    register_batching_rule("DetBackward", shape_passthrough);
+    register_batching_rule("InvBackward", shape_passthrough);
+    register_batching_rule("SolveBackward", shape_passthrough);
+    register_batching_rule("CholeskyBackward", shape_passthrough);
+    register_batching_rule("SvdBackward", shape_passthrough);
+    register_batching_rule("QrBackward", shape_passthrough);
 
     // ====================================================================
-    // FFT ops: operate on specific dim, batch-independent
+    // FFT ops: operate on a specific `dim` that indexes the unbatched view
     // ====================================================================
-    register_batching_rule("FFTBackward", passthrough_rule);
-    register_batching_rule("IFFTBackward", passthrough_rule);
-    register_batching_rule("RFFTBackward", passthrough_rule);
-    register_batching_rule("IRFFTBackward", passthrough_rule);
+    // V-01: each FFT variant transforms along a saved `dim`. vmap prepends a
+    // batch axis, so a raw passthrough would transform along the batch axis for
+    // a positive user `dim`. dim_shifted_passthrough runs func per slice so the
+    // user's own `dim` already indexes the correct unbatched axis.
+    auto fft_dim_rule = dim_shifted_passthrough(AttrKey::Dim);
+    register_batching_rule("FFTBackward", fft_dim_rule);
+    register_batching_rule("IFFTBackward", fft_dim_rule);
+    register_batching_rule("RFFTBackward", fft_dim_rule);
+    register_batching_rule("IRFFTBackward", fft_dim_rule);
 
     // ====================================================================
     // Additional indexing ops

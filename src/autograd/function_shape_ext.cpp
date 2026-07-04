@@ -597,8 +597,8 @@ auto RepeatBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto RepeatBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
 
-    // saved_tensors_[0] = original shape (1D Int64)
-    // saved_tensors_[1] = repeats (1D Int64)
+    // saved_tensors_[0] = original (un-normalized) input shape (1D Int64)
+    // saved_tensors_[1] = repeats as passed by the caller (1D Int64)
     const auto& shape_tensor = saved_tensors_[0];
     auto shape_ptr = shape_tensor.data<int64_t>();
     auto original_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
@@ -607,38 +607,50 @@ auto RepeatBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     auto repeats_ptr = repeats_tensor.data<int64_t>();
     auto repeats = std::vector<int64_t>(repeats_ptr, repeats_ptr + repeats_tensor.numel());
 
-    // To compute gradient: reshape grad so each repeated dimension is split into
-    // (repeat_count, original_dim_size), then sum over the repeat_count dimension.
-    //
-    // For each dimension i:
-    //   grad_shape[i] = repeats[i] * original_shape[i]
-    // We reshape to interleave repeat and original dims, then sum.
+    // Normalise rank exactly as the forward does (src/ops/transform.cpp repeat()):
+    //   - repeats.size() > input.ndim(): the forward leading-unsqueezes the input
+    //     (prepends 1s) up to repeats.size();
+    //   - repeats.size() < input.ndim(): the forward front-pads repeats with 1s.
+    // In both cases the effective input shape and repeats are front-padded with
+    // 1s to the common rank `nd`, and output dim i = norm_shape[i] * norm_repeats[i].
+    const size_t nd = std::max(repeats.size(), original_shape.size());
+    std::vector<int64_t> normalized_shape(nd, 1);
+    std::vector<int64_t> normalized_repeats(nd, 1);
+    for (size_t i = 0; i < original_shape.size(); ++i) {
+        normalized_shape[nd - original_shape.size() + i] = original_shape[i];
+    }
+    for (size_t i = 0; i < repeats.size(); ++i) {
+        normalized_repeats[nd - repeats.size() + i] = repeats[i];
+    }
 
-    auto ndim = original_shape.size();
-
-    // Build reshape: [repeats[0], orig[0], repeats[1], orig[1], ...]
+    // Reshape grad so each output dim splits into (repeat_count, original_size):
+    //   [r0, s0, r1, s1, ...]   (length 2*nd)
     std::vector<int64_t> expanded_shape;
-    expanded_shape.reserve(2 * ndim);
-    for (size_t i = 0; i < ndim; ++i) {
-        expanded_shape.push_back(repeats[i]);
-        expanded_shape.push_back(original_shape[i]);
+    expanded_shape.reserve(2 * nd);
+    for (size_t i = 0; i < nd; ++i) {
+        expanded_shape.push_back(normalized_repeats[i]);
+        expanded_shape.push_back(normalized_shape[i]);
     }
 
     auto grad_reshaped = reshape(grad, expanded_shape);
 
-    // Sum over the repeat dimensions (dims 0, 2, 4, ...)
-    // We need to sum from the highest dim first to avoid shifting indices
+    // Sum out the repeat axes (even positions 0, 2, 4, ...), highest-first so the
+    // remaining even axes keep their indices as higher axes collapse away.
     auto result = grad_reshaped;
-    for (int64_t i = static_cast<int64_t>(ndim) - 1; i >= 0; --i) {
-        int64_t repeat_dim = 2 * i;  // The repeat count dimension
+    for (int64_t i = static_cast<int64_t>(nd) - 1; i >= 0; --i) {
+        int64_t repeat_dim = 2 * i;
         result = tenzor::sum(result, repeat_dim, false);
     }
 
-    return {result};
+    // `result` now has shape normalized_shape; reshape back to the true input
+    // shape, dropping any leading 1s introduced by normalisation. numel is
+    // preserved because only 1s were prepended.
+    return {reshape(result, original_shape)};
 }
 
 auto RepeatBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // repeat backward: reshape grad to split repeated dims, sum over repeat dims
+    // repeat backward: reshape grad to split repeated dims, sum over repeat dims.
+    // Must normalise rank identically to the forward (see backward() above).
     const auto& shape_tensor = saved_tensors_[0];
     auto shape_ptr = shape_tensor.data<int64_t>();
     auto original_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
@@ -647,26 +659,35 @@ auto RepeatBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     auto repeats_ptr = repeats_tensor.data<int64_t>();
     auto repeats = std::vector<int64_t>(repeats_ptr, repeats_ptr + repeats_tensor.numel());
 
-    auto ndim = original_shape.size();
+    const size_t nd = std::max(repeats.size(), original_shape.size());
+    std::vector<int64_t> normalized_shape(nd, 1);
+    std::vector<int64_t> normalized_repeats(nd, 1);
+    for (size_t i = 0; i < original_shape.size(); ++i) {
+        normalized_shape[nd - original_shape.size() + i] = original_shape[i];
+    }
+    for (size_t i = 0; i < repeats.size(); ++i) {
+        normalized_repeats[nd - repeats.size() + i] = repeats[i];
+    }
 
-    // Build reshape: [repeats[0], orig[0], repeats[1], orig[1], ...]
+    // Build reshape: [r0, s0, r1, s1, ...]  (length 2*nd)
     std::vector<int64_t> expanded_shape;
-    expanded_shape.reserve(2 * ndim);
-    for (size_t i = 0; i < ndim; ++i) {
-        expanded_shape.push_back(repeats[i]);
-        expanded_shape.push_back(original_shape[i]);
+    expanded_shape.reserve(2 * nd);
+    for (size_t i = 0; i < nd; ++i) {
+        expanded_shape.push_back(normalized_repeats[i]);
+        expanded_shape.push_back(normalized_shape[i]);
     }
 
     auto grad_reshaped = tenzor::reshape(grad_outputs[0], expanded_shape);
 
-    // Sum over repeat dimensions (0, 2, 4, ...) from highest to avoid index shift
+    // Sum over repeat axes (0, 2, 4, ...) highest-first to avoid index shift.
     Variable result = grad_reshaped;
-    for (int64_t i = static_cast<int64_t>(ndim) - 1; i >= 0; --i) {
+    for (int64_t i = static_cast<int64_t>(nd) - 1; i >= 0; --i) {
         int64_t repeat_dim = 2 * i;
         result = tenzor::sum(result, repeat_dim, false);
     }
 
-    return {result};
+    // Reshape back to the true input shape, dropping normalisation's leading 1s.
+    return {tenzor::reshape(result, original_shape)};
 }
 
 // ---------------------------------------------------------------------------
