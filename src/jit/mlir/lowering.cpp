@@ -1952,8 +1952,20 @@ auto handle_max_pool2d(LoweringContext& ctx,
     const auto d = out->dtype();
     auto [win, str, plo, phi] = pool_window_for_2d(node, x->shape());
 
-    std::string init_max = "0xFF800000";
-    if (d == ::tenzor::DType::Float64) init_max = "0xFFF0000000000000";
+    // -inf init for the max reduce-window, as a width-correct hex bit pattern.
+    // The literal must match the element bit-width or iree-compile rejects the
+    // module (hex float out of range) — f16/bf16 need 16-bit patterns, not the
+    // 32-bit f32 one. Mirrors handle_max's per-dtype init.
+    std::string init_max;
+    if (d == ::tenzor::DType::Float64) {
+        init_max = "0xFFF0000000000000";  // IEEE 754 binary64 -inf
+    } else if (d == ::tenzor::DType::Float16) {
+        init_max = "0xFC00";  // IEEE 754 binary16 -inf
+    } else if (d == ::tenzor::DType::BFloat16) {
+        init_max = "0xFF80";  // bfloat16 -inf
+    } else {
+        init_max = "0xFF800000";  // IEEE 754 binary32 -inf (Float32 / fallback)
+    }
     auto init_name = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, init_name, init_max, {}, d);
     body << '\n';

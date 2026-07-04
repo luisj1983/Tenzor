@@ -3770,7 +3770,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             // Inputs: [condition, then_inputs...]
             // condition is a scalar bool tensor
             if (!input_vars.empty() && node->then_branch()) {
-                bool cond = input_vars[0].tensor().to(DType::Float32).item<float>() != 0.0f;
+                // Move the condition to the host BEFORE the Float32 narrowing.
+                // A device-side Float32 cast lets CUDA/ROCm canonicalize a NaN
+                // condition to 0, flipping the taken branch versus CPU (see the
+                // eager cond()/while_loop() in control_flow.cpp, which use the
+                // same .to(Device::cpu()).to(Float32) idiom). This interpreter is
+                // the deployed compiled path, so it must make the identical branch
+                // decision as eager on every backend.
+                bool cond = input_vars[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
                 auto& branch = cond ? node->then_branch() : node->else_branch();
                 if (branch) {
                     // Pass remaining inputs to the chosen branch
@@ -3797,7 +3804,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::GuardNode: {
             if (!input_vars.empty()) {
                 // GuardNode checks a boolean condition; if false, triggers retrace
-                bool guard_val = input_vars[0].tensor().to(DType::Float32).item<float>() != 0.0f;
+                bool guard_val = input_vars[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
                 bool expected = node->get_bool_attr("expected_value");
                 if (guard_val != expected) {
                     needs_retrace_ = true;
@@ -3938,8 +3945,8 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             // Body graph outputs: [condition, carried_0, carried_1, ...]
             // Loop outputs: [final_carried_0, final_carried_1, ...]
             if (input_vars.size() >= 2 && node->body()) {
-                int64_t max_iter = static_cast<int64_t>(input_vars[0].tensor().to(DType::Float32).item<float>());
-                bool cond = input_vars[1].tensor().to(DType::Float32).item<float>() != 0.0f;
+                int64_t max_iter = static_cast<int64_t>(input_vars[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>());
+                bool cond = input_vars[1].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
 
                 // The iteration counter / condition scalars fed to the body must
                 // live on the SAME device the loop runs on, otherwise the body's
@@ -3971,7 +3978,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
                     // body_outputs[0] = new condition, rest = updated carried values
                     if (!body_outputs.empty()) {
-                        cond = body_outputs[0].tensor().to(DType::Float32).item<float>() != 0.0f;
+                        cond = body_outputs[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
                         carried.clear();
                         for (size_t j = 1; j < body_outputs.size(); ++j) {
                             carried.push_back(std::move(body_outputs[j]));

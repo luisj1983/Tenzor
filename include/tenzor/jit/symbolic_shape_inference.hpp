@@ -69,6 +69,9 @@ private:
     /// Infer output shape for Transpose by swapping two dimensions.
     auto infer_transpose(const Node* node) -> std::vector<SymbolicShape>;
 
+    /// Permute: reorder axes per the "dims" permutation attribute.
+    auto infer_permute(const Node* node) -> std::vector<SymbolicShape>;
+
     /// Infer output shape for Linear: (*, in_features) -> (*, out_features).
     auto infer_linear(const Node* node) -> std::vector<SymbolicShape>;
 

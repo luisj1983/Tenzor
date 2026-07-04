@@ -692,7 +692,13 @@ private:
         Variable cond_var = eval(*iff.cond, env);
         Tensor cond_t = cond_var.tensor();
         // item<float>() requires a single-element Float32 tensor; the condition
-        // inherits ctx_dtype_ so it may be Float64/Float16/BFloat16.
+        // inherits ctx_dtype_ so it may be Float64/Float16/BFloat16, and it may
+        // live on a GPU (ctx_device_). Move it to the host BEFORE the Float32
+        // narrowing: a device-side cast can canonicalize a NaN condition to 0 on
+        // CUDA/ROCm, baking a different branch into the graph depending on the
+        // scripting device. ForStmt/NumberExpr below already use this CPU-first
+        // idiom.
+        cond_t = cond_t.to(Device::cpu());
         if (cond_t.dtype() != DType::Float32) cond_t = cond_t.to(DType::Float32);
         bool cond_val = cond_t.item<float>() != 0.0f;
         const auto& body = cond_val ? iff.then_body : iff.else_body;

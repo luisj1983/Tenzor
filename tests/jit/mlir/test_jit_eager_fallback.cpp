@@ -272,3 +272,43 @@ TEST(JitRocmArch, DetectedArchMatchesDeviceAndCompiles) {
     EXPECT_GT(fs::file_size(artifact.vmfb_path), 0U);
     fs::remove_all(tmp);
 }
+
+// ── Fix #3: a graph break / empty trace makes trace_and_compile() return
+//    nullptr (NOT an exception). On the nvrtc inference path this previously
+//    slipped past the strict check and silently degraded to eager, while the
+//    mlir path threw — an inconsistent strict contract across backends and
+//    between inference and training. Under strict it must now throw; under
+//    non-strict it degrades to eager (correct result). An identity function
+//    produces an empty trace (num_nodes()==0 -> nullptr). ────────────────────
+TEST(JitEagerFallback, EmptyTraceHonorsStrictNvrtc) {
+    ensure_core_init();
+    auto identity = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return x;  // no traceable ops -> empty graph -> trace_and_compile==nullptr
+    };
+    auto x_t = ::tenzor::full({4}, 1.5F, ::tenzor::DType::Float32);
+    ::tenzor::Variable x(x_t, /*requires_grad=*/false);
+
+    // Strict: must THROW rather than silently degrade to eager.
+    {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "nvrtc";
+        cfg.strict  = true;
+        ::tenzor::jit::CompiledFunction compiled(
+            ::tenzor::jit::CompiledFunction::FnType(identity), cfg);
+        EXPECT_THROW({ (void)compiled(x); }, std::exception)
+            << "strict nvrtc must throw on an empty-trace/graph-break nullptr";
+    }
+    // Non-strict: degrades to eager, no throw, correct result.
+    {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "nvrtc";
+        cfg.strict  = false;
+        ::tenzor::jit::CompiledFunction compiled(
+            ::tenzor::jit::CompiledFunction::FnType(identity), cfg);
+        ::tenzor::Variable out;
+        ASSERT_NO_THROW({ out = compiled(x); });
+        const auto diff =
+            ::tenzor::max(::tenzor::abs(x.tensor() - out.tensor())).item<float>();
+        EXPECT_LT(diff, 1e-6F);
+    }
+}

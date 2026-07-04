@@ -47,6 +47,21 @@ struct MlirInvokerCache {};
 
 }  // namespace mlir_detail
 
+namespace {
+// Strict mode is on if the per-call config requests it OR the global
+// TENZOR_JIT_STRICT env var is set to a non-empty, non-"0" value. Centralized so
+// every JIT fallback site — compile failure, graph break / empty trace, and
+// replay failure, on both the nvrtc and mlir backends — applies the identical
+// rule. A graph break that escaped this check would silently degrade to eager on
+// one path while another path throws: an inconsistent strict contract across
+// backends and between inference and training.
+auto jit_strict_enabled(bool config_strict) -> bool {
+    if (config_strict) return true;
+    const char* s = std::getenv("TENZOR_JIT_STRICT");
+    return s && *s && *s != '0';
+}
+}  // namespace
+
 // ============================================================================
 // CompiledFunction
 // ============================================================================
@@ -76,6 +91,16 @@ CompiledFunction::CompiledFunction(FnTypeN fn, CompileConfig config)
             R"_(. Valid backends: "nvrtc", "mlir")_");
     }
     if (config_.backend == "mlir") {
+        // NOTE: the IREE target string is deliberately NOT rejected here. An
+        // unknown/mis-cased target is validated at the compile boundary
+        // (mj::compile_mlir throws a clear JitCompileError listing the valid
+        // canonical names), and CompiledFunction treats an unmappable target
+        // string uniformly with an unmappable DEVICE (OneAPI/MPS): under strict
+        // mode the error rethrows; under non-strict it degrades to eager with a
+        // WARN (see mlir_invoke's C1/C2 safety net). Throwing at construction
+        // would break that uniformity — an OneAPI device (target="auto") degrades
+        // gracefully, so a bogus target string must too — and is redundant with
+        // the compile-boundary validation.
 #ifndef TENZOR_HAS_MLIR_JIT
         throw std::runtime_error(
             "CompiledFunction: backend=\"mlir\" requested but Tenzor was "
@@ -268,33 +293,47 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
     // Always execute eagerly first for correctness
     auto result = fn_(inputs);
 
-    // Attempt compilation in the background
+    // Attempt compilation in the background. Two distinct "no compiled graph"
+    // outcomes must both honour strict mode: (a) trace_and_compile THROWS on a
+    // pipeline failure, and (b) it returns nullptr on a graph break / empty
+    // trace. Case (b) is NOT an exception, so it must be handled explicitly —
+    // otherwise a graph break silently degrades to eager on this nvrtc inference
+    // path while the mlir path (mlir_invoke_impl) throws, an inconsistent strict
+    // contract across backends.
+    std::shared_ptr<CompiledModule> compiled;
+    bool compile_threw = false;
     try {
-        auto compiled = trace_and_compile(inputs);
-        if (compiled) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (cache_.size() < static_cast<size_t>(config_.max_retraces)) {
-                cache_[key] = compiled;
-            }
-        }
+        compiled = trace_and_compile(inputs);
     } catch (const std::exception& e) {
         // Compilation failed. The eager result above is already correct, but we
         // do not want this to be silent: it would hide regressions in the JIT
-        // pipeline. Honour strict mode either from the per-call config or from
-        // the global TENZOR_JIT_STRICT env var. In non-strict mode log a WARN
-        // every time so callers can see exactly which graphs fail.
-        bool strict = config_.strict;
-        if (!strict) {
-            if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
-                strict = true;
-            }
-        }
-        if (strict) {
+        // pipeline. In non-strict mode log a WARN every time so callers can see
+        // exactly which graphs fail.
+        if (jit_strict_enabled(config_.strict)) {
             throw;
         }
         TENZOR_LOG_WARN("JIT compilation failed ({} backend, target={}): {}. "
                         "Falling back to eager execution.",
                         config_.backend, config_.target, e.what());
+        compile_threw = true;
+    }
+
+    if (!compile_threw) {
+        if (compiled) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cache_.size() < static_cast<size_t>(config_.max_retraces)) {
+                cache_[key] = compiled;
+            }
+        } else if (jit_strict_enabled(config_.strict)) {
+            throw std::runtime_error(
+                "JIT trace produced no compiled graph (graph break or empty "
+                "trace) and strict mode is enabled (" + config_.backend +
+                " backend, config.strict / TENZOR_JIT_STRICT)");
+        } else {
+            TENZOR_LOG_WARN("JIT trace produced no compiled graph ({} backend): "
+                            "graph break or empty trace. Falling back to eager "
+                            "execution.", config_.backend);
+        }
     }
 
     return result;
@@ -348,7 +387,19 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
             return fn_(inputs);
         }
         if (!compiled_module) {
-            // Graph break / empty trace → run eager autograd (same backend).
+            // Graph break / empty trace (nullptr, NOT an exception). Honour
+            // strict mode here too: otherwise training silently degrades to eager
+            // autograd while the same config would throw on the mlir inference
+            // path — an inconsistent strict contract between inference and
+            // training. In non-strict mode WARN so the fallback is visible.
+            if (jit_strict_enabled(config_.strict)) {
+                throw std::runtime_error(
+                    "JIT grad trace produced no compiled graph (graph break or "
+                    "empty trace) and strict mode is enabled");
+            }
+            TENZOR_LOG_WARN("JIT grad trace produced no compiled graph: graph "
+                            "break or empty trace. Falling back to eager autograd "
+                            "on the input's backend.");
             return fn_(inputs);
         }
         std::lock_guard<std::mutex> lock(mutex_);

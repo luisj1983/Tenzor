@@ -382,3 +382,46 @@ TEST(JitTraceOps, MappedActivationsMatchEager) {
         [](const Variable& x) { return tenzor::softplus(x, 1.0f); },
         [](Device d) { return randn({4, 8}, DType::Float32, d); });
 }
+
+// Regression (JIT review Fix #1): expand/broadcast_to and cat must be captured
+// in the trace on EVERY backend, INCLUDING CPU. They previously bypassed dispatch
+// on CPU (inline materialization into a zeros()/empty() output), so the tracer —
+// which hooks the dispatch layer — never saw them and their output was frozen as
+// a trace-time constant, severing the data dependency on the input. The compiled
+// graph then returned the WARMUP's values for any later input. Warm up with input
+// A, replay with a DIFFERENT input B (same shape -> same cache key), and require
+// the compiled output to track B (== eager(B)); a frozen constant returns
+// eager(A) and fails. The num_cached() assert rejects a silent eager passthrough.
+TEST(JitTraceOps, ExpandCatTrackInputNotFrozen) {
+    auto make_vec = [](std::vector<float> vals, Device dev) {
+        auto t = zeros({static_cast<int64_t>(vals.size())}, DType::Float32,
+                       Device::cpu());
+        auto* d = t.data<float>();
+        for (size_t i = 0; i < vals.size(); ++i) d[i] = vals[i];
+        return t.to(dev);
+    };
+    auto fn = [](const Variable& x) -> Variable {
+        // x: [3] -> broadcast to [2,3] -> cat with itself along dim 0 -> [4,3].
+        auto b = tenzor::expand(x, {2, 3});
+        return tenzor::cat({b, b}, 0);
+    };
+    for (const auto& dev : get_available_backends()) {
+        auto compiled = jit::compile(fn);
+        // Warmup with A: cache miss -> eager + build/cache graph.
+        auto a = make_vec({1.0f, 2.0f, 3.0f}, dev);
+        (void)compiled(Variable(a, false));
+        dev.synchronize();
+        // Replay with a DIFFERENT input B.
+        auto b = make_vec({10.0f, 20.0f, 30.0f}, dev);
+        auto out = compiled(Variable(b, false));
+        dev.synchronize();
+        ASSERT_GT(compiled.num_cached(), 0u)
+            << "expand+cat graph was not compiled/cached on " << dev.to_string();
+        auto eager_b = fn(Variable(b, false)).tensor().to(Device::cpu());
+        auto out_cpu = out.tensor().to(Device::cpu());
+        auto diff = max(abs(eager_b - out_cpu)).template item<float>();
+        EXPECT_LT(diff, 1e-5f)
+            << "compiled expand+cat did not track input B (frozen constant?) on "
+            << dev.to_string();
+    }
+}

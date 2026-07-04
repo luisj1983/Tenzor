@@ -83,10 +83,20 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::Mean:
         case OpType::Max:
         case OpType::Min:
+        // Var/Std/Prod are axis reductions carrying the same dim/dims/keepdim
+        // attrs (the tracing interceptor copies them generically), so they share
+        // the reduction shape rule. Without this they fell to `default -> {}` and
+        // froze downstream dynamic dims to the trace-time size in SymbolicTracePass.
+        case OpType::Prod:
+        case OpType::Var:
+        case OpType::Std:
             return infer_reduction(node);
 
         case OpType::Transpose:
             return infer_transpose(node);
+
+        case OpType::Permute:
+            return infer_permute(node);
 
         case OpType::Linear:
             return infer_linear(node);
@@ -453,6 +463,35 @@ auto SymbolicShapeInference::infer_transpose(const Node* node) -> std::vector<Sy
     }
 
     return {std::move(sym_shape)};
+}
+
+
+auto SymbolicShapeInference::infer_permute(const Node* node) -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.empty() || !node->has_attr("dims")) {
+        return {};
+    }
+
+    auto dims = node->get_vec_attr("dims");
+    auto& in_shape = input_shapes[0];
+    int64_t rank = static_cast<int64_t>(in_shape.rank());
+    std::vector<SymbolicDim> out_dims(dims.size());
+
+    // Mirror Graph::infer_symbolic_types (graph.cpp) and the concrete infer_types
+    // path: normalize negative dims and require every index in range. A bare
+    // `< rank` signed check would let negatives index out of bounds and leave
+    // out-of-range axes as default-constructed dims.
+    for (size_t i = 0; i < dims.size(); ++i) {
+        int64_t d = dims[i];
+        if (d < 0) d += rank;
+        if (d >= 0 && d < rank) {
+            out_dims[i] = in_shape[static_cast<size_t>(d)];
+        } else {
+            return {};  // invalid permutation index — no confident inference
+        }
+    }
+
+    return {SymbolicShape(std::move(out_dims))};
 }
 
 // ============================================================================

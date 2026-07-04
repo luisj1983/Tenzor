@@ -673,7 +673,13 @@ auto slice_multi_kernel(const Tensor& input,
 }
 
 auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape) -> Tensor {
-    // Expand creates a view with stride=0 for broadcast dimensions
+    // Build the stride-0 broadcast view (dim of size 1 -> stride 0), then
+    // MATERIALIZE it into a packed contiguous buffer. This matches the CUDA
+    // expand kernel (expand_kernel_device writes a real replicated buffer) and
+    // the historical CPU public-op path, so expand() is identical across
+    // backends. Materializing also prevents a stride-0 view from flowing into
+    // downstream kernels that read data<T>() without honouring strides (the
+    // same hazard repeat_kernel/roll_kernel guard against).
     const auto& in_shape = input.shape();
     const auto& in_strides = input.strides();
     int64_t ndim_out = static_cast<int64_t>(target_shape.size());
@@ -695,11 +701,14 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape
         // else: new leading dimension, stride stays 0
     }
 
-    Tensor result;
-    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
-    result.mutable_shape() = target_shape;
-    result.mutable_strides() = new_strides;
-    return result;
+    Tensor view;
+    TensorAccessor::get_impl_mutable(view) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    view.mutable_shape() = target_shape;
+    view.mutable_strides() = new_strides;
+
+    // contiguous_kernel walks the (possibly stride-0) view and copies each
+    // logical element, replicating broadcast dimensions into a dense output.
+    return contiguous_kernel(view);
 }
 
 auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor {

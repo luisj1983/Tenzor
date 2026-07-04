@@ -448,7 +448,8 @@ void register_jit(py::module_& m) {
             py::call_guard<py::gil_scoped_release>());
 
     // Compile API (torch.compile equivalent)
-    jit.def("compile", [](py::function fn, bool fullgraph, std::string mode) {
+    jit.def("compile", [](py::function fn, bool fullgraph, std::string mode,
+                          std::string backend, std::string target, bool strict) {
         // The C++ side stores the callable in N-input form; the Python
         // wrapper unpacks the span as positional arguments so user code
         // can keep writing `def f(x):` or `def f(x, y, z):` naturally.
@@ -483,6 +484,15 @@ void register_jit(py::module_& m) {
         tenzor::jit::CompileConfig config;
         config.fullgraph = fullgraph;
         config.mode = std::move(mode);
+        // Expose backend/target/strict so tz.compile is consistent with the
+        // @tz.jit decorator (jit.compile_function): both default to the portable
+        // "mlir" backend (real cross-backend compilation, incl. CPU via IREE
+        // llvm-cpu) instead of "nvrtc" (which has no CPU codegen and only graph-
+        // breaks to eager off CUDA/ROCm). strict is settable here too so a user
+        // can opt into hard failures on a coverage gap.
+        config.backend = std::move(backend);
+        config.target  = std::move(target);
+        config.strict  = strict;
 
         auto compiled = std::make_shared<tenzor::jit::CompiledFunction>(
             tenzor::jit::CompiledFunction::FnTypeN(std::move(cpp_fn)),
@@ -505,18 +515,28 @@ void register_jit(py::module_& m) {
     py::arg("fn"),
     py::arg("fullgraph") = false,
     py::arg("mode") = "default",
+    py::arg("backend") = "mlir",
+    py::arg("target") = "auto",
+    py::arg("strict") = false,
     "Compile a function for automatic graph capture and optimization.\n"
     "First call traces and compiles; subsequent calls use cached compiled graph.\n"
     "Shape mismatches trigger recompilation (up to 8 shapes cached).\n"
-    "Accepts any number of positional Variable arguments.");
+    "Accepts any number of positional Variable arguments.\n"
+    "backend: \"mlir\" (default, portable IREE path incl. CPU) or \"nvrtc\".\n"
+    "target: IREE target for the mlir backend (\"auto\" derives from device).\n"
+    "strict: if True, raise instead of degrading to eager on a coverage gap.");
 
     // tenzor.compile alias
-    m.def("compile", [jit](py::function fn, bool fullgraph, std::string mode) {
-        return jit.attr("compile")(fn, fullgraph, mode);
+    m.def("compile", [jit](py::function fn, bool fullgraph, std::string mode,
+                           std::string backend, std::string target, bool strict) {
+        return jit.attr("compile")(fn, fullgraph, mode, backend, target, strict);
     },
     py::arg("fn"),
     py::arg("fullgraph") = false,
     py::arg("mode") = "default",
+    py::arg("backend") = "mlir",
+    py::arg("target") = "auto",
+    py::arg("strict") = false,
     "Compile a function for automatic graph capture (alias for jit.compile).");
 
     // compile_script — Python-subset scripting frontend

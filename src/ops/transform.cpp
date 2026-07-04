@@ -122,7 +122,6 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     }
 
     // Check all tensors have same ndim and same shape except at dim
-    int64_t total_size_at_dim = 0;
     for (const auto& t : inputs) {
         auto shape = t.shape();
         if (shape.size() != static_cast<size_t>(ndim)) {
@@ -133,87 +132,17 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
                 throw std::runtime_error("All tensors must have the same shape except in the concatenation dimension");
             }
         }
-        total_size_at_dim += shape[dim];
     }
 
-    // Create output shape
-    std::vector<int64_t> out_shape(first_shape.begin(), first_shape.end());
-    out_shape[dim] = total_size_at_dim;
-
-    // For non-CPU devices, use dispatcher to route to backend-specific implementation
-    if (inputs[0].device().type != Device::Type::CPU) {
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-
-        // Convert span to vector for dispatch
-        std::vector<Tensor> tensor_vec(inputs.begin(), inputs.end());
-        return dispatch(OpId::Cat, std::span<const Tensor>(tensor_vec), attrs)[0];
-    }
-
-    // Optimized CPU concatenation using memcpy + OpenMP
-    auto output = zeros(out_shape, common_dtype, Device::cpu());
-    auto dtype = common_dtype;
-    size_t elem_size = dtype_size(dtype);
-
-    // Calculate dimensions for chunk-based copying:
-    // outer_size = product of dims before `dim`
-    // inner_size = product of dims after `dim` (contiguous chunk size)
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= out_shape[i];
-    }
-
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) {
-        inner_size *= out_shape[i];
-    }
-
-    // Overflow check: out_shape[dim] * inner_size
-    if (inner_size > 0 && out_shape[dim] > std::numeric_limits<int64_t>::max() / inner_size) {
-        throw std::overflow_error("cat: output tensor size overflows int64_t");
-    }
-    int64_t out_slice_size = out_shape[dim] * inner_size;  // Full slice size for one outer index
-
-    char* out_base = reinterpret_cast<char*>(output.data<uint8_t>());
-
-    // Process each input tensor
-    int64_t offset_at_dim = 0;
-    for (const auto& t : inputs) {
-        auto t_cont = t.is_contiguous() ? t : t.contiguous();
-        const char* in_base = reinterpret_cast<const char*>(t_cont.data<uint8_t>());
-        auto in_shape = t_cont.shape();
-        int64_t in_dim_size = in_shape[dim];
-
-        // Fast path: dim=0 and contiguous - single large memcpy per tensor
-        if (dim == 0 && outer_size == 1) {
-            int64_t total_bytes = t_cont.numel() * elem_size;
-            int64_t out_offset = offset_at_dim * inner_size * elem_size;
-            std::memcpy(out_base + out_offset, in_base, total_bytes);
-        }
-        // General case: chunk-based copying with OpenMP
-        else {
-            int64_t copy_chunk_bytes = inner_size * elem_size;
-            int64_t total_chunks = outer_size * in_dim_size;
-
-            // Flatten the nested loops and parallelize over all chunks
-            #pragma omp parallel for if(total_chunks > 64)
-            for (int64_t chunk = 0; chunk < total_chunks; ++chunk) {
-                int64_t outer = chunk / in_dim_size;
-                int64_t d = chunk % in_dim_size;
-
-                // Input position: outer * (in_dim_size * inner_size) + d * inner_size
-                int64_t in_offset = (outer * in_dim_size + d) * inner_size * elem_size;
-                // Output position: outer * out_slice_size + (offset_at_dim + d) * inner_size
-                int64_t out_offset = (outer * out_slice_size + (offset_at_dim + d) * inner_size) * elem_size;
-
-                std::memcpy(out_base + out_offset, in_base + in_offset, copy_chunk_bytes);
-            }
-        }
-
-        offset_at_dim += in_dim_size;
-    }
-
-    return output;
+    // Dispatch uniformly on ALL devices (including CPU) so the JIT tracer, which
+    // hooks the dispatch layer, captures Cat on every backend. The previous
+    // CPU-only inline memcpy path bypassed dispatch, making the traced graph
+    // device-dependent (Cat vanished on CPU). Every backend's Cat kernel
+    // materializes the same concatenated buffer, so eager results are unchanged.
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> tensor_vec(inputs.begin(), inputs.end());
+    return dispatch(OpId::Cat, std::span<const Tensor>(tensor_vec), attrs)[0];
 }
 
 auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
@@ -410,93 +339,22 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
         repeats.insert(repeats.begin(), 1);
     }
 
-    // Calculate output shape
-    std::vector<int64_t> out_shape(ndim);
+    // Overflow guard on the output extent. The backend Repeat kernel computes
+    // out_shape[i] = in_shape[i] * repeats[i] without an overflow check, so
+    // validate here (checked_mul_i64 throws on overflow) before dispatch.
     for (int64_t i = 0; i < ndim; ++i) {
-        out_shape[i] = checked_mul_i64(shape[i], repeats[i], "repeat");
+        (void)checked_mul_i64(shape[i], repeats[i], "repeat");
     }
 
-    // For non-CPU devices, use dispatcher
-    if (padded.device().type != Device::Type::CPU) {
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Repeats, shape_to_string(repeats));
-        std::vector<Tensor> inputs = {padded};
-        return dispatch(OpId::Repeat, inputs, attrs)[0];
-    }
-
-    // CPU implementation: repeat elements along each dimension
-    // Make input contiguous for easier indexing
-    auto input_cont = padded.is_contiguous() ? padded : padded.contiguous();
-
-    // Create output tensor
-    auto output = empty(out_shape, padded.dtype(), Device::cpu());
-
-    // Calculate total elements
-    int64_t total_out = 1;
-    for (auto s : out_shape) {
-        total_out *= s;
-    }
-
-    // Calculate input strides (contiguous)
-    std::vector<int64_t> in_strides(ndim);
-    int64_t in_stride = 1;
-    for (int64_t i = ndim - 1; i >= 0; --i) {
-        in_strides[i] = in_stride;
-        in_stride *= shape[i];
-    }
-
-    // repeat is a pure element-wise memory remap, so it is dtype-agnostic: copy each
-    // element by its byte size. This supports every dtype (including unsigned ints,
-    // bool, and complex) without enumerating them.
-    const size_t esz = dtype_size(input.dtype());
-    const char* in_base = static_cast<const char*>(input_cont.data_ptr());
-    char* out_base = static_cast<char*>(output.data_ptr());
-
-    // out_coords is decomposed per element; allocate it per-thread (or once for
-    // the serial path) rather than once per output element to avoid millions of
-    // heap allocations on large tensors. TILE semantics (torch.Tensor.repeat /
-    // numpy.tile): the whole input block is tiled `repeats[i]` times along axis
-    // i, so the source coordinate wraps with modulo. (`/ repeats[i]` would be
-    // interleave, which is repeat_interleave's semantics, not repeat's.)
-#ifdef _OPENMP
-    #pragma omp parallel if (total_out > 65536)
-    {
-        std::vector<int64_t> out_coords(ndim);
-        #pragma omp for
-        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-            int64_t temp = out_idx;
-            for (int64_t i = ndim - 1; i >= 0; --i) {
-                out_coords[i] = temp % out_shape[i];
-                temp /= out_shape[i];
-            }
-            int64_t in_idx = 0;
-            for (int64_t i = 0; i < ndim; ++i) {
-                int64_t in_coord = out_coords[i] % shape[i];
-                in_idx += in_coord * in_strides[i];
-            }
-            std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
-                        in_base + static_cast<size_t>(in_idx) * esz, esz);
-        }
-    }
-#else
-    std::vector<int64_t> out_coords(ndim);
-    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-        int64_t temp = out_idx;
-        for (int64_t i = ndim - 1; i >= 0; --i) {
-            out_coords[i] = temp % out_shape[i];
-            temp /= out_shape[i];
-        }
-        int64_t in_idx = 0;
-        for (int64_t i = 0; i < ndim; ++i) {
-            int64_t in_coord = out_coords[i] % shape[i];
-            in_idx += in_coord * in_strides[i];
-        }
-        std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
-                    in_base + static_cast<size_t>(in_idx) * esz, esz);
-    }
-#endif
-
-    return output;
+    // Dispatch uniformly on ALL devices (including CPU) so the JIT tracer, which
+    // hooks the dispatch layer, captures Repeat on every backend. The previous
+    // CPU-only inline path bypassed dispatch, making the traced graph
+    // device-dependent (Repeat vanished on CPU). The Repeat kernel materializes
+    // the same tiled buffer, so eager results are unchanged.
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Repeats, shape_to_string(repeats));
+    std::vector<Tensor> inputs = {padded};
+    return dispatch(OpId::Repeat, inputs, attrs)[0];
 }
 
 auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
@@ -533,98 +391,26 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
         padded_reps[reps_offset + i] = reps[i];
     }
 
-    // Calculate output shape
-    std::vector<int64_t> out_shape(out_ndim);
+    // Overflow guard on the output extent. The backend Tile kernel (which
+    // delegates to Repeat) computes out_shape[i] = padded_shape[i] *
+    // padded_reps[i] without an overflow check, so validate here before
+    // dispatch (checked_mul_i64 throws on overflow).
     for (int64_t i = 0; i < out_ndim; ++i) {
-        out_shape[i] = checked_mul_i64(padded_shape[i], padded_reps[i], "tile");
+        (void)checked_mul_i64(padded_shape[i], padded_reps[i], "tile");
     }
 
-    // For non-CPU devices, use dispatcher. Serialize the right-aligned
-    // padded_reps (not the raw reps) so the backend kernel sees exactly the
-    // same per-dimension repetition counts the CPU path uses — otherwise
-    // CPU/GPU diverge when reps.size() != ndim (the right-alignment rule).
-    if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Reps, shape_to_string(padded_reps));
-        std::vector<Tensor> inputs = {input};
-        return dispatch(OpId::Tile, inputs, attrs)[0];
-    }
-
-    // CPU implementation: tile entire tensor along each dimension
-    // Make contiguous for easier indexing
-    auto input_cont = input.is_contiguous() ? input : input.contiguous();
-
-    // Create output tensor
-    auto output = empty(out_shape, input.dtype(), Device::cpu());
-
-    // Calculate total elements
-    int64_t total_out = 1;
-    for (auto s : out_shape) {
-        total_out *= s;
-    }
-
-    // Calculate input strides (contiguous)
-    std::vector<int64_t> in_strides(out_ndim);
-    int64_t in_stride = 1;
-    for (int64_t i = out_ndim - 1; i >= 0; --i) {
-        in_strides[i] = in_stride;
-        in_stride *= padded_shape[i];
-    }
-
-    // tile is a pure element-wise memory remap, so it is dtype-agnostic: copy
-    // each element by its byte size (mirroring repeat() above). This supports
-    // every dtype (including unsigned ints, bool, and complex) without
-    // enumerating them, matching expand()/repeat() and the non-CPU dispatch.
-    const size_t esz = dtype_size(input.dtype());
-    const char* in_base = static_cast<const char*>(input_cont.data_ptr());
-    char* out_base = static_cast<char*>(output.data_ptr());
-
-    // out_coords is allocated per-thread (or once for the serial path) instead
-    // of once per output element, avoiding per-element heap churn on large
-    // tensors (mirrors repeat() above).
-#ifdef _OPENMP
-    #pragma omp parallel if (total_out > 65536)
-    {
-        std::vector<int64_t> out_coords(out_ndim);
-        #pragma omp for
-        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-            int64_t temp = out_idx;
-            for (int64_t i = out_ndim - 1; i >= 0; --i) {
-                out_coords[i] = temp % out_shape[i];
-                temp /= out_shape[i];
-            }
-            int64_t in_idx = 0;
-            for (int64_t i = 0; i < out_ndim; ++i) {
-                int64_t in_coord = out_coords[i] % padded_shape[i];
-                in_idx += in_coord * in_strides[i];
-            }
-            std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
-                        in_base + static_cast<size_t>(in_idx) * esz, esz);
-        }
-    }
-#else
-    std::vector<int64_t> out_coords(out_ndim);
-    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-        // Calculate output coordinates
-        int64_t temp = out_idx;
-        for (int64_t i = out_ndim - 1; i >= 0; --i) {
-            out_coords[i] = temp % out_shape[i];
-            temp /= out_shape[i];
-        }
-
-        // Map to input coordinates (modulo by input shape)
-        int64_t in_idx = 0;
-        for (int64_t i = 0; i < out_ndim; ++i) {
-            int64_t in_coord = out_coords[i] % padded_shape[i];
-            in_idx += in_coord * in_strides[i];
-        }
-
-        std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
-                    in_base + static_cast<size_t>(in_idx) * esz, esz);
-    }
-#endif
-
-    return output;
+    // Dispatch uniformly on ALL devices (including CPU) so the JIT tracer, which
+    // hooks the dispatch layer, captures Tile on every backend. The previous
+    // CPU-only inline path bypassed dispatch, making the traced graph
+    // device-dependent (Tile vanished on CPU). Serialize the right-aligned
+    // padded_reps (not the raw reps) so the backend kernel sees exactly the same
+    // per-dimension repetition counts — otherwise the result would diverge when
+    // reps.size() != ndim (the right-alignment rule). The Tile kernel
+    // materializes the same tiled buffer, so eager results are unchanged.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Reps, shape_to_string(padded_reps));
+    std::vector<Tensor> inputs = {input};
+    return dispatch(OpId::Tile, inputs, attrs)[0];
 }
 
 auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
@@ -636,7 +422,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
     }
 
     // Resolve -1 entries ("keep this dim") against the input's corresponding
-    // dimension BEFORE any allocation or GPU dispatch, so the backend Expand
+    // dimension BEFORE any allocation or dispatch, so the backend Expand
     // kernel never sees a -1. PyTorch right-aligns the target shape with the
     // input shape; -1 is only valid for dimensions that already exist in the
     // input (it cannot size a new leading dimension).
@@ -655,12 +441,11 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
         }
     }
 
-    // Validate dimension compatibility for BOTH the CPU fill path and the
-    // non-CPU dispatch path. Each target dimension that maps onto an existing
-    // input dimension must either match it exactly or the input dimension must
-    // be 1 (broadcastable). Doing this above the device branch ensures the GPU
-    // Expand kernel never receives an invalid expansion that would index out
-    // of bounds (previously only the CPU fill loop performed this check).
+    // Validate dimension compatibility for the Expand kernel. Each target
+    // dimension that maps onto an existing input dimension must either match it
+    // exactly or the input dimension must be 1 (broadcastable). Doing this above
+    // dispatch ensures the backend Expand kernel never receives an invalid
+    // expansion that would index out of bounds.
     {
         int dim_offset = static_cast<int>(shape.size()) - static_cast<int>(input_shape.size());
         for (size_t i = 0; i < shape.size(); ++i) {
@@ -689,169 +474,17 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
         return input;
     }
 
-    // Use dispatcher for non-CPU devices (expand takes an input tensor)
-    if (input.device().type != Device::Type::CPU) {
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Shape, shape_to_string(shape));
-
-        std::vector<Tensor> inputs = {input};
-        return dispatch(OpId::Expand, inputs, attrs)[0];
-    }
-
-    // CPU path: Manual implementation — ensure contiguous layout
-    auto cont_input = input.is_contiguous() ? input : input.contiguous();
-    auto input_shape_vec = std::vector<int64_t>(cont_input.shape().begin(), cont_input.shape().end());
-
-    // Create output tensor on CPU
-    auto output = zeros(shape, input.dtype(), Device::cpu());
-
-    // Calculate strides
-    std::vector<int64_t> input_strides(input_shape_vec.size());
-    int64_t input_stride = 1;
-    for (int i = input_shape_vec.size() - 1; i >= 0; --i) {
-        input_strides[i] = input_stride;
-        input_stride *= input_shape_vec[i];
-    }
-
-    // Calculate total output elements
-    int64_t total_elements = 1;
-    for (auto s : shape) {
-        total_elements = checked_mul_i64(total_elements, s, "expand");
-    }
-
-    // Fill output by replicating input - dtype-aware implementation
-    if (cont_input.dtype() == DType::Float64) {
-        const double* input_data = cont_input.data<double>();
-        double* output_data = output.data<double>();
-
-        for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-            int64_t temp = out_idx;
-            int64_t in_idx = 0;
-
-            int input_dim_offset = shape.size() - input_shape_vec.size();
-
-            for (int i = shape.size() - 1; i >= 0; --i) {
-                int64_t coord = temp % shape[i];
-                temp /= shape[i];
-
-                int input_dim = i - input_dim_offset;
-                if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
-                    // Map to input dimension (handle size-1 dimensions)
-                    if (input_shape_vec[input_dim] == 1) {
-                        coord = 0;
-                    } else if (input_shape_vec[input_dim] != shape[i]) {
-                        throw std::runtime_error("Cannot expand dimension from non-1 size to different size");
-                    }
-                    in_idx += coord * input_strides[input_dim];
-                }
-            }
-
-            output_data[out_idx] = input_data[in_idx];
-        }
-    } else if (cont_input.dtype() == DType::Float16) {
-        const Float16* input_data = cont_input.data<Float16>();
-        Float16* output_data = output.data<Float16>();
-
-        for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-            int64_t temp = out_idx;
-            int64_t in_idx = 0;
-
-            int input_dim_offset = shape.size() - input_shape_vec.size();
-
-            for (int i = shape.size() - 1; i >= 0; --i) {
-                int64_t coord = temp % shape[i];
-                temp /= shape[i];
-
-                int input_dim = i - input_dim_offset;
-                if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
-                    // Map to input dimension (handle size-1 dimensions)
-                    if (input_shape_vec[input_dim] == 1) {
-                        coord = 0;
-                    } else if (input_shape_vec[input_dim] != shape[i]) {
-                        throw std::runtime_error("Cannot expand dimension from non-1 size to different size");
-                    }
-                    in_idx += coord * input_strides[input_dim];
-                }
-            }
-
-            output_data[out_idx] = input_data[in_idx];
-        }
-    } else {
-        // Helper lambda for expand logic
-        auto expand_impl = [&]<typename T>(T*) {
-            const T* input_data = cont_input.data<T>();
-            T* output_data = output.data<T>();
-
-            for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-                int64_t temp = out_idx;
-                int64_t in_idx = 0;
-
-                int input_dim_offset = shape.size() - input_shape_vec.size();
-
-                for (int i = shape.size() - 1; i >= 0; --i) {
-                    int64_t coord = temp % shape[i];
-                    temp /= shape[i];
-
-                    int input_dim = i - input_dim_offset;
-                    if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
-                        // Map to input dimension (handle size-1 dimensions)
-                        if (input_shape_vec[input_dim] == 1) {
-                            coord = 0;
-                        } else if (input_shape_vec[input_dim] != shape[i]) {
-                            throw std::runtime_error("Cannot expand dimension from non-1 size to different size");
-                        }
-                        in_idx += coord * input_strides[input_dim];
-                    }
-                }
-
-                output_data[out_idx] = input_data[in_idx];
-            }
-        };
-
-        // Dispatch based on dtype
-        switch (cont_input.dtype()) {
-            case DType::Float16:
-                expand_impl(static_cast<Float16*>(nullptr));
-                break;
-            case DType::BFloat16:
-                expand_impl(static_cast<BFloat16*>(nullptr));
-                break;
-            case DType::Float32:
-                expand_impl(static_cast<float*>(nullptr));
-                break;
-            case DType::Float64:
-                expand_impl(static_cast<double*>(nullptr));
-                break;
-            case DType::Int8:
-                expand_impl(static_cast<int8_t*>(nullptr));
-                break;
-            case DType::UInt8:
-                expand_impl(static_cast<uint8_t*>(nullptr));
-                break;
-            case DType::Int16:
-                expand_impl(static_cast<int16_t*>(nullptr));
-                break;
-            case DType::Int32:
-                expand_impl(static_cast<int32_t*>(nullptr));
-                break;
-            case DType::Int64:
-                expand_impl(static_cast<int64_t*>(nullptr));
-                break;
-            case DType::Bool:
-                expand_impl(static_cast<bool*>(nullptr));
-                break;
-            case DType::Complex64:
-                expand_impl(static_cast<std::complex<float>*>(nullptr));
-                break;
-            case DType::Complex128:
-                expand_impl(static_cast<std::complex<double>*>(nullptr));
-                break;
-            default:
-                throw std::runtime_error("Unsupported dtype for expand");
-        }
-    }
-
-    return output;
+    // Dispatch uniformly on ALL devices (including CPU) so the JIT tracer, which
+    // hooks the dispatch layer, captures Expand on every backend. The previous
+    // CPU-only inline materialization bypassed dispatch, making the traced graph
+    // device-dependent (Expand vanished on CPU and its zeros()-backed output was
+    // frozen as a constant, severing the data dependency). Every backend's Expand
+    // kernel materializes a dense replicated buffer, so eager results are
+    // unchanged. See the Flip precedent (flip() in this file) for the same fix.
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Shape, shape_to_string(shape));
+    std::vector<Tensor> inputs = {input};
+    return dispatch(OpId::Expand, inputs, attrs)[0];
 }
 
 auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {

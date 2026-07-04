@@ -251,8 +251,13 @@ void run_jit_vs_eager(::tenzor::jit::CompiledFunction::FnType fn,
     auto jit   = compiled(x);
     EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
         << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
-    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
+    // Compare in Float32 so the helper works for reduced-precision outputs
+    // (f16/bf16): item<float>() requires a Float32 scalar. The cast is a no-op
+    // for an already-f32 result.
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu())
+                          .to(::tenzor::DType::Float32);
+    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu())
+                          .to(::tenzor::DType::Float32);
     auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
                     .template item<float>();
     EXPECT_LT(diff, tol);
@@ -385,4 +390,33 @@ TEST(OpVision, Conv2dPartialCollapsePadSlicePath) {
     auto x_t = ::tenzor::randn({1, 4, 2, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(x_t, false);
     tzv_e2e::run_jit_vs_eager(fn, x, 5e-3F);
+}
+
+// Regression (JIT review Fix #4): handle_max_pool2d emitted a 32-bit f32 -inf
+// init literal (0xFF800000) for every float dtype except Float64, so a Float16 /
+// BFloat16 max-pool produced `stablehlo.constant dense<0xFF800000> : tensor<f16>`
+// — a hex width mismatch that iree-compile rejects on ALL targets. These must now
+// compile (width-correct 0xFC00 / 0xFF80, matching handle_max) and match eager.
+TEST(OpVision, MaxPool2dFloat16CompilesAndMatches) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::max_pool2d(x, {2, 2}, {2, 2}, {0, 0});
+    };
+    auto x32 = ::tenzor::full({1, 1, 4, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x32.data<float>();
+    for (int i = 0; i < 16; ++i) xd[i] = static_cast<float>(i);
+    ::tenzor::Variable x(x32.to(::tenzor::DType::Float16), false);
+    tzv_e2e::run_jit_vs_eager(fn, x, 1e-2F);
+}
+
+TEST(OpVision, MaxPool2dBFloat16CompilesAndMatches) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::max_pool2d(x, {2, 2}, {2, 2}, {0, 0});
+    };
+    auto x32 = ::tenzor::full({1, 1, 4, 4}, 0.0F, ::tenzor::DType::Float32);
+    auto* xd = x32.data<float>();
+    for (int i = 0; i < 16; ++i) xd[i] = static_cast<float>(i);
+    ::tenzor::Variable x(x32.to(::tenzor::DType::BFloat16), false);
+    tzv_e2e::run_jit_vs_eager(fn, x, 1e-2F);
 }

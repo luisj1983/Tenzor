@@ -168,6 +168,39 @@ TEST(MlirNumericParity, Float16SoftmaxWideAxis) {
         << "F16 softmax diverges from eager (F16 accumulation not widened?)";
 }
 
+// Fix #10 coverage — the JIT numeric-parity suite was Float32/Float16-dominant,
+// so the float64-accumulator divergence class (a compiled reduction silently
+// accumulating in F32 while eager uses F64) was untested. F64 softmax over a wide
+// axis exercises an internal exp-sum reduction: both eager and the compiled
+// (mlir/llvm-cpu) path are F64, so an F32-narrowed accumulation of 4096 exps
+// would diverge at ~1e-7 — far above the F64 reduction-order noise this tight
+// 1e-9 bound tolerates.
+TEST(MlirNumericParity, Float64SoftmaxWideAxisAccumulates) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [](const Variable& x) -> Variable { return nn::softmax(x, -1); });
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    Tensor x_t = (::tenzor::randn({4, 4096}, DType::Float32, Device::cpu()) * 4.0f)
+                     .to(DType::Float64);
+    Variable x(x_t, /*requires_grad=*/false);
+
+    const Variable eager = nn::softmax(x, -1);
+    mj::reset_cache_stats();
+    Variable out;
+    ASSERT_NO_THROW({ out = compiled(x); });
+    ASSERT_GE(mj::cache_stats().misses, 1u)
+        << "F64 softmax did NOT run through IREE (eager fallback)";
+
+    EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 1e-9)
+        << "F64 softmax diverges from eager (F64 accumulation narrowed to F32?)";
+}
+
 // M3 — F16 LayerNorm over a long axis: mean/variance must accumulate in F32.
 TEST(MlirNumericParity, Float16LayerNormWideAxis) {
     mt::ensure_core_init();
