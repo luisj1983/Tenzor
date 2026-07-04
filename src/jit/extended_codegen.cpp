@@ -120,6 +120,20 @@ auto ExtendedKernelCodegen::literal_suffix(DType dtype) -> std::string {
 }
 
 auto ExtendedKernelCodegen::fmt_scalar(double v, DType dtype) -> std::string {
+    if (!std::isfinite(v)) {
+        // Non-finite: emit a valid device constant instead of the invalid
+        // "inff"/"nanf" token that "<printed>" + suffix would produce (JIT-002).
+        // __int_as_float / __longlong_as_double work in both CUDA and HIP.
+        const bool f64 = (dtype == DType::Float64);
+        if (std::isnan(v)) {
+            return f64 ? "__longlong_as_double(0x7ff8000000000000LL)"
+                       : "__int_as_float(0x7fc00000)";
+        }
+        const std::string inf = f64
+            ? "__longlong_as_double(0x7ff0000000000000LL)"
+            : "__int_as_float(0x7f800000)";
+        return v < 0.0 ? ("(-" + inf + ")") : inf;
+    }
     std::ostringstream o;
     o << std::setprecision(std::numeric_limits<double>::max_digits10) << v;
     std::string body = o.str();
@@ -609,12 +623,13 @@ extern "C" __global__ void fused_softmax_kernel(
 
 auto ExtendedKernelCodegen::generate_layer_norm(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
-    auto C = compute_type(group.dtype);  // Welford state in float/double
-    // Eager (CPU fused_ops) computes the inverse std as 1.0 / sqrt(var + eps),
-    // NOT via the rsqrt intrinsic (which is a fast approximation differing by
-    // 1-2 ULP). Divide by sqrt here so the JIT norm matches eager and is
-    // consistent across CUDA/ROCm.
-    const std::string sqrt_fn = fn_for("sqrt", group.dtype);
+    auto C = compute_type(group.dtype);  // elementwise compute type
+    // Run the Welford mean/variance accumulator in double to match the eager
+    // kernel's F64 accumulator (JIT-064); computing it in float (compute_type
+    // for F32) lost mantissa for long normalized dims. Element reads / the
+    // normalize multiply stay in C. Divide by the (double) sqrt of the double
+    // statistic, matching eager's 1/sqrt(var+eps) rather than the rsqrt approx.
+    const std::string ACC = "double";
     std::ostringstream ss;
 
     ss << R"(
@@ -638,30 +653,31 @@ extern "C" __global__ void fused_layer_norm_kernel(
     const )" << T << R"(* x = input + instance * norm_size;
     )" << T << R"(* y = output + instance * norm_size;
 
-    // Welford online mean computation (accumulate in compute type; the 16-bit
-    // storage types are promoted to float for the running mean/variance).
-    )" << C << R"( mean = 0;
-    )" << C << R"( m2 = 0;
+    // Welford online mean computation (accumulate in double to match the eager
+    // F64 accumulator; the 16-bit/32-bit storage types are widened for the
+    // running mean/variance).
+    )" << ACC << R"( mean = 0;
+    )" << ACC << R"( m2 = 0;
     int count = 0;
 
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         count++;
-        )" << C << R"( xi = static_cast<)" << C << R"(>(x[i]);
-        )" << C << R"( delta = xi - mean;
+        )" << ACC << R"( xi = static_cast<)" << ACC << R"(>(x[i]);
+        )" << ACC << R"( delta = xi - mean;
         mean += delta / count;
-        )" << C << R"( delta2 = xi - mean;
+        )" << ACC << R"( delta2 = xi - mean;
         m2 += delta * delta2;
     }
 
     // Warp-level Welford merge
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        )" << C << R"( other_mean = __shfl_down_sync(TZ_WARP_MASK, mean, offset);
-        )" << C << R"( other_m2 = __shfl_down_sync(TZ_WARP_MASK, m2, offset);
+        )" << ACC << R"( other_mean = __shfl_down_sync(TZ_WARP_MASK, mean, offset);
+        )" << ACC << R"( other_m2 = __shfl_down_sync(TZ_WARP_MASK, m2, offset);
         int other_count = __shfl_down_sync(TZ_WARP_MASK, count, offset);
 
         int total = count + other_count;
         if (total > 0) {
-            )" << C << R"( delta = other_mean - mean;
+            )" << ACC << R"( delta = other_mean - mean;
             mean = (count * mean + other_count * other_mean) / total;
             m2 = m2 + other_m2 + delta * delta * count * other_count / total;
             count = total;
@@ -669,7 +685,7 @@ extern "C" __global__ void fused_layer_norm_kernel(
     }
 
     // Block-level merge via shared memory
-    __shared__ )" << C << R"( s_mean[32], s_m2[32];
+    __shared__ )" << ACC << R"( s_mean[32], s_m2[32];
     __shared__ int s_count[32];
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
@@ -688,13 +704,13 @@ extern "C" __global__ void fused_layer_norm_kernel(
         count = (lane < nwarps) ? s_count[lane] : 0;
 
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            )" << C << R"( other_mean = __shfl_down_sync(TZ_WARP_MASK, mean, offset);
-            )" << C << R"( other_m2 = __shfl_down_sync(TZ_WARP_MASK, m2, offset);
+            )" << ACC << R"( other_mean = __shfl_down_sync(TZ_WARP_MASK, mean, offset);
+            )" << ACC << R"( other_m2 = __shfl_down_sync(TZ_WARP_MASK, m2, offset);
             int other_count = __shfl_down_sync(TZ_WARP_MASK, count, offset);
 
             int total = count + other_count;
             if (total > 0) {
-                )" << C << R"( delta = other_mean - mean;
+                )" << ACC << R"( delta = other_mean - mean;
                 mean = (count * mean + other_count * other_mean) / total;
                 m2 = m2 + other_m2 + delta * delta * count * other_count / total;
                 count = total;
@@ -708,8 +724,8 @@ extern "C" __global__ void fused_layer_norm_kernel(
     }
     __syncthreads();
 
-    )" << C << R"( final_mean = s_mean[0];
-    )" << C << R"( inv_std = (()" << C << R"()1) / )" << sqrt_fn << R"((s_m2[0] + eps);
+    )" << ACC << R"( final_mean = s_mean[0];
+    )" << ACC << R"( inv_std = ((double)1) / sqrt(s_m2[0] + eps);
 
     // Normalize + affine
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
@@ -735,12 +751,15 @@ extern "C" __global__ void fused_layer_norm_kernel(
 
 auto ExtendedKernelCodegen::generate_rms_norm(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
-    auto C = compute_type(group.dtype);  // sum-of-squares in float/double
+    auto C = compute_type(group.dtype);  // elementwise compute type
+    // Accumulate the sum-of-squares in double to match the eager kernel, which
+    // uses an F64 accumulator to avoid mantissa loss in the RMS denominator for
+    // long hidden dims (JIT-065). Computing it in float (compute_type for F32)
+    // diverged from eager. The element reads/normalize multiply stay in C.
+    const std::string ACC = "double";
     // Eager (CPU fused_ops) computes the inverse std as 1.0 / sqrt(var + eps),
-    // NOT via the rsqrt intrinsic (which is a fast approximation differing by
-    // 1-2 ULP). Divide by sqrt here so the JIT norm matches eager and is
-    // consistent across CUDA/ROCm.
-    const std::string sqrt_fn = fn_for("sqrt", group.dtype);
+    // NOT via the rsqrt intrinsic (a fast approximation differing by 1-2 ULP);
+    // we divide by the (double) sqrt of the double statistic to match eager.
     std::ostringstream ss;
 
     ss << R"(
@@ -764,12 +783,12 @@ extern "C" __global__ void fused_rms_norm_kernel(
 
     // Compute sum of squares (accumulate in compute type; 16-bit storage types
     // are promoted to float for the reduction).
-    )" << C << R"( sum_sq = 0;
-    )" << C << R"( sumsq_c = 0;  // Kahan compensation (match CPU compensated sum)
+    )" << ACC << R"( sum_sq = 0;
+    )" << ACC << R"( sumsq_c = 0;  // Kahan compensation (match CPU compensated sum)
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        )" << C << R"( val = static_cast<)" << C << R"(>(x[i]);
-        )" << C << R"( ky = val * val - sumsq_c;
-        )" << C << R"( kt = sum_sq + ky;
+        )" << ACC << R"( val = static_cast<)" << ACC << R"(>(x[i]);
+        )" << ACC << R"( ky = val * val - sumsq_c;
+        )" << ACC << R"( kt = sum_sq + ky;
         sumsq_c = (kt - sum_sq) - ky;
         sum_sq = kt;
     }
@@ -780,7 +799,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
         sum_sq += __shfl_down_sync(TZ_WARP_MASK, sum_sq, offset);
     }
 
-    __shared__ )" << C << R"( shared[32];
+    __shared__ )" << ACC << R"( shared[32];
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
 
@@ -796,7 +815,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
     }
     __syncthreads();
 
-    )" << C << R"( rms_inv = (()" << C << R"()1) / )" << sqrt_fn << R"((shared[0] / norm_size + eps);
+    )" << ACC << R"( rms_inv = ((double)1) / sqrt(shared[0] / norm_size + eps);
 
     // Normalize
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {

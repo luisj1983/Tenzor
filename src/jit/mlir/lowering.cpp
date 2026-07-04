@@ -681,9 +681,22 @@ auto handle_binary(LoweringContext& ctx,
     const auto& out = node.outputs()[0];
     const auto& a_val = node.inputs()[0];
     const auto& b_val = node.inputs()[1];
-    auto a = maybe_broadcast(body, ctx, ctx.name_for(a_val->id()),
+    // Convert each operand to the output element type before broadcasting (JIT-067):
+    // emit_stablehlo_binary declares a single element type for both operands and the
+    // result, so an operand whose dtype differs from out->dtype() would emit
+    // ill-typed IR. Traced graphs already carry explicit Cast nodes (so this is a
+    // no-op there); this guards hand-built graphs and any pass that rewrites a
+    // binary node without inserting a Cast.
+    auto convert_if = [&](const std::string& name,
+                          const std::shared_ptr<::tenzor::jit::Value>& val) -> std::string {
+        if (val->dtype() == out->dtype()) return name;
+        auto c = ctx.fresh_name();
+        emit_stablehlo_convert(body, c, name, val->shape(), val->dtype(), out->dtype());
+        return c;
+    };
+    auto a = maybe_broadcast(body, ctx, convert_if(ctx.name_for(a_val->id()), a_val),
                              a_val->shape(), out->shape(), out->dtype());
-    auto b = maybe_broadcast(body, ctx, ctx.name_for(b_val->id()),
+    auto b = maybe_broadcast(body, ctx, convert_if(ctx.name_for(b_val->id()), b_val),
                              b_val->shape(), out->shape(), out->dtype());
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
@@ -1545,9 +1558,22 @@ auto handle_slice(LoweringContext& ctx,
             throw std::runtime_error(
                 "GraphToMLIR: Slice starts/ends must have rank entries");
         }
+        // Honor per-dim step/stride (JIT-013): a strided slice in the vector
+        // form previously fell through with stride 1, returning un-strided
+        // elements. stablehlo.slice requires positive strides.
+        std::vector<int64_t> stv;
+        if (node.has_attr("steps")) stv = node.get_vec_attr("steps");
         for (int64_t i = 0; i < rank; ++i) {
             starts[i]  = normalize_index(sv[i], in_shape[i]);
             limits[i]  = normalize_index(ev[i], in_shape[i]);
+            if (i < static_cast<int64_t>(stv.size())) {
+                if (stv[i] <= 0) {
+                    throw std::runtime_error(
+                        "GraphToMLIR: Slice requires a positive step "
+                        "(stablehlo.slice does not support negative strides)");
+                }
+                strides[i] = stv[i];
+            }
         }
     } else if (node.has_attr("dim")) {
         // Per-dim slice form: dim + start + end (+ optional step).
@@ -1911,8 +1937,12 @@ auto pool_window_for_2d(const ::tenzor::jit::Node& node,
     //     only). Previously we silently fell through to the default,
     //     dropping the real kernel size and emitting a 1x1 window.
     //   - per-axis int_attrs `h_key`/`w_key`
+    // Per-axis fallback (fb_h, fb_w): the width fallback must be independent of
+    // the height one so a rectangular pool with an unspecified stride defaults to
+    // stride == kernel_size per axis (JIT-007). Previously a single `fallback`
+    // made the width stride default to the kernel HEIGHT.
     auto get_hw = [&](const char* vec_key, const char* h_key,
-                      const char* w_key, int64_t fallback) {
+                      const char* w_key, int64_t fb_h, int64_t fb_w) {
         if (node.has_vec_attr(vec_key)) {
             auto v = node.get_vec_attr(vec_key);
             if (v.size() == 2) return std::pair{v[0], v[1]};
@@ -1923,15 +1953,15 @@ auto pool_window_for_2d(const ::tenzor::jit::Node& node,
             return std::pair{s, s};
         }
         int64_t h = node.has_int_attr(h_key) ? node.get_int_attr(h_key)
-                                             : fallback;
+                                             : fb_h;
         int64_t w = node.has_int_attr(w_key) ? node.get_int_attr(w_key)
-                                             : fallback;
+                                             : fb_w;
         return std::pair{h, w};
     };
-    auto [kh, kw] = get_hw("kernel_size", "kernel_h", "kernel_w", 1);
+    auto [kh, kw] = get_hw("kernel_size", "kernel_h", "kernel_w", 1, 1);
     auto [sh, sw] = get_hw("stride",      "stride_h", "stride_w",
-                           /*fallback to kernel*/ kh);
-    auto [ph, pw] = get_hw("padding",     "padding_h", "padding_w", 0);
+                           /*fallback to kernel per axis*/ kh, kw);
+    auto [ph, pw] = get_hw("padding",     "padding_h", "padding_w", 0, 0);
     std::vector<int64_t> window  = {1, 1, kh, kw};
     std::vector<int64_t> strides = {1, 1, sh, sw};
     std::vector<int64_t> pad_lo  = {0, 0, ph, pw};
@@ -2785,8 +2815,35 @@ auto handle_pow(LoweringContext& ctx,
     };
 
     if (node.inputs().size() == 2) {
-        const auto& a = ctx.name_for(node.inputs()[0]->id());
-        const auto& b = ctx.name_for(node.inputs()[1]->id());
+        const auto& a_val = node.inputs()[0];
+        const auto& b_val = node.inputs()[1];
+        // If the exponent is a compile-time Constant with a non-negative integer
+        // scalar value, lower to repeated multiply (JIT-051): stablehlo.power is
+        // exp(y*log(x)) on GPU/SPIR-V HAL targets and returns NaN for a negative
+        // base, whereas eager and the nvrtc path give the correct real value for
+        // an integer exponent. lower_int_pow (used by the 1-input path) is NaN-safe.
+        if (auto exp_node = b_val->node();
+            exp_node && exp_node->op_type() == ::tenzor::jit::OpType::Constant &&
+            exp_node->has_attr("value")) {
+            const auto& t = exp_node->get_tensor_attr("value");
+            if (t.numel() == 1) {
+                double ev = t.to(::tenzor::DType::Float64)
+                             .to(::tenzor::Device::cpu()).item<double>();
+                double r = std::round(ev);
+                if (std::abs(ev - r) < 1e-6 && r >= 0.0 && r <= 64.0) {
+                    auto a = maybe_broadcast(body, ctx, ctx.name_for(a_val->id()),
+                                             a_val->shape(), shape, d);
+                    lower_int_pow(a, static_cast<int>(r));  // binds out->id()
+                    return;
+                }
+            }
+        }
+        // General case: broadcast both operands to the output shape (JIT-066) —
+        // stablehlo.power requires equal operand shapes — then emit power.
+        auto a = maybe_broadcast(body, ctx, ctx.name_for(a_val->id()),
+                                 a_val->shape(), shape, d);
+        auto b = maybe_broadcast(body, ctx, ctx.name_for(b_val->id()),
+                                 b_val->shape(), shape, d);
         auto out_name = ctx.fresh_name();
         ctx.bind(out->id(), out_name);
         emit_stablehlo_binary(body, "power", out_name, a, b, shape, d);
@@ -3286,45 +3343,71 @@ auto handle_flash_attention_expand(LoweringContext& ctx,
         scale = 1.0f / std::sqrt(static_cast<float>(D));
     }
 
+    // Compute the scores, scale, mask and softmax in F32 for F16/BF16 (JIT-006).
+    // Previously the QK dot_general result, the *scale and the causal mask were
+    // all emitted in the storage dtype d, so F16/BF16 attention truncated the
+    // scores to half precision BEFORE softmax — diverging from eager and from the
+    // plugin path. Widen Q/K/V to F32, run the whole score pipeline in F32, and
+    // narrow only the final attention output back to d (mirrors the norms).
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    auto q_c = ctx.name_for(q_val->id());
+    auto k_c = ctx.name_for(k_val->id());
+    auto v_c = ctx.name_for(v_val->id());
+    if (widen) {
+        auto qn = ctx.fresh_name();
+        emit_stablehlo_convert(body, qn, q_c, q_shape, d, cd); body << '\n'; q_c = qn;
+        auto kn = ctx.fresh_name();
+        emit_stablehlo_convert(body, kn, k_c, k_shape, d, cd); body << '\n'; k_c = kn;
+        auto vn = ctx.fresh_name();
+        emit_stablehlo_convert(body, vn, v_c, v_shape, d, cd); body << '\n'; v_c = vn;
+    }
+
     // QK = dot_general(Q, K) batch=(0,1) contract Q.dim=3 K.dim=3
     // -> shape (B, H, Sq, Sk)
     const std::vector<int64_t> qk_shape{B, H, Sq, Sk};
     auto qk = ctx.fresh_name();
-    emit_stablehlo_dot_general(body, qk, ctx.name_for(q_val->id()),
-                               ctx.name_for(k_val->id()),
+    emit_stablehlo_dot_general(body, qk, q_c, k_c,
                                /*lhs_batch=*/{0, 1}, /*rhs_batch=*/{0, 1},
                                /*lhs_contracting=*/{3}, /*rhs_contracting=*/{3},
-                               q_shape, k_shape, qk_shape, d);
+                               q_shape, k_shape, qk_shape, cd);
     body << '\n';
 
     // qk_scaled = qk * scale
     auto scale_c = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, scale_c,
-                                  scalar_literal(static_cast<double>(scale), d),
-                                  qk_shape, d);
+                                  scalar_literal(static_cast<double>(scale), cd),
+                                  qk_shape, cd);
     body << '\n';
     auto qk_s = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", qk_s, qk, scale_c, qk_shape, d);
+    emit_stablehlo_binary(body, "multiply", qk_s, qk, scale_c, qk_shape, cd);
     body << '\n';
 
     std::string pre_softmax = qk_s;
     if (causal) {
-        pre_softmax = expand::emit_causal_mask_and_add(ctx, body, qk_s, qk_shape, d);
+        pre_softmax = expand::emit_causal_mask_and_add(ctx, body, qk_s, qk_shape, cd);
     }
 
     auto attn = expand::emit_softmax_last_dim(ctx, body, pre_softmax,
-                                              qk_shape, d);
+                                              qk_shape, cd);
 
     // out = dot_general(attn, V) batch=(0,1) contract attn.dim=3 V.dim=2
-    // -> (B, H, Sq, D)
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out_val->id(), out_name);
-    emit_stablehlo_dot_general(body, out_name, attn,
-                               ctx.name_for(v_val->id()),
+    // -> (B, H, Sq, D), computed in cd then narrowed back to d.
+    auto out_cd = ctx.fresh_name();
+    emit_stablehlo_dot_general(body, out_cd, attn, v_c,
                                {0, 1}, {0, 1},
                                {3}, {2},
-                               qk_shape, v_shape, out_val->shape(), d);
+                               qk_shape, v_shape, out_val->shape(), cd);
     body << '\n';
+    if (widen) {
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out_val->id(), out_name);
+        emit_stablehlo_convert(body, out_name, out_cd, out_val->shape(), cd, d);
+        body << '\n';
+    } else {
+        ctx.bind(out_val->id(), out_cd);
+    }
 }
 
 
@@ -3410,38 +3493,64 @@ auto handle_gqa_expand(LoweringContext& ctx,
 
     const std::vector<int64_t> kv_full_shape{B, Hq, Sk, D};
 
+    // Compute the scores/softmax in F32 for F16/BF16 (JIT-006) — see the
+    // FlashAttention expand path. The KV expansion above is pure data movement
+    // and stays in d; only the numeric score pipeline is widened.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    auto q_c = ctx.name_for(q_val->id());
+    auto k_c = k_expanded;
+    auto v_c = v_expanded;
+    if (widen) {
+        auto qn = ctx.fresh_name();
+        emit_stablehlo_convert(body, qn, q_c, q_shape, d, cd); body << '\n'; q_c = qn;
+        auto kn = ctx.fresh_name();
+        emit_stablehlo_convert(body, kn, k_c, kv_full_shape, d, cd); body << '\n'; k_c = kn;
+        auto vn = ctx.fresh_name();
+        emit_stablehlo_convert(body, vn, v_c, kv_full_shape, d, cd); body << '\n'; v_c = vn;
+    }
+
     // QK = dot_general(Q, K_expanded), batch=(0,1), contract=(3,3) -> (B,Hq,Sq,Sk)
     const std::vector<int64_t> qk_shape{B, Hq, Sq, Sk};
     auto qk = ctx.fresh_name();
-    emit_stablehlo_dot_general(body, qk, ctx.name_for(q_val->id()), k_expanded,
+    emit_stablehlo_dot_general(body, qk, q_c, k_c,
                                {0, 1}, {0, 1}, {3}, {3},
-                               q_shape, kv_full_shape, qk_shape, d);
+                               q_shape, kv_full_shape, qk_shape, cd);
     body << '\n';
 
     auto scale_c = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, scale_c,
-                                  scalar_literal(static_cast<double>(scale), d),
-                                  qk_shape, d);
+                                  scalar_literal(static_cast<double>(scale), cd),
+                                  qk_shape, cd);
     body << '\n';
     auto qk_s = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", qk_s, qk, scale_c, qk_shape, d);
+    emit_stablehlo_binary(body, "multiply", qk_s, qk, scale_c, qk_shape, cd);
     body << '\n';
 
     std::string pre_softmax = qk_s;
     if (causal) {
         pre_softmax = expand::emit_causal_mask_and_add(ctx, body, qk_s,
-                                                       qk_shape, d);
+                                                       qk_shape, cd);
     }
     auto attn = expand::emit_softmax_last_dim(ctx, body, pre_softmax,
-                                              qk_shape, d);
+                                              qk_shape, cd);
 
-    // out = dot_general(attn, V_expanded), batch=(0,1), contract=(3,2)
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out_val->id(), out_name);
-    emit_stablehlo_dot_general(body, out_name, attn, v_expanded,
+    // out = dot_general(attn, V_expanded), batch=(0,1), contract=(3,2),
+    // computed in cd then narrowed back to d (JIT-006).
+    auto out_cd = ctx.fresh_name();
+    emit_stablehlo_dot_general(body, out_cd, attn, v_c,
                                {0, 1}, {0, 1}, {3}, {2},
-                               qk_shape, kv_full_shape, out_val->shape(), d);
+                               qk_shape, kv_full_shape, out_val->shape(), cd);
     body << '\n';
+    if (widen) {
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out_val->id(), out_name);
+        emit_stablehlo_convert(body, out_name, out_cd, out_val->shape(), cd, d);
+        body << '\n';
+    } else {
+        ctx.bind(out_val->id(), out_cd);
+    }
 }
 
 
@@ -3819,6 +3928,11 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::MatMul:       handle_matmul(ctx, *node, body); break;
             case OpType::Bmm:          handle_bmm(ctx, *node, body);    break;
             case OpType::Linear:       handle_linear(ctx, *node, body); break;
+            // SparseMatMul is a SparsePass retag of Linear (inputs [x, weight,
+            // bias]) and is numerically identical (spmm(from_dense(W),xT)T + b =
+            // x@WT + b). MLIR has no sparse kernel, so lower it as the equivalent
+            // dense Linear instead of hitting the default: throw (JIT-025).
+            case OpType::SparseMatMul: handle_linear(ctx, *node, body); break;
 
             // ── Shape ──
             case OpType::Reshape:      handle_reshape(ctx, *node, body);   break;

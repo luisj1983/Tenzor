@@ -44,7 +44,12 @@ auto PatternMatcher::estimate_elements(
         // cannot be computed, so report it as unknown rather than letting a
         // 0 or negative placeholder propagate into the cost model.
         if (d <= 0) return FusionMatch::kUnknownElements;
-        elements *= d;
+        // Guard the multiply against signed-overflow UB (JIT-020): a wrapped
+        // negative product would flow into the cost model. On overflow, report
+        // the count as unknown (the cost model already treats that safely).
+        if (__builtin_mul_overflow(elements, d, &elements)) {
+            return FusionMatch::kUnknownElements;
+        }
     }
     return elements;
 }
@@ -331,6 +336,19 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
           n2->inputs()[0].get() == n2->inputs()[1].get())) {
         return std::nullopt;
     }
+    // A Pow square step must have exponent EXACTLY 2 (JIT-004). The Mul case is
+    // guarded above; the Pow case previously accepted any exponent, so a
+    // norm-shaped graph using Pow(x-mean, 3) (or 0.5) would be replaced by the
+    // hardcoded-squaring fused kernel and silently compute the wrong variance.
+    // The traced Pow carries its exponent as a float "exponent" attr; if that is
+    // absent (e.g. an earlier pass moved the exponent to a Constant input) we
+    // cannot confirm it here, so reject and let the correct eager path run.
+    if (n2->op_type() == OpType::Pow) {
+        float e = n2->get_attr("exponent");
+        if (!n2->has_float_attr("exponent") || e < 1.999f || e > 2.001f) {
+            return std::nullopt;
+        }
+    }
 
     // Mean of squared differences
     if (start_idx + 3 >= nodes.size()) return std::nullopt;
@@ -441,6 +459,14 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
         !(n0->inputs().size() == 2 &&
           n0->inputs()[0].get() == n0->inputs()[1].get())) {
         return std::nullopt;
+    }
+    // A Pow square step must have exponent EXACTLY 2 (JIT-004): the fused RMSNorm
+    // kernel hardcodes squaring, so a Pow(x, 3)/Pow(x, 0.5) would be mis-fused.
+    if (n0->op_type() == OpType::Pow) {
+        float e = n0->get_attr("exponent");
+        if (!n0->has_float_attr("exponent") || e < 1.999f || e > 2.001f) {
+            return std::nullopt;
+        }
     }
 
     auto& n1 = nodes[start_idx + 1];

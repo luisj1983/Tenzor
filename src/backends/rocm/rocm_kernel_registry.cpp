@@ -4650,6 +4650,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Quantized Operations --------------------------------------------------
     table.register_single_output_kernel(OpId::QuantizedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        if (inputs.size() >= 4) {
+            throw std::invalid_argument(
+                "QuantizedLinear (GPU): per-channel weight scale/zero-point "
+                "(inputs[3]/[4]) is not supported by this backend kernel; use "
+                "per-tensor quantization (scalar WeightScaleQ/WeightZeroPoint) — "
+                "JIT-041.");
+        }
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
@@ -4676,6 +4683,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 std::to_string(stride[0]) + "," + std::to_string(stride[1]) +
                 "), padding=(" + std::to_string(padding[0]) + "," + std::to_string(padding[1]) +
                 "), dilation=(" + std::to_string(dilation[0]) + "," + std::to_string(dilation[1]) + ")");
+        }
+        // The ROCm quantized_conv2d_hip kernel uses weight_shape[2] for BOTH
+        // kernel dims, so a rectangular kernel is silently computed as square;
+        // reject it loudly (JIT-040).
+        {
+            const auto wshape = inputs[1].shape();
+            if (wshape.size() >= 4 && wshape[2] != wshape[3]) {
+                throw std::invalid_argument(
+                    "QuantizedConv2d (ROCm): backend kernel assumes a square "
+                    "kernel; got " + std::to_string(wshape[2]) + "x" +
+                    std::to_string(wshape[3]) + " (JIT-040).");
+            }
         }
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);

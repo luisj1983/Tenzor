@@ -722,6 +722,19 @@ auto MemorySwapPlanner::apply(Graph& graph,
         auto value = graph.get_value(sched.value_id);
         if (!value) continue;
 
+        // Only swap values with exactly ONE live consumer (JIT-009). This planner
+        // restores the value before its LAST consumer and redirects only that
+        // consumer, so any intermediate consumer scheduled between SwapOut and
+        // SwapIn would read the evicted (freed/stale) buffer. Mirror
+        // RematerializationPlanner's single-consumer guard rather than corrupt a
+        // multi-consumer value.
+        size_t live_consumers = 0;
+        for (const auto& use : value->uses()) {
+            auto user = use.lock();
+            if (user && user->op_type() != OpType::SwapOut) ++live_consumers;
+        }
+        if (live_consumers != 1) continue;
+
         // Create SwapOut node: placed after the producer
         auto swap_out = graph.create_node(OpType::SwapOut,
                                            "swap_out_" + sched.value_id);

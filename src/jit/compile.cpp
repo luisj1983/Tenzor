@@ -222,6 +222,17 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
                 !inputs.empty() &&
                 (inputs[0].tensor().device().type == Device::Type::CUDA ||
                  inputs[0].tensor().device().type == Device::Type::ROCm);
+            // reduce-overhead requested but the device can't capture a graph
+            // (Vulkan/OneAPI/CPU): warn once so it isn't a silent no-op, matching
+            // the MLIR path's behavior (JIT-035).
+            if (config_.mode == "reduce-overhead" && !graph_capable) {
+                static std::once_flag warned;
+                std::call_once(warned, [] {
+                    TENZOR_LOG_WARN(
+                        "JIT reduce-overhead mode has no effect on this backend "
+                        "(CUDA-graph capture is CUDA/ROCm only); running normally.");
+                });
+            }
             if (config_.mode == "reduce-overhead" && graph_capable) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 std::vector<Tensor> input_tensors;
@@ -289,9 +300,28 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
             return outs[0];
     }
 
-    // Cache miss: trace, compile, and cache
-    // Always execute eagerly first for correctness
-    auto result = fn_(inputs);
+    // Cache miss: trace, compile, and cache. Trace ONCE — fn_() runs a single
+    // time under the interceptor and yields the eager result via the out-params
+    // below. Running fn_() a second time here would apply a side-effecting
+    // closure's effect twice on a cache miss (JIT-008).
+    Variable result;
+    bool fn_ran = false;
+
+    // JIT-033: the nvrtc backend has no native codegen for Vulkan/OneAPI, so the
+    // traced graph runs through the interpreter there — correct, but unaccelerated
+    // and previously silent (unlike the MLIR path). Warn once so it is visible.
+    if (config_.backend == "nvrtc" && !inputs.empty()) {
+        const auto dt = inputs[0].tensor().device().type;
+        if (dt == Device::Type::Vulkan || dt == Device::Type::OneAPI) {
+            static std::once_flag nvrtc_warned;
+            std::call_once(nvrtc_warned, [] {
+                TENZOR_LOG_WARN(
+                    "JIT nvrtc backend has no GPU codegen on Vulkan/OneAPI; the "
+                    "traced graph runs via the interpreter (correct but not "
+                    "accelerated). Use backend=\"mlir\" for acceleration.");
+            });
+        }
+    }
 
     // Attempt compilation in the background. Two distinct "no compiled graph"
     // outcomes must both honour strict mode: (a) trace_and_compile THROWS on a
@@ -303,12 +333,18 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
     std::shared_ptr<CompiledModule> compiled;
     bool compile_threw = false;
     try {
-        compiled = trace_and_compile(inputs);
+        compiled = trace_and_compile(inputs, /*grad_mode=*/false,
+                                     &result, &fn_ran);
     } catch (const std::exception& e) {
-        // Compilation failed. The eager result above is already correct, but we
-        // do not want this to be silent: it would hide regressions in the JIT
-        // pipeline. In non-strict mode log a WARN every time so callers can see
-        // exactly which graphs fail.
+        // If fn_ itself threw (before it finished), that is a genuine closure
+        // error — propagate it exactly as a plain eager call would, regardless
+        // of strict mode. Only a COMPILE failure (fn_ already ran) is eligible
+        // for the eager fallback, using the result captured above.
+        if (!fn_ran) throw;
+        // Compilation failed. The eager result is already correct, but we do not
+        // want this to be silent: it would hide regressions in the JIT pipeline.
+        // In non-strict mode log a WARN every time so callers can see exactly
+        // which graphs fail.
         if (jit_strict_enabled(config_.strict)) {
             throw;
         }
@@ -366,6 +402,17 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
         }
     }
 
+    // Capture the single traced fn_ execution's (grad-enabled) result AND whether
+    // fn_ ran during THIS call. Hoisted to function scope (not just the cache-miss
+    // block) so the differentiable-REPLAY fallback further down can reuse this
+    // result instead of running fn_ a SECOND time when this same call traced it —
+    // a side-effecting closure would otherwise double-apply on a cache-miss whose
+    // replay then fails (the JIT-008 hazard, grad replay path — JIT-071). On a
+    // cache HIT fn_ never ran here, so fn_ran_this_call stays false and the eager
+    // fallback correctly runs fn_ exactly once.
+    Variable grad_result;
+    bool fn_ran_this_call = false;
+
     // Cache miss: build the differentiable (un-fused) variant now. Unlike the
     // inference path we do NOT run an eager warmup first — we want THIS call to
     // go through the compiled graph so grads provably come from the replay, not
@@ -373,8 +420,12 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
     // trace), fall back to eager autograd on the same backend (correct grads).
     if (!compiled_module) {
         try {
-            compiled_module = trace_and_compile(inputs, /*grad_mode=*/true);
+            compiled_module = trace_and_compile(inputs, /*grad_mode=*/true,
+                                                &grad_result, &fn_ran_this_call);
         } catch (const std::exception& e) {
+            // fn_ itself threw (before finishing): a genuine closure error —
+            // propagate it exactly as a plain eager call would.
+            if (!fn_ran_this_call) throw;
             bool strict = config_.strict;
             if (!strict) {
                 if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
@@ -384,7 +435,7 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
             if (strict) throw;
             TENZOR_LOG_WARN("JIT grad compile failed: {}. Falling back to eager "
                             "autograd on the input's backend.", e.what());
-            return fn_(inputs);
+            return grad_result;  // fn_ already ran once (grad-enabled result)
         }
         if (!compiled_module) {
             // Graph break / empty trace (nullptr, NOT an exception). Honour
@@ -400,7 +451,7 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
             TENZOR_LOG_WARN("JIT grad trace produced no compiled graph: graph "
                             "break or empty trace. Falling back to eager autograd "
                             "on the input's backend.");
-            return fn_(inputs);
+            return grad_result;  // fn_ already ran once during the trace
         }
         std::lock_guard<std::mutex> lock(mutex_);
         if (cache_.size() < static_cast<size_t>(config_.max_retraces)) {
@@ -426,6 +477,11 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
         }
         if (strict) throw;
         TENZOR_LOG_WARN("JIT grad replay fell back to eager autograd: {}", e.what());
+        // If THIS call traced fn_ (cache miss above), reuse that grad-enabled
+        // result — re-running fn_ here would double-execute a side-effecting
+        // closure (JIT-071). On a cache HIT fn_ has not run yet this call, so an
+        // eager call is correct and runs it exactly once.
+        if (fn_ran_this_call) return grad_result;
         return fn_(inputs);
     }
     if (outs.empty()) {
@@ -483,7 +539,9 @@ auto CompiledFunction::shape_key(std::span<const Variable> inputs,
 }
 
 auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
-                                         bool grad_mode)
+                                         bool grad_mode,
+                                         Variable* out_result,
+                                         bool* out_fn_ran)
     -> std::shared_ptr<CompiledModule> {
     had_graph_break_ = false;
     size_t traced_op_count = 0;
@@ -527,6 +585,13 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
     }
 
     DispatchInterceptorStack::pop();
+
+    // fn_() has completed exactly once (under the interceptor). Publish its
+    // result so the caller reuses it instead of running fn_() a second time
+    // (JIT-008), and flag that the closure itself ran (so a later compile
+    // failure is distinguishable from a closure error).
+    if (out_fn_ran) *out_fn_ran = true;
+    if (out_result) *out_result = output;
 
     // A graph break means an op that could not be represented in the IR ran
     // during the trace. Its output has no producing node, so any later consumer
@@ -603,7 +668,10 @@ namespace {
 /// is recorded as a TracedOp. Without the interceptor, the tracer sees no
 /// ops and `end_trace` returns an empty graph.
 auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
-                              std::span<const Variable> inputs)
+                              std::span<const Variable> inputs,
+                              Variable* out_result = nullptr,
+                              bool* out_fn_attempted = nullptr,
+                              bool* out_fn_ok = nullptr)
     -> std::shared_ptr<Graph> {
     auto& tracer = Tracer::get_instance();
     tracer.start_trace();
@@ -617,6 +685,12 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
     });
     DispatchInterceptorStack::push(std::move(interceptor));
 
+    // fn is about to run (exactly once, under the interceptor). Mark it
+    // attempted BEFORE the call so a caller can tell "fn threw" apart from "fn
+    // never ran" on the fallback path — the two demand opposite handling
+    // (propagate vs. eager re-run) and must never be conflated (JIT-008-class
+    // double-exec on the MLIR path).
+    if (out_fn_attempted) *out_fn_attempted = true;
     Variable output;
     try {
         output = fn(inputs);
@@ -626,6 +700,11 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
         throw;
     }
     DispatchInterceptorStack::pop();
+    // fn completed successfully. Publish its result + the ok flag so the caller
+    // reuses it on any post-trace fallback (graph break, lower/compile failure)
+    // instead of running fn a SECOND time.
+    if (out_fn_ok) *out_fn_ok = true;
+    if (out_result) *out_result = output;
     if (had_break) {
         // Returning nullptr routes mlir_invoke() into its "trace produced no
         // graph -> fall back to eager (or throw in strict mode)" path instead
@@ -687,9 +766,24 @@ auto auto_target_for_device(const ::tenzor::Device& dev)
 auto resolve_target(const std::string& cfg_target,
                     const ::tenzor::Device& dev) -> std::string {
     if (cfg_target != "auto") {
-        if (cfg_target == "vulkan") return "vulkan-spirv";
-        if (cfg_target == "hip")    return "rocm";
-        return cfg_target;
+        std::string resolved = cfg_target;
+        if (cfg_target == "vulkan") resolved = "vulkan-spirv";
+        else if (cfg_target == "hip") resolved = "rocm";
+        // JIT-032: an explicit target whose device family differs from the input
+        // tensor's runs the graph on a DIFFERENT backend and host-round-trips the
+        // result back — a silent, easy-to-hit device migration. Warn once so it
+        // is visible rather than silent.
+        if (auto in_t = auto_target_for_device(dev); in_t && *in_t != resolved) {
+            static std::once_flag warned;
+            std::call_once(warned, [&] {
+                TENZOR_LOG_WARN(
+                    "JIT: explicit MLIR target '{}' does not match the input "
+                    "tensor's device ({}); the graph runs on '{}' and the result "
+                    "is copied back to the input device — verify this is intended.",
+                    resolved, dev.to_string(), resolved);
+            });
+        }
+        return resolved;
     }
     if (auto t = auto_target_for_device(dev)) return *t;
     throw std::runtime_error(
@@ -749,9 +843,21 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
     }
 
     // C2: strict-aware eager fallback around the entire lower/compile/resolve/
-    // run section.
+    // run section. Thread three signals out of the impl so the fallback runs
+    // fn_ AT MOST ONCE across the whole invocation (JIT-008-class double-exec):
+    //   fn_ok        — fn ran to completion during the trace; traced_result is
+    //                  valid. A later JIT stage (lower/compile/invoke) failed →
+    //                  REUSE traced_result, never re-run fn_.
+    //   fn_attempted — fn was entered but threw. Re-running would double-execute
+    //                  its side effects and throw again → propagate the original.
+    //   neither      — fn never ran (e.g. a cached invoker failed at runtime) →
+    //                  eager fallback fn_(inputs) is safe and is the documented
+    //                  C2 behaviour.
+    Variable traced_result;
+    bool fn_attempted = false;
+    bool fn_ok = false;
     try {
-        return mlir_invoke_impl(inputs);
+        return mlir_invoke_impl(inputs, &traced_result, &fn_attempted, &fn_ok);
     } catch (const std::exception& e) {
         bool strict = config_.strict;
         if (!strict) {
@@ -761,6 +867,18 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
             }
         }
         if (strict) throw;
+        if (fn_ok) {
+            TENZOR_LOG_WARN(
+                "MLIR JIT: compile/run failed (target={}): {}. Reusing the "
+                "traced eager result (fn already ran).",
+                config_.target, e.what());
+            return traced_result;
+        }
+        if (fn_attempted) {
+            // The user's function itself threw during the trace — surface that
+            // error unchanged rather than silently re-running it.
+            throw;
+        }
         TENZOR_LOG_WARN(
             "MLIR JIT: compile/run failed (target={}): {}. Falling back to "
             "eager execution on the input's backend.",
@@ -769,7 +887,10 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
     }
 }
 
-auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
+auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
+                                        Variable* out_result,
+                                        bool* out_fn_attempted,
+                                        bool* out_fn_ok)
     -> Variable {
     namespace mj = ::tenzor::jit::mlir_jit;
 
@@ -813,8 +934,11 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
         }
     }
 
-    // Cache miss: trace → lower → compile → load invoker → cache.
-    auto graph = trace_single_input_graph(fn_, inputs);
+    // Cache miss: trace → lower → compile → load invoker → cache. Thread the
+    // out-params so the trace runs fn EXACTLY ONCE; every fallback below reuses
+    // that result rather than re-invoking fn_ (JIT-008-class double-exec).
+    auto graph = trace_single_input_graph(fn_, inputs, out_result,
+                                          out_fn_attempted, out_fn_ok);
     if (!graph || graph->num_nodes() == 0) {
         // Trace produced nothing (graph break in fullgraph mode, or the
         // function only ran ops the interceptor doesn't capture). Either
@@ -830,8 +954,11 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
                 "CompiledFunction::mlir_invoke: trace produced no graph "
                 "(TENZOR_JIT_STRICT=1).");
         }
-        TENZOR_LOG_WARN("MLIR JIT: trace produced no graph; falling back to "
-                        "eager execution for this invocation.");
+        // fn already ran (successfully) during the trace above — reuse its
+        // result instead of running it a SECOND time.
+        TENZOR_LOG_WARN("MLIR JIT: trace produced no graph; reusing the traced "
+                        "eager result for this invocation.");
+        if (out_result && out_fn_ok && *out_fn_ok) return *out_result;
         return fn_(inputs);
     }
 
@@ -919,8 +1046,17 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs)
             hal_ordinal);
     } catch (const mj::JitInvokeError& e) {
         const std::string what = e.what();
-        if (what.find("NOT_FOUND") != std::string::npos &&
-            what.find("driver") != std::string::npos) {
+        // A missing/unregistered in-process HAL driver can surface under several
+        // IREE status codes, not just NOT_FOUND (JIT-036). Anchor on "driver" and
+        // accept the driver-unavailable statuses so the subprocess fallback isn't
+        // skipped just because the wording differs (which would drop us to eager).
+        const bool driver_mentioned = what.find("driver") != std::string::npos;
+        const bool unavailable =
+            what.find("NOT_FOUND")   != std::string::npos ||
+            what.find("UNAVAILABLE") != std::string::npos ||
+            what.find("not registered") != std::string::npos ||
+            what.find("no driver")   != std::string::npos;
+        if (driver_mentioned && unavailable) {
             // The in-process HAL driver for this target isn't linked, so we must
             // run via the iree-run-module subprocess. That subprocess canNOT
             // register the tenzor_plugin VM native module, so any

@@ -908,6 +908,13 @@ private:
     std::unordered_map<std::string, size_t> param_leaves_;
     int64_t next_node_id_{0};                               ///< Node ID counter
     mutable bool needs_retrace_{false};                        ///< Set when ShapeGuard detects mismatch
+    /// Runtime replay device, set by forward() before executing nodes. Used to
+    /// place tensor-attr-backed node payloads (Constant "value", fused weights/
+    /// bias) on the same device as the inputs — deserialized graphs materialize
+    /// those attrs on CPU, so without this a reloaded graph replayed on GPU fed
+    /// a CPU constant into a GPU op (JIT-050). Guarded by CompiledModule's
+    /// forward_mutex_, so the mutable member is not raced.
+    mutable Device exec_target_device_{Device::cpu()};
 
 public:
     /// Check if a shape guard triggered a retrace request
@@ -925,6 +932,23 @@ private:
     auto execute_node(const std::shared_ptr<Node>& node,
                       std::unordered_map<std::string, Variable>& value_map,
                       bool grad_mode = false) const -> void;
+
+    /// Place a tensor-attr-backed node payload on the current replay device
+    /// (set by forward()). No-op for a fresh trace whose attrs already live on
+    /// the device; migrates a deserialized (CPU) payload onto the GPU (JIT-050).
+    auto place_on_exec_device(const Tensor& t) const -> Tensor {
+        return t.device() == exec_target_device_ ? t : t.to(exec_target_device_);
+    }
+
+    /// True if `v` is a terminal output of this graph. `uses()` only tracks a
+    /// value that feeds ANOTHER node, so a value returned directly (e.g. the
+    /// argmax indices of a `max(dim)`) has no use but must still be produced.
+    auto is_graph_output(const std::shared_ptr<Value>& v) const -> bool {
+        for (const auto& o : outputs_) {
+            if (o.get() == v.get()) return true;
+        }
+        return false;
+    }
 
     friend class Compiler;  // Allow compiler to access internals
 };

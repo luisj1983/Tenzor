@@ -325,6 +325,15 @@ auto conv3d(const Variable& input, const Variable& weight,
     attrs.set(AttrKey::Stride, sd);
     attrs.set(AttrKey::Padding, pd);
     attrs.set(AttrKey::Dilation, dd);
+    // Emit the depth axis under its own per-axis keys as well as the scalar
+    // Stride/Padding/Dilation (which the kernel reads as the depth value). This
+    // makes the JIT tracing interceptor's D/H/W-triple copy fire so a traced
+    // Conv3d carries a faithful 3-element "stride"/"padding"/"dilation" vec
+    // instead of a 2-element {h,w} vec (which made JIT replay read the width
+    // component out of bounds). The kernel ignores StrideD/PaddingD/DilationD.
+    attrs.set(AttrKey::StrideD, sd);
+    attrs.set(AttrKey::PaddingD, pd);
+    attrs.set(AttrKey::DilationD, dd);
     attrs.set(AttrKey::StrideH, sh);
     attrs.set(AttrKey::StrideW, sw);
     attrs.set(AttrKey::PaddingH, ph);

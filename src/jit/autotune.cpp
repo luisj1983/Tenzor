@@ -7,7 +7,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
+#include <thread>
 #include <sstream>
 #include <stdexcept>
 
@@ -96,9 +98,15 @@ auto AutotuneCache::save(const std::string& path) const -> void {
         std::filesystem::create_directories(p.parent_path());
     }
 
-    // Write to a temp file first, then rename for atomicity
-    std::string tmp_path = path + ".tmp";
-    {
+    // Write to a temp file first, then rename for atomicity. The temp name must
+    // be unique per thread: two threads calling save() concurrently both hold
+    // only a shared_lock, so a fixed "path.tmp" would be written by both at once
+    // and truncate/interleave before the rename, corrupting the file (JIT-053).
+    // A per-thread temp name lets each write independently; the final atomic
+    // rename to `path` is last-writer-wins (both wrote valid content).
+    const std::string tmp_path = path + ".tmp." +
+        std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    try {
         std::ofstream ofs(tmp_path);
         if (!ofs) {
             throw std::runtime_error("AutotuneCache::save: cannot open " + tmp_path);
@@ -131,10 +139,17 @@ auto AutotuneCache::save(const std::string& path) const -> void {
                 << "}";
         }
         ofs << "\n}\n";
+        ofs.flush();
+        ofs.close();
+        // Atomic rename (inside the try so a failure also cleans up the temp).
+        std::filesystem::rename(tmp_path, path);
+    } catch (...) {
+        // Remove the (per-thread) temp so a write/rename failure does not leave
+        // an orphan next to the cache — best-effort, never masks the real error.
+        std::error_code ec;
+        std::filesystem::remove(tmp_path, ec);
+        throw;
     }
-
-    // Atomic rename
-    std::filesystem::rename(tmp_path, path);
 }
 
 // ============================================================================

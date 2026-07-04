@@ -24,6 +24,8 @@
 #include <tenzor/nn/layers/linear.hpp>
 #include <tenzor/nn/layers/conv.hpp>
 #include <tenzor/nn/quantization/quantized_layers.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <cmath>
 
 #include "../backend_parity/parity_test_utils.hpp"
 
@@ -264,4 +266,121 @@ int main(int argc, char** argv) {
     int result = RUN_ALL_TESTS();
     tenzor::finalize();
     return result;
+}
+
+// =========================================================================
+// GPU quant-kernel guard/compute regression (JIT-040/041/042/043).
+// These directly dispatch the backend kernels with configs the wrappers must
+// now handle correctly (fail-loud on unsupported, correct on OutputScale/bias),
+// on every AVAILABLE backend. int8 operands via a real symmetric quantize.
+// =========================================================================
+namespace {
+// Quantize an fp32 tensor to int8 (symmetric, per-tensor) and return (q, scale).
+std::pair<Tensor, float> quantize_i8(const Tensor& x) {
+    Tensor xc = x.to(Device::cpu()).contiguous();
+    const float* d = xc.data<float>();
+    float amax = 1e-8f;
+    for (int64_t i = 0; i < xc.numel(); ++i) amax = std::max(amax, std::fabs(d[i]));
+    float scale = amax / 127.0f;
+    Tensor q({xc.shape().begin(), xc.shape().end()}, DType::Int8, Device::cpu());
+    int8_t* qd = q.data<int8_t>();
+    for (int64_t i = 0; i < xc.numel(); ++i) {
+        int v = static_cast<int>(std::lround(d[i] / scale));
+        qd[i] = static_cast<int8_t>(std::max(-127, std::min(127, v)));
+    }
+    return {q, scale};
+}
+}  // namespace
+
+TEST(JITQuantizationGpuKernels, PerChannelRejectedOnGpu_JIT041) {
+    for (const auto& dev : get_available_backends()) {
+        if (dev.type == Device::Type::CPU) continue;  // CPU wrapper honors per-channel
+        auto [xq, xs] = quantize_i8(randn({4, 16}, DType::Float32, Device::cpu()));
+        auto [wq, ws] = quantize_i8(randn({8, 16}, DType::Float32, Device::cpu()));
+        // Per-channel scale/zp tensors at inputs[3]/[4] (size > 1) => must throw.
+        Tensor pc_scale = tenzor::full({8}, static_cast<double>(ws), DType::Float32, Device::cpu());
+        Tensor pc_zp    = tenzor::full({8}, 0.0, DType::Int32, Device::cpu());
+        std::vector<Tensor> inputs = {
+            xq.to(dev), wq.to(dev),
+            tenzor::full({8}, 0.0, DType::Float32, dev),  // bias placeholder
+            pc_scale.to(dev), pc_zp.to(dev)};
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputScale, static_cast<double>(xs));
+        attrs.set(AttrKey::WeightScaleQ, static_cast<double>(ws));
+        SCOPED_TRACE(std::string("per-channel guard on ") + backend_name(dev));
+        EXPECT_THROW({ (void)dispatch(OpId::QuantizedLinear, inputs, attrs); },
+                     std::invalid_argument)
+            << "GPU QuantizedLinear must reject per-channel scale/zp (JIT-041) on "
+            << backend_name(dev);
+    }
+}
+
+TEST(JITQuantizationGpuKernels, RectangularQuantConvRejected_JIT040) {
+    for (const auto& dev : get_available_backends()) {
+        if (dev.type != Device::Type::Vulkan && dev.type != Device::Type::ROCm) continue;
+        auto [xq, xs] = quantize_i8(randn({1, 2, 8, 8}, DType::Float32, Device::cpu()));
+        auto [wq, ws] = quantize_i8(randn({3, 2, 2, 3}, DType::Float32, Device::cpu()));  // rectangular kH!=kW
+        std::vector<Tensor> inputs = {xq.to(dev), wq.to(dev)};
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputScale, static_cast<double>(xs));
+        attrs.set(AttrKey::WeightScaleQ, static_cast<double>(ws));
+        SCOPED_TRACE(std::string("rectangular quant-conv guard on ") + backend_name(dev));
+        EXPECT_THROW({ (void)dispatch(OpId::QuantizedConv2d, inputs, attrs); },
+                     std::invalid_argument)
+            << "GPU QuantizedConv2d must reject a rectangular kernel (JIT-040) on "
+            << backend_name(dev);
+    }
+}
+
+TEST(JITQuantizationGpuKernels, VulkanOutputScaleMatchesCpu_JIT042) {
+    Device vk{Device::Type::Vulkan, 0};
+    bool have_vk = false;
+    for (const auto& d : get_available_backends())
+        if (d.type == Device::Type::Vulkan) { vk = d; have_vk = true; }
+    if (!have_vk) GTEST_SKIP() << "Vulkan not available";
+
+    auto [xq, xs] = quantize_i8(randn({4, 16}, DType::Float32, Device::cpu()));
+    auto [wq, ws] = quantize_i8(randn({8, 16}, DType::Float32, Device::cpu()));
+    // A NON-ZERO bias exercises the bias/output_scale interaction: the shader adds
+    // bias at natural scale, so the /output_scale correction must NOT scale it.
+    Tensor bias_cpu = randn({8}, DType::Float32, Device::cpu());
+    const double out_scale = 2.0;  // non-unit output scale exercises the /out_scale path
+    auto run = [&](Device dev) {
+        std::vector<Tensor> inputs = {xq.to(dev), wq.to(dev), bias_cpu.to(dev)};
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputScale, static_cast<double>(xs));
+        attrs.set(AttrKey::WeightScaleQ, static_cast<double>(ws));
+        attrs.set(AttrKey::OutputScale, out_scale);
+        return dispatch(OpId::QuantizedLinear, inputs, attrs)[0].to(Device::cpu());
+    };
+    Tensor cpu_out = run(Device::cpu());
+    Tensor vk_out  = run(vk);
+    // With JIT-042, Vulkan now applies /output_scale like CPU, so they match.
+    EXPECT_TRUE(tensors_close(cpu_out, vk_out, 2e-3f, 2e-3f))
+        << "Vulkan QuantizedLinear OutputScale diverges from CPU (JIT-042)";
+}
+
+TEST(JITQuantizationGpuKernels, OneApiEmptyBiasNoCrash_JIT043) {
+    Device oa{Device::Type::OneAPI, 0};
+    bool have = false;
+    for (const auto& d : get_available_backends())
+        if (d.type == Device::Type::OneAPI) { oa = d; have = true; }
+    if (!have) GTEST_SKIP() << "OneAPI not available";
+
+    auto [xq, xs] = quantize_i8(randn({4, 16}, DType::Float32, Device::cpu()));
+    auto [wq, ws] = quantize_i8(randn({8, 16}, DType::Float32, Device::cpu()));
+    OpAttributes attrs;
+    attrs.set(AttrKey::InputScale, static_cast<double>(xs));
+    attrs.set(AttrKey::WeightScaleQ, static_cast<double>(ws));
+
+    // A 0-element bias placeholder at inputs[2] must be treated as no-bias
+    // (JIT-043) rather than read out of bounds.
+    Tensor empty_bias({0}, DType::Float32, oa);
+    std::vector<Tensor> with_empty = {xq.to(oa), wq.to(oa), empty_bias};
+    std::vector<Tensor> no_bias    = {xq.to(oa), wq.to(oa)};
+
+    Tensor a = dispatch(OpId::QuantizedLinear, with_empty, attrs)[0].to(Device::cpu());
+    Tensor b = dispatch(OpId::QuantizedLinear, no_bias, attrs)[0].to(Device::cpu());
+    EXPECT_TRUE(tensors_close(a, b, 1e-4f, 1e-4f))
+        << "OneAPI QuantizedLinear empty-bias placeholder != no-bias (JIT-043)";
 }

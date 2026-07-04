@@ -2442,6 +2442,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_single_output_kernel(OpId::QuantizedLinear,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        if (inputs.size() >= 4) {
+            throw std::invalid_argument(
+                "QuantizedLinear (GPU): per-channel weight scale/zero-point "
+                "(inputs[3]/[4]) is not supported by this backend kernel; use "
+                "per-tensor quantization (scalar WeightScaleQ/WeightZeroPoint) — "
+                "JIT-041.");
+        }
             const auto& input = inputs[0];
             const auto& weight = inputs[1];
 
@@ -2455,9 +2462,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+            float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
 
-            return get_vulkan_backend()->dispatchQuantizedLinear(
+            Tensor result = get_vulkan_backend()->dispatchQuantizedLinear(
                 input, weight, bias, input_scale, weight_scale, input_zp, weight_zp);
+            // The Vulkan shader computes (acc*input_scale*weight_scale + bias) at
+            // NATURAL bias scale, but CPU/CUDA/ROCm/OneAPI compute
+            // acc*(in*wt/out) + bias (bias NOT divided by output_scale). Dividing
+            // the whole result by output_scale therefore over-scales the bias, so
+            // add back bias*(1 - 1/output_scale) to leave only the matmul term
+            // scaled (JIT-042). No-op at the common OutputScale == 1.0.
+            if (output_scale != 1.0f) {
+                result = result / output_scale +
+                         bias * (1.0f - 1.0f / output_scale);
+            }
+            return result;
         });
 
     table.register_single_output_kernel(OpId::QuantizedConv2d,
@@ -2480,6 +2499,20 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                     "QuantizedConv2d (Vulkan): backend shader only supports symmetric "
                     "stride/padding; got stride=" + std::to_string(stride_arr[0]) + "x" + std::to_string(stride_arr[1]) +
                     ", padding=" + std::to_string(padding_arr[0]) + "x" + std::to_string(padding_arr[1]) + ".");
+            }
+            // The Vulkan quantized-conv shader also ignores dilation and groups and
+            // assumes a square kernel; fail loudly on those rather than silently
+            // computing the wrong result (JIT-040).
+            const auto dilation_arr = ::tenzor::backend::attrs::dilation_2d(attrs);
+            const int64_t q_groups = attrs.get_int(AttrKey::Groups, 1);
+            if (dilation_arr[0] != 1 || dilation_arr[1] != 1 || q_groups != 1 ||
+                (weight_shape.size() >= 4 && weight_shape[2] != weight_shape[3])) {
+                throw std::invalid_argument(
+                    "QuantizedConv2d (Vulkan): backend shader supports only "
+                    "dilation=1, groups=1 and a square kernel (JIT-040); got "
+                    "dilation=" + std::to_string(dilation_arr[0]) + "x" +
+                    std::to_string(dilation_arr[1]) + ", groups=" +
+                    std::to_string(q_groups) + ".");
             }
             float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));

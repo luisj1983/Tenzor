@@ -136,5 +136,101 @@ def test_traced_graph_with_fresh_input():
     )
 
 
+# ----------------------------------------------------------------------------
+# @tz.jit wrapper regressions (JIT-070 family): the decorator must run the
+# user's function EXACTLY ONCE per call, keep temp inputs alive for show_*, and
+# key static args by value.
+# ----------------------------------------------------------------------------
+
+def test_jit_no_double_exec_on_error():
+    """A side-effecting fn that raises must run its body ONCE. The MLIR path
+    used to re-run fn_ on its eager fallback (and re-run it again in the Python
+    wrapper's error hint), double-executing side effects (JIT-070)."""
+    calls = {"n": 0}
+
+    @tz.jit
+    def bad(x):
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        bad(tz.randn([4, 8]))
+    assert calls["n"] == 1, f"fn body ran {calls['n']} times (double-exec)"
+
+
+def test_jit_no_double_exec_on_success():
+    """A successful call must also run the traced fn exactly once, whether it
+    compiles or degrades to eager."""
+    calls = {"n": 0}
+
+    @tz.jit
+    def f(x):
+        calls["n"] += 1
+        return tz.sum(x, 1)
+
+    y = f(tz.randn([4, 8]))
+    assert y is not None
+    assert calls["n"] == 1, f"fn body ran {calls['n']} times (double-exec)"
+
+
+def test_jit_grad_path_runs_once_and_grads_correct():
+    """A @tz.jit fn called with requires_grad inputs goes through grad_invoke.
+    It must run the traced body EXACTLY ONCE (the grad-replay fallback used to
+    re-run fn_ on a cache-miss whose replay failed — JIT-071) and produce grads
+    matching eager autograd."""
+    import numpy as np
+    calls = {"n": 0}
+
+    @tz.jit
+    def f(x):
+        calls["n"] += 1
+        return tz.sum(x * x, 1)
+
+    x = tz.Variable(tz.randn([4, 8]), True)
+    y = f(x)
+    assert calls["n"] == 1, f"grad-path fn body ran {calls['n']} times"
+
+    y.backward(tz.Variable(tz.ones([4]), False))
+    g = x.grad
+    gnp = np.asarray(g.tensor().numpy() if hasattr(g, "tensor") else g.numpy())
+    expect = 2.0 * np.asarray(x.tensor().numpy())   # d/dx sum(x^2) = 2x
+    assert np.allclose(gnp, expect, atol=1e-4), "jit grad diverged from eager 2x"
+
+
+def test_jit_show_graph_after_temp_input():
+    """The natural `f(temp); show_graph(f)` idiom must not raise — the wrapper
+    keeps a STRONG ref to the last call's tensor operands."""
+    @tz.jit
+    def f(x):
+        return tz.sum(x, 1)
+
+    _ = f(tz.randn([4, 8]))          # temp input, dropped after the call
+    s = tz.jit.show_graph(f)         # must NOT raise
+    assert isinstance(s, str)
+
+
+def test_jit_static_arg_value_key_and_rejects_nonprimitive():
+    """Scalar static args are keyed by value (not id-based repr); a
+    non-primitive static arg raises a clear TypeError rather than mis-keying."""
+    x = tz.randn([4, 8])
+
+    @tz.jit
+    def g(x, dim):
+        return tz.sum(x, dim)
+
+    assert _allclose(g(x, 1), tz.sum(x, 1))
+
+    class C:  # default (id-based) __repr__ — a value-key must not use repr
+        def __init__(self, v):
+            self.v = v
+
+    @tz.jit
+    def h(x, obj):
+        return x
+
+    with pytest.raises(TypeError, match="not supported"):
+        h(x, C(1))
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))

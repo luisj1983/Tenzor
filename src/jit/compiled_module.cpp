@@ -573,7 +573,14 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
 
 auto CompiledModule::replay_cuda_graph_outputs() const -> std::vector<Tensor> {
     std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
-    return captured_outputs_;
+    // Clone the static capture buffers (JIT-005). The next replay() overwrites
+    // captured_outputs_ IN PLACE, so returning them directly would alias
+    // consecutive results — `y1 = f(x1); y2 = f(x2);` would leave y1 sharing
+    // y2's buffer. Cloning gives each caller an independent output.
+    std::vector<Tensor> out;
+    out.reserve(captured_outputs_.size());
+    for (const auto& t : captured_outputs_) out.push_back(t.clone());
+    return out;
 }
 
 auto CompiledModule::replay_cuda_graph(std::vector<Tensor>& inputs) -> bool {

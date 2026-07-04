@@ -541,6 +541,13 @@ void register_jit(py::module_& m) {
 
     // compile_script — Python-subset scripting frontend
     jit.def("compile_script", [](const std::string& source) {
+        // Reject an embedded NUL rather than silently truncating the program at
+        // it (compile_script scans the c_str to '\0') — JIT-022.
+        if (source.find('\0') != std::string::npos) {
+            throw std::invalid_argument(
+                "compile_script: source contains an embedded NUL byte "
+                "(would silently truncate the program)");
+        }
         return tenzor::jit::compile_script(source.c_str());
     },
     py::arg("source"),
@@ -550,6 +557,11 @@ void register_jit(py::module_& m) {
     "Uses a default CPU+Float32 {1}-element dummy for tracing.");
 
     jit.def("compile_script", [](const std::string& source, const tenzor::Tensor& dummy) {
+        if (source.find('\0') != std::string::npos) {
+            throw std::invalid_argument(
+                "compile_script: source contains an embedded NUL byte "
+                "(would silently truncate the program)");
+        }
         return tenzor::jit::compile_script(source.c_str(), dummy);
     },
     py::arg("source"), py::arg("dummy"),

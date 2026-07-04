@@ -186,8 +186,30 @@ auto GraphWriter::write_io_lists(const Graph& graph) -> void {
 // modules survive a save/load round trip.
 auto GraphWriter::write_constants(const Graph& graph) -> void {
     const auto& constants = graph.constants();
-    write_uint64(constants.size());
+    const auto& param_leaves = graph.param_leaves();
+    const auto& parameters = graph.parameters();
+    // Fold captured trainable-parameter leaves into the constants stream as a
+    // frozen snapshot (JIT-014). They live in param_leaves_ (value-id -> index
+    // into parameters_), NOT constants_, so a graph built via with_parameters/
+    // set_parameters previously dropped them on save and Graph::forward then
+    // threw "value not computed" on load. Writing their current tensor values as
+    // constants is the correct save-time snapshot (the loaded graph replays them
+    // as plain constants). Format stays compatible: the reader just sees more
+    // constants.
+    std::vector<std::pair<std::string, Tensor>> extra;
+    extra.reserve(param_leaves.size());
+    for (const auto& [id, idx] : param_leaves) {
+        if (constants.count(id)) continue;  // already serialized as a constant
+        if (idx < parameters.size() && parameters[idx]) {
+            extra.emplace_back(id, parameters[idx]->tensor());
+        }
+    }
+    write_uint64(constants.size() + extra.size());
     for (const auto& [id, tensor] : constants) {
+        write_string(id);
+        write_tensor(tensor);
+    }
+    for (const auto& [id, tensor] : extra) {
         write_string(id);
         write_tensor(tensor);
     }
@@ -645,7 +667,18 @@ auto GraphReader::read_io_lists(Graph& graph) -> void {
     for (uint64_t i = 0; i < num_inputs; ++i) {
         std::string id = read_string();
         auto v = graph.get_value(id);
-        if (v) ins.push_back(v);
+        // Fail loud on a missing value, exactly like read_nodes above. Silently
+        // skipping would build a graph with FEWER inputs than were serialized —
+        // Graph::forward() then binds the caller's arguments to the wrong Values
+        // (or too few), silently producing wrong results instead of a clean
+        // "malformed graph" error on a truncated/corrupted file.
+        if (!v) {
+            throw std::runtime_error(
+                "GraphReader::read_io_lists: malformed graph — input list "
+                "references value '" + id +
+                "' that does not exist in the values section");
+        }
+        ins.push_back(v);
     }
     graph.set_inputs(std::move(ins));
 
@@ -659,7 +692,16 @@ auto GraphReader::read_io_lists(Graph& graph) -> void {
     for (uint64_t i = 0; i < num_outputs; ++i) {
         std::string id = read_string();
         auto v = graph.get_value(id);
-        if (v) outs.push_back(v);
+        // Fail loud on a missing value (see the inputs loop above): a silently
+        // dropped output would make Graph::forward() return fewer tensors than
+        // the graph declared, corrupting every downstream consumer.
+        if (!v) {
+            throw std::runtime_error(
+                "GraphReader::read_io_lists: malformed graph — output list "
+                "references value '" + id +
+                "' that does not exist in the values section");
+        }
+        outs.push_back(v);
     }
     graph.set_outputs(std::move(outs));
 }

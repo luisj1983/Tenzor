@@ -470,7 +470,11 @@ auto parse_output_line(const std::string& shape_and_data)
         }
     }
 
-    ::tenzor::Tensor out = ::tenzor::full(shape, 0.0, dt);
+    // Allocate raw storage of the correct dtype (matching _iree_marshal.hpp)
+    // rather than ::tenzor::full, whose float/double scalar overload mis-handles
+    // integer/complex dtypes; the parse loop below overwrites every element
+    // (JIT-016).
+    ::tenzor::Tensor out(shape, dt, ::tenzor::Device::cpu());
     std::istringstream is(values);
     if (dt == ::tenzor::DType::Float32) {
         float* p = out.data<float>();

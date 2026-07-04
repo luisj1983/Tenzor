@@ -146,6 +146,26 @@ auto SymbolicShapeInference::infer_matmul(const Node* node) -> std::vector<Symbo
         return {};
     }
 
+    // torch.matmul 1-D operand promotion (JIT-047): a 1-D operand is promoted by
+    // prepending (lhs) / appending (rhs) a 1, then the added dim is dropped from
+    // the result. Previously these produced no symbolic shape, freezing dims.
+    if (lhs.rank() == 1 && rhs.rank() == 1) {
+        return {SymbolicShape(std::vector<SymbolicDim>{})};  // dot -> scalar
+    }
+    if (lhs.rank() == 1 && rhs.rank() >= 2) {
+        // (K,) @ (..., K, N) -> (..., N)
+        SymbolicShape out(std::vector<SymbolicDim>(
+            rhs.dims().begin(), rhs.dims().end() - 2));
+        out.push_back(rhs[rhs.rank() - 1]);
+        return {std::move(out)};
+    }
+    if (lhs.rank() >= 2 && rhs.rank() == 1) {
+        // (..., M, K) @ (K,) -> (..., M)
+        SymbolicShape out(std::vector<SymbolicDim>(
+            lhs.dims().begin(), lhs.dims().end() - 1));
+        return {std::move(out)};
+    }
+
     // General MatMul: (..., M, K) @ (..., K, N) -> (..., M, N)
     // Broadcast the leading batch dims (everything but the last two) of both
     // operands, mirroring torch.matmul and the concrete infer_types path in

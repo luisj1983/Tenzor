@@ -442,6 +442,12 @@ auto make_tracing_interceptor(
         };
         copy_int_list_to_vec(AttrKey::Shape, "shape");
         copy_int_list_to_vec(AttrKey::OutputSize, "output_size");
+        // AdaptiveAvgPool2d/MaxPool dispatch the target size as per-axis
+        // OutputSizeH/OutputSizeW (not the OutputSize list), so also emit the
+        // "output_size" vec from that pair; otherwise the executor found no
+        // output_size and produced a wrong (default) shape + severed grad
+        // (JIT-056).
+        copy_hw_pair(AttrKey::OutputSizeH, AttrKey::OutputSizeW, "output_size");
         // LayerNorm normalized_shape: dispatched as a comma-separated STRING
         // (AttrKey::NormalizedShape). Parse it to an int-list so the executor's
         // LayerNorm node (which reads the "normalized_shape" vec attr) replays
@@ -466,6 +472,14 @@ auto make_tracing_interceptor(
         copy_int_list_to_vec(AttrKey::Dims,  "dims");
         copy_int_list_to_vec(AttrKey::Starts, "starts");
         copy_int_list_to_vec(AttrKey::Ends,   "ends");
+        // A multi-dim strided slice sets per-dim Steps too; emit them so the
+        // traced starts/ends slice replays with the right stride (JIT-013). Gate
+        // on Starts so this only fires for the slice form — AttrKey::Steps is
+        // overloaded (e.g. Linspace uses it as a SCALAR count), and emitting a
+        // "steps" vec for those would attach a spurious per-dim stride.
+        if (attrs.has(AttrKey::Starts)) {
+            copy_int_list_to_vec(AttrKey::Steps, "steps");
+        }
         if (attrs.has(AttrKey::Mode)) {
             const auto mode = attrs.get_string(AttrKey::Mode, "bilinear");
             if (mode == "nearest") {

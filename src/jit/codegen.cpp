@@ -190,7 +190,25 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         }
         return str;
     };
-    std::string s = fmt_double(step.scalar);        // scalar operand literal
+    // Emit a COMPLETE scalar-operand literal (already suffixed). For non-finite
+    // values, emit a valid device constant instead of the invalid "inff"/"nanf"
+    // token that "<printed>" + F previously produced, which failed NVRTC/HIPRTC
+    // compilation (JIT-002). __int_as_float / __longlong_as_double are available
+    // in both CUDA and HIP device code.
+    auto emit_scalar = [&](double v) -> std::string {
+        if (!std::isfinite(v)) {
+            if (std::isnan(v)) {
+                return f64 ? "__longlong_as_double(0x7ff8000000000000LL)"
+                           : "__int_as_float(0x7fc00000)";
+            }
+            const std::string inf = f64
+                ? "__longlong_as_double(0x7ff0000000000000LL)"
+                : "__int_as_float(0x7f800000)";
+            return v < 0.0 ? ("(-" + inf + ")") : inf;
+        }
+        return fmt_double(v) + F;  // finite: full literal incl. suffix
+    };
+    std::string s = emit_scalar(step.scalar);       // complete scalar operand literal
 
     // Activation scalars default to their PyTorch nn.functional values when the
     // step records 0.0 (no explicit slope/alpha). Mirror execute_fused_cpu
@@ -283,14 +301,14 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         case ElemOp::Fmod: return vp + "val = " + fn("fmod") + "(" + a + ", " + b + ");";
 
         // Scalar ops
-        case ElemOp::AddScalar:  return vp + "val = " + a + " + " + s + F + ";";
-        case ElemOp::MulScalar:  return vp + "val = " + a + " * " + s + F + ";";
-        case ElemOp::PowScalar:  return vp + "val = " + fn("pow") + "(" + a + ", " + s + F + ");";
+        case ElemOp::AddScalar:  return vp + "val = " + a + " + " + s + ";";
+        case ElemOp::MulScalar:  return vp + "val = " + a + " * " + s + ";";
+        case ElemOp::PowScalar:  return vp + "val = " + fn("pow") + "(" + a + ", " + s + ");";
         // clamp_min/clamp_max == std::max/std::min(x, s), which propagate NaN
         // (clamp_min_kernel/clamp_max_kernel blend the NaN back over AVX
         // max/min); fmax/fmin drop NaN and diverge from CPU/eager.
-        case ElemOp::ClampMin:   return vp + "val = (" + a + " < " + s + F + ") ? " + s + F + " : " + a + ";";
-        case ElemOp::ClampMax:   return vp + "val = (" + a + " > " + s + F + ") ? " + s + F + " : " + a + ";";
+        case ElemOp::ClampMin:   return vp + "val = (" + a + " < " + s + ") ? " + s + " : " + a + ";";
+        case ElemOp::ClampMax:   return vp + "val = (" + a + " > " + s + ") ? " + s + " : " + a + ";";
     }
     // No `default:` — `-Wswitch` flags any ElemOp without an explicit case above
     // (promoted to an error under the CI/Release warning flags), and the throw is

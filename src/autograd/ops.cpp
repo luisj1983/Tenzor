@@ -684,7 +684,17 @@ auto transpose(const Variable& input, int64_t dim0, int64_t dim1) -> Variable {
 
 auto squeeze(const Variable& input, int64_t dim) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(tenzor::squeeze(input.tensor(), dim), false);
+        // Dispatch OpId::Squeeze (rather than the raw Tensor view) so the JIT
+        // tracing interceptor records a first-class Squeeze node. A raw
+        // Tensor::squeeze view is invisible to the dispatch-level tracer, so a
+        // graph whose output is a squeeze view (e.g. F::conv1d's trailing
+        // squeeze) produced no graph output at all. Mirrors Tensor::reshape,
+        // which already dispatches OpId::Reshape for the same reason. The
+        // Squeeze kernel returns a view, so storage aliasing is preserved.
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        std::vector<Tensor> inputs = {input.tensor()};
+        return Variable(dispatch(OpId::Squeeze, inputs, attrs)[0], false);
     }
 
     // Normalise negative dim at construction so both backward paths
@@ -1765,7 +1775,14 @@ auto logsumexp(const Variable& input, int64_t dim, bool keepdim) -> Variable {
 
 auto unsqueeze(const Variable& input, int64_t dim) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(tenzor::unsqueeze(input.tensor(), dim), false);
+        // Dispatch OpId::Unsqueeze so the JIT tracer records a first-class
+        // Unsqueeze node (a raw Tensor::unsqueeze view is invisible to the
+        // dispatch-level interceptor). Mirrors Tensor::reshape. The Unsqueeze
+        // kernel returns a view, so storage aliasing is preserved.
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        std::vector<Tensor> inputs = {input.tensor()};
+        return Variable(dispatch(OpId::Unsqueeze, inputs, attrs)[0], false);
     }
     auto result = tenzor::unsqueeze(input.tensor(), dim);
     auto grad_fn = std::make_shared<UnsqueezeBackward>();

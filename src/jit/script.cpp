@@ -729,10 +729,23 @@ private:
     }
 
     Variable visit(const NumberExpr& n, const Env&) const {
-        // Narrow the literal on CPU (deterministic rounding) before moving to the
-        // device, so an f32->bf16/f16 cast is identical across backends.
-        Tensor t = full({}, static_cast<float>(n.value), DType::Float32, Device::cpu());
-        if (ctx_dtype_ != DType::Float32) t = t.to(ctx_dtype_);
+        Tensor t;
+        if (ctx_dtype_ == DType::Float64 || ctx_dtype_ == DType::Complex64 ||
+            ctx_dtype_ == DType::Complex128) {
+            // Wide/complex context: build the literal directly at ctx_dtype_ from
+            // the full-precision double (JIT-003). The previous code first cast to
+            // float32, so an f64 literal like 3.141592653589793 was silently
+            // truncated to the f32 value (~7 sig digits) and the widen-back to f64
+            // could not recover the lost mantissa. NumberExpr::value is a double
+            // (strtod), so no precision is lost here. CPU construction keeps the
+            // rounding deterministic before the move to the device.
+            t = full({}, n.value, ctx_dtype_, Device::cpu());
+        } else {
+            // <=f32 context: narrow on CPU (deterministic rounding) before moving
+            // to the device, so an f32->bf16/f16 cast is identical across backends.
+            t = full({}, static_cast<float>(n.value), DType::Float32, Device::cpu());
+            if (ctx_dtype_ != DType::Float32) t = t.to(ctx_dtype_);
+        }
         t = t.to(ctx_device_);
         return Variable(t, false);
     }
@@ -872,9 +885,13 @@ private:
         Tensor out;
         if (c.op == '<')      out = tenzor::lt(lhs.tensor(), rhs.tensor());
         else                  out = tenzor::gt(lhs.tensor(), rhs.tensor());
-        // Cast bool → float32 so jit::cond's `item<float>` call works on
-        // scalar outputs.
-        out = out.to(DType::Float32);
+        // Cast the bool mask to the trace's context dtype (JIT-012) rather than
+        // unconditionally Float32. A non-scalar comparison consumed in arithmetic
+        // (e.g. `m = x < x; return m * x` with a Float64 x) otherwise multiplied a
+        // Float32 mask by a Float64 tensor, giving backend-dependent promotion.
+        // Scalar branch conditions are unaffected: jit::cond / eval_scalar re-cast
+        // the value to Float32 before item<float>().
+        out = out.to(ctx_dtype_);
         return Variable(out, false);
     }
 };

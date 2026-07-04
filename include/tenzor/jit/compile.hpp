@@ -308,8 +308,16 @@ private:
     ///        passes are skipped so the replay never contains a backward-less
     ///        fused GPU node. The un-fused graph is replayed through the
     ///        autograd-aware executor (Graph::forward(inputs, grad_mode=true)).
+    /// @param out_result  if non-null, receives the eager result of the single
+    ///        traced fn_() execution, so the caller need not run fn_() a second
+    ///        time (JIT-008: a side-effecting closure must not run twice).
+    /// @param out_fn_ran  if non-null, set to true once fn_() has completed, so
+    ///        the caller can distinguish a closure error (propagate) from a
+    ///        later compile error (fall back to eager using out_result).
     auto trace_and_compile(std::span<const Variable> inputs,
-                           bool grad_mode = false)
+                           bool grad_mode = false,
+                           Variable* out_result = nullptr,
+                           bool* out_fn_ran = nullptr)
         -> std::shared_ptr<CompiledModule>;
 
     /// Differentiable replay path for requires_grad inputs (nvrtc backend).
@@ -329,7 +337,16 @@ private:
     /// load invoker → invoke). `mlir_invoke` wraps this in the C1 up-front
     /// eager check and the C2 strict-aware eager fallback; on its own this
     /// method may throw (unsupported target, lowering gap, driver-load error).
-    auto mlir_invoke_impl(std::span<const Variable> inputs) -> Variable;
+    ///
+    /// The out-params let `mlir_invoke` run the traced function EXACTLY ONCE:
+    /// `out_result`/`out_fn_ok` carry the eager result produced during the
+    /// trace (reused on any post-trace fallback instead of re-invoking fn_),
+    /// and `out_fn_attempted` distinguishes "fn threw" (propagate) from "fn
+    /// never ran" (safe to fall back to eager). All optional (nullptr → skip).
+    auto mlir_invoke_impl(std::span<const Variable> inputs,
+                          Variable* out_result = nullptr,
+                          bool* out_fn_attempted = nullptr,
+                          bool* out_fn_ok = nullptr) -> Variable;
 };
 
 /**

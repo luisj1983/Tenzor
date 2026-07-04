@@ -667,7 +667,16 @@ auto slice_multi_kernel(const Tensor& input,
                         const std::vector<int64_t>& steps) -> Tensor {
     Tensor result = input;
     for (size_t d = 0; d < starts.size(); ++d) {
-        result = slice_kernel(result, static_cast<int64_t>(d), starts[d], ends[d], steps[d]);
+        // `ends`/`steps` may be shorter than `starts` (e.g. a Slice dispatched
+        // with Starts but a defaulted/empty Steps). Default a missing end to the
+        // current dim's full size and a missing step to 1 — matching the CUDA
+        // slice kernel's defaulting (transform.cu) so the two backends agree
+        // instead of the CPU path reading out of bounds while CUDA succeeds.
+        const int64_t end = (d < ends.size())
+                                ? ends[d]
+                                : result.shape()[static_cast<int64_t>(d)];
+        const int64_t step = (d < steps.size()) ? steps[d] : 1;
+        result = slice_kernel(result, static_cast<int64_t>(d), starts[d], end, step);
     }
     return result;
 }

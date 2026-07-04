@@ -17,6 +17,7 @@
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/functional.hpp"
 #include "../../include/tenzor/nn/quantization/quantized_layers.hpp"
+#include "../../include/tenzor/nn/utils/variable_cast.hpp"
 #include "../../include/tenzor/sparse/sparse_ops.hpp"
 #include "../../include/tenzor/backend/fast_dispatch.hpp"
 #include "../../include/tenzor/core/shape.hpp"
@@ -121,7 +122,15 @@ auto mode_attr_to_string(const Node& node) -> std::string {
         case 2: return "bicubic";
         case 3: return "trilinear";
         default:
-            throw std::runtime_error("JIT graph contains unsupported interpolate mode");
+            // The tracer maps any mode outside {nearest,bilinear,bicubic,
+            // trilinear} to -1 (JIT-057). Those modes are not supported by the
+            // eager interpolate kernel either, so this fails loud in both paths
+            // (no silent divergence). Name the sentinel so the failure is
+            // actionable rather than opaque.
+            throw std::runtime_error(
+                "JIT graph contains an unsupported interpolate mode (encoded as " +
+                std::to_string(node.get_int_attr("mode")) +
+                "); only nearest/bilinear/bicubic/trilinear are supported");
     }
 }
 
@@ -628,6 +637,13 @@ auto Graph::infer_types() -> void {
             case OpType::Mean:
             case OpType::Max:
             case OpType::Min:
+            // Var/Std/Prod are single-output axis reductions with the same
+            // dim/keepdim shape rule as Sum/Mean; they were previously absent
+            // here and fell through to default (no output shape pushed), leaving
+            // the value frozen at its trace-time shape (JIT-046).
+            case OpType::Var:
+            case OpType::Std:
+            case OpType::Prod:
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
                     bool keepdim = node->get_bool_attr("keepdim");
@@ -665,6 +681,7 @@ auto Graph::infer_types() -> void {
             // ================================================================
             // Convolution
             // ================================================================
+            case OpType::QuantizedConv2d:  // same [x, weight] conv shape rule (JIT-026)
             case OpType::Conv2d:
                 if (!input_shapes.empty()) {
                     auto& shape = input_shapes[0];  // [N, C, H, W]
@@ -938,6 +955,38 @@ auto Graph::infer_types() -> void {
                 break;
 
             case OpType::Padding:
+                // Padding ENLARGES dims; it must not be treated as shape-
+                // preserving (JIT-044). Compute the padded extent using the SAME
+                // pad-vector interpretation as the MLIR handle_padding lowering
+                // (which reads out_val->shape() to type the stablehlo.pad); a
+                // copied (unpadded) shape produced a pad result type smaller than
+                // the real extent -> invalid/verifier-failing IR.
+                if (!input_shapes.empty()) {
+                    auto shape = input_shapes[0];
+                    const size_t rank = shape.size();
+                    if (node->has_attr("padding")) {
+                        auto v = node->get_vec_attr("padding");
+                        std::vector<int64_t> low(rank, 0), high(rank, 0);
+                        if (v.size() == 2 * rank) {
+                            // first-dim-first, one [lo,hi] pair per dim
+                            for (size_t i = 0; i < rank; ++i) {
+                                low[i] = v[2 * i];
+                                high[i] = v[2 * i + 1];
+                            }
+                        } else if (v.size() % 2 == 0) {
+                            // pytorch F.pad: last-dim-first pairs
+                            const size_t pairs = v.size() / 2;
+                            for (size_t i = 0; i < pairs && i < rank; ++i) {
+                                const size_t dim = rank - 1 - i;
+                                low[dim] = v[2 * i];
+                                high[dim] = v[2 * i + 1];
+                            }
+                        }
+                        for (size_t i = 0; i < rank; ++i) shape[i] += low[i] + high[i];
+                    }
+                    output_shapes.push_back(shape);
+                }
+                break;
             case OpType::GQA:
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
@@ -1171,7 +1220,8 @@ auto Graph::infer_types() -> void {
                     output_shapes.push_back(input_shapes[0]);
                 }
                 break;
-            case OpType::QuantizedConv2d:
+            // Dequantize/Quantize/DenseToSparse are genuinely shape-preserving.
+            // (QuantizedConv2d now uses the Conv2d shape rule above — JIT-026.)
             case OpType::Dequantize:
             case OpType::Quantize:
             case OpType::DenseToSparse:
@@ -1499,6 +1549,9 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Mean:
             case OpType::Max:
             case OpType::Min:
+            case OpType::Var:   // single-output axis reductions — same rule (JIT-046)
+            case OpType::Std:
+            case OpType::Prod:
                 if (!input_sym_shapes.empty()) {
                     auto sym_shape = input_sym_shapes[0];
                     bool keepdim = node->get_bool_attr("keepdim");
@@ -1537,6 +1590,7 @@ auto Graph::infer_symbolic_types() -> void {
             // ================================================================
             // Convolution
             // ================================================================
+            case OpType::QuantizedConv2d:  // same conv shape rule (JIT-026)
             case OpType::Conv2d:
                 if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() == 4) {
                     auto& in_shape = input_sym_shapes[0];
@@ -1696,6 +1750,11 @@ auto Graph::infer_symbolic_types() -> void {
             // Linear: (*, in_features) -> (*, out_features)
             // ================================================================
             case OpType::Linear:
+            // QuantizedLinear and SparseMatMul share Linear's [x, weight] shape
+            // rule (out last dim = weight[0] = out_features); they were wrongly
+            // lumped into the shape-preserving group below (JIT-026).
+            case OpType::QuantizedLinear:
+            case OpType::SparseMatMul:
                 if (input_sym_shapes.size() >= 2) {
                     auto out_shape = input_sym_shapes[0];
                     // Weight shape is [out_features, in_features]
@@ -2093,11 +2152,11 @@ auto Graph::infer_symbolic_types() -> void {
                 }
                 break;
 
-            case OpType::QuantizedLinear:
-            case OpType::QuantizedConv2d:
+            // Dequantize/Quantize/DenseToSparse are genuinely shape-preserving.
+            // (QuantizedLinear/SparseMatMul handled via the Linear rule above;
+            // QuantizedConv2d via the Conv2d case — JIT-026.)
             case OpType::Dequantize:
             case OpType::Quantize:
-            case OpType::SparseMatMul:
             case OpType::DenseToSparse:
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
@@ -2150,7 +2209,15 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
     } else if (!parameters_.empty() && parameters_.front()) {
         target_device = parameters_.front()->tensor().device();
     } else if (!constants_.empty()) {
-        target_device = constants_.begin()->second.device();
+        // constants_ is an unordered_map, so begin() is nondeterministic across
+        // runs/builds — a niladic graph with mixed-device constants would pick a
+        // different replay device each time (JIT-019). Choose the constant with
+        // the smallest id so the selection is deterministic.
+        const std::string* pick = nullptr;
+        for (const auto& [id, tensor] : constants_) {
+            if (!pick || id < *pick) pick = &id;
+        }
+        target_device = constants_.at(*pick).device();
     }
     for (const auto& [id, tensor] : constants_) {
         Tensor placed = (tensor.device() == target_device)
@@ -2194,6 +2261,10 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
             value_map[id] = Variable(std::move(placed), /*requires_grad=*/false);
         }
     }
+
+    // Publish the replay device so tensor-attr-backed node payloads (Constant
+    // "value", fused weights/bias) can be placed on it (JIT-050).
+    exec_target_device_ = target_device;
 
     // Execute nodes in topological order
     for (const auto& node : nodes_) {
@@ -2549,7 +2620,8 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                         mm_out = mm_out + input_vars[2];
                     } else if (node->has_tensor_attr("fused_bias")) {
                         mm_out = mm_out +
-                            Variable(node->get_tensor_attr("fused_bias"), false);
+                            Variable(place_on_exec_device(
+                                node->get_tensor_attr("fused_bias")), false);
                     }
                 }
                 if (node->get_bool_attr("fused_relu")) {
@@ -2705,54 +2777,50 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // ====================================================================
         case OpType::Conv2d:
             if (input_vars.size() >= 2) {
-                // Read per-axis stride/padding/dilation honoring all forms the
-                // tracer can emit: explicit per-axis ints ("stride_h"/"stride_w"
-                // from the dispatch interceptor's hw-pair copy), the
-                // pair-as-vec ("stride"/"padding"/"dilation" = {h, w}) the
-                // interceptor populates from AttrKey::PaddingH/PaddingW etc.,
-                // and the scalar int fallback ("stride") for square configs.
-                // Audit item G.13: previously this only read the (never-set)
-                // scalar int "stride_h"/"padding_h"/"dilation", so JIT-traced
-                // Conv2d silently ran with stride=1,padding=0,dilation=1
-                // regardless of what the eager module set.
-                // Resolve a {h, w} pair from any of the three forms the
-                // tracer emits: explicit per-axis ints, a 2-element vec, or
-                // a scalar int (square config). has_attr() returns true if
-                // the key lives in either int_attrs_ or vec_attrs_, so probe
-                // both maps explicitly.
-                auto pair_from = [&](const char* h_key, const char* w_key,
-                                      const char* shared_key,
-                                      int64_t default_v)
-                        -> std::pair<int64_t, int64_t> {
-                    if (node->has_attr(h_key) && node->has_attr(w_key)) {
-                        return {node->get_int_attr(h_key),
-                                node->get_int_attr(w_key)};
-                    }
-                    auto v = node->get_vec_attr(shared_key);
-                    if (v.size() == 2) return {v[0], v[1]};
-                    if (v.size() == 1) return {v[0], v[0]};
-                    if (node->has_attr(shared_key)) {
-                        int64_t s = node->get_int_attr(shared_key);
-                        return {s, s};
-                    }
-                    return {default_v, default_v};
-                };
-                auto [stride_h, stride_w]     = pair_from(
-                    "stride_h",   "stride_w",   "stride",   1);
-                auto [padding_h, padding_w]   = pair_from(
-                    "padding_h",  "padding_w",  "padding",  0);
-                auto [dilation_h, dilation_w] = pair_from(
-                    "dilation_h", "dilation_w", "dilation", 1);
+                // Conv1d/Conv2d/Conv3d ALL trace to OpType::Conv2d — the tracing
+                // interceptor maps Conv1dForward/Conv3dForward to this OpType too
+                // (tracing_interceptor.cpp). Rank-dispatch on the input's spatial
+                // rank so 1D/3D convolutions are executed by the matching kernel
+                // instead of being silently run through the 2D path (which throws
+                // "produced no outputs" for 1D and mis-computes for 3D). Mirrors
+                // the ConvTranspose case below. set_conv_attrs_from_node /
+                // attr_vec_or_scalar honor the tracer's vec ("stride"={..}) and
+                // scalar forms across every spatial rank.
+                const auto in_rank = input_vars[0].tensor().shape().size();
+                if (in_rank < 3 || in_rank > 5) {
+                    throw std::runtime_error(
+                        "JIT Conv replay expects a 3D/4D/5D input (rank " +
+                        std::to_string(in_rank) + ")");
+                }
+                const size_t spatial_rank = in_rank - 2;
                 int64_t groups = node->has_attr("groups") ?
                     node->get_int_attr("groups") : static_cast<int64_t>(1);
 
                 if (grad_mode) {
+                    const auto stride   = attr_vec_or_scalar(*node, "stride",   spatial_rank, 1);
+                    const auto padding  = attr_vec_or_scalar(*node, "padding",  spatial_rank, 0);
+                    const auto dilation = attr_vec_or_scalar(*node, "dilation", spatial_rank, 1);
                     std::optional<Variable> bias;
                     if (input_vars.size() >= 3) bias = input_vars[2];
-                    Variable conv_out = nn::functional::conv2d(
-                        input_vars[0], input_vars[1], bias,
-                        {stride_h, stride_w}, {padding_h, padding_w},
-                        {dilation_h, dilation_w}, groups);
+                    auto conv_of = [&]() -> Variable {
+                        if (spatial_rank == 1) {
+                            return nn::functional::conv1d(
+                                input_vars[0], input_vars[1], bias,
+                                stride[0], padding[0], dilation[0], groups);
+                        }
+                        if (spatial_rank == 2) {
+                            return nn::functional::conv2d(
+                                input_vars[0], input_vars[1], bias,
+                                {stride[0], stride[1]}, {padding[0], padding[1]},
+                                {dilation[0], dilation[1]}, groups);
+                        }
+                        return nn::functional::conv3d(
+                            input_vars[0], input_vars[1], bias,
+                            {stride[0], stride[1], stride[2]},
+                            {padding[0], padding[1], padding[2]},
+                            {dilation[0], dilation[1], dilation[2]}, groups);
+                    };
+                    Variable conv_out = conv_of();
                     if (node->get_bool_attr("fused_relu")) {
                         conv_out = nn::relu(conv_out);
                     }
@@ -2761,25 +2829,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 }
 
                 OpAttributes conv_attrs;
-                // Per-axis keys are what the backend kernels actually read
-                // (see cpu_kernel_registry.cpp Conv2dForward). Set the scalar
-                // forms too so kernels that only consult them still work.
-                conv_attrs.set(AttrKey::StrideH,   stride_h);
-                conv_attrs.set(AttrKey::StrideW,   stride_w);
-                conv_attrs.set(AttrKey::PaddingH,  padding_h);
-                conv_attrs.set(AttrKey::PaddingW,  padding_w);
-                conv_attrs.set(AttrKey::DilationH, dilation_h);
-                conv_attrs.set(AttrKey::DilationW, dilation_w);
-                conv_attrs.set(AttrKey::Stride,    stride_h);
-                conv_attrs.set(AttrKey::Padding,   padding_h);
-                conv_attrs.set(AttrKey::Dilation,  dilation_h);
-                conv_attrs.set(AttrKey::Groups,    groups);
+                set_conv_attrs_from_node(*node, conv_attrs, spatial_rank);
 
                 std::vector<Tensor> inputs = {input_vars[0].tensor(), input_vars[1].tensor()};
                 if (input_vars.size() >= 3) {
                     inputs.push_back(input_vars[2].tensor());
                 }
-                auto result = dispatch(OpId::Conv2dForward, inputs, conv_attrs);
+                const OpId conv_op = spatial_rank == 1 ? OpId::Conv1dForward
+                                   : spatial_rank == 2 ? OpId::Conv2dForward
+                                                       : OpId::Conv3dForward;
+                auto result = dispatch(conv_op, inputs, conv_attrs);
                 if (!result.empty()) {
                     Variable conv_out(result[0], false);
                     // optimize_for_inference (FuseConvReLU / FuseConvBNReLU) may
@@ -3146,6 +3205,17 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 if (node->has_int_attr("dim")) {
                     int64_t dim = node->get_int_attr("dim");
                     outputs.push_back(tenzor::max(input_vars[0], dim, keepdim));
+                    // max(dim) is a (values, indices) op: the tracer registers a
+                    // second output for the argmax indices. Populate it when it is
+                    // actually consumed, so argmax/topk-style graphs replay instead
+                    // of failing with "Input value not available" (JIT-010).
+                    if (node->outputs().size() >= 2 &&
+                        (!node->outputs()[1]->uses().empty() ||
+                         is_graph_output(node->outputs()[1]))) {
+                        outputs.push_back(Variable(
+                            tenzor::argmax(input_vars[0].tensor(), dim, keepdim),
+                            false));
+                    }
                 } else if (node->has_vec_attr("dims")) {
                     auto norm = normalize_reduce_dims(
                         node->get_vec_attr("dims"),
@@ -3170,6 +3240,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     if (node->has_int_attr("dim")) {
                         int64_t dim = node->get_int_attr("dim");
                         outputs.push_back(tenzor::min(input_vars[0], dim, keepdim));
+                        if (node->outputs().size() >= 2 &&
+                            (!node->outputs()[1]->uses().empty() ||
+                             is_graph_output(node->outputs()[1]))) {
+                            outputs.push_back(Variable(
+                                tenzor::argmin(input_vars[0].tensor(), dim, keepdim),
+                                false));
+                        }
                     } else if (node->has_vec_attr("dims")) {
                         auto norm = normalize_reduce_dims(
                             node->get_vec_attr("dims"),
@@ -3188,6 +3265,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     int64_t dim = node->get_int_attr("dim");
                     auto result = tenzor::min(input_vars[0].tensor(), dim, keepdim);
                     outputs.push_back(Variable(result, false));
+                    if (node->outputs().size() >= 2 &&
+                        (!node->outputs()[1]->uses().empty() ||
+                         is_graph_output(node->outputs()[1]))) {
+                        outputs.push_back(Variable(
+                            tenzor::argmin(input_vars[0].tensor(), dim, keepdim),
+                            false));
+                    }
                 } else if (node->has_vec_attr("dims")) {
                     auto norm = normalize_reduce_dims(
                         node->get_vec_attr("dims"),
@@ -3322,11 +3406,30 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // ====================================================================
         case OpType::Slice:
             if (!input_vars.empty()) {
-                int64_t dim = node->get_int_attr("dim");
-                int64_t start = node->get_int_attr("start");
-                int64_t end = node->get_int_attr("end");
-                int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
-                outputs.push_back(tenzor::slice(input_vars[0], dim, start, end, step));
+                if (node->has_vec_attr("starts") && node->has_vec_attr("ends")) {
+                    // Multi-dim (optionally strided) slice: apply a per-dim slice
+                    // for each axis. Previously this form fell through to the
+                    // per-dim reader below, which found no "dim"/"start"/"end"
+                    // and sliced dim 0 with [0,0) — wrong elements (JIT-013).
+                    auto sv = node->get_vec_attr("starts");
+                    auto ev = node->get_vec_attr("ends");
+                    auto stv = node->has_vec_attr("steps")
+                                   ? node->get_vec_attr("steps")
+                                   : std::vector<int64_t>{};
+                    Variable acc = input_vars[0];
+                    for (size_t i = 0; i < sv.size() && i < ev.size(); ++i) {
+                        int64_t step = (i < stv.size()) ? stv[i] : 1;
+                        acc = tenzor::slice(acc, static_cast<int64_t>(i),
+                                            sv[i], ev[i], step);
+                    }
+                    outputs.push_back(acc);
+                } else {
+                    int64_t dim = node->get_int_attr("dim");
+                    int64_t start = node->get_int_attr("start");
+                    int64_t end = node->get_int_attr("end");
+                    int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
+                    outputs.push_back(tenzor::slice(input_vars[0], dim, start, end, step));
+                }
             }
             break;
 
@@ -3525,7 +3628,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // Other
         // ====================================================================
         case OpType::Dropout:
-            // In JIT execution, dropout is typically in eval mode (no-op)
+            // Inference replay: dropout runs in eval mode -> identity (correct).
+            // Grad (training) replay: dropout must apply a Bernoulli mask and the
+            // 1/(1-p) inverted scale that stay consistent between forward and
+            // backward. The traced graph does not capture the mask, so replaying
+            // as identity would silently drop BOTH the regularization and the
+            // gradient scaling (JIT-037). Throw so grad_invoke catches it and
+            // falls back to eager autograd on the same backend (mirrors the
+            // BatchNorm2d / linalg grad-mode throws), instead of returning wrong
+            // training gradients.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: Dropout is not wired for differentiable "
+                    "replay (mask/scale not captured); fall back to eager");
+            }
             if (!input_vars.empty()) {
                 outputs.push_back(input_vars[0]);
             }
@@ -3585,15 +3701,29 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     // raw would sever the graph. Semantics:
                     //   y = x * rsqrt(mean(x^2, -1, keepdim) + eps) [* gamma]
                     const Variable& x = input_vars[0];
-                    Variable x2 = x * x;
+                    // Match the eager RMSNorm kernel's widened accumulator
+                    // (JIT-038): the inference kernel accumulates the
+                    // sum-of-squares in F32/F64, so composing this replay in a
+                    // half dtype diverged (per-element F16/BF16 rounding of x^2
+                    // and the mean). Widen F16/BF16 to F32 through the autograd-
+                    // aware variable_cast (so grad still flows), compute the RMS
+                    // there, and narrow the result back.
+                    const DType x_dt = x.tensor().dtype();
+                    const bool widen = (x_dt == DType::Float16 ||
+                                        x_dt == DType::BFloat16);
+                    Variable xw = widen ? nn::variable_cast(x, DType::Float32) : x;
+                    Variable x2 = xw * xw;
                     Variable ms = tenzor::mean(x2, static_cast<int64_t>(-1), /*keepdim=*/true);
                     Variable denom = tenzor::rsqrt(ms + Variable(
                         tenzor::full({1}, static_cast<float>(eps),
                                      ms.tensor().dtype(), ms.tensor().device()), false));
-                    Variable y = x * denom;  // broadcasts denom over last dim
+                    Variable y = xw * denom;  // broadcasts denom over last dim
                     if (input_vars.size() >= 2) {
-                        y = y * input_vars[1];  // affine gamma
+                        Variable g = widen ? nn::variable_cast(input_vars[1], DType::Float32)
+                                           : input_vars[1];
+                        y = y * g;  // affine gamma
                     }
+                    if (widen) y = nn::variable_cast(y, x_dt);
                     outputs.push_back(y);
                     break;
                 }
@@ -3723,6 +3853,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Constant:
             if (node->has_attr("value")) {
                 Tensor t = node->get_tensor_attr("value");
+                // Deserialized graphs materialize tensor attrs on CPU
+                // (GraphReader::read_tensor), so place the constant on the replay
+                // device before it feeds a device op (JIT-050). No-op when the
+                // value already lives on the target device (fresh traces).
+                if (t.device() != exec_target_device_) {
+                    t = t.to(exec_target_device_);
+                }
                 outputs.push_back(Variable(t, false));
             }
             break;
@@ -3886,16 +4023,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     b2 = input_vars[4]; have_b2 = true;
                 } else {
                     // Pull weights/biases from the node's tensor attrs.
-                    w1 = Variable(node->get_tensor_attr("weight1"), false);
-                    w2 = Variable(node->get_tensor_attr("weight2"), false);
+                    w1 = Variable(place_on_exec_device(
+                        node->get_tensor_attr("weight1")), false);
+                    w2 = Variable(place_on_exec_device(
+                        node->get_tensor_attr("weight2")), false);
                     if (node->has_tensor_attr("bias1") &&
                         node->get_tensor_attr("bias1").numel() > 0) {
-                        b1 = Variable(node->get_tensor_attr("bias1"), false);
+                        b1 = Variable(place_on_exec_device(
+                            node->get_tensor_attr("bias1")), false);
                         have_b1 = true;
                     }
                     if (node->has_tensor_attr("bias2") &&
                         node->get_tensor_attr("bias2").numel() > 0) {
-                        b2 = Variable(node->get_tensor_attr("bias2"), false);
+                        b2 = Variable(place_on_exec_device(
+                            node->get_tensor_attr("bias2")), false);
                         have_b2 = true;
                     }
                 }
@@ -4088,8 +4229,10 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::SparseMatMul: {
             // Retagged from Linear by SparsePass; inputs = [x, weight(, bias)].
-            // Sparse SpMM over the from_dense weight is EXACT (lossless), so this
-            // is differentiable-safe to fall back to eager; run inference here.
+            // Sparse SpMM over the from_dense weight is mathematically equivalent
+            // to the dense Linear, but NOT bit-identical: the summation order
+            // differs from cblas_sgemm and across MKL/cuSPARSE/rocSPARSE (JIT-030),
+            // so cross-backend parity uses a tolerance, not exact compare.
             if (grad_mode) {
                 throw std::runtime_error(
                     "JIT grad replay: SparseMatMul is not wired for differentiable "

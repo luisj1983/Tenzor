@@ -1295,6 +1295,77 @@ TEST_F(JITCompilerTest, FuseConvBatchNorm_WithPattern) {
     EXPECT_LT(graph.num_nodes(), orig_nodes) << "fusion did not reduce nodes";
 }
 
+// JIT-076: Conv+BN fusion folds the BN affine (scale = gamma/sqrt(var+eps)) into
+// the conv weight/bias at compile time. Eager BatchNorm INFERENCE computes this
+// in a Float32 accumulator for Float16/BFloat16 (batchnorm.cpp; oneDNN converts
+// stats to F32). The fold must match that regardless of backend — computing it in
+// the raw parameter dtype makes correctness depend on whether each backend's f16
+// elementwise div/sqrt happens to widen (CPU's do; a truncating backend would
+// diverge). The pass now widens f16/bf16 to Float32 for the math and narrows the
+// stored weight/bias back, so the fold is device-independent and eager-matching.
+// This test asserts that INVARIANT: the folded f16 weight equals the explicit
+// Float32-widened reference (and stays Float16). It is a cross-backend guard —
+// on a backend whose f16 ops truncate, folding without the widen would fail here.
+TEST_F(JITCompilerTest, FuseConvBatchNorm_Float16FoldMatchesF32Widened) {
+    Graph graph;
+    auto input = graph.create_value("input", {1, 3, 8, 8}, DType::Float16, device_);
+    auto conv_out = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float16, device_);
+    auto bn_out = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float16, device_);
+
+    auto conv = graph.create_node(OpType::Conv2d, "conv");
+    conv->add_input(input); conv->add_output(conv_out); conv_out->set_node(conv);
+    auto bn = graph.create_node(OpType::BatchNorm2d, "bn");
+    bn->add_input(conv_out); bn->add_output(bn_out); bn_out->set_node(bn);
+    graph.add_node(conv); graph.add_node(bn);
+    graph.set_inputs({input}); graph.set_outputs({bn_out});
+
+    Tensor w_f32({16, 3, 3, 3}, DType::Float32, device_);
+    { float* p = w_f32.data<float>();
+      for (int64_t i = 0; i < w_f32.numel(); ++i) p[i] = std::sin(0.3f * i) * 0.7f; }
+    Tensor gamma_f32({16}, DType::Float32, device_);
+    Tensor var_f32({16}, DType::Float32, device_);
+    Tensor mean_f32({16}, DType::Float32, device_);
+    Tensor beta_f32({16}, DType::Float32, device_);
+    { float* g = gamma_f32.data<float>(); float* v = var_f32.data<float>();
+      float* m = mean_f32.data<float>();  float* b = beta_f32.data<float>();
+      for (int64_t c = 0; c < 16; ++c) {
+          g[c] = 1.5f + 0.31f * static_cast<float>(c);
+          v[c] = 0.271828f + 0.0831f * static_cast<float>(c);
+          m[c] = 0.013f * static_cast<float>(c);
+          b[c] = 0.021f * static_cast<float>(c);
+      } }
+    const float eps = 1e-5F;
+
+    conv->set_tensor_attr("weight", w_f32.to(DType::Float16));
+    bn->set_tensor_attr("weight",       gamma_f32.to(DType::Float16));
+    bn->set_tensor_attr("bias",         beta_f32.to(DType::Float16));
+    bn->set_tensor_attr("running_mean", mean_f32.to(DType::Float16));
+    bn->set_tensor_attr("running_var",  var_f32.to(DType::Float16));
+    bn->set_attr("eps", eps);
+
+    FuseConvBatchNormPass pass;
+    ASSERT_TRUE(pass.run(graph)) << "fusion did not fire";
+    Tensor fused = conv->get_tensor_attr("weight");
+    ASSERT_EQ(fused.dtype(), DType::Float16) << "fused weight must stay Float16";
+
+    // Reference: widen the f16-STORED params to Float32, compute scale, multiply
+    // the widened conv weight, narrow to Float16 — the eager-matching fold.
+    Tensor gc = gamma_f32.to(DType::Float16).to(DType::Float32);
+    Tensor vc = var_f32.to(DType::Float16).to(DType::Float32);
+    Tensor scale_ref = gc / tenzor::sqrt(vc + eps);
+    Tensor wc = w_f32.to(DType::Float16).to(DType::Float32);
+    Tensor ref_f16 = (wc * scale_ref.reshape({16, 1, 1, 1})).to(DType::Float16);
+
+    const float* f = fused.to(DType::Float32).data<float>();
+    const float* r = ref_f16.to(DType::Float32).data<float>();
+    const int64_t n = fused.numel();
+    float max_ref_diff = 0.0f;
+    for (int64_t i = 0; i < n; ++i)
+        max_ref_diff = std::max(max_ref_diff, std::fabs(f[i] - r[i]));
+    EXPECT_LT(max_ref_diff, 1e-3F)
+        << "folded f16 weight diverges from the Float32-widened (eager) reference";
+}
+
 TEST_F(JITCompilerTest, FuseConvBatchNorm_PassName) {
     FuseConvBatchNormPass pass;
     EXPECT_EQ(pass.name(), "FuseConvBatchNorm");

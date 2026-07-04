@@ -39,22 +39,22 @@ def jit(
     ...
 
 
-def show_graph(fn: Any, example: Any = None) -> str:
+def show_graph(fn: Any, *examples: Any) -> str:
     """Return the captured Tenzor graph for `fn` as a human-readable string."""
     ...
 
 
-def show_mlir(fn: Any, example: Any = None) -> str:
+def show_mlir(fn: Any, *examples: Any) -> str:
     """Return the MLIR module produced by lowering `fn`."""
     ...
 
 
-def show_stablehlo(fn: Any, example: Any = None) -> str:
+def show_stablehlo(fn: Any, *examples: Any) -> str:
     """Return the StableHLO module produced by lowering `fn`."""
     ...
 
 
-def show_iree(fn: Any, example: Any = None) -> str:
+def show_iree(fn: Any, *examples: Any) -> str:
     """Return the IREE compiled artifact dump for `fn`."""
     ...
 

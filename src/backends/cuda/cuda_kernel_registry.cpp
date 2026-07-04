@@ -4742,6 +4742,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Quantized Operations
     // =========================================================================
     table.register_single_output_kernel(OpId::QuantizedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        if (inputs.size() >= 4) {
+            throw std::invalid_argument(
+                "QuantizedLinear (GPU): per-channel weight scale/zero-point "
+                "(inputs[3]/[4]) is not supported by this backend kernel; use "
+                "per-tensor quantization (scalar WeightScaleQ/WeightZeroPoint) — "
+                "JIT-041.");
+        }
         // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
         const auto& input = inputs[0];
         const auto& weight = inputs[1];

@@ -101,9 +101,13 @@ TEST_P(EdgeCaseTest, MismatchedShapes_MatrixMultiplication) {
 TEST_P(EdgeCaseTest, InvalidDimensionIndex_Negative) {
     auto a = ones({2, 3, 4}, DType::Float32, device_);
 
+    // Out-of-range dim is reported via std::out_of_range (the library-wide
+    // convention for index/axis errors; see normalize_reduce_dim and the 17
+    // sibling out_of_range expectations). std::out_of_range is-a std::exception
+    // but NOT a std::runtime_error, so assert the precise, correct type.
     EXPECT_THROW({
         auto b = sum(a, -10);  // Invalid negative dimension
-    }, std::runtime_error);
+    }, std::out_of_range);
 }
 
 TEST_P(EdgeCaseTest, InvalidDimensionIndex_TooLarge) {
@@ -111,7 +115,7 @@ TEST_P(EdgeCaseTest, InvalidDimensionIndex_TooLarge) {
 
     EXPECT_THROW({
         auto b = sum(a, 5);  // Dimension 5 doesn't exist
-    }, std::runtime_error);
+    }, std::out_of_range);
 }
 
 TEST_P(EdgeCaseTest, ZeroDimensionalTensor_Operations) {

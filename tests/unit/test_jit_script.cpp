@@ -399,3 +399,19 @@ TEST(JitScript, RejectsMalformedIfMissingColon) {
         )");
     }, std::runtime_error);
 }
+
+// JIT-003: a high-precision f64 literal in a scripted fn must NOT be truncated
+// to float32. Pre-fix, `x * 3.141592653589793` in an f64 context multiplied by
+// the f32 value (3.1415927410125732), ~1e-7 relative error vs eager.
+TEST(JitScript, Float64LiteralNotTruncated) {
+    const char* src = R"(def forward(x): return x * 3.141592653589793)";
+    Tensor dummy = ones({1}, DType::Float64, Device::cpu());
+    auto compiled = jit::compile_script(src, dummy);
+    ASSERT_NE(compiled, nullptr);
+    Tensor xin = ones({1}, DType::Float64, Device::cpu());  // x = 1.0
+    Variable y = compiled->forward(Variable(xin, false));
+    double got = y.tensor().to(Device::cpu()).to(DType::Float64).item<double>();
+    const double pi = 3.141592653589793;
+    EXPECT_LT(std::abs(got - pi), 1e-15)
+        << "scripted f64 literal was truncated (got " << got << ")";
+}

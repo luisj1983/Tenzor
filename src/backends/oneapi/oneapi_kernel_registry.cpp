@@ -5264,13 +5264,24 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::QuantizedLinear,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        if (inputs.size() >= 4) {
+            throw std::invalid_argument(
+                "QuantizedLinear (GPU): per-channel weight scale/zero-point "
+                "(inputs[3]/[4]) is not supported by this backend kernel; use "
+                "per-tensor quantization (scalar WeightScaleQ/WeightZeroPoint) — "
+                "JIT-041.");
+        }
             float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
             float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
             int32_t output_zp = static_cast<int32_t>(attrs.get_int(AttrKey::OutputZeroPoint, 0));
-            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            // Guard a 0-element bias placeholder (convention when per-channel
+            // scale/zp sit at inputs[3]/[4]); reading bias[o] from an empty tensor
+            // is out of bounds (JIT-043). Matches the CPU kernel.
+            const Tensor* bias =
+                (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
             return {oneapi::quantized_linear_kernel(inputs[0], inputs[1], bias,
                                                      input_scale, input_zp,
                                                      weight_scale, weight_zp,
@@ -5295,7 +5306,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
-            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            const Tensor* bias =
+                (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;  // JIT-043
             return {oneapi::quantized_conv2d_kernel(inputs[0], inputs[1], bias,
                                                      stride[0], padding[0], dilation[0], groups,
                                                      input_scale, input_zp,

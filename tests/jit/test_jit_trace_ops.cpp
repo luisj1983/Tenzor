@@ -425,3 +425,81 @@ TEST(JitTraceOps, ExpandCatTrackInputNotFrozen) {
             << dev.to_string();
     }
 }
+
+// =========================================================================
+// Conv1d / Conv3d rank-dispatch regression (JIT-055).
+// Conv1dForward and Conv3dForward both trace to OpType::Conv2d; the executor
+// must rank-dispatch on the input's spatial rank, not run everything as 2D.
+// =========================================================================
+namespace {
+// Fixed-weight conv replay-vs-eager check (deterministic weights via ones()).
+void check_conv_replay(const char* label,
+                       const std::function<Variable(const Variable&, const Variable&)>& fn,
+                       const std::vector<int64_t>& in_shape,
+                       const std::vector<int64_t>& w_shape) {
+    for (const auto& dev : get_available_backends()) {
+        try {
+            int64_t in_n = 1; for (auto s : in_shape) in_n *= s;
+            Tensor xin = arange(0.0, static_cast<double>(in_n), 1.0,
+                                DType::Float32, dev).reshape(in_shape);
+            Variable w(ones(w_shape, DType::Float32, dev), false);
+            Tensor eager = fn(Variable(xin, false), w).tensor().to(Device::cpu());
+            auto rr = compiled_replay(
+                [&fn, w](const Variable& x) { return fn(x, w); },
+                xin);
+            EXPECT_GE(rr.cached, 1u)
+                << label << " graph-broke on " << backend_name(dev);
+            EXPECT_TRUE(tensors_close(eager, rr.output, 1e-3f, 1e-3f))
+                << label << " replay != eager on " << backend_name(dev);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << label << " threw on " << backend_name(dev)
+                          << ": " << e.what();
+        }
+    }
+}
+}  // namespace
+
+TEST(JitTraceOps, Conv1dRankDispatch) {
+    check_conv_replay(
+        "Conv1d",
+        [](const Variable& x, const Variable& w) {
+            return nn::functional::conv1d(x, w);
+        },
+        /*in=*/{1, 2, 8}, /*w=*/{3, 2, 3});
+}
+
+TEST(JitTraceOps, Conv3dRankDispatch) {
+    check_conv_replay(
+        "Conv3d",
+        [](const Variable& x, const Variable& w) {
+            return nn::functional::conv3d(x, w);
+        },
+        /*in=*/{1, 2, 4, 4, 4}, /*w=*/{3, 2, 2, 2, 2});
+}
+
+TEST(JitTraceOps, Conv2dStillWorks) {
+    check_conv_replay(
+        "Conv2d",
+        [](const Variable& x, const Variable& w) {
+            return nn::functional::conv2d(x, w);
+        },
+        /*in=*/{1, 2, 8, 8}, /*w=*/{3, 2, 3, 3});
+}
+
+// =========================================================================
+// squeeze/unsqueeze must be first-class traced nodes (JIT-069). A graph whose
+// OUTPUT is a squeeze/unsqueeze view was previously invisible to the tracer
+// (raw Tensor view, no dispatch) and produced no graph output at all.
+// =========================================================================
+TEST(JitTraceOps, SqueezeOutputIsTraced) {
+    check_op_on_all_backends(
+        "relu_then_squeeze",
+        [](const Variable& x) { return tenzor::squeeze(nn::relu(x), 1); },
+        [](Device d) { return arange(0.0, 8.0, 1.0, DType::Float32, d).reshape({2, 1, 4}); });
+}
+TEST(JitTraceOps, UnsqueezeOutputIsTraced) {
+    check_op_on_all_backends(
+        "relu_then_unsqueeze",
+        [](const Variable& x) { return tenzor::unsqueeze(nn::relu(x), 2); },
+        [](Device d) { return arange(0.0, 8.0, 1.0, DType::Float32, d).reshape({2, 4}); });
+}

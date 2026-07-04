@@ -625,6 +625,73 @@ auto FuseConvBatchNormPass::run(Graph& graph) -> bool {
     return modified;
 }
 
+namespace {
+
+// Fold BatchNorm affine params into a Conv's weight/bias at compile time.
+//   scale = gamma / sqrt(var + eps)
+//   w' = w * scale   (per output channel)
+//   b' = scale * (b - mean) + beta   (or beta - scale*mean when the conv has no bias)
+//
+// Precision: eager BatchNorm INFERENCE computes invstd and the normalization in a
+// Float32 accumulator for Float16/BFloat16 inputs (see batchnorm.cpp
+// "normalize in a float accumulator for half types", and the oneDNN path which
+// converts gamma/beta/mean/var to Float32). Folding scale directly in Float16
+// rounds `var + eps` to f16 BEFORE the sqrt and does the divide in f16, so the
+// folded constants diverge from eager for half-precision models (JIT-076). We
+// therefore widen f16/bf16 params to Float32 for the math and narrow the FINAL
+// weight/bias back to the conv tensors' original dtypes. For Float32/Float64
+// params the widen dtype equals the param dtype, so this is a bit-for-bit no-op
+// (no behavioural change on the common path).
+void fold_bn_into_conv(const std::shared_ptr<Node>& conv_node,
+                       const Tensor& gamma, const Tensor& beta,
+                       const Tensor& running_mean, const Tensor& running_var,
+                       float eps,
+                       const Tensor& conv_weight, const Tensor& conv_bias) {
+    const DType pdt = running_var.dtype();
+    const DType cdt = (pdt == DType::Float16 || pdt == DType::BFloat16)
+                          ? DType::Float32
+                          : pdt;
+    auto widen = [cdt](const Tensor& t) {
+        return t.dtype() == cdt ? t : t.to(cdt);
+    };
+
+    const Tensor gamma_c = widen(gamma);
+    const Tensor var_c   = widen(running_var);
+    // scale = gamma / sqrt(var + eps), all in the (possibly widened) compute dtype.
+    const Tensor scale = gamma_c / tenzor::sqrt(var_c + eps);
+
+    // Fuse weights: scale each output channel. conv_weight is [out,in,kH,kW];
+    // reshape scale to [out,1,1,1] for broadcasting.
+    const DType wdt = conv_weight.dtype();
+    const Tensor cw = conv_weight.dtype() == cdt ? conv_weight
+                                                 : conv_weight.to(cdt);
+    const auto w_shape = cw.shape();
+    Tensor fused_weight = (w_shape.size() == 4)
+        ? cw * scale.reshape({w_shape[0], 1, 1, 1})
+        : cw * scale;  // fallback: direct element-wise
+    if (fused_weight.dtype() != wdt) fused_weight = fused_weight.to(wdt);
+    conv_node->set_tensor_attr("weight", fused_weight);
+
+    // Fuse bias.
+    const Tensor beta_c = widen(beta);
+    const Tensor mean_c = widen(running_mean);
+    Tensor fused_bias;
+    if (conv_bias.numel() > 0) {
+        const Tensor cb = conv_bias.dtype() == cdt ? conv_bias
+                                                   : conv_bias.to(cdt);
+        fused_bias = scale * (cb - mean_c) + beta_c;
+    } else {
+        fused_bias = beta_c - scale * mean_c;
+    }
+    // Store the bias in the dtype a downstream add would have used: the conv's
+    // own bias dtype when present, otherwise BN's beta dtype.
+    const DType bdt = conv_bias.numel() > 0 ? conv_bias.dtype() : beta.dtype();
+    if (fused_bias.dtype() != bdt) fused_bias = fused_bias.to(bdt);
+    conv_node->set_tensor_attr("bias", fused_bias);
+}
+
+}  // namespace
+
 auto FuseConvBatchNormPass::fuse_pair(std::shared_ptr<Node> conv_node,
                                        std::shared_ptr<Node> bn_node,
                                        Graph& graph) -> bool {
@@ -644,38 +711,9 @@ auto FuseConvBatchNormPass::fuse_pair(std::shared_ptr<Node> conv_node,
         return false;
     }
 
-    // Compute fused parameters:
-    //   inv_std = 1 / sqrt(var + eps)
-    //   w' = gamma * w / sqrt(var + eps) = gamma * inv_std * w
-    //   b' = gamma * (b - mean) / sqrt(var + eps) + beta
-    Tensor var_plus_eps = running_var + eps;
-    Tensor inv_std = tenzor::sqrt(var_plus_eps);
-    // inv_std = 1 / sqrt(var + eps): compute scale = gamma / sqrt(var + eps)
-    Tensor scale = gamma / inv_std;
-
-    // Fuse weights: scale each output channel
-    // conv_weight shape: [out_channels, in_channels, kH, kW]
-    // scale shape: [out_channels]
-    // We need to reshape scale to [out_channels, 1, 1, 1] for broadcasting
-    auto w_shape = conv_weight.shape();
-    if (w_shape.size() == 4) {
-        Tensor scale_reshaped = scale.reshape({w_shape[0], 1, 1, 1});
-        Tensor fused_weight = conv_weight * scale_reshaped;
-        conv_node->set_tensor_attr("weight", fused_weight);
-    } else {
-        // Fallback: attempt direct element-wise (may not broadcast correctly)
-        conv_node->set_tensor_attr("weight", conv_weight * scale);
-    }
-
-    // Fuse bias: b' = scale * (b - mean) + beta
-    if (conv_bias.numel() > 0) {
-        Tensor fused_bias = scale * (conv_bias - running_mean) + beta;
-        conv_node->set_tensor_attr("bias", fused_bias);
-    } else {
-        // No conv bias: b' = scale * (0 - mean) + beta = -scale * mean + beta
-        Tensor fused_bias = beta - scale * running_mean;
-        conv_node->set_tensor_attr("bias", fused_bias);
-    }
+    // Fold BN into the conv weight/bias (widens f16/bf16 to match eager — JIT-076).
+    fold_bn_into_conv(conv_node, gamma, beta, running_mean, running_var, eps,
+                      conv_weight, conv_bias);
 
     conv_node->set_bool_attr("fused_bn", true);
 
@@ -936,26 +974,9 @@ auto FuseConvBatchNormReluPass::fuse_triple(std::shared_ptr<Node> conv_node,
         return false;
     }
 
-    Tensor var_plus_eps = running_var + eps;
-    Tensor inv_std = tenzor::sqrt(var_plus_eps);
-    Tensor scale = gamma / inv_std;
-
-    auto w_shape = conv_weight.shape();
-    if (w_shape.size() == 4) {
-        Tensor scale_reshaped = scale.reshape({w_shape[0], 1, 1, 1});
-        Tensor fused_weight = conv_weight * scale_reshaped;
-        conv_node->set_tensor_attr("weight", fused_weight);
-    } else {
-        conv_node->set_tensor_attr("weight", conv_weight * scale);
-    }
-
-    if (conv_bias.numel() > 0) {
-        Tensor fused_bias = scale * (conv_bias - running_mean) + beta;
-        conv_node->set_tensor_attr("bias", fused_bias);
-    } else {
-        Tensor fused_bias = beta - scale * running_mean;
-        conv_node->set_tensor_attr("bias", fused_bias);
-    }
+    // Fold BN into the conv weight/bias (widens f16/bf16 to match eager — JIT-076).
+    fold_bn_into_conv(conv_node, gamma, beta, running_mean, running_var, eps,
+                      conv_weight, conv_bias);
 
     // Mark as triple-fused
     conv_node->set_bool_attr("fused_bn", true);
@@ -2089,6 +2110,32 @@ auto LoopUnrollingPass::run(Graph& graph) -> bool {
                     auto remap_it = id_remap.find(input->id());
                     std::string actual_id = (remap_it != id_remap.end()) ? remap_it->second : input->id();
                     auto val = graph.get_value(actual_id);
+                    if (!val) {
+                        // Body-local captured leaf (a constant/parameter that
+                        // lives only in the loop-body subgraph, not the outer
+                        // graph). Previously this input was silently dropped,
+                        // leaving the cloned op with a missing operand (JIT-054).
+                        // Materialize the body's constant in the outer graph so
+                        // the unrolled op has a real operand.
+                        auto cit = body->constants().find(input->id());
+                        if (cit != body->constants().end()) {
+                            // Materialize with a node-unique id (cloned->name() is
+                            // globally unique) so a body-local constant id that
+                            // happens to collide across DIFFERENT loops does not
+                            // reuse the wrong outer value.
+                            const std::string mat_id =
+                                cloned->name() + "_uconst_" + input->id();
+                            val = graph.get_value(mat_id);
+                            if (!val) {
+                                const auto sh = cit->second.shape();
+                                val = graph.create_value(
+                                    mat_id,
+                                    std::vector<int64_t>(sh.begin(), sh.end()),
+                                    cit->second.dtype(), cit->second.device());
+                                graph.set_constant(mat_id, cit->second);
+                            }
+                        }
+                    }
                     if (val) cloned->add_input(val);
                 }
 
@@ -2191,12 +2238,23 @@ auto LICMPass::run(Graph& graph) -> bool {
             // threading below to be well-defined.
             if (inv_node->outputs().size() != 1) continue;
 
+            // Only hoist when EVERY input resolves in the OUTER graph (JIT-054).
+            // A loop-body node whose operands are body-local captured leaves
+            // (constants/parameters that exist only in the subgraph, not in the
+            // outer graph) would otherwise be hoisted with those inputs silently
+            // dropped — emitting a zero-/missing-input op that yields garbage or
+            // crashes. Leave such a node in the body.
+            bool all_resolvable = true;
+            for (const auto& input : inv_node->inputs()) {
+                if (!graph.get_value(input->id())) { all_resolvable = false; break; }
+            }
+            if (!all_resolvable) continue;
+
             // 1. Re-create the node in the outer graph with a FRESH unique output
             //    id (ids must not be shared across the outer and body scopes).
             auto hoisted = graph.create_node(inv_node->op_type());
             for (const auto& input : inv_node->inputs()) {
-                auto outer_val = graph.get_value(input->id());
-                if (outer_val) hoisted->add_input(outer_val);
+                hoisted->add_input(graph.get_value(input->id()));
             }
             // Copy scalar/vector/bool/tensor attrs so the hoisted op is identical.
             {
