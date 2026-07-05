@@ -114,12 +114,18 @@ set_source_files_properties(kernels/ctc_loss.hip.cpp
 # produces Inf/NaN and therefore *eliminates* the explicit zero-divisor branch
 # in ieee_div() (same mechanism documented for ctc_loss above). For Float64 the
 # fallthrough hardware divide (reciprocal + Newton-Raphson) then returns a
-# finite/indefinite-NaN value instead of ±Inf. We disable ONLY -ffinite-math-only
-# here — not all of -ffast-math — so the approximate transcendentals / FMA
-# contraction on this hot element-wise file keep their fast-math codegen while
-# Inf/NaN semantics are honoured.
+# finite/indefinite-NaN value instead of ±Inf.
+#
+# JIT-F050: compile this hot element-wise file with FULL precise math
+# (-fno-fast-math), not just -fno-finite-math-only. Keeping fast-math here made
+# eager ROCm exp/log/sqrt/rsqrt/div use ~1e-3-relative approximate transcendentals
+# and -ffp-contract=fast, so an elementwise op run eagerly diverged from the same
+# op run through the (now precise, -ffp-contract=off) JIT AND from the CPU/CUDA
+# reference — the very "cross-backend parity failure" the activations/fused_ops
+# exemption below already fixes for softmax/norm. -fno-fast-math is a superset of
+# -fno-finite-math-only, so the ieee_div Inf/NaN semantics above stay honoured.
 set_source_files_properties(kernels/math.hip.cpp
-    PROPERTIES COMPILE_FLAGS "-fno-finite-math-only"
+    PROPERTIES COMPILE_FLAGS "-fno-fast-math"
 )
 
 # activations.hip.cpp (softmax exp) and fused_ops.hip.cpp (RMSNorm rsqrt) feed

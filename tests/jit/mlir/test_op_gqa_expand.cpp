@@ -10,10 +10,13 @@
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/mlir/lowering.hpp"
+#include "tenzor/jit/mlir/iree_runtime.hpp"
 #include "tenzor/jit/tracer.hpp"
 #include "tenzor/tenzor.hpp"
 
 #include <gtest/gtest.h>
+
+#include "mlir_target_util.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -134,4 +137,60 @@ TEST(OpGQAExpand, MHANoKVReshapeWhenHeadsMatch) {
     lowerer.set_plugin_enabled(false);
     const std::string mlir = lowerer.lower(g);
     assert_iree_compile_accepts(mlir, "mha");
+}
+
+// JIT-F034: numeric assertion for the GQA expand path (previously only text /
+// compile-clean checks). If V is constant along the sequence dim, the attention
+// output is a softmax-weighted average of identical V vectors, i.e. that
+// constant, regardless of Q/K. With group size 2 (Hq=4, Hkv=2), query heads 0,1
+// map to KV head 0 and heads 2,3 to KV head 1 — verifying both the attention
+// math and the KV-head grouping. Runs on every available IREE target.
+TEST(OpGQAExpand, ConstantVPerHeadReturnsThatConstant) {
+    ensure_core_init();
+    const int64_t B = 1, Hq = 4, Hkv = 2, S = 3, D = 8;
+    auto g = make_gqa_graph({B, Hq, S, D}, {B, Hkv, S, D}, /*causal=*/false);
+
+    auto q = ::tenzor::full({B, Hq, S, D}, 0.1f, ::tenzor::DType::Float32);
+    auto k = ::tenzor::full({B, Hkv, S, D}, 0.1f, ::tenzor::DType::Float32);
+    auto v = ::tenzor::full({B, Hkv, S, D}, 0.f, ::tenzor::DType::Float32);
+    {
+        auto* vp = v.data<float>();
+        for (int64_t h = 0; h < Hkv; ++h)
+            for (int64_t s = 0; s < S; ++s)
+                for (int64_t d = 0; d < D; ++d)
+                    vp[((h * S) + s) * D + d] = (h == 0 ? 1.0f : 2.0f);
+    }
+
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(false);
+    const std::string mlir = lowerer.lower(g);
+
+    namespace mt = ::tenzor::testing::mlir;
+    for (const auto& target : mt::available_iree_targets()) {
+        tzm::CompileOptions opts;
+        opts.target = target;
+        opts.plugin_enabled = false;
+        if (target == "vulkan-spirv" || target == "vulkan") opts.vulkan_arch = "ampere";
+        auto artifact = tzm::compile_mlir(mlir, opts);
+        std::unique_ptr<tzm::IreeInvoker> inv;
+        try {
+            inv = tzm::IreeInvoker::load(artifact);
+        } catch (const std::exception& e) {
+            std::string w = e.what();
+            if (w.find("no driver") != std::string::npos ||
+                w.find("NOT_FOUND") != std::string::npos) continue;
+            throw;
+        }
+        auto outs = inv->invoke({q, k, v});
+        ASSERT_EQ(outs.size(), 1u) << "target=" << target;
+        auto oc = outs[0].to(::tenzor::Device::cpu());
+        const float* op = oc.data<float>();
+        for (int64_t hq = 0; hq < Hq; ++hq) {
+            float expect = (hq / (Hq / Hkv) == 0) ? 1.0f : 2.0f;
+            for (int64_t s = 0; s < S; ++s)
+                for (int64_t d = 0; d < D; ++d)
+                    EXPECT_NEAR(op[((hq * S) + s) * D + d], expect, 1e-4f)
+                        << "target=" << target << " hq=" << hq;
+        }
+    }
 }

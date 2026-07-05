@@ -237,10 +237,11 @@ auto GraphWriter::write_nodes(const Graph& graph) -> void {
         auto [float_attrs, int_attrs, vec_attrs, bool_attrs, tensor_attrs] =
             const_cast<Node*>(node.get())->get_all_attrs();
 
+        // Scalar attrs are now double (JIT-F057); write 8 bytes, not 4.
         write_uint64(float_attrs.size());
         for (const auto& [name, val] : float_attrs) {
             write_string(name);
-            write_float(val);
+            write_double(val);
         }
 
         write_uint64(int_attrs.size());
@@ -512,7 +513,17 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
             "GraphReader::read_nodes: num_nodes exceeds remaining file");
     }
     for (uint64_t n = 0; n < num_nodes; ++n) {
-        OpType op_type = static_cast<OpType>(read_uint32());
+        // Range-validate the OpType before casting, mirroring the DType guard in
+        // read_values(): a corrupt/truncated file must fail loudly here rather
+        // than store an out-of-range enum that surfaces as a confusing downstream
+        // error. Roll is the last OpType enumerator (keep in sync if extended).
+        uint32_t raw_op = read_uint32();
+        if (raw_op > static_cast<uint32_t>(OpType::Roll)) {
+            throw std::runtime_error(
+                "GraphReader::read_nodes: invalid OpType value " +
+                std::to_string(raw_op));
+        }
+        OpType op_type = static_cast<OpType>(raw_op);
         std::string name = read_string();
 
         auto node = graph.create_node(op_type, name);
@@ -577,7 +588,7 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
         }
         for (uint64_t i = 0; i < num_float_attrs; ++i) {
             std::string attr_name = read_string();
-            float val = read_float();
+            double val = read_double();  // scalar attrs are double now (JIT-F057)
             node->set_attr(attr_name, val);
         }
 

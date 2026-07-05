@@ -20,6 +20,8 @@
 
 #include <gtest/gtest.h>
 
+#include "mlir_target_util.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -242,25 +244,28 @@ namespace F = ::tenzor::nn::functional;
 void run_jit_vs_eager(::tenzor::jit::CompiledFunction::FnType fn,
                       const ::tenzor::Variable& x,
                       float tol = 1e-4F) {
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    namespace mt = ::tenzor::testing::mlir;
     auto eager = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jit   = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    // Compare in Float32 so the helper works for reduced-precision outputs
-    // (f16/bf16): item<float>() requires a Float32 scalar. The cast is a no-op
-    // for an already-f32 result.
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu())
                           .to(::tenzor::DType::Float32);
-    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu())
+    // Fan out over every available IREE target so the conv/pool lowerings — incl.
+    // the conv precision_config (JIT-F012) — are validated on GPU too (JIT-F028).
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jit = compiled(x);
+        mt::assert_jit_used("vision", target);
+        auto jit_cpu = jit.tensor().to(::tenzor::Device::cpu())
                           .to(::tenzor::DType::Float32);
-    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
-                    .template item<float>();
-    EXPECT_LT(diff, tol);
+        auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                        .template item<float>();
+        EXPECT_LT(diff, tol) << "target=" << target << " diff=" << diff;
+    }
 }
 
 }  // namespace tzv_e2e
@@ -419,4 +424,21 @@ TEST(OpVision, MaxPool2dBFloat16CompilesAndMatches) {
     for (int i = 0; i < 16; ++i) xd[i] = static_cast<float>(i);
     ::tenzor::Variable x(x32.to(::tenzor::DType::BFloat16), false);
     tzv_e2e::run_jit_vs_eager(fn, x, 1e-2F);
+}
+
+// JIT-F035/F012: F16 Conv2d through the JIT across every available IREE target
+// (llvm-cpu / cuda / vulkan-spirv). The eager reference and inputs are on CPU
+// (safe), and the conv lowering must widen F16->F32 to match eager.
+TEST(OpVision, Conv2dF16EndToEnd) {
+    ensure_core_init();
+    auto w = ::tenzor::randn({4, 3, 3, 3}, ::tenzor::DType::Float32)
+                 .to(::tenzor::DType::Float16);
+    ::tenzor::Variable wv(w, false);
+    auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::conv2d(x, wv, std::nullopt, {1, 1}, {1, 1});
+    };
+    auto x_t = ::tenzor::randn({1, 3, 8, 8}, ::tenzor::DType::Float32)
+                   .to(::tenzor::DType::Float16);
+    ::tenzor::Variable x(x_t, /*requires_grad=*/false);
+    tzv_e2e::run_jit_vs_eager(fn, x, /*tol=*/6e-2F);
 }

@@ -545,7 +545,8 @@ auto RematerializationPlanner::apply(
     }
 
     for (const auto& candidate : candidates) {
-        // If we have a memory budget, stop once we're under it
+        // Reclamation target: stop once we've freed the requested number of
+        // bytes (0 = no cap; reclaim from all good candidates).
         if (memory_budget_ > 0 && memory_freed >= memory_budget_) break;
 
         auto value = graph.get_value(candidate.value_id);

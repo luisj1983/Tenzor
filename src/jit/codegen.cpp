@@ -608,7 +608,12 @@ auto KernelCache::compile(const std::string& source, const std::string& kernel_n
                                          0, nullptr, nullptr));
         // Provide the ROCm include dir so <hip/hip_fp16.h> / <hip/hip_bf16.h>
         // (Float16/BFloat16 fusions) resolve under HIPRTC.
-        std::vector<std::string> opt_storage = {arch_flag, "--std=c++17"};
+        // -ffp-contract=off disables FP multiply-add contraction (clang/HIP
+        // defaults to "fast", which fuses to a single-rounding fma). Round mul
+        // then add separately to match the precise reference / eager CPU and the
+        // codebase's double-accumulator bit-match effort (JIT-F004).
+        std::vector<std::string> opt_storage = {arch_flag, "--std=c++17",
+                                                "-ffp-contract=off"};
 #ifdef TENZOR_HIPRTC_INCLUDE
         opt_storage.push_back(std::string("-I") + TENZOR_HIPRTC_INCLUDE);
 #endif
@@ -697,7 +702,12 @@ auto KernelCache::compile(const std::string& source, const std::string& kernel_n
     // <cuda_bf16.h> (Float16/BFloat16 fusions) fails to open the file unless we
     // hand it the CUDA include directory (baked in at build time).
     std::vector<std::string> opt_storage = {
-        arch_flag, "--std=c++17", "-default-device"
+        // --fmad=false disables FP multiply-add contraction so `a*b + c` rounds
+        // twice (mul then add), matching the eager CPU/precise reference and the
+        // codebase's double-accumulator / 1-over-sqrt bit-match effort. Leaving it
+        // on lets the GPU fuse to a single-rounding fma, drifting ~1 ULP/op over
+        // long normalized dims (JIT-F004).
+        arch_flag, "--std=c++17", "-default-device", "--fmad=false"
     };
 #ifdef TENZOR_NVRTC_INCLUDE
     opt_storage.push_back(std::string("--include-path=") + TENZOR_NVRTC_INCLUDE);

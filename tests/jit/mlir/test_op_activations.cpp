@@ -61,8 +61,11 @@ void check_matches_eager(const std::string& name, FnT fn,
         auto jitted = compiled(x);
         mt::assert_jit_used(name, target);
         auto jitted_cpu = jitted.tensor().to(::tenzor::Device::cpu());
+        // Compare in Float32 so the diff itself is not re-rounded in a low-
+        // precision dtype (and so item<float>() is valid for F16/BF16 outputs).
         auto diff = ::tenzor::max(::tenzor::abs(
-            eager_cpu - jitted_cpu)).template item<float>();
+            eager_cpu.to(::tenzor::DType::Float32) -
+            jitted_cpu.to(::tenzor::DType::Float32))).template item<float>();
         EXPECT_LT(diff, tol)
             << "op=" << name << " target=" << target << " diff=" << diff;
     }
@@ -105,6 +108,28 @@ TEST(OpActivations, GELU) {
     check_matches_eager("gelu", [](const ::tenzor::Variable& x) {
         return ::tenzor::gelu(x);
     }, /*tol=*/5e-3F);
+}
+
+// JIT-F039/F040/F041: F16 transcendental activations must be computed in F32 in
+// the lowering (widen -> compute -> narrow), matching the eager kernels which
+// widen. These exercise the widened handlers end-to-end (compile + run) and
+// check the result matches the eager F16 reference within F16 tolerance.
+TEST(OpActivations, SigmoidF16) {
+    check_matches_eager("sigmoid_f16", [](const ::tenzor::Variable& x) {
+        return ::tenzor::nn::sigmoid(x);
+    }, /*tol=*/2e-3F, /*shape=*/{16}, ::tenzor::DType::Float16);
+}
+
+TEST(OpActivations, SiLUComposedF16) {
+    check_matches_eager("silu_f16", [](const ::tenzor::Variable& x) {
+        return x * ::tenzor::nn::sigmoid(x);
+    }, /*tol=*/3e-3F, /*shape=*/{16}, ::tenzor::DType::Float16);
+}
+
+TEST(OpActivations, GELUF16) {
+    check_matches_eager("gelu_f16", [](const ::tenzor::Variable& x) {
+        return ::tenzor::gelu(x);
+    }, /*tol=*/8e-3F, /*shape=*/{16}, ::tenzor::DType::Float16);
 }
 
 // Direct lowering test for the SiLU handler — constructs the graph by hand

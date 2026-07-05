@@ -19,6 +19,8 @@
 
 #include <gtest/gtest.h>
 
+#include "mlir_target_util.hpp"
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -40,23 +42,31 @@ void check_matches_eager(const std::string& name, FnT fn,
                          float tol = 1e-5F,
                          ::tenzor::DType dt = ::tenzor::DType::Float32) {
     ensure_core_init();
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
+    namespace mt = ::tenzor::testing::mlir;
     auto raw = ::tenzor::randn(shape, dt);
     auto x = ::tenzor::Variable(raw, /*requires_grad=*/false);
+    auto eager = fn(x);
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
 
-    auto eager  = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, tol) << "op=" << name << " diff=" << diff;
+    // Fan out over every available IREE target so the reduction lowerings are
+    // numerically validated on the GPU targets too, not just llvm-cpu (JIT-F028).
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jitted = compiled(x);
+        mt::assert_jit_used(name, target);
+        auto jitted_cpu = jitted.tensor().to(::tenzor::Device::cpu());
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager_cpu.to(::tenzor::DType::Float32) -
+            jitted_cpu.to(::tenzor::DType::Float32))).template item<float>();
+        EXPECT_LT(diff, tol) << "op=" << name << " target=" << target
+                             << " diff=" << diff;
+    }
 }
 
 }  // namespace

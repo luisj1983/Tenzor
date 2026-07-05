@@ -81,6 +81,12 @@ inline auto iree_target_supported(const std::string& target) -> bool {
 
 // The full IREE target set the MLIR backend can lower to.
 inline auto all_iree_targets() -> std::vector<std::string> {
+    // Intel OneAPI (and Apple MPS) are intentionally absent (JIT-F030): IREE has
+    // no HAL driver / compile target for them (see CompiledFunction::mlir_invoke_impl,
+    // which throws in strict mode and otherwise runs eagerly for those devices).
+    // The MLIR/IREE JIT path therefore does not cover OneAPI; on that backend a
+    // model runs eagerly (correct, unaccelerated). CPU/CUDA/ROCm/Vulkan are the
+    // IREE-supported targets and are all exercised here when the hardware is present.
     return {"llvm-cpu", "cuda", "rocm", "vulkan-spirv"};
 }
 

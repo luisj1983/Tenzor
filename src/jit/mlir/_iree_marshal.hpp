@@ -45,11 +45,27 @@ inline auto dtype_to_iree(::tenzor::DType d) -> iree_hal_element_type_t {
         case ::tenzor::DType::Bool:       return IREE_HAL_ELEMENT_TYPE_BOOL_8;
         case ::tenzor::DType::Complex64:  return IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_64;
         case ::tenzor::DType::Complex128: return IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_128;
+        // Quantized int8 is stored one byte per value, byte-identical to a plain
+        // (u)int8 buffer; marshal it as such (scale/zero-point are separate
+        // metadata, not part of the element buffer).
+        case ::tenzor::DType::QInt8:      return IREE_HAL_ELEMENT_TYPE_INT_8;
+        case ::tenzor::DType::QUInt8:     return IREE_HAL_ELEMENT_TYPE_UINT_8;
+        // QInt4x2 packs two 4-bit values per byte: dtype_size is 1 byte for 2
+        // logical elements, so numel*element_size under-counts the buffer by 2x.
+        // There is no whole-byte IREE element type for it — reject explicitly
+        // rather than silently corrupt the byte accounting.
+        case ::tenzor::DType::QInt4x2:
+            throw std::invalid_argument(
+                "IREE marshal: QInt4x2 (packed 4-bit) has no whole-byte IREE "
+                "element type and cannot be marshalled without corrupting the "
+                "byte accounting; not supported for the MLIR/IREE JIT path.");
         default: break;
     }
+    // FP8 (E4M3/E5M2/FNUZ) has no HAL element type in this IREE distribution, so
+    // it falls through here and the caller falls back to eager execution.
     throw std::invalid_argument(
-        "IREE marshal: unsupported DType. value=" +
-        std::to_string(static_cast<int>(d)));
+        "IREE marshal: unsupported DType for the MLIR/IREE path (e.g. FP8). "
+        "value=" + std::to_string(static_cast<int>(d)));
 }
 
 inline auto iree_to_dtype(iree_hal_element_type_t e) -> ::tenzor::DType {
@@ -131,6 +147,21 @@ inline auto buffer_view_to_tensor(iree_hal_buffer_view_t* bv)
     iree_hal_buffer_t* buffer = iree_hal_buffer_view_buffer(bv);
     const iree_device_size_t byte_length =
         iree_hal_buffer_view_byte_length(bv);
+
+    // Guard the memcpy: the destination was sized from shape × dtype, but the
+    // copy length comes independently from IREE. If they disagree (e.g. a future
+    // sub-byte/packed element type, or an element whose byte width differs from
+    // dtype_size), a blind memcpy would half-fill the output or overflow the
+    // heap. Fail loudly instead (JIT-F046).
+    const std::size_t expected =
+        static_cast<std::size_t>(out.numel()) * out.element_size();
+    if (static_cast<std::size_t>(byte_length) != expected) {
+        throw std::runtime_error(
+            "buffer_view_to_tensor: IREE byte_length (" +
+            std::to_string(static_cast<std::size_t>(byte_length)) +
+            ") != expected shape*dtype size (" + std::to_string(expected) +
+            "); refusing to memcpy a mismatched buffer");
+    }
 
     // Try host-mapping first: free on CPU drivers (local-task / local-sync)
     // since the buffer storage is host-visible there. Fall back to an

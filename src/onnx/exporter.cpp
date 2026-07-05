@@ -3631,7 +3631,10 @@ auto ONNXExporter::convert_jit_node_to_onnx(
             // genuine 0.0, so ONNX fell back to its 0.9 default and the exported
             // BatchNorm silently updated running stats it was meant to freeze.
             if (node->has_float_attr("momentum")) {
-                onnx_node.set_attr("momentum", node->get_attr("momentum"));
+                // JIT node scalar attrs are double now (JIT-F057); ONNX float
+                // attrs are f32 by spec, so narrow at the export boundary.
+                onnx_node.set_attr("momentum",
+                                   static_cast<float>(node->get_attr("momentum")));
             }
             break;
         }
@@ -3734,7 +3737,7 @@ auto ONNXExporter::convert_jit_node_to_onnx(
                 onnx_node.set_attr(name, val);
             }
             for (const auto& [name, val] : float_attrs) {
-                onnx_node.set_attr(name, val);
+                onnx_node.set_attr(name, static_cast<float>(val));  // ONNX f32 (JIT-F057)
             }
             for (const auto& [name, val] : vec_attrs) {
                 onnx_node.set_attr(name, val);

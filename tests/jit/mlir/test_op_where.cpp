@@ -27,6 +27,8 @@
 
 #include <gtest/gtest.h>
 
+#include "mlir_target_util.hpp"
+
 #include <vector>
 
 namespace {
@@ -52,26 +54,29 @@ TEST(OpWhere, WhereSelectsOnTrueWhenMaskIsAllTrue) {
         return ::tenzor::where(cond_v, x, other_v);
     };
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
     auto x = ::tenzor::Variable(
         ::tenzor::full({16}, 3.0F, ::tenzor::DType::Float32),
         /*requires_grad=*/false);
-
     auto eager = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jit   = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
-    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
-    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
-                    .template item<float>();
-    EXPECT_LT(diff, 1e-5F);
+    // Fan out over every available IREE target (JIT-F028).
+    namespace mt = ::tenzor::testing::mlir;
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jit = compiled(x);
+        mt::assert_jit_used("where", target);
+        auto jit_cpu = jit.tensor().to(::tenzor::Device::cpu());
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager_cpu.to(::tenzor::DType::Float32) -
+            jit_cpu.to(::tenzor::DType::Float32))).template item<float>();
+        EXPECT_LT(diff, 1e-5F) << "target=" << target << " diff=" << diff;
+    }
 }
 
 TEST(OpWhere, WhereSelectsOnFalseWhenMaskIsAllFalse) {
@@ -85,24 +90,27 @@ TEST(OpWhere, WhereSelectsOnFalseWhenMaskIsAllFalse) {
         return ::tenzor::where(cond_v, x, other_v);
     };
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
     auto x = ::tenzor::Variable(
         ::tenzor::full({16}, 3.0F, ::tenzor::DType::Float32),
         /*requires_grad=*/false);
-
     auto eager = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jit   = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
-    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
-    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
-                    .template item<float>();
-    EXPECT_LT(diff, 1e-5F);
+    // Fan out over every available IREE target (JIT-F028).
+    namespace mt = ::tenzor::testing::mlir;
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jit = compiled(x);
+        mt::assert_jit_used("where", target);
+        auto jit_cpu = jit.tensor().to(::tenzor::Device::cpu());
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager_cpu.to(::tenzor::DType::Float32) -
+            jit_cpu.to(::tenzor::DType::Float32))).template item<float>();
+        EXPECT_LT(diff, 1e-5F) << "target=" << target << " diff=" << diff;
+    }
 }

@@ -34,8 +34,11 @@ auto FusionCostModel::should_fuse(const FusionCandidate& candidate) const -> boo
 
     double saved_launch_us = static_cast<double>(candidate.num_ops - 1) * launch_overhead_us_;
 
-    // Estimate memory traffic savings (in bytes, assuming float32 = 4 bytes)
-    constexpr double bytes_per_element = 4.0;
+    // Estimate memory traffic savings (in bytes). Use the candidate's actual
+    // element size so F16/BF16 (2B) and F64/Complex (8/16B) are not modelled as
+    // Float32 (which over/under-estimates the traffic saved by fusion).
+    const double bytes_per_element =
+        static_cast<double>(candidate.bytes_per_element == 0 ? 4 : candidate.bytes_per_element);
     size_t eliminated_accesses = 0;
     if (candidate.num_memory_accesses > 2) {
         eliminated_accesses = candidate.num_memory_accesses - 2;
@@ -125,7 +128,9 @@ auto FusionCostModel::estimate_speedup(const FusionCandidate& candidate) const -
     } else {
         // CPU heuristic: memory bandwidth savings from keeping data in cache.
         // Working set = total_elements * 4 bytes (float32).
-        constexpr int64_t l2_elements = 1024 * 1024 / 4;  // ~1MB L2 / 4 bytes
+        // ~1MB L2 divided by the actual element size (not a hardcoded 4 bytes).
+        const int64_t l2_elements =
+            1024 * 1024 / static_cast<int64_t>(candidate.bytes_per_element == 0 ? 4 : candidate.bytes_per_element);
 
         if (candidate.total_elements <= l2_elements) {
             // Fits in L2: fusion keeps intermediates in cache -> good savings.

@@ -313,15 +313,38 @@ auto SymbolicShapeInference::infer_reshape(const Node* node) -> std::vector<Symb
             return {SymbolicShape(std::move(out_dims))};
         }
 
-        // Dynamic input, no wildcard. The concrete target dims were specialized
-        // to the trace shape; baking them would produce a wrong output shape for
-        // other bindings (x.view(x.size(0), 128) traced at B=32 must resolve to
-        // [B, 128], not [32, 128]). Treat the LEADING dim as the free
-        // data-dependent dim — the universal (B, ...) reshape pattern — and
-        // derive it symbolically from numel so the result is numel-preserving
-        // for every binding: out[0] = total_in / prod(target[1..]); trailing
-        // dims stay concrete. This mirrors the -1 wildcard math at position 0
-        // and matches the executor's runtime leading-dim recovery.
+        // Dynamic input, no wildcard. Treating the LEADING dim as the free
+        // data-dependent dim (the universal (B, ...) reshape) is only valid when
+        // there is positive evidence of a batch-preserving reshape: the input's
+        // non-leading dims are all static and their product equals the product of
+        // the target's non-leading dims, so only the leading/batch dim varies.
+        // Otherwise this is a genuinely fixed reshape and its concrete target IS
+        // the output shape — overwriting target[0] with total_in/trailing would
+        // wrongly symbolize a fixed leading dim (JIT-F022).
+        bool trailing_static = true;
+        int64_t in_trailing = 1;
+        for (size_t i = 1; i < in_shape.rank(); ++i) {
+            if (in_shape[i].is_symbolic()) { trailing_static = false; break; }
+            in_trailing *= in_shape[i].value();
+        }
+        int64_t tgt_trailing = 1;
+        for (size_t i = 1; i < target_shape.size(); ++i) {
+            tgt_trailing *= target_shape[i];
+        }
+        bool batch_reshape = trailing_static && !target_shape.empty() &&
+                             in_trailing == tgt_trailing;
+        if (!batch_reshape) {
+            std::vector<SymbolicDim> out_dims;
+            out_dims.reserve(target_shape.size());
+            for (size_t i = 0; i < target_shape.size(); ++i) {
+                out_dims.emplace_back(target_shape[i]);
+            }
+            return {SymbolicShape(std::move(out_dims))};
+        }
+
+        // Batch-preserving reshape: derive the leading dim symbolically from numel
+        // so the result is numel-preserving for every binding:
+        // out[0] = total_in / prod(target[1..]); trailing dims stay concrete.
         SymbolicDim total_in = SymbolicDim::concrete(1);
         for (size_t i = 0; i < in_shape.rank(); ++i) total_in = total_in * in_shape[i];
 
@@ -438,7 +461,17 @@ auto SymbolicShapeInference::infer_reduction(const Node* node) -> std::vector<Sy
         sym_shape = SymbolicShape();
     }
 
-    return {std::move(sym_shape)};
+    // A dimensioned Max/Min produces TWO outputs (values and indices) which share
+    // the reduced shape. Emit one symbolic shape per node output so the indices
+    // output is not left unshaped (and later frozen to the trace-time size).
+    size_t n_out = node->outputs().empty() ? 1 : node->outputs().size();
+    std::vector<SymbolicShape> result;
+    result.reserve(n_out);
+    for (size_t i = 0; i + 1 < n_out; ++i) {
+        result.push_back(sym_shape);
+    }
+    result.push_back(std::move(sym_shape));
+    return result;
 }
 
 // ============================================================================
@@ -495,6 +528,13 @@ auto SymbolicShapeInference::infer_permute(const Node* node) -> std::vector<Symb
     auto dims = node->get_vec_attr("dims");
     auto& in_shape = input_shapes[0];
     int64_t rank = static_cast<int64_t>(in_shape.rank());
+    // A permutation must be a bijection over ALL axes, so its length must equal
+    // the input rank. A wrong-length permutation (e.g. dims={0,2} on a rank-3
+    // input) would otherwise yield a wrong-rank symbolic shape that mismatches
+    // the concrete executor output and corrupts downstream reasoning.
+    if (static_cast<int64_t>(dims.size()) != rank) {
+        return {};
+    }
     std::vector<SymbolicDim> out_dims(dims.size());
 
     // Mirror Graph::infer_symbolic_types (graph.cpp) and the concrete infer_types

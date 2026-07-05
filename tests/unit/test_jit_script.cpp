@@ -155,6 +155,40 @@ TEST(JitScript, RejectsMultiArgFunction) {
     }, std::runtime_error);
 }
 
+// JIT-F003: a multi-argument compiled script (built via the dummies overload)
+// must be callable through the vector forward() overload. Pre-fix, the module
+// was constructed without a traced signature, so the FIRST forward() thought the
+// shape had changed and retraced through the single-input source-module path,
+// throwing "argument count mismatch".
+TEST(JitScript, MultiArgScriptForwardWorks) {
+    const char* src = R"(def forward(x, y): return x + y)";
+    std::vector<Tensor> dummies = {
+        ones({2}, DType::Float32, Device::cpu()),
+        ones({2}, DType::Float32, Device::cpu()),
+    };
+    auto compiled = jit::compile_script(src, dummies);
+    ASSERT_NE(compiled, nullptr);
+
+    // Same-shape call: replays the traced graph directly (no spurious retrace).
+    Tensor a = full({2}, 3.0, DType::Float32, Device::cpu());
+    Tensor b = full({2}, 4.0, DType::Float32, Device::cpu());
+    auto outs = compiled->forward({Variable(a, false), Variable(b, false)});
+    ASSERT_EQ(outs.size(), 1u);
+    auto r = outs[0].tensor().to(Device::cpu());
+    EXPECT_NEAR(r.data<float>()[0], 7.0f, 1e-5);
+    EXPECT_NEAR(r.data<float>()[1], 7.0f, 1e-5);
+
+    // Different-shape call: exercises the multi-input retrace closure.
+    Tensor a3 = full({3}, 1.0, DType::Float32, Device::cpu());
+    Tensor b3 = full({3}, 2.0, DType::Float32, Device::cpu());
+    auto outs3 = compiled->forward({Variable(a3, false), Variable(b3, false)});
+    ASSERT_EQ(outs3.size(), 1u);
+    auto r3 = outs3[0].tensor().to(Device::cpu());
+    ASSERT_EQ(r3.numel(), 3);
+    EXPECT_NEAR(r3.data<float>()[0], 3.0f, 1e-5);
+    EXPECT_NEAR(r3.data<float>()[2], 3.0f, 1e-5);
+}
+
 TEST(JitScript, RejectsIfElse) {
     EXPECT_THROW({
         jit::compile_script(R"(

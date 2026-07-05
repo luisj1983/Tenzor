@@ -27,6 +27,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/script.hpp>
 #include <tenzor/jit/tracer.hpp>
+#include <tenzor/jit/control_flow.hpp>
 #include <tenzor/jit/graph.hpp>
 #include <tenzor/ops/math.hpp>
 
@@ -188,5 +189,43 @@ TEST(JitInplaceTrace, InplaceMutationOfCapturedConstantBakesPreOpValue) {
             << "captured constant baked its POST-mutation value (replay == 17)";
         Tensor expected = full({4}, 15.0f, DType::Float32, dev);
         EXPECT_TENSORS_CLOSE(expected, replay, 1e-5f, 1e-5f);
+    }
+}
+
+// JIT-F031: control flow (cond / while_loop) must execute correctly on EVERY
+// available backend, not just CPU — exercising the host-side widened predicate
+// readback (JIT-F008) and the loop trip count on backend-resident tensors.
+TEST(JitControlFlowBackends, CondAndWhileLoopAllBackends) {
+    using namespace tenzor::jit;
+    for (const auto& dev : get_available_backends()) {
+        SCOPED_TRACE(backend_name(dev));
+        auto x = Variable(full({4}, 3.0f, DType::Float32, dev), false);
+
+        auto out_t = cond(full({1}, 1.0f, DType::Float32, dev),
+            [](const Variable& in) { return in + in; },          // then -> 6
+            [](const Variable& in) { return tenzor::neg(in); },  // else -> -3
+            x);
+        auto rt = out_t.tensor().to(Device::cpu());
+        for (int i = 0; i < 4; ++i) EXPECT_NEAR(rt.data<float>()[i], 6.0f, 1e-5f);
+
+        auto out_f = cond(full({1}, 0.0f, DType::Float32, dev),
+            [](const Variable& in) { return in + in; },
+            [](const Variable& in) { return tenzor::neg(in); },
+            x);
+        auto rf = out_f.tensor().to(Device::cpu());
+        for (int i = 0; i < 4; ++i) EXPECT_NEAR(rf.data<float>()[i], -3.0f, 1e-5f);
+
+        auto counter = Variable(full({1}, 0.0f, DType::Float32, dev), false);
+        auto res = while_loop(3,
+            [dev](const std::vector<Variable>&) -> Tensor {
+                return ones({1}, DType::Float32, dev);  // always-true cond
+            },
+            [dev](const std::vector<Variable>& st) -> std::vector<Variable> {
+                return {st[0] + Variable(ones({1}, DType::Float32, dev), false)};
+            },
+            {counter});
+        ASSERT_EQ(res.size(), 1u);
+        auto rc = res[0].tensor().to(Device::cpu());
+        EXPECT_NEAR(rc.data<float>()[0], 3.0f, 1e-5f);  // three +1 increments
     }
 }

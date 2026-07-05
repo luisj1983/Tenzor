@@ -29,6 +29,11 @@ struct FusionCandidate {
     int64_t total_elements{0};       ///< Total number of elements processed
     size_t num_memory_accesses{0};   ///< Number of separate memory read/write ops
     FusionKind kind{FusionKind::ElementWise};  ///< Kind of fusion pattern
+    size_t bytes_per_element{4};     ///< Element size in bytes of the fused
+                                     ///< tensors' dtype (default 4 = Float32).
+                                     ///< Used for memory-traffic estimates so
+                                     ///< F16/BF16 (2B) and F64/Complex (8/16B)
+                                     ///< are not mis-modelled as Float32.
 };
 
 /**

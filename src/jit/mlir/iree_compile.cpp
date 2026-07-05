@@ -459,6 +459,7 @@ auto compile_via_subprocess(const std::string& mlir_text,
                             const std::string& target,
                             const std::string& rocm_arch,
                             const std::string& cuda_arch,
+                            const std::string& vulkan_arch,
                             const fs::path& vmfb_path,
                             const fs::path& mlir_path) -> void {
     const std::string& bin = ::tenzor::jit::mlir_jit::resolve_iree_compile();
@@ -483,6 +484,10 @@ auto compile_via_subprocess(const std::string& mlir_text,
     // iree-compile rejects the cuda backend with "missing GPU target".
     if (target == "cuda" && !cuda_arch.empty()) {
         args.push_back("--iree-cuda-target=" + cuda_arch);
+    }
+    // Vulkan needs an explicit target too, or the SPIR-V env lacks F16 (F032).
+    if ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty()) {
+        args.push_back("--iree-vulkan-target=" + vulkan_arch);
     }
     // Write MLIR text to a temp file rather than piping via stdin. The
     // stdin pipe path was hitting auto-input-type detection failures on
@@ -686,6 +691,18 @@ auto compile_mlir(const std::string& mlir_text,
         }
     }
 
+    // F032: the IREE Vulkan target controlling the SPIR-V environment. Derived
+    // from the actual device by the caller (opts.vulkan_arch); fall back to the
+    // build default so an F16/BF16 vulkan graph gets a capable SPIR-V env rather
+    // than IREE's conservative default (which lacks shaderFloat16).
+    std::string vulkan_arch;
+    if (target == "vulkan-spirv" || target == "vulkan") {
+        vulkan_arch = opts.vulkan_arch;
+#ifdef TENZOR_DEFAULT_VULKAN_TARGET
+        if (vulkan_arch.empty()) vulkan_arch = TENZOR_DEFAULT_VULKAN_TARGET;
+#endif
+    }
+
     bool is_shared_temp = false;
     fs::path cache_dir;
     if (opts.cache_dir.empty()) {
@@ -702,6 +719,8 @@ auto compile_mlir(const std::string& mlir_text,
     const std::string key_target =
         (target == "rocm" && !rocm_arch.empty()) ? (target + ":" + rocm_arch)
       : (target == "cuda" && !cuda_arch.empty()) ? (target + ":" + cuda_arch)
+      : ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty())
+            ? (target + ":" + vulkan_arch)
                                                  : target;
     const std::string key = compute_cache_key(mlir_text, key_target);
     const fs::path vmfb_path = cache_dir / (key + ".vmfb");
@@ -753,7 +772,7 @@ auto compile_mlir(const std::string& mlir_text,
         }
         write_vmfb_atomically(vmfb_path, cache_dir,
                               [&](const fs::path& tmp_out) {
-            compile_via_subprocess(mlir_text, target, rocm_arch, cuda_arch,
+            compile_via_subprocess(mlir_text, target, rocm_arch, cuda_arch, vulkan_arch,
                                    tmp_out, mlir_path);
         });
         const auto compile_t1 = std::chrono::steady_clock::now();
@@ -803,6 +822,13 @@ auto compile_mlir(const std::string& mlir_text,
     if (target == "cuda" && !cuda_arch.empty()) {
         cuda_target_flag = std::string("--iree-cuda-target=") + cuda_arch;
         flags.push_back(cuda_target_flag.c_str());
+    }
+    // Vulkan needs an explicit target too (F032): without it the SPIR-V env lacks
+    // shaderFloat16 / 16-bit storage and an F16 graph produces garbage on the GPU.
+    std::string vulkan_target_flag;
+    if ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty()) {
+        vulkan_target_flag = std::string("--iree-vulkan-target=") + vulkan_arch;
+        flags.push_back(vulkan_target_flag.c_str());
     }
     if (auto* set_err = ireeCompilerSessionSetFlags(
             session, /*argc=*/static_cast<int>(flags.size()), flags.data());

@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <atomic>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -263,7 +264,18 @@ private:
     FnTypeN fn_;
     CompileConfig config_;
     mutable std::mutex mutex_;
-    bool had_graph_break_{false};
+    // Set true during a trace when an op that cannot be represented in the IR
+    // ran. The correctness-critical read uses a trace-local bool (see
+    // trace_and_compile) so concurrent traces on different threads cannot clobber
+    // each other's flag; this member is only a best-effort published copy for the
+    // had_graph_break() introspection accessor, hence atomic to stay UB-free.
+    std::atomic<bool> had_graph_break_{false};
+
+    /// Warn at most once PER compiled function (not once per process) when this
+    /// function runs unaccelerated on a device with no JIT path (OneAPI/MPS on
+    /// the mlir backend; Vulkan/OneAPI on nvrtc). A process-global once-flag hid
+    /// the lack of acceleration for every function after the first (JIT-F038).
+    std::atomic<bool> warned_no_accel_{false};
 
     /// Trainable parameters this function closes over (empty for functional-
     /// style callers that pass parameters as explicit inputs). Shared with the
@@ -271,8 +283,11 @@ private:
     /// built Graph so replay rebinds the live Variables. Guarded by mutex_.
     std::vector<std::shared_ptr<Variable>> parameters_;
 
-    /// Track warmup calls for reduce-overhead mode (CUDA graph capture)
-    int warmup_count_{0};
+    /// Track warmup calls for reduce-overhead mode (CUDA graph capture),
+    /// keyed per shape signature so a call for one shape does not advance the
+    /// warmup counter of another (which would mistime that shape's capture).
+    /// Guarded by mutex_.
+    std::unordered_map<std::string, int> warmup_counts_;
     static constexpr int kReduceOverheadWarmupCalls = 2;
 
     /// Count of differentiable compiled-graph replays (training-through-JIT).

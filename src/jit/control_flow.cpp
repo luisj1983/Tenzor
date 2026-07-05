@@ -28,12 +28,14 @@ auto cond(const Tensor& condition,
     }
 
     // Eager mode: evaluate condition and call appropriate branch. Move to CPU
-    // BEFORE the Float32 cast: casting on the device lets some backends (e.g.
-    // ROCm) canonicalize a NaN condition to 0, flipping the taken branch vs CPU
+    // BEFORE the cast: casting on the device lets some backends (e.g. ROCm)
+    // canonicalize a NaN condition to 0, flipping the taken branch vs CPU
     // (NaN != 0 is true). A host-side cast keeps NaN as NaN so the branch choice
-    // is identical across all backends.
+    // is identical across all backends. WIDEN to Float64 rather than narrowing to
+    // Float32: a nonzero Float64 condition below the Float32 denormal floor
+    // (e.g. 1e-40) would underflow to 0.0f and wrongly take the else-branch.
     bool cond_val =
-        condition.to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
+        condition.to(Device::cpu()).to(DType::Float64).item<double>() != 0.0;
 
     if (cond_val) {
         return then_fn(args);
@@ -95,10 +97,11 @@ auto while_loop(int64_t max_iter,
     for (int64_t i = 0; i < max_iter; ++i) {
         // Check condition
         Tensor cond_result = cond_fn(state);
-        // Host-side cast (see cond()): a device-side Float32 cast can canonicalize
-        // a NaN loop predicate to 0 on some backends, exiting the loop early vs
-        // CPU (NaN == 0 is false → continue). Keep the check deterministic.
-        if (cond_result.to(Device::cpu()).to(DType::Float32).item<float>() == 0.0f) {
+        // Host-side widening cast (see cond()): a device-side cast can
+        // canonicalize a NaN loop predicate to 0 on some backends, exiting the
+        // loop early vs CPU (NaN == 0 is false → continue). Widen to Float64 so a
+        // tiny nonzero Float64 predicate does not underflow to 0 and exit early.
+        if (cond_result.to(Device::cpu()).to(DType::Float64).item<double>() == 0.0) {
             break;
         }
 

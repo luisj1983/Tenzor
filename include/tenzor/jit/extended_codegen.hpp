@@ -60,7 +60,10 @@ struct ExtendedFusionGroup {
 
     // --- LayerNorm / RMSNorm fields ---
     int norm_axis{-1};                   ///< Normalization axis
-    float eps{1e-5f};
+    // double (not float) so a Float64 LayerNorm/RMSNorm receives a full-precision
+    // eps in the `var + eps` denominator, matching the eager F64 kernel
+    // (JIT-F014). The F32 kernel path narrows it back to float at marshal time.
+    double eps{1e-5};
     bool has_affine{true};               ///< Has gamma/beta parameters
 
     // --- Small MLP fields ---

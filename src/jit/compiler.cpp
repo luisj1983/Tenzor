@@ -2408,6 +2408,13 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
         candidate.total_elements = match.estimated_elements;
         candidate.num_memory_accesses = match.nodes.size() * 2;  // Rough estimate: 1 read + 1 write per op
         candidate.kind = match.kind;
+        // Element size drives the memory-traffic estimate; derive it from the
+        // fused tensors' dtype so F16/BF16/F64 are not modelled as Float32.
+        if (!match.outputs.empty() && match.outputs[0]) {
+            candidate.bytes_per_element = dtype_size(match.outputs[0]->dtype());
+        } else if (!match.inputs.empty() && match.inputs[0]) {
+            candidate.bytes_per_element = dtype_size(match.inputs[0]->dtype());
+        }
 
         if (!cost_model_.should_fuse(candidate)) continue;
 

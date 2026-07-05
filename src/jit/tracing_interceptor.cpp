@@ -362,7 +362,10 @@ auto make_tracing_interceptor(
         // them. Previously the traced op lost all attributes, so ops like Pow
         // replayed with exponent=0 and mean/sum(dim) replayed with dim=0.
         auto copy_float = [&](AttrKey k, const char* name) {
-            if (attrs.has(k)) traced.attrs[name] = static_cast<float>(attrs.get_float(k));
+            // Store at full double precision (get_float returns double); the
+            // node's scalar attrs are now double so f64 graphs keep the exact
+            // value (pow exponent, clamp bounds, eps) — JIT-F057.
+            if (attrs.has(k)) traced.attrs[name] = attrs.get_float(k);
         };
         auto copy_int = [&](AttrKey k, const char* name) {
             if (attrs.has(k)) traced.int_attrs[name] = attrs.get_int(k);

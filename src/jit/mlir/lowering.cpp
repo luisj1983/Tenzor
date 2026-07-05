@@ -333,6 +333,19 @@ auto get_attr_float(const ::tenzor::jit::Node& n,
     return default_value;
 }
 
+
+// Like get_attr_float but returns the attribute at full double precision (node
+// attrs are stored as double). Use this where a value emitted into an f64 graph
+// must not be truncated through float (e.g. a fractional pow exponent).
+auto get_attr_double(const ::tenzor::jit::Node& n,
+                     std::initializer_list<const char*> names,
+                     double default_value) -> double {
+    for (auto* nm : names) {
+        if (n.has_attr(nm)) return n.get_attr(nm);
+    }
+    return default_value;
+}
+
 auto get_attr_bool(const ::tenzor::jit::Node& n,
                    std::initializer_list<const char*> names,
                    bool default_value) -> bool {
@@ -713,12 +726,38 @@ auto handle_unary(LoweringContext& ctx,
         throw std::runtime_error(
             "GraphToMLIR: " + mnemonic + " expects 1 input and 1 output");
     }
-    const auto& a = ctx.name_for(node.inputs()[0]->id());
+    const auto& in_val = node.inputs()[0];
+    const auto& a = ctx.name_for(in_val->id());
     const auto& out = node.outputs()[0];
+    const auto d = out->dtype();
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
-    emit_stablehlo_unary(body, mnemonic, out_name, a, out->shape(),
-                         out->dtype());
+
+    // Transcendental / approximated ops are computed by the eager kernels in F32
+    // (widen -> compute -> narrow). Match that for F16/BF16 so the JIT does not
+    // diverge from eager, and so f16 device-math differences across HAL targets
+    // (llvm-cpu vs cuda vs rocm vs vulkan-spirv) do not surface. Exact ops
+    // (negate/abs) are bit-identical in half precision and need no widening.
+    static const std::unordered_set<std::string> kNeedsWiden = {
+        "exponential", "log", "sqrt", "rsqrt", "sine", "cosine", "logistic"};
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16) &&
+                       kNeedsWiden.count(mnemonic) > 0;
+
+    if (!widen) {
+        emit_stablehlo_unary(body, mnemonic, out_name, a, out->shape(), d);
+        body << '\n';
+        return;
+    }
+
+    const auto cd = ::tenzor::DType::Float32;
+    auto xc = ctx.fresh_name();
+    emit_stablehlo_convert(body, xc, a, in_val->shape(), d, cd);
+    body << '\n';
+    auto rc = ctx.fresh_name();
+    emit_stablehlo_unary(body, mnemonic, rc, xc, out->shape(), cd);
+    body << '\n';
+    emit_stablehlo_convert(body, out_name, rc, out->shape(), cd, d);
     body << '\n';
 }
 
@@ -883,14 +922,34 @@ auto handle_silu(LoweringContext& ctx,
     const auto& out = node.outputs()[0];
     const auto shape = out->shape();
     const auto d = out->dtype();
-    const auto& x = ctx.name_for(node.inputs()[0]->id());
+    // Match eager: compute the logistic (and the multiply) in F32 for F16/BF16,
+    // then narrow. A half-precision logistic diverges from eager and across HAL
+    // targets (f16 logistic lowering is target-specific).
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string x = ctx.name_for(node.inputs()[0]->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x, shape, d, cd);
+        body << '\n';
+        x = xc;
+    }
     auto sig_name = ctx.fresh_name();
-    emit_stablehlo_unary(body, "logistic", sig_name, x, shape, d);
+    emit_stablehlo_unary(body, "logistic", sig_name, x, shape, cd);
     body << '\n';
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
-    emit_stablehlo_binary(body, "multiply", out_name, x, sig_name, shape, d);
-    body << '\n';
+    if (widen) {
+        auto prod = ctx.fresh_name();
+        emit_stablehlo_binary(body, "multiply", prod, x, sig_name, shape, cd);
+        body << '\n';
+        emit_stablehlo_convert(body, out_name, prod, shape, cd, d);
+        body << '\n';
+    } else {
+        emit_stablehlo_binary(body, "multiply", out_name, x, sig_name, shape, d);
+        body << '\n';
+    }
 }
 
 /// GELU (exact, erf-based): gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2))).
@@ -908,43 +967,65 @@ auto handle_gelu(LoweringContext& ctx,
     const auto& out = node.outputs()[0];
     const auto shape = out->shape();
     const auto d = out->dtype();
-    const auto& x = ctx.name_for(node.inputs()[0]->id());
+    // Match eager: run the whole erf-GELU pipeline (constants, erf, adds, muls)
+    // in F32 for F16/BF16, then narrow. Half-precision erf and half-rounded
+    // constants diverge from eager and across HAL targets.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string x = ctx.name_for(node.inputs()[0]->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x, shape, d, cd);
+        body << '\n';
+        x = xc;
+    }
 
-    // Constants: 0.5, 1.0, 1/sqrt(2).
+    // Constants: 0.5, 1.0, 1/sqrt(2) — in the compute dtype so they carry full
+    // precision when widened.
     auto c_half     = ctx.fresh_name();
     auto c_one      = ctx.fresh_name();
     auto c_invsqrt2 = ctx.fresh_name();         // 1/sqrt(2) ≈ 0.7071067811865476
-    emit_stablehlo_splat_constant(body, c_half, scalar_literal(0.5, d),
-                                  shape, d); body << '\n';
-    emit_stablehlo_splat_constant(body, c_one,  scalar_literal(1.0, d),
-                                  shape, d); body << '\n';
+    emit_stablehlo_splat_constant(body, c_half, scalar_literal(0.5, cd),
+                                  shape, cd); body << '\n';
+    emit_stablehlo_splat_constant(body, c_one,  scalar_literal(1.0, cd),
+                                  shape, cd); body << '\n';
     emit_stablehlo_splat_constant(body, c_invsqrt2,
-                                  scalar_literal(0.7071067811865476, d),
-                                  shape, d);
+                                  scalar_literal(0.7071067811865476, cd),
+                                  shape, cd);
     body << '\n';
 
     // scaled = x / sqrt(2)
     auto scaled = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", scaled, x, c_invsqrt2, shape, d);
+    emit_stablehlo_binary(body, "multiply", scaled, x, c_invsqrt2, shape, cd);
     body << '\n';
     // e = erf(x / sqrt(2))
     auto eval = ctx.fresh_name();
-    emit_chlo_unary(body, "erf", eval, scaled, shape, d);
+    emit_chlo_unary(body, "erf", eval, scaled, shape, cd);
     body << '\n';
     // one_plus = 1 + erf(...)
     auto one_plus = ctx.fresh_name();
-    emit_stablehlo_binary(body, "add", one_plus, c_one, eval, shape, d);
+    emit_stablehlo_binary(body, "add", one_plus, c_one, eval, shape, cd);
     body << '\n';
     // half_x = 0.5 * x
     auto half_x = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", half_x, c_half, x, shape, d);
+    emit_stablehlo_binary(body, "multiply", half_x, c_half, x, shape, cd);
     body << '\n';
     // out = (0.5 * x) * (1 + erf(x / sqrt(2)))
     auto out_name = ctx.fresh_name();
     ctx.bind(out->id(), out_name);
-    emit_stablehlo_binary(body, "multiply", out_name, half_x, one_plus,
-                          shape, d);
-    body << '\n';
+    if (widen) {
+        auto prod = ctx.fresh_name();
+        emit_stablehlo_binary(body, "multiply", prod, half_x, one_plus,
+                              shape, cd);
+        body << '\n';
+        emit_stablehlo_convert(body, out_name, prod, shape, cd, d);
+        body << '\n';
+    } else {
+        emit_stablehlo_binary(body, "multiply", out_name, half_x, one_plus,
+                              shape, d);
+        body << '\n';
+    }
 }
 
 /// Determine the reduction dims and keepdim flag from a traced reduce
@@ -1708,7 +1789,35 @@ auto handle_conv2d(LoweringContext& ctx,
     const auto& x = node.inputs()[0];
     const auto& w = node.inputs()[1];
     const auto& out = node.outputs()[0];
-    const auto d = out->dtype();
+    const auto out_dtype = out->dtype();
+    // Compute the convolution in F32 for F16/BF16 (like the pooling/norm
+    // handlers): a half-precision accumulate diverges from eager. `cd` is the
+    // compute dtype; narrow back to out_dtype at the end when widened.
+    const bool widen = (out_dtype == ::tenzor::DType::Float16 ||
+                        out_dtype == ::tenzor::DType::BFloat16);
+    const auto d = widen ? ::tenzor::DType::Float32 : out_dtype;
+
+    // stablehlo.convolution needs an explicit HIGHEST precision_config or GPU HAL
+    // targets (CUDA tensor cores / ROCm MFMA) silently use TF32/reduced-precision
+    // accumulation, diverging from eager and from the llvm-cpu target. Every
+    // dot_general in this file forces HIGHEST for the same reason.
+    static constexpr const char* kConvPrecision =
+        ", precision_config = [#stablehlo<precision HIGHEST>, "
+        "#stablehlo<precision HIGHEST>]";
+
+    // Widen the input/weight when needed; all emits below use `d` (== cd).
+    std::string x_name = ctx.name_for(x->id());
+    std::string w_name = ctx.name_for(w->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x_name, x->shape(), out_dtype, d);
+        body << '\n';
+        x_name = xc;
+        auto wc = ctx.fresh_name();
+        emit_stablehlo_convert(body, wc, w_name, w->shape(), out_dtype, d);
+        body << '\n';
+        w_name = wc;
+    }
 
     // Attribute reads (defaults match torch's nn.Conv2d).
     auto get_pair = [&](const char* vec_key, const char* h_key,
@@ -1737,9 +1846,7 @@ auto handle_conv2d(LoweringContext& ctx,
     const int64_t groups = node.has_attr("groups")
                                ? node.get_int_attr("groups") : 1;
 
-    auto out_name = ctx.fresh_name();
-    auto conv_name = node.inputs().size() >= 3 ? ctx.fresh_name()
-                                               : out_name;
+    auto conv_name = ctx.fresh_name();
 
     // IREE's stablehlo.convolution -> linalg conversion mis-lowers a degenerate
     // geometry: when an output spatial dim is 1 AND the stride skips part of the
@@ -1764,7 +1871,7 @@ auto handle_conv2d(LoweringContext& ctx,
 
         if (degenerate) {
             // Explicitly pad the input to [N, Cin, padded_h, padded_w].
-            std::string cur = ctx.name_for(x->id());
+            std::string cur = x_name;
             std::vector<int64_t> cur_shape = xs;
             if (pad_h > 0 || pad_w > 0) {
                 auto pv = ctx.fresh_name();
@@ -1800,7 +1907,7 @@ auto handle_conv2d(LoweringContext& ctx,
                 emit_stablehlo_reshape(body, win_flat, wsl, win, {N, K}, d);
                 body << '\n';
                 auto w_flat = ctx.fresh_name();
-                emit_stablehlo_reshape(body, w_flat, ctx.name_for(w->id()), ws,
+                emit_stablehlo_reshape(body, w_flat, w_name, ws,
                                        {Cout, K}, d);
                 body << '\n';
                 auto mm = ctx.fresh_name();
@@ -1825,14 +1932,15 @@ auto handle_conv2d(LoweringContext& ctx,
                                      d);
                 body << '\n';
                 body << '%' << conv_name << " = stablehlo.convolution(%" << sl
-                     << ", %" << ctx.name_for(w->id()) << ")\n"
+                     << ", %" << w_name << ")\n"
                      << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, "
                         "1],\n"
                      << "    window = {stride = [" << stride_h << ", " << stride_w
                      << "], pad = [[0, 0], [0, 0]], rhs_dilate = [" << dilation_h
                      << ", " << dilation_w
                      << "]} {batch_group_count = 1 : i64, "
-                        "feature_group_count = 1 : i64} : (";
+                        "feature_group_count = 1 : i64"
+                     << kConvPrecision << "} : (";
                 write_tensor_type_for_emit(body, trimmed, d);
                 body << ", ";
                 write_tensor_type_for_emit(body, ws, d);
@@ -1846,14 +1954,14 @@ auto handle_conv2d(LoweringContext& ctx,
 
     if (!emitted) {
         body << '%' << conv_name << " = stablehlo.convolution(%"
-             << ctx.name_for(x->id()) << ", %" << ctx.name_for(w->id()) << ")\n"
+             << x_name << ", %" << w_name << ")\n"
              << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],\n"
              << "    window = {stride = [" << stride_h << ", " << stride_w
              << "], pad = [[" << pad_h << ", " << pad_h << "], ["
              << pad_w << ", " << pad_w << "]], rhs_dilate = ["
              << dilation_h << ", " << dilation_w << "]} "
              << "{batch_group_count = 1 : i64, feature_group_count = "
-             << groups << " : i64} : (";
+             << groups << " : i64" << kConvPrecision << "} : (";
         write_tensor_type_for_emit(body, x->shape(), d);
         body << ", ";
         write_tensor_type_for_emit(body, w->shape(), d);
@@ -1862,20 +1970,38 @@ auto handle_conv2d(LoweringContext& ctx,
         body << '\n';
     }
 
+    // Bias add (in the compute dtype), then narrow to the storage dtype.
+    std::string result = conv_name;
     if (node.inputs().size() >= 3) {
         const auto& b_val = node.inputs()[2];
+        std::string b_name = ctx.name_for(b_val->id());
+        if (widen) {
+            auto bc = ctx.fresh_name();
+            emit_stablehlo_convert(body, bc, b_name, b_val->shape(), out_dtype, d);
+            body << '\n';
+            b_name = bc;
+        }
         // Bias: (C_out,) broadcast over (N, C_out, H_out, W_out) — dim 1.
         auto bias_b = ctx.fresh_name();
-        emit_stablehlo_broadcast_in_dim(body, bias_b,
-                                        ctx.name_for(b_val->id()),
+        emit_stablehlo_broadcast_in_dim(body, bias_b, b_name,
                                         /*bcast_dims=*/{1}, b_val->shape(),
                                         out->shape(), d);
         body << '\n';
-        emit_stablehlo_binary(body, "add", out_name, conv_name, bias_b,
+        auto added = ctx.fresh_name();
+        emit_stablehlo_binary(body, "add", added, conv_name, bias_b,
                               out->shape(), d);
         body << '\n';
+        result = added;
     }
-    ctx.bind(out->id(), out_name);
+
+    if (widen) {
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out->id(), out_name);
+        emit_stablehlo_convert(body, out_name, result, out->shape(), d, out_dtype);
+        body << '\n';
+    } else {
+        ctx.bind(out->id(), result);
+    }
 }
 
 /// Emit a stablehlo.reduce_window pooling op (MaxPool / AvgPool sum).
@@ -2572,7 +2698,7 @@ auto handle_batch_norm2d(LoweringContext& ctx,
     const auto& v_val   = node.inputs()[4];
     const auto& out_val = node.outputs()[0];
     const auto shape = x_val->shape();
-    const auto d = out_val->dtype();
+    const auto out_dtype = out_val->dtype();
     const float eps = get_attr_float(node, {"eps"}, 1e-5f);
 
     // The MLIR/IREE path compiles inference graphs only (the grad/training
@@ -2589,15 +2715,36 @@ auto handle_batch_norm2d(LoweringContext& ctx,
             "MLIR) for training-through-JIT");
     }
 
+    // Widen F16/BF16 to F32 for the normalize math (matching handle_layer_norm /
+    // handle_rms_norm) then narrow. Running the (x-mean)*rsqrt(var+eps)*gamma+beta
+    // pipeline in half precision diverges from an eager kernel that normalizes in
+    // F32. epsilon is always an f32 attribute (StableHLO requires F32Attr).
+    const bool widen = (out_dtype == ::tenzor::DType::Float16 ||
+                        out_dtype == ::tenzor::DType::BFloat16);
+    const auto d = widen ? ::tenzor::DType::Float32 : out_dtype;
+
+    std::string xn = ctx.name_for(x_val->id());
+    std::string wn = ctx.name_for(w_val->id());
+    std::string bn = ctx.name_for(b_val->id());
+    std::string mn = ctx.name_for(m_val->id());
+    std::string vn = ctx.name_for(v_val->id());
+    if (widen) {
+        auto cvt = [&](std::string& nm,
+                       const std::shared_ptr<::tenzor::jit::Value>& val) {
+            auto c = ctx.fresh_name();
+            emit_stablehlo_convert(body, c, nm, val->shape(), out_dtype, d);
+            body << '\n';
+            nm = c;
+        };
+        cvt(xn, x_val); cvt(wn, w_val); cvt(bn, b_val);
+        cvt(mn, m_val); cvt(vn, v_val);
+    }
+
     // Use the explicit stablehlo.batch_norm_inference op.
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out_val->id(), out_name);
-    body << '%' << out_name << " = \"stablehlo.batch_norm_inference\"(%"
-         << ctx.name_for(x_val->id()) << ", %"
-         << ctx.name_for(w_val->id()) << ", %"
-         << ctx.name_for(b_val->id()) << ", %"
-         << ctx.name_for(m_val->id()) << ", %"
-         << ctx.name_for(v_val->id()) << ") <{"
+    auto bn_out = ctx.fresh_name();
+    body << '%' << bn_out << " = \"stablehlo.batch_norm_inference\"(%"
+         << xn << ", %" << wn << ", %" << bn << ", %" << mn << ", %" << vn
+         << ") <{"
          << "epsilon = " << std::scientific << std::setprecision(9) << eps
          << " : f32, feature_index = 1 : i64}> : (";
     write_tensor_type_for_emit(body, shape, d);
@@ -2612,6 +2759,15 @@ auto handle_batch_norm2d(LoweringContext& ctx,
     body << ") -> ";
     write_tensor_type_for_emit(body, shape, d);
     body << '\n';
+
+    if (widen) {
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out_val->id(), out_name);
+        emit_stablehlo_convert(body, out_name, bn_out, shape, d, out_dtype);
+        body << '\n';
+    } else {
+        ctx.bind(out_val->id(), bn_out);
+    }
 }
 
 // ── Cast / Index ────────────────────────────────────────────────────────────
@@ -2775,6 +2931,27 @@ auto handle_pow(LoweringContext& ctx,
     const auto shape = out->shape();
     const auto d = out->dtype();
 
+    // For F16/BF16, compute in F32 and narrow once — matching eager
+    // (Float16(pow(float(x), n))). Repeated half-precision multiply (int pow) and
+    // half-precision stablehlo.power (fractional) otherwise accumulate rounding
+    // that diverges from eager and across HAL targets.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+
+    // Bind out->id() to `result_cd` (a value in the compute dtype), narrowing to
+    // d first when widening.
+    auto bind_result = [&](const std::string& result_cd) {
+        if (widen) {
+            auto out_name = ctx.fresh_name();
+            ctx.bind(out->id(), out_name);
+            emit_stablehlo_convert(body, out_name, result_cd, shape, cd, d);
+            body << '\n';
+        } else {
+            ctx.bind(out->id(), result_cd);
+        }
+    };
+
     // Lower a small non-negative INTEGER exponent to repeated multiply.
     // stablehlo.power is implemented as exp(y*log(x)) on GPU/SPIR-V HAL targets,
     // which returns NaN for ANY negative base — diverging from eager (which
@@ -2782,36 +2959,58 @@ auto handle_pow(LoweringContext& ctx,
     // exact and NaN-free for negative bases. A fractional/negative exponent
     // still uses stablehlo.power (a negative base to a fractional power is
     // genuinely NaN under eager too, so semantics match there).
-    auto lower_int_pow = [&](const std::string& a, int n) {
-        if (n == 0) {
-            auto out_name = ctx.fresh_name();
-            ctx.bind(out->id(), out_name);
-            emit_stablehlo_splat_constant(body, out_name, scalar_literal(1.0f, d),
-                                          shape, d);
+    auto lower_int_pow = [&](const std::string& a_in, int n) {
+        std::string a = a_in;
+        if (widen) {
+            auto ac = ctx.fresh_name();
+            emit_stablehlo_convert(body, ac, a, shape, d, cd);
             body << '\n';
-            return;
+            a = ac;
         }
-        std::string cur = a;
-        for (int i = 1; i < n; ++i) {
-            auto next = ctx.fresh_name();
-            emit_stablehlo_binary(body, "multiply", next, cur, a, shape, d);
+        const int abs_n = n < 0 ? -n : n;
+        std::string pos;  // x^|n| in the compute dtype
+        if (abs_n == 0) {
+            pos = ctx.fresh_name();
+            emit_stablehlo_splat_constant(body, pos, scalar_literal(1.0, cd),
+                                          shape, cd);
             body << '\n';
-            cur = next;
+        } else {
+            std::string cur = a;
+            for (int i = 1; i < abs_n; ++i) {
+                auto next = ctx.fresh_name();
+                emit_stablehlo_binary(body, "multiply", next, cur, a, shape, cd);
+                body << '\n';
+                cur = next;
+            }
+            if (abs_n == 1) {
+                // x^1 == x; realize with a multiply-by-one so the output gets its
+                // own SSA value (1*x == x exactly under IEEE round-to-nearest).
+                auto one_name = ctx.fresh_name();
+                emit_stablehlo_splat_constant(body, one_name, scalar_literal(1.0, cd),
+                                              shape, cd);
+                body << '\n';
+                pos = ctx.fresh_name();
+                emit_stablehlo_binary(body, "multiply", pos, a, one_name, shape, cd);
+                body << '\n';
+            } else {
+                pos = cur;  // cur holds x^|n| for |n| >= 2
+            }
         }
-        if (n == 1) {
-            // x^1 == x; realize with a multiply-by-one so the output gets its own
-            // SSA value (1*x == x exactly under IEEE round-to-nearest).
+        std::string result = pos;
+        if (n < 0) {
+            // x^n = 1 / x^|n| for a NEGATIVE integer exponent. Repeated-multiply +
+            // reciprocal is NaN-free for negative bases, unlike stablehlo.power
+            // (exp(y*log(x)) -> NaN on GPU/SPIR-V), and matches eager std::pow and
+            // the llvm-cpu target (JIT-F061). x=0 gives 1/0 = inf, matching eager.
             auto one_name = ctx.fresh_name();
-            emit_stablehlo_splat_constant(body, one_name, scalar_literal(1.0f, d),
-                                          shape, d);
+            emit_stablehlo_splat_constant(body, one_name, scalar_literal(1.0, cd),
+                                          shape, cd);
             body << '\n';
-            auto out_name = ctx.fresh_name();
-            ctx.bind(out->id(), out_name);
-            emit_stablehlo_binary(body, "multiply", out_name, a, one_name, shape, d);
+            result = ctx.fresh_name();
+            emit_stablehlo_binary(body, "divide", result, one_name, pos, shape, cd);
             body << '\n';
-            return;
         }
-        ctx.bind(out->id(), cur);  // cur holds x^n for n >= 2
+        bind_result(result);
     };
 
     if (node.inputs().size() == 2) {
@@ -2830,7 +3029,7 @@ auto handle_pow(LoweringContext& ctx,
                 double ev = t.to(::tenzor::DType::Float64)
                              .to(::tenzor::Device::cpu()).item<double>();
                 double r = std::round(ev);
-                if (std::abs(ev - r) < 1e-6 && r >= 0.0 && r <= 64.0) {
+                if (std::abs(ev - r) < 1e-6 && std::abs(r) <= 64.0) {
                     auto a = maybe_broadcast(body, ctx, ctx.name_for(a_val->id()),
                                              a_val->shape(), shape, d);
                     lower_int_pow(a, static_cast<int>(r));  // binds out->id()
@@ -2839,33 +3038,49 @@ auto handle_pow(LoweringContext& ctx,
             }
         }
         // General case: broadcast both operands to the output shape (JIT-066) —
-        // stablehlo.power requires equal operand shapes — then emit power.
+        // stablehlo.power requires equal operand shapes — then emit power. Widen
+        // to F32 for F16/BF16 (fractional/tensor power via exp(y*log(x))).
         auto a = maybe_broadcast(body, ctx, ctx.name_for(a_val->id()),
                                  a_val->shape(), shape, d);
         auto b = maybe_broadcast(body, ctx, ctx.name_for(b_val->id()),
                                  b_val->shape(), shape, d);
-        auto out_name = ctx.fresh_name();
-        ctx.bind(out->id(), out_name);
-        emit_stablehlo_binary(body, "power", out_name, a, b, shape, d);
+        if (widen) {
+            auto ac = ctx.fresh_name();
+            emit_stablehlo_convert(body, ac, a, shape, d, cd); body << '\n';
+            auto bc = ctx.fresh_name();
+            emit_stablehlo_convert(body, bc, b, shape, d, cd); body << '\n';
+            a = ac; b = bc;
+        }
+        auto p = ctx.fresh_name();
+        emit_stablehlo_binary(body, "power", p, a, b, shape, cd);
         body << '\n';
+        bind_result(p);
         return;
     }
     if (node.inputs().size() == 1) {
-        const auto& a = ctx.name_for(node.inputs()[0]->id());
-        float exp = get_attr_float(node, {"exponent"}, 1.0f);
-        float r = std::round(exp);
-        if (std::abs(exp - r) < 1e-6f && r >= 0.0f && r <= 64.0f) {
-            lower_int_pow(a, static_cast<int>(r));
+        const auto& a_in = ctx.name_for(node.inputs()[0]->id());
+        // Read the exponent at full double precision so an f64 graph's fractional
+        // exponent (e.g. 0.1) is not truncated through float (JIT-F048).
+        double exp = get_attr_double(node, {"exponent"}, 1.0);
+        double r = std::round(exp);
+        if (std::abs(exp - r) < 1e-6 && std::abs(r) <= 64.0) {
+            lower_int_pow(a_in, static_cast<int>(r));
             return;
         }
+        std::string a = a_in;
+        if (widen) {
+            auto ac = ctx.fresh_name();
+            emit_stablehlo_convert(body, ac, a, shape, d, cd); body << '\n';
+            a = ac;
+        }
         auto exp_name = ctx.fresh_name();
-        emit_stablehlo_splat_constant(body, exp_name, scalar_literal(exp, d),
-                                      shape, d);
+        emit_stablehlo_splat_constant(body, exp_name, scalar_literal(exp, cd),
+                                      shape, cd);
         body << '\n';
-        auto out_name = ctx.fresh_name();
-        ctx.bind(out->id(), out_name);
-        emit_stablehlo_binary(body, "power", out_name, a, exp_name, shape, d);
+        auto p = ctx.fresh_name();
+        emit_stablehlo_binary(body, "power", p, a, exp_name, shape, cd);
         body << '\n';
+        bind_result(p);
         return;
     }
     throw std::runtime_error("GraphToMLIR: Pow expects 1 or 2 inputs");
@@ -3750,14 +3965,22 @@ auto handle_rms_norm_expand(LoweringContext& ctx,
     int64_t N = 1;
     for (auto k : norm_dims) N *= shape[k];
 
-    // Accumulate the sum-of-squares / mean / rsqrt in F32 for F16/BF16 (cd),
-    // matching the eager RMSNorm kernel (float sum_sq) and the widened
-    // handle_layer_norm/handle_sum/handle_softmax. Reducing in half precision
-    // loses accuracy as the normalized length N grows (every transformer block).
-    // cd == d for F32/F64; the widened result is narrowed back to d at the end.
+    // Two dtypes are in play:
+    //  * cd  — the normalize/elementwise dtype (x/rms and the affine scale). For
+    //          F16/BF16 we widen to F32 and narrow at the end; else cd == d.
+    //  * ad  — the sum-of-squares ACCUMULATION dtype. The eager RMSNorm kernel
+    //          accumulates sum_sq (and computes mean/rsqrt) in DOUBLE for an F32
+    //          input (fused_ln_sumsq_f64) to avoid mantissa loss over long hidden
+    //          dims; F16/BF16 accumulate in F32. Reducing an F32 RMSNorm in F32
+    //          (the old behavior) diverged from eager by ~1e-5 rel for hidden
+    //          dims in the thousands (JIT-F053). Reduce in `ad`, then narrow the
+    //          resulting rms to cd (eager narrows inv_rms before applying it).
     const bool widen = (d == ::tenzor::DType::Float16 ||
                         d == ::tenzor::DType::BFloat16);
     const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    const auto ad = (d == ::tenzor::DType::Float32) ? ::tenzor::DType::Float64
+                    : widen                         ? ::tenzor::DType::Float32
+                                                    : d;  // F64 stays F64
 
     std::string x = ctx.name_for(x_val->id());
     if (widen) {
@@ -3766,46 +3989,70 @@ auto handle_rms_norm_expand(LoweringContext& ctx,
         body << '\n';
         x = xc;
     }
+    // x in the accumulation dtype (only an extra convert when ad != cd, i.e. F32).
+    std::string x_ad = x;
+    if (ad != cd) {
+        auto xa = ctx.fresh_name();
+        emit_stablehlo_convert(body, xa, x, shape, cd, ad);
+        body << '\n';
+        x_ad = xa;
+    }
 
-    // sq = x * x
+    // sq = x * x  (in the accumulation dtype)
     auto sq = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", sq, x, x, shape, cd); body << '\n';
+    emit_stablehlo_binary(body, "multiply", sq, x_ad, x_ad, shape, ad); body << '\n';
     // sum_sq = reduce_sum(sq, norm_dims)
     auto init0 = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, cd), {}, cd);
+    emit_stablehlo_splat_constant(body, init0, scalar_literal(0.0, ad), {}, ad);
     body << '\n';
     auto sum_sq = ctx.fresh_name();
     emit_stablehlo_reduce(body, sum_sq, sq, init0, "add", norm_dims, shape,
-                          reduced_shape, cd); body << '\n';
+                          reduced_shape, ad); body << '\n';
     // mean = sum_sq / N
     auto n_c = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, n_c,
-                                  scalar_literal(static_cast<double>(N), cd),
-                                  reduced_shape, cd);
+                                  scalar_literal(static_cast<double>(N), ad),
+                                  reduced_shape, ad);
     body << '\n';
     auto mean_sq = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", mean_sq, sum_sq, n_c, reduced_shape, cd);
+    emit_stablehlo_binary(body, "divide", mean_sq, sum_sq, n_c, reduced_shape, ad);
     body << '\n';
     // var_eps = mean_sq + eps
     auto eps_c = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, eps_c,
-                                  scalar_literal(static_cast<double>(eps), cd),
-                                  reduced_shape, cd);
+                                  scalar_literal(static_cast<double>(eps), ad),
+                                  reduced_shape, ad);
     body << '\n';
     auto var_eps = ctx.fresh_name();
-    emit_stablehlo_binary(body, "add", var_eps, mean_sq, eps_c, reduced_shape, cd);
+    emit_stablehlo_binary(body, "add", var_eps, mean_sq, eps_c, reduced_shape, ad);
     body << '\n';
-    // rms = sqrt(var_eps)
+    // inv_rms = 1 / sqrt(var_eps), computed in the accumulation dtype, THEN
+    // narrowed to cd and MULTIPLIED into x — matching the eager kernel, which
+    // narrows the RECIPROCAL (float32(1/sqrt_double)) and multiplies (not narrow
+    // rms then divide). This keeps the rounding point identical to eager (F058).
     auto rms = ctx.fresh_name();
-    emit_stablehlo_unary(body, "sqrt", rms, var_eps, reduced_shape, cd);
+    emit_stablehlo_unary(body, "sqrt", rms, var_eps, reduced_shape, ad);
     body << '\n';
-    auto rms_b = ctx.fresh_name();
-    emit_stablehlo_broadcast_in_dim(body, rms_b, rms, bcast_dims,
+    auto one_ad = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, one_ad, scalar_literal(1.0, ad),
+                                  reduced_shape, ad);
+    body << '\n';
+    auto inv_rms = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", inv_rms, one_ad, rms, reduced_shape, ad);
+    body << '\n';
+    if (ad != cd) {
+        auto inv_cd = ctx.fresh_name();
+        emit_stablehlo_convert(body, inv_cd, inv_rms, reduced_shape, ad, cd);
+        body << '\n';
+        inv_rms = inv_cd;
+    }
+    auto inv_b = ctx.fresh_name();
+    emit_stablehlo_broadcast_in_dim(body, inv_b, inv_rms, bcast_dims,
                                     reduced_shape, shape, cd);
     body << '\n';
-    // xhat = x / rms_b
+    // xhat = x * inv_rms_b
     auto xhat = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", xhat, x, rms_b, shape, cd);
+    emit_stablehlo_binary(body, "multiply", xhat, x, inv_b, shape, cd);
     body << '\n';
 
     std::string final_name = xhat;

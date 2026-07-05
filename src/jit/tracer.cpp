@@ -119,6 +119,21 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::LogicalAnd: return "LogicalAnd";
         case OpType::LogicalOr: return "LogicalOr";
         case OpType::LogicalNot: return "LogicalNot";
+        // C2/MVP-2 additions (were collapsing to "Unknown", breaking
+        // find_nodes_by_type / DOT / histogram labels).
+        case OpType::Var: return "Var";
+        case OpType::Std: return "Std";
+        case OpType::Prod: return "Prod";
+        case OpType::LeakyReLU: return "LeakyReLU";
+        case OpType::ELU: return "ELU";
+        case OpType::Mish: return "Mish";
+        case OpType::Softplus: return "Softplus";
+        case OpType::GroupNorm: return "GroupNorm";
+        case OpType::InstanceNorm: return "InstanceNorm";
+        case OpType::Gather: return "Gather";
+        case OpType::Scatter: return "Scatter";
+        case OpType::Flip: return "Flip";
+        case OpType::Roll: return "Roll";
         default: return "Unknown";
     }
 }
@@ -219,6 +234,20 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"LogicalAnd", OpType::LogicalAnd},
         {"LogicalOr", OpType::LogicalOr},
         {"LogicalNot", OpType::LogicalNot},
+        // C2/MVP-2 additions (mirror op_type_to_string).
+        {"Var", OpType::Var},
+        {"Std", OpType::Std},
+        {"Prod", OpType::Prod},
+        {"LeakyReLU", OpType::LeakyReLU},
+        {"ELU", OpType::ELU},
+        {"Mish", OpType::Mish},
+        {"Softplus", OpType::Softplus},
+        {"GroupNorm", OpType::GroupNorm},
+        {"InstanceNorm", OpType::InstanceNorm},
+        {"Gather", OpType::Gather},
+        {"Scatter", OpType::Scatter},
+        {"Flip", OpType::Flip},
+        {"Roll", OpType::Roll},
     };
 
     auto it = string_to_type.find(str);
@@ -511,7 +540,22 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
         std::vector<std::shared_ptr<Value>> sub_outputs;
         for (const auto& oid : output_ids) {
             auto it = sub_values.find(oid);
-            if (it != sub_values.end()) sub_outputs.push_back(it->second);
+            if (it != sub_values.end()) {
+                sub_outputs.push_back(it->second);
+            } else {
+                // The output was neither produced inside the slice nor a carried
+                // input (e.g. a branch that returns a freshly-created constant or
+                // a closure-captured tensor). Materialize it as a sub-graph
+                // leaf/constant via the same classify_captured path used for
+                // inputs, so the branch surfaces the correct number of outputs
+                // instead of silently dropping one (which fails at replay as
+                // "Output value not computed" / "Input value not available").
+                const auto& info = tensor_info_[oid];
+                auto v = sub->create_value(oid, info.shape, info.dtype, info.device);
+                sub_values[oid] = v;
+                classify_captured(*sub, oid);
+                sub_outputs.push_back(v);
+            }
         }
         sub->set_outputs(sub_outputs);
         sub->topological_sort();
@@ -681,15 +725,16 @@ auto Tracer::record_inplace(OpId op, Tensor& target,
 
     TracedOp traced(*op_type, std::move(input_ids), {new_id});
     // Carry the scalar attrs the functional replay may need.
+    // Store at full double precision (attrs are double now; JIT-F057) so a
+    // Float64 graph's clamp bounds / slope are not truncated through float.
     if (attrs.has(AttrKey::Min)) {
-        traced.attrs["min"] = static_cast<float>(attrs.get_float(AttrKey::Min));
+        traced.attrs["min"] = attrs.get_float(AttrKey::Min);
     }
     if (attrs.has(AttrKey::Max)) {
-        traced.attrs["max"] = static_cast<float>(attrs.get_float(AttrKey::Max));
+        traced.attrs["max"] = attrs.get_float(AttrKey::Max);
     }
     if (attrs.has(AttrKey::Negative_slope)) {
-        traced.attrs["negative_slope"] =
-            static_cast<float>(attrs.get_float(AttrKey::Negative_slope));
+        traced.attrs["negative_slope"] = attrs.get_float(AttrKey::Negative_slope);
     }
     record_op(std::move(traced));
 }
@@ -1054,9 +1099,11 @@ auto Tracer::trace_loop(int64_t max_iter,
 
     // Loop trip-count constant (node input[0]). Built on CPU where `full` is a
     // direct fill with NO OpId dispatch, so it does not record a spurious op
-    // into the trace. The interpreter reads it via `.to(Float32).item()`.
+    // into the trace. Stored as Int64 (not Float32) so the trip count is exact
+    // for max_iter > 2^24; the interpreter prefers the exact int_attr recorded
+    // on the Loop op but reads this tensor as int64 as a fallback.
     Tensor max_iter_tensor = tenzor::full({1}, static_cast<double>(max_iter),
-                                          DType::Float32, Device::cpu());
+                                          DType::Int64, Device::cpu());
     std::string max_iter_id = register_tensor(max_iter_tensor);
 
     // Entry condition (node input[1]) evaluated on the ENTRY state, BEFORE the

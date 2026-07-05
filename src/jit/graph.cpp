@@ -2357,7 +2357,7 @@ auto execute_fused_gpu_node(const Node& node,
     ExtendedFusionGroup group;
     group.kind = kind;
     group.dtype = dt;
-    group.eps = node.has_float_attr("eps") ? node.get_attr("eps") : 1e-5f;
+    group.eps = node.has_float_attr("eps") ? node.get_attr("eps") : 1e-5;
 
     auto tensors_from = [&](size_t from) {
         std::vector<Tensor> v;
@@ -3207,7 +3207,9 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     }
                     outputs.push_back(acc);
                 } else {
-                    outputs.push_back(tenzor::sum(input_vars[0]));
+                    // Full reduction: honor the captured keepdim (a full reduce
+                    // with keepdim=true keeps all-ones dims, matching eager).
+                    outputs.push_back(tenzor::sum(input_vars[0], std::nullopt, keepdim));
                 }
             }
             break;
@@ -3228,7 +3230,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     }
                     outputs.push_back(acc);
                 } else {
-                    outputs.push_back(tenzor::mean(input_vars[0]));
+                    outputs.push_back(tenzor::mean(input_vars[0], std::nullopt, keepdim));
                 }
             }
             break;
@@ -3260,7 +3262,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     }
                     outputs.push_back(acc);
                 } else {
-                    outputs.push_back(tenzor::max(input_vars[0]));
+                    outputs.push_back(tenzor::max(input_vars[0], std::nullopt, keepdim));
                 }
             }
             break;
@@ -3291,7 +3293,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                         }
                         outputs.push_back(acc);
                     } else {
-                        outputs.push_back(tenzor::min(input_vars[0]));
+                        outputs.push_back(tenzor::min(input_vars[0], std::nullopt, keepdim));
                     }
                     break;
                 }
@@ -3316,7 +3318,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     }
                     outputs.push_back(Variable(acc, false));
                 } else {
-                    auto result = tenzor::min(input_vars[0].tensor());
+                    auto result = tenzor::min(input_vars[0].tensor(), std::nullopt, keepdim);
                     outputs.push_back(Variable(result, false));
                 }
             }
@@ -3399,9 +3401,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     outputs.push_back(Variable(result, false));
                 }
             } else if (!input_vars.empty()) {
-                float exponent = node->get_attr("exponent");
+                // Read at full double precision (attrs are double now; JIT-F057)
+                // so an f64 graph's fractional exponent is not float-truncated.
+                double exponent = node->get_attr("exponent");
                 if (grad_mode) {
-                    outputs.push_back(tenzor::pow(input_vars[0], static_cast<double>(exponent)));
+                    outputs.push_back(tenzor::pow(input_vars[0], exponent));
                 } else {
                     auto result = tenzor::pow(input_vars[0].tensor(), exponent);
                     outputs.push_back(Variable(result, false));
@@ -3425,11 +3429,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             if (!input_vars.empty()) {
                 // A missing bound means "unbounded on that side" (one-sided
                 // clamp), NOT clamp-against-zero. Default to ±inf.
+                // Read bounds at full double precision (the attr is stored as a
+                // double). The previous float round-trip made a Float64 clamp
+                // boundary (e.g. 0.1) diverge from eager near the boundary.
                 double min_val = node->has_attr("min")
-                    ? static_cast<double>(static_cast<float>(node->get_attr("min")))
+                    ? node->get_attr("min")
                     : -std::numeric_limits<double>::infinity();
                 double max_val = node->has_attr("max")
-                    ? static_cast<double>(static_cast<float>(node->get_attr("max")))
+                    ? node->get_attr("max")
                     : std::numeric_limits<double>::infinity();
                 outputs.push_back(tenzor::clamp(input_vars[0], min_val, max_val));
             }
@@ -3527,7 +3534,9 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::ELU:
             if (!input_vars.empty()) {
-                float alpha = node->has_attr("alpha") ? node->get_attr("alpha") : 1.0f;
+                // Read at full double precision (attrs are double now; JIT-F062)
+                // so an f64 ELU's alpha matches the fused codegen (double) path.
+                double alpha = node->has_attr("alpha") ? node->get_attr("alpha") : 1.0;
                 outputs.push_back(tenzor::elu(input_vars[0], alpha));
             }
             break;
@@ -3540,8 +3549,8 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Softplus:
             if (!input_vars.empty()) {
-                float beta = node->has_attr("beta") ? node->get_attr("beta") : 1.0f;
-                outputs.push_back(tenzor::softplus(input_vars[0], beta));
+                double beta = node->has_attr("beta") ? node->get_attr("beta") : 1.0;
+                outputs.push_back(tenzor::softplus(input_vars[0], beta));  // JIT-F062
             }
             break;
 
@@ -3948,7 +3957,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 // same .to(Device::cpu()).to(Float32) idiom). This interpreter is
                 // the deployed compiled path, so it must make the identical branch
                 // decision as eager on every backend.
-                bool cond = input_vars[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
+                bool cond = input_vars[0].tensor().to(Device::cpu()).to(DType::Float64).item<double>() != 0.0;
                 auto& branch = cond ? node->then_branch() : node->else_branch();
                 if (branch) {
                     // Pass remaining inputs to the chosen branch
@@ -3975,7 +3984,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::GuardNode: {
             if (!input_vars.empty()) {
                 // GuardNode checks a boolean condition; if false, triggers retrace
-                bool guard_val = input_vars[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
+                bool guard_val = input_vars[0].tensor().to(Device::cpu()).to(DType::Float64).item<double>() != 0.0;
                 bool expected = node->get_bool_attr("expected_value");
                 if (guard_val != expected) {
                     needs_retrace_ = true;
@@ -4045,6 +4054,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             // FuseFFNPass::fuse_triple emits — it transfers only linear1's data
             // input and stores the weights as attrs). Support both so the fused
             // node is actually executable.
+            //
+            // The attr-carried weights are wrapped as requires_grad=false
+            // constants, so running this node in grad_mode would flow gradient to
+            // x but silently sever the weight gradients. Like the other fused
+            // nodes, the grad graph is compiled WITHOUT fusion; a FusedFFN here in
+            // grad_mode means that contract was violated — fail loudly rather than
+            // produce a zero-weight-gradient training step.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT: encountered a FusedFFN node (" + node->name() +
+                    ") during differentiable replay; the grad graph must be "
+                    "compiled without fusion (its attr-carried weights are frozen "
+                    "constants and would silently sever weight gradients)");
+            }
             if (!input_vars.empty()) {
                 Variable x = input_vars[0];
                 Variable w1, b1, w2, b2;
@@ -4120,8 +4143,15 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             // Body graph outputs: [condition, carried_0, carried_1, ...]
             // Loop outputs: [final_carried_0, final_carried_1, ...]
             if (input_vars.size() >= 2 && node->body()) {
-                int64_t max_iter = static_cast<int64_t>(input_vars[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>());
-                bool cond = input_vars[1].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
+                // Read the trip count from the exact int64 attribute recorded by
+                // trace_loop; the input[0] tensor is only an ONNX-arity carrier.
+                // Falling back to the tensor (now Int64) still avoids the old
+                // Float32 round-trip that rounded any max_iter > 2^24.
+                int64_t max_iter = node->has_int_attr("max_iter")
+                    ? node->get_int_attr("max_iter")
+                    : static_cast<int64_t>(
+                          input_vars[0].tensor().to(Device::cpu()).to(DType::Int64).item<int64_t>());
+                bool cond = input_vars[1].tensor().to(Device::cpu()).to(DType::Float64).item<double>() != 0.0;
 
                 // The iteration counter / condition scalars fed to the body must
                 // live on the SAME device the loop runs on, otherwise the body's
@@ -4141,10 +4171,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 for (int64_t i = 0; i < max_iter && cond; ++i) {
                     // Build body inputs: [iter, cond, carried...]
                     std::vector<Variable> body_inputs;
+                    // Iteration counter carried as Int64 so it is exact for
+                    // i > 2^24 (the body placeholder is unused, but keep it exact
+                    // and consistent with the Int64 trip count).
                     body_inputs.push_back(Variable(
-                        tenzor::full({1}, static_cast<float>(i), DType::Float32, loop_dev), false));
+                        tenzor::full({1}, static_cast<double>(i), DType::Int64, loop_dev), false));
                     body_inputs.push_back(Variable(
-                        tenzor::full({1}, cond ? 1.0f : 0.0f, DType::Float32, loop_dev), false));
+                        tenzor::full({1}, cond ? 1.0 : 0.0, DType::Float64, loop_dev), false));
                     for (auto& c : carried) {
                         body_inputs.push_back(c);
                     }
@@ -4153,7 +4186,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
                     // body_outputs[0] = new condition, rest = updated carried values
                     if (!body_outputs.empty()) {
-                        cond = body_outputs[0].tensor().to(Device::cpu()).to(DType::Float32).item<float>() != 0.0f;
+                        cond = body_outputs[0].tensor().to(Device::cpu()).to(DType::Float64).item<double>() != 0.0;
                         carried.clear();
                         for (size_t j = 1; j < body_outputs.size(); ++j) {
                             carried.push_back(std::move(body_outputs[j]));

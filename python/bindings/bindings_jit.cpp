@@ -449,7 +449,8 @@ void register_jit(py::module_& m) {
 
     // Compile API (torch.compile equivalent)
     jit.def("compile", [](py::function fn, bool fullgraph, std::string mode,
-                          std::string backend, std::string target, bool strict) {
+                          std::string backend, std::string target, bool strict,
+                          py::object parameters) {
         // The C++ side stores the callable in N-input form; the Python
         // wrapper unpacks the span as positional arguments so user code
         // can keep writing `def f(x):` or `def f(x, y, z):` naturally.
@@ -498,6 +499,18 @@ void register_jit(py::module_& m) {
             tenzor::jit::CompiledFunction::FnTypeN(std::move(cpp_fn)),
             std::move(config));
 
+        // Register trainable parameters that the function reads via closure so
+        // training-through-JIT flows gradients back to THEM (as live parameter
+        // leaves) instead of freezing them as constants — which silently produces
+        // zero weight gradients (JIT-F043). Pass e.g. model.parameters().
+        if (!parameters.is_none()) {
+            std::vector<std::shared_ptr<tenzor::Variable>> params;
+            for (auto item : parameters) {
+                params.push_back(item.cast<std::shared_ptr<tenzor::Variable>>());
+            }
+            compiled->set_parameters(std::move(params));
+        }
+
         // Returned py::cpp_function accepts any positional Variables. The
         // pybind11 *args dispatch happens via py::args; we then forward to
         // the span-based operator().
@@ -518,7 +531,12 @@ void register_jit(py::module_& m) {
     py::arg("backend") = "mlir",
     py::arg("target") = "auto",
     py::arg("strict") = false,
+    py::arg("parameters") = py::none(),
     "Compile a function for automatic graph capture and optimization.\n"
+    "parameters: optional iterable of Variables (e.g. model.parameters()) read by\n"
+    "  the function via closure, registered as trainable leaves so gradients flow\n"
+    "  to them for training-through-JIT; without it they are frozen as constants\n"
+    "  and receive no gradient.\n"
     "First call traces and compiles; subsequent calls use cached compiled graph.\n"
     "Shape mismatches trigger recompilation (up to 8 shapes cached).\n"
     "Accepts any number of positional Variable arguments.\n"
@@ -528,8 +546,10 @@ void register_jit(py::module_& m) {
 
     // tenzor.compile alias
     m.def("compile", [jit](py::function fn, bool fullgraph, std::string mode,
-                           std::string backend, std::string target, bool strict) {
-        return jit.attr("compile")(fn, fullgraph, mode, backend, target, strict);
+                           std::string backend, std::string target, bool strict,
+                           py::object parameters) {
+        return jit.attr("compile")(fn, fullgraph, mode, backend, target, strict,
+                                   parameters);
     },
     py::arg("fn"),
     py::arg("fullgraph") = false,
@@ -537,7 +557,10 @@ void register_jit(py::module_& m) {
     py::arg("backend") = "mlir",
     py::arg("target") = "auto",
     py::arg("strict") = false,
-    "Compile a function for automatic graph capture (alias for jit.compile).");
+    py::arg("parameters") = py::none(),
+    "Compile a function for automatic graph capture (alias for jit.compile).\n"
+    "parameters: optional iterable of Variables to register as trainable leaves\n"
+    "  so gradients flow to them for training-through-JIT (JIT-F043).");
 
     // compile_script — Python-subset scripting frontend
     jit.def("compile_script", [](const std::string& source) {

@@ -29,13 +29,22 @@ auto AutotuneCache::instance() -> AutotuneCache& {
 // Lookup
 // ============================================================================
 
-auto AutotuneCache::lookup(const std::string& key) const -> std::optional<int> {
+auto AutotuneCache::lookup(const std::string& key, int num_candidates) const
+    -> std::optional<int> {
     std::shared_lock lock(mutex_);
     auto it = cache_.find(key);
-    if (it != cache_.end()) {
-        return it->second.algorithm_id;
+    if (it == cache_.end()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    int id = it->second.algorithm_id;
+    // Reject a cached id that cannot address the current candidate list. A cache
+    // autotuned on another architecture (or an older build with more candidates)
+    // could otherwise return an id that indexes past the current candidates into
+    // an invalid/undefined kernel — a correctness bug, not merely a slow choice.
+    if (num_candidates >= 0 && (id < 0 || id >= num_candidates)) {
+        return std::nullopt;
+    }
+    return id;
 }
 
 // ============================================================================
@@ -293,14 +302,15 @@ auto AutotuneCache::load_default() -> void {
 
 auto AutotuneCache::make_key(const std::string& op_name,
                               const std::string& dtype,
-                              const std::string& device,
+                              const std::string& device_arch,
                               const std::vector<std::vector<int64_t>>& shapes) -> std::string {
     std::ostringstream oss;
-    // Include the device/arch in the key: this cache is persisted (save/load)
-    // and served across devices, so a key without device/arch would return a
-    // config autotuned for the wrong architecture. Mirrors the device-keying in
-    // codegen.cpp / compile.cpp.
-    oss << op_name << ":" << dtype << ":" << device;
+    // Include the device ARCHITECTURE in the key: this cache is persisted
+    // (save/load) and served across machines/GPUs, so a key without the true
+    // arch would return a config autotuned for a different architecture. The
+    // caller must pass an arch-qualified identifier (see the header contract);
+    // an index-only "cuda:0" would alias distinct GPU generations.
+    oss << op_name << ":" << dtype << ":" << device_arch;
 
     for (size_t i = 0; i < shapes.size(); ++i) {
         oss << ":";

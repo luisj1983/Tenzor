@@ -66,20 +66,17 @@ namespace {
 /// driver name accepted by `iree-run-module --device=...` and
 /// `iree_runtime_instance_try_create_default_device`.
 auto device_for_target(const std::string& target) -> std::string {
-    if (target == "llvm-cpu") {
-        return "local-task";
+    // Delegate to the single source of truth in iree_paths so the runtime-side
+    // driver mapping stays in lockstep with the compile-side one. Previously this
+    // rejected metal-spirv / vmvx / vmvx-inline (which compile_mlir / driver_for_
+    // target accept), so those targets compiled a valid .vmfb and then died at
+    // IreeInvoker::load — an asymmetry between compile and runtime (JIT-F047).
+    try {
+        return driver_for_target(target);
+    } catch (const std::exception& e) {
+        throw JitInvokeError("Unsupported IREE target for runtime invoke: " +
+                             target);
     }
-    if (target == "cuda") {
-        return "cuda";
-    }
-    if (target == "rocm") {
-        return "hip";
-    }
-    if (target == "vulkan-spirv" || target == "vulkan") {
-        return "vulkan";
-    }
-    throw JitInvokeError("Unsupported IREE target for runtime invoke: " +
-                         target);
 }
 
 auto dtype_to_iree_element(::tenzor::DType d) -> std::string {

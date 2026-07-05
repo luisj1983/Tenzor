@@ -86,3 +86,67 @@ TEST(CompileTest, CompileFreeFunctionWorks) {
     auto compiled = compile(fn);
     EXPECT_EQ(compiled.num_cached(), 0);
 }
+
+// JIT-F027: @tz.jit / tz.compile must install the in-place op hook so an
+// in-place mutation inside the compiled function is recorded into the graph, not
+// silently dropped. Pre-fix, the compiled replay returned the PRE-mutation value.
+TEST(CompileTest, InplaceMutationCapturedViaCompile) {
+    Tensor one = ones({4}, DType::Float32, Device::cpu());
+    auto fn = [one](const Variable& x) -> Variable {
+        Tensor y = x.tensor() + one;   // y = x + 1
+        tenzor::add_(y, one);          // in-place: y = x + 2
+        Tensor z = y + one;            // reads the MUTATED y -> x + 3
+        return Variable(z, false);
+    };
+    auto compiled = compile(fn);
+    Tensor x = full({4}, 2.0f, DType::Float32, Device::cpu());
+    // First call traces (and runs fn eagerly); subsequent calls replay the
+    // compiled graph, which must reproduce x + 3 == 5 (not the dropped-mutation
+    // value x + 2 == 4).
+    (void)compiled(Variable(x, false));
+    Variable out = compiled(Variable(x, false));
+    Tensor replay = out.tensor().to(Device::cpu());
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(replay.data<float>()[i], 5.0f, 1e-5f)
+            << "in-place add_ was dropped from the compiled graph (got the "
+               "pre-mutation value)";
+    }
+}
+
+// JIT-F033: a compiled function must EXECUTE correctly at multiple concrete
+// shapes (recompiling as needed), not just have its symbolic-dim algebra
+// asserted. A reduction makes the output shape shape-dependent, so replaying a
+// graph baked at the wrong shape would be caught.
+TEST(CompileTest, ExecutesCorrectlyAcrossBatchSizes) {
+    auto fn = [](const Variable& x) -> Variable {
+        return tenzor::sum(x, /*dim=*/1);  // reduce dim 1 -> shape [B]
+    };
+    auto compiled = compile(fn);
+    for (int64_t B : {2, 5, 8}) {
+        Tensor xt = full({B, 4}, 1.5f, DType::Float32, Device::cpu());
+        Variable x(xt, false);
+        Tensor eager = fn(x).tensor().to(Device::cpu());
+        (void)compiled(x);                                   // trace/compile shape
+        Tensor jit = compiled(x).tensor().to(Device::cpu());  // replay
+        ASSERT_EQ(jit.numel(), B) << "B=" << B;
+        for (int64_t i = 0; i < B; ++i) {
+            EXPECT_NEAR(jit.data<float>()[i], eager.data<float>()[i], 1e-4f)
+                << "B=" << B << " i=" << i;  // each = 4 * 1.5 = 6.0
+        }
+    }
+}
+
+// JIT-F054: fullgraph=True must error on a graph break (here a data-dependent
+// .item() read), not silently fall back to eager.
+TEST(CompileTest, FullgraphThrowsOnItemGraphBreak) {
+    CompileConfig cfg;
+    cfg.fullgraph = true;
+    auto fn = [](const Variable& x) -> Variable {
+        // .item() is a data-dependent read -> graph break.
+        float s = tenzor::sum(x).tensor().to(Device::cpu()).item<float>();
+        return x * s;
+    };
+    auto compiled = CompiledFunction(CompiledFunction::FnType(fn), cfg);
+    Tensor xt = full({4}, 2.0f, DType::Float32, Device::cpu());
+    EXPECT_THROW(compiled(Variable(xt, false)), std::exception);
+}

@@ -17,6 +17,8 @@
 
 #include <gtest/gtest.h>
 
+#include "mlir_target_util.hpp"
+
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -130,18 +132,42 @@ TEST(OpRMSNormExpand, ExpandResultMatchesHandComputed) {
     lowerer.set_plugin_enabled(false);
     const std::string mlir = lowerer.lower(g);
 
-    tzm::CompileOptions opts;
-    opts.target         = "llvm-cpu";
-    opts.plugin_enabled = false;
-    auto artifact = tzm::compile_mlir(mlir, opts);
-    auto invoker  = tzm::IreeInvoker::load(artifact);
-    auto outs     = invoker->invoke({x_t, w_t});
-    ASSERT_EQ(outs.size(), 1u);
-    const float* op = outs[0].data<float>();
-    EXPECT_NEAR(op[0], 1.2f, 1e-5f);
-    EXPECT_NEAR(op[1], 1.6f, 1e-5f);
-    EXPECT_NEAR(op[2], 0.0f, 1e-5f);
-    EXPECT_NEAR(op[3], 0.0f, 1e-5f);
+    // Fan out over every available IREE target so the F32 RMSNorm — whose
+    // sum-of-squares now accumulates in F64 to match eager (JIT-F053) — is
+    // validated on the GPU targets too (F64 must work through vulkan-spirv/cuda).
+    namespace mt = ::tenzor::testing::mlir;
+    for (const auto& target : mt::available_iree_targets()) {
+        tzm::CompileOptions opts;
+        opts.target         = target;
+        opts.plugin_enabled = false;
+        if (target == "vulkan-spirv" || target == "vulkan") {
+            opts.vulkan_arch = "ampere";  // enable F16/F64 SPIR-V caps (F032)
+        }
+        auto artifact = tzm::compile_mlir(mlir, opts);
+        std::unique_ptr<tzm::IreeInvoker> invoker;
+        try {
+            invoker = tzm::IreeInvoker::load(artifact);
+        } catch (const std::exception& e) {
+            // Some targets compile but their in-process HAL runtime driver is not
+            // registered in this IREE dist (e.g. cuda without the linked driver;
+            // the high-level CompiledFunction path uses a subprocess for those).
+            // That is a runtime-availability fact of this host, not a lowering
+            // defect — exercise the targets whose runtime loads in-process
+            // (llvm-cpu and vulkan-spirv here, which is what validates F053's F64).
+            if (std::string(e.what()).find("no driver") != std::string::npos ||
+                std::string(e.what()).find("NOT_FOUND") != std::string::npos) {
+                continue;
+            }
+            throw;
+        }
+        auto outs = invoker->invoke({x_t, w_t});
+        ASSERT_EQ(outs.size(), 1u) << "target=" << target;
+        const float* op = outs[0].data<float>();
+        EXPECT_NEAR(op[0], 1.2f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(op[1], 1.6f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(op[2], 0.0f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(op[3], 0.0f, 1e-5f) << "target=" << target;
+    }
 }
 
 TEST(OpRMSNormExpand, WithNonUnitWeight) {

@@ -4,9 +4,98 @@
  */
 
 #include <gtest/gtest.h>
+#include <memory>
 #include <tenzor/jit/symbolic_shape.hpp>
+#include <tenzor/jit/graph.hpp>
+#include <tenzor/jit/tracer.hpp>
+#include <tenzor/jit/symbolic_shape_inference.hpp>
+#include <tenzor/core/dtype.hpp>
+#include <tenzor/core/device.hpp>
 
 using namespace tenzor::jit;
+
+namespace {
+std::shared_ptr<Value> mk_val(std::string id, std::vector<int64_t> shape) {
+    return std::make_shared<Value>(std::move(id), std::move(shape),
+                                   tenzor::DType::Float32, tenzor::Device::cpu());
+}
+}  // namespace
+
+// JIT-F021: a permutation whose length differs from the input rank must yield
+// no confident inference (empty), not a wrong-rank shape.
+TEST(SymbolicShapeInferenceFixes, PermuteWrongLengthReturnsEmpty) {
+    auto x = mk_val("x", {2, 3, 4});
+    auto node = std::make_shared<Node>(OpType::Permute);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("dims", {0, 2});  // length 2 != rank 3
+    SymbolicShapeInference infer;
+    EXPECT_TRUE(infer.infer(node.get()).empty());
+    node->set_vec_attr("dims", {0, 2, 1});  // valid full-rank permutation
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].rank(), 3u);
+}
+
+// JIT-F020: a dimensioned Max produces values + indices; both outputs must
+// receive the reduced symbolic shape.
+TEST(SymbolicShapeInferenceFixes, MaxWithDimEmitsTwoOutputShapes) {
+    auto x = mk_val("x", {2, 3, 4});
+    auto node = std::make_shared<Node>(OpType::Max);
+    node->add_input(x);
+    node->add_output(mk_val("vals", {}));
+    node->add_output(mk_val("idx", {}));
+    node->set_int_attr("dim", 1);
+    node->set_bool_attr("keepdim", false);
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0].rank(), 2u);
+    EXPECT_EQ(out[1].rank(), 2u);
+}
+
+// JIT-F022: a genuinely fixed reshape (no -1, trailing product differs from the
+// input's) on a dynamic input must resolve to the concrete target, not a
+// symbolized leading dim.
+TEST(SymbolicShapeInferenceFixes, FixedReshapeOnDynamicInputStaysConcrete) {
+    auto x = mk_val("x", {0, 10});
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+    auto node = std::make_shared<Node>(OpType::Reshape);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("shape", {5, 4});  // fixed; trailing 4 != input trailing 10
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    ASSERT_TRUE(out[0][0].is_concrete());
+    EXPECT_EQ(out[0][0].value(), 5);
+    ASSERT_TRUE(out[0][1].is_concrete());
+    EXPECT_EQ(out[0][1].value(), 4);
+}
+
+// Companion: a batch-preserving reshape (trailing product matches) still
+// symbolizes the leading dim.
+TEST(SymbolicShapeInferenceFixes, BatchReshapeOnDynamicInputSymbolizesLeading) {
+    auto x = mk_val("x", {0, 2, 5});
+    x->set_symbolic_shape(SymbolicShape({SymbolicDim::symbolic("B"),
+                                         SymbolicDim::concrete(2),
+                                         SymbolicDim::concrete(5)}));
+    auto node = std::make_shared<Node>(OpType::Reshape);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("shape", {0, 10});  // placeholder leading, trailing 10 == 2*5
+    // Use a concrete leading in the target to mimic x.reshape(x.size(0), 10):
+    node->set_vec_attr("shape", {32, 10});
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());   // leading dim tracks batch
+    ASSERT_TRUE(out[0][1].is_concrete());
+    EXPECT_EQ(out[0][1].value(), 10);
+}
 
 class DynamicShapesTest : public ::testing::Test {};
 

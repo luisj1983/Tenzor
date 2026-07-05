@@ -216,7 +216,9 @@ struct TracedOp {
     OpType type;                                     ///< Operation type
     std::vector<std::string> inputs;                 ///< Input tensor IDs
     std::vector<std::string> outputs;                ///< Output tensor IDs
-    std::unordered_map<std::string, float> attrs;    ///< Float attributes (e.g., dropout rate)
+    std::unordered_map<std::string, double> attrs;   ///< Scalar float attributes, stored as
+                                                     ///< double so f64 graphs keep full precision
+                                                     ///< (e.g. pow exponent, clamp bounds) — JIT-F057
     std::unordered_map<std::string, int64_t> int_attrs;  ///< Int attributes (e.g., dimensions)
     std::unordered_map<std::string, std::vector<int64_t>> vec_attrs;  ///< Vector attributes (e.g., shape)
     std::unordered_map<std::string, bool> bool_attrs;  ///< Boolean attributes (e.g., bias)

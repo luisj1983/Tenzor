@@ -6,6 +6,8 @@
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/compiler.hpp"
 #include "tenzor/backend/dispatch_interceptor.hpp"
+#include "tenzor/backend/loader.hpp"
+#include "tenzor/core/jit_hooks.hpp"
 #include "tenzor/utils/log.hpp"
 
 #ifdef TENZOR_HAS_MLIR_JIT
@@ -128,6 +130,13 @@ auto CompiledFunction::set_parameters(
     // parameter set (or none); drop them so the next call re-traces with the
     // new parameters bound.
     cache_.clear();
+    // The MLIR inference path freezes captured parameters as constants inside
+    // each IREE invoker, so those must be dropped too or an mlir-backend call
+    // would keep returning results computed with the old parameter values.
+    if (mlir_cache_) {
+        mlir_cache_->invokers.clear();
+    }
+    warmup_counts_.clear();  // JIT-F056: counters tracked the dropped modules
 }
 
 auto CompiledFunction::with_parameters(
@@ -214,7 +223,7 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
     }
     if (compiled_module) {
             // reduce-overhead mode: capture and replay CUDA graphs. This path
-            // mutates shared CUDA-graph state and warmup_count_; serialize it.
+            // mutates shared CUDA-graph state and warmup_counts_; serialize it.
             // CUDA-graph capture only applies to CUDA/ROCm; for CPU/Vulkan/OneAPI
             // fall through to normal compiled execution on that same backend
             // (running an empty CUDA graph would return stale results / crash).
@@ -265,8 +274,9 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
                     }
                     return outs[0];
                 }
-                ++warmup_count_;
-                if (warmup_count_ >= kReduceOverheadWarmupCalls) {
+                int& warmup = warmup_counts_[key];
+                ++warmup;
+                if (warmup >= kReduceOverheadWarmupCalls) {
                     // Capture CUDA graph on this execution
                     if (inputs.size() == 1) {
                         auto result = compiled_module->forward(inputs[0]);
@@ -313,13 +323,14 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
     if (config_.backend == "nvrtc" && !inputs.empty()) {
         const auto dt = inputs[0].tensor().device().type;
         if (dt == Device::Type::Vulkan || dt == Device::Type::OneAPI) {
-            static std::once_flag nvrtc_warned;
-            std::call_once(nvrtc_warned, [] {
+            // Per-compiled-function (JIT-F038): each such function warns once, not
+            // just the first one in the process.
+            if (!warned_no_accel_.exchange(true)) {
                 TENZOR_LOG_WARN(
                     "JIT nvrtc backend has no GPU codegen on Vulkan/OneAPI; the "
                     "traced graph runs via the interpreter (correct but not "
                     "accelerated). Use backend=\"mlir\" for acceleration.");
-            });
+            }
         }
     }
 
@@ -360,11 +371,14 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
             if (cache_.size() < static_cast<size_t>(config_.max_retraces)) {
                 cache_[key] = compiled;
             }
-        } else if (jit_strict_enabled(config_.strict)) {
+        } else if (config_.fullgraph || jit_strict_enabled(config_.strict)) {
+            // fullgraph=True must error on ANY graph break — including the
+            // .item()/in-place breaks that now surface via the trace hooks
+            // (JIT-F054), not only unmapped-op breaks caught by the interceptor.
             throw std::runtime_error(
                 "JIT trace produced no compiled graph (graph break or empty "
-                "trace) and strict mode is enabled (" + config_.backend +
-                " backend, config.strict / TENZOR_JIT_STRICT)");
+                "trace) and fullgraph/strict mode is enabled (" + config_.backend +
+                " backend, config.fullgraph / config.strict / TENZOR_JIT_STRICT)");
         } else {
             TENZOR_LOG_WARN("JIT trace produced no compiled graph ({} backend): "
                             "graph break or empty trace. Falling back to eager "
@@ -377,7 +391,9 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
 
 auto CompiledFunction::num_cached() const -> size_t {
     std::lock_guard<std::mutex> lock(mutex_);
-    return cache_.size();
+    // On the mlir backend inference specializations live in mlir_cache_, not in
+    // cache_; count both so introspection is consistent across backends.
+    return cache_.size() + (mlir_cache_ ? mlir_cache_->invokers.size() : 0);
 }
 
 auto CompiledFunction::num_grad_forwards() const -> size_t {
@@ -443,10 +459,10 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
             // autograd while the same config would throw on the mlir inference
             // path — an inconsistent strict contract between inference and
             // training. In non-strict mode WARN so the fallback is visible.
-            if (jit_strict_enabled(config_.strict)) {
+            if (config_.fullgraph || jit_strict_enabled(config_.strict)) {
                 throw std::runtime_error(
                     "JIT grad trace produced no compiled graph (graph break or "
-                    "empty trace) and strict mode is enabled");
+                    "empty trace) and fullgraph/strict mode is enabled");
             }
             TENZOR_LOG_WARN("JIT grad trace produced no compiled graph: graph "
                             "break or empty trace. Falling back to eager autograd "
@@ -494,10 +510,19 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
     }
     return outs[0];
 }
-
 auto CompiledFunction::clear_cache() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     cache_.clear();
+    // The MLIR/IREE inference specializations live in a separate cache whose
+    // invokers bake trace-time weights/constants into the compiled artifact.
+    // Clearing only cache_ would leave stale invokers serving results on the
+    // mlir backend after the user forces a re-trace.
+    if (mlir_cache_) {
+        mlir_cache_->invokers.clear();
+    }
+    // The per-shape warmup counters tracked the modules just dropped; reset them
+    // so a re-traced module re-warms before CUDA-graph capture (JIT-F056).
+    warmup_counts_.clear();
 }
 
 auto CompiledFunction::shape_key(const Variable& input, bool grad_variant)
@@ -538,16 +563,67 @@ auto CompiledFunction::shape_key(std::span<const Variable> inputs,
     return ss.str();
 }
 
+namespace {
+
+// RAII installer for the two side-channel trace hooks that the DispatchInterceptor
+// alone does NOT catch (JIT-F027):
+//   * the graph-break hook — data-dependent leaf reads (Tensor::item()) notify
+//     the tracer through this hook, not the dispatch stack;
+//   * the in-place op hook — in-place kernels dispatch through dispatch_inplace,
+//     which intentionally bypasses the DispatchInterceptorStack, so without this
+//     hook their mutations are invisible to the trace and later reads replay the
+//     PRE-mutation value (silently wrong numerics, no eager fallback).
+// TracingGuard (jit.trace) installs both; the CompiledFunction compile paths
+// previously installed only the interceptor. `on_break` runs in addition to
+// tracer.record_graph_break so the caller flips its trace-local break flag and
+// discards / falls back like an unmapped-op break.
+struct ScopedTraceHooks {
+    ScopedTraceHooks(Tracer& tracer, std::function<void()> on_break) {
+        tenzor::detail::set_graph_break_hook(
+            [&tracer, on_break = std::move(on_break)](const std::string& reason) {
+                if (on_break) on_break();
+                tracer.record_graph_break(reason);
+            });
+        tenzor::detail::set_inplace_op_hook(
+            [&tracer](OpId op, Tensor& target, const Tensor* others,
+                      std::size_t num_others, const OpAttributes& attrs,
+                      const Tensor* pre_snapshot) {
+                tracer.record_inplace(
+                    op, target,
+                    std::span<const Tensor>(others, num_others), attrs,
+                    pre_snapshot);
+            });
+    }
+    ~ScopedTraceHooks() {
+        tenzor::detail::set_graph_break_hook(nullptr);
+        tenzor::detail::set_inplace_op_hook(nullptr);
+    }
+    ScopedTraceHooks(const ScopedTraceHooks&) = delete;
+    ScopedTraceHooks& operator=(const ScopedTraceHooks&) = delete;
+};
+
+}  // namespace
+
 auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
                                          bool grad_mode,
                                          Variable* out_result,
                                          bool* out_fn_ran)
     -> std::shared_ptr<CompiledModule> {
-    had_graph_break_ = false;
+    // Trace-local graph-break flag. The Tracer is thread_local but this
+    // CompiledFunction (and its had_graph_break_ member) is shared across
+    // threads; keying the decision off a stack-local bool ensures concurrent
+    // different-shape traces cannot clobber each other's flag and cache a graph
+    // that silently froze an unrepresented op as a constant.
+    bool graph_break = false;
     size_t traced_op_count = 0;
 
     auto& tracer = Tracer::get_instance();
     tracer.start_trace();
+
+    // Install the in-place / graph-break side-channel hooks for the duration of
+    // the trace so in-place mutations are recorded (not silently dropped) and a
+    // data-dependent .item() read breaks the trace (JIT-F027).
+    ScopedTraceHooks trace_hooks(tracer, [&graph_break] { graph_break = true; });
 
     // Declare the closure-captured trainable parameters (if any) BEFORE running
     // the traced forward, so end_trace() can classify each captured parameter as
@@ -563,8 +639,8 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
 
     // Push a tracing interceptor onto the dispatch stack
     auto interceptor = make_tracing_interceptor(tracer,
-        [this, &traced_op_count](OpId op) {
-            had_graph_break_ = true;
+        [this, &traced_op_count, &graph_break](OpId op) {
+            graph_break = true;
             if (config_.fullgraph) {
                 throw std::runtime_error(
                     "tenzor.compile(fullgraph=True): graph break at OpId "
@@ -605,7 +681,10 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
     // and future calls re-trace and fall back to eager again. This is the only
     // correct behavior short of true graph segmentation. (In fullgraph mode the
     // interceptor callback has already thrown before reaching here.)
-    if (had_graph_break_) {
+    // Publish for the had_graph_break() introspection accessor (best-effort);
+    // the decision below reads the race-free trace-local flag.
+    had_graph_break_.store(graph_break);
+    if (graph_break) {
         tracer.clear();
         return nullptr;
     }
@@ -671,11 +750,15 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
                               std::span<const Variable> inputs,
                               Variable* out_result = nullptr,
                               bool* out_fn_attempted = nullptr,
-                              bool* out_fn_ok = nullptr)
+                              bool* out_fn_ok = nullptr,
+                              bool* out_had_break = nullptr)
     -> std::shared_ptr<Graph> {
     auto& tracer = Tracer::get_instance();
     tracer.start_trace();
     bool had_break = false;
+    // Install the in-place / graph-break side-channel hooks (JIT-F027) so
+    // in-place mutations are recorded and .item() reads break the trace.
+    ScopedTraceHooks trace_hooks(tracer, [&had_break] { had_break = true; });
     auto interceptor = make_tracing_interceptor(tracer, [&had_break](OpId /*op*/) {
         // A break means an unmappable op ran; its output would be frozen as a
         // constant in the built graph (see trace_and_compile for the full
@@ -705,6 +788,7 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
     // instead of running fn a SECOND time.
     if (out_fn_ok) *out_fn_ok = true;
     if (out_result) *out_result = output;
+    if (out_had_break) *out_had_break = had_break;  // JIT-F055 (publish for accessor)
     if (had_break) {
         // Returning nullptr routes mlir_invoke() into its "trace produced no
         // graph -> fall back to eager (or throw in strict mode)" path instead
@@ -798,6 +882,35 @@ auto resolve_target(const std::string& cfg_target,
 // try→eager degradation so an unmappable device (OneAPI/MPS), a lowering gap,
 // an unsupported-target throw, or a driver-load error degrades to eager on the
 // SAME backend instead of crashing — unless strict mode is on.
+// Map the actual Vulkan device's vendor to an IREE `--iree-vulkan-target` arch
+// that enables the F16 / 16-bit-storage SPIR-V capabilities. TENZOR_VULKAN_TARGET
+// overrides. Returns "" if the vendor is unknown / no Vulkan backend, letting
+// compile_mlir fall back to the build default (or a bare target).
+static auto detect_vulkan_iree_target(const ::tenzor::Device& in_dev)
+    -> std::string {
+    if (const char* e = std::getenv("TENZOR_VULKAN_TARGET"); e && *e) {
+        return e;
+    }
+    auto* be = ::tenzor::try_get_backend(::tenzor::Device::Type::Vulkan);
+    if (be == nullptr) return {};
+    int idx = (in_dev.type == ::tenzor::Device::Type::Vulkan && in_dev.index >= 0)
+                  ? in_dev.index
+                  : 0;
+    try {
+        auto info = be->get_device_info(idx);
+        std::string v = info.vendor;
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (v.find("nvidia") != std::string::npos) return "ampere";
+        if (v.find("amd") != std::string::npos ||
+            v.find("radeon") != std::string::npos) return "rdna3";
+        if (v.find("intel") != std::string::npos) return "arc";
+    } catch (...) {
+        // Best-effort: fall through to the build default.
+    }
+    return {};
+}
+
 auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable {
     if (inputs.empty()) {
         throw std::invalid_argument(
@@ -830,15 +943,16 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
                 "IREE HAL); cannot compile. Use backend=\"nvrtc\" or a device "
                 "with an IREE target (CPU/CUDA/ROCm/Vulkan) to enable JIT.");
         }
-        static std::once_flag warned_no_target;
-        std::call_once(warned_no_target, [&] {
+        // Per-compiled-function (JIT-F038): warn once for EACH function that runs
+        // unaccelerated here, not once for the whole process.
+        if (!warned_no_accel_.exchange(true)) {
             TENZOR_LOG_WARN(
                 "MLIR JIT: device '{}' has no IREE target backend (Intel "
                 "OneAPI / Apple MPS have no IREE HAL); executing eagerly on "
                 "that backend. Use backend=\"nvrtc\" or a device with an IREE "
                 "target (CPU/CUDA/ROCm/Vulkan) to enable JIT.",
                 dev.to_string());
-        });
+        }
         return fn_(inputs);
     }
 
@@ -937,8 +1051,10 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // Cache miss: trace → lower → compile → load invoker → cache. Thread the
     // out-params so the trace runs fn EXACTLY ONCE; every fallback below reuses
     // that result rather than re-invoking fn_ (JIT-008-class double-exec).
+    bool had_break = false;
     auto graph = trace_single_input_graph(fn_, inputs, out_result,
-                                          out_fn_attempted, out_fn_ok);
+                                          out_fn_attempted, out_fn_ok, &had_break);
+    had_graph_break_.store(had_break);  // JIT-F055: publish for the introspection accessor
     if (!graph || graph->num_nodes() == 0) {
         // Trace produced nothing (graph break in fullgraph mode, or the
         // function only ran ops the interceptor doesn't capture). Either
@@ -949,10 +1065,12 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
                 strict = true;
             }
         }
-        if (strict) {
+        // fullgraph=True must also error on a graph break here (JIT-F054), not
+        // only in strict mode.
+        if (strict || config_.fullgraph) {
             throw std::runtime_error(
                 "CompiledFunction::mlir_invoke: trace produced no graph "
-                "(TENZOR_JIT_STRICT=1).");
+                "(graph break; config.fullgraph / TENZOR_JIT_STRICT).");
         }
         // fn already ran (successfully) during the trace above — reuse its
         // result instead of running it a SECOND time.
@@ -1017,6 +1135,14 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
         const int rocm_ordinal =
             (in_dev.type == ::tenzor::Device::Type::ROCm) ? in_dev.index : 0;
         opts.rocm_arch = mj::detect_rocm_gfx_arch(rocm_ordinal);
+    }
+    // F032: derive an IREE Vulkan target from the actual device's vendor so the
+    // emitted SPIR-V environment enables shaderFloat16 / 16-bit storage. Without
+    // it, IREE's conservative default SPIR-V env lacks F16, so F16/BF16 graphs
+    // silently produce garbage/NaN on the GPU (F32 works). TENZOR_VULKAN_TARGET
+    // overrides. Empty result => compile_mlir falls back to the build default.
+    if (opts.target == "vulkan-spirv" || opts.target == "vulkan") {
+        opts.vulkan_arch = detect_vulkan_iree_target(in_dev);
     }
 
     auto artifact = mj::compile_mlir(mlir_text, opts);

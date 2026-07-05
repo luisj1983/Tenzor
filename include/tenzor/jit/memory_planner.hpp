@@ -281,10 +281,14 @@ public:
                const std::vector<RematerializationCandidate>& candidates) -> size_t;
 
     /**
-     * @brief Set the memory budget. Only rematerialize if peak usage
-     *        exceeds this budget.
+     * @brief Set the rematerialization RECLAMATION TARGET.
      *
-     * @param bytes Memory budget in bytes (0 = always rematerialize good candidates)
+     * apply() walks candidates cheapest-first and stops as soon as this many
+     * bytes of peak memory have been reclaimed (freed). It is a target quantity
+     * to reclaim, NOT a peak-usage floor: a larger value rematerializes MORE, not
+     * fewer, and 0 means "reclaim from all good candidates, no cap".
+     *
+     * @param bytes Bytes of peak memory to reclaim (0 = no cap).
      */
     auto set_memory_budget(size_t bytes) -> void { memory_budget_ = bytes; }
 

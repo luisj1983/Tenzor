@@ -41,6 +41,17 @@ struct CompileOptions {
     /// non-rocm targets. The value participates in the on-disk cache key so
     /// artifacts for different GPU ISAs never alias.
     std::string rocm_arch;
+
+    /// For target=="vulkan-spirv": the IREE Vulkan target controlling the SPIR-V
+    /// environment (e.g. "ampere", "rdna3", "sm_80"), derived from the actual
+    /// Vulkan device's vendor. REQUIRED for correctness: without it IREE compiles
+    /// against a conservative default SPIR-V env that lacks shaderFloat16 / 16-bit
+    /// storage, so an F16/BF16 graph silently produces garbage/NaN on the GPU
+    /// (while F32 works). When empty, compile_mlir() consults the
+    /// TENZOR_VULKAN_TARGET env var, then the TENZOR_DEFAULT_VULKAN_TARGET build
+    /// constant. Ignored for non-vulkan targets. Participates in the on-disk cache
+    /// key so artifacts for different Vulkan devices never alias.
+    std::string vulkan_arch;
 };
 
 /// Result of a successful compile invocation.

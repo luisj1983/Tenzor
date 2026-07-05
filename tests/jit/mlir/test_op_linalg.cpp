@@ -17,11 +17,40 @@
 
 #include <gtest/gtest.h>
 
+#include "mlir_target_util.hpp"
+
 #include <functional>
 #include <string>
 #include <vector>
 
 namespace {
+
+// Compile `fn` on every available IREE target and assert its output matches the
+// eager reference (JIT-F028: previously hardcoded to llvm-cpu only).
+inline void run_over_targets(const std::string& name,
+                             ::tenzor::jit::CompiledFunction::FnType fn,
+                             const ::tenzor::Variable& x, float tol) {
+    namespace mt = ::tenzor::testing::mlir;
+    auto eager_cpu = fn(x).tensor().to(::tenzor::Device::cpu())
+                          .to(::tenzor::DType::Float32);
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jitted = compiled(x);
+        mt::assert_jit_used(name, target);
+        auto jit_cpu = jitted.tensor().to(::tenzor::Device::cpu())
+                             .to(::tenzor::DType::Float32);
+        auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                        .template item<float>();
+        EXPECT_LT(diff, tol) << "op=" << name << " target=" << target
+                             << " diff=" << diff;
+    }
+}
 
 auto ensure_core_init() -> void {
     static const bool inited = []() {
@@ -41,24 +70,12 @@ TEST(OpLinalg, MatMul2D) {
     auto W = ::tenzor::randn({8, 6}, ::tenzor::DType::Float32);
     ::tenzor::Variable wv(W, false);
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir"; cfg.target = "llvm-cpu";
-
     auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return ::tenzor::matmul(x, wv);
     };
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
     auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
-    auto eager  = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, 1e-3F) << "matmul diff=" << diff;
+    run_over_targets("matmul", fn, x, 1e-3F);
 }
 
 TEST(OpLinalg, Bmm3D) {
@@ -66,24 +83,12 @@ TEST(OpLinalg, Bmm3D) {
     auto W = ::tenzor::randn({3, 5, 4}, ::tenzor::DType::Float32);
     ::tenzor::Variable wv(W, false);
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir"; cfg.target = "llvm-cpu";
-
     auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return ::tenzor::bmm(x, wv);
     };
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
     auto raw = ::tenzor::randn({3, 4, 5}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
-    auto eager  = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, 1e-3F) << "bmm diff=" << diff;
+    run_over_targets("bmm", fn, x, 1e-3F);
 }
 
 TEST(OpLinalg, LinearWithBias) {
@@ -92,24 +97,12 @@ TEST(OpLinalg, LinearWithBias) {
     auto b = ::tenzor::randn({6}, ::tenzor::DType::Float32);
     ::tenzor::Variable wv(W, false), bv(b, false);
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir"; cfg.target = "llvm-cpu";
-
     auto fn = [wv, bv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return ::tenzor::linear(x, wv, bv);
     };
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
     auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
-    auto eager  = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, 1e-3F) << "linear diff=" << diff;
+    run_over_targets("linear", fn, x, 1e-3F);
 }
 
 // ---------------------------------------------------------------------------
@@ -125,25 +118,13 @@ TEST(OpLinalg, MatMulUnequalRankBatchLhs) {
     auto W = ::tenzor::randn({8, 6}, ::tenzor::DType::Float32);
     ::tenzor::Variable wv(W, false);
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir"; cfg.target = "llvm-cpu";
-
     auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         // lhs: (B=2, M=4, K=8), rhs: (K=8, N=6) ⇒ out (B=2, M=4, N=6)
         return ::tenzor::matmul(x, wv);
     };
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
     auto raw = ::tenzor::randn({2, 4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
-    auto eager  = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, 1e-3F) << "matmul rank-3 lhs @ rank-2 rhs diff=" << diff;
+    run_over_targets("matmul_rank3_lhs", fn, x, 1e-3F);
 }
 
 TEST(OpLinalg, MatMulUnequalRankBatchRhs) {
@@ -153,22 +134,10 @@ TEST(OpLinalg, MatMulUnequalRankBatchRhs) {
     auto W = ::tenzor::randn({3, 8, 6}, ::tenzor::DType::Float32);
     ::tenzor::Variable wv(W, false);
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir"; cfg.target = "llvm-cpu";
-
     auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return ::tenzor::matmul(x, wv);
     };
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
     auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
     ::tenzor::Variable x(raw, false);
-    auto eager  = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto diff = ::tenzor::max(::tenzor::abs(
-        eager.tensor() - jitted.tensor())).template item<float>();
-    EXPECT_LT(diff, 1e-3F) << "matmul rank-2 lhs @ rank-3 rhs diff=" << diff;
+    run_over_targets("matmul_rank2_lhs_rank3_rhs", fn, x, 1e-3F);
 }

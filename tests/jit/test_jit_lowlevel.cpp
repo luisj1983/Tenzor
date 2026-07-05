@@ -15,6 +15,7 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/tracer.hpp"
+#include "tenzor/jit/autotune.hpp"
 
 using namespace tenzor;
 using namespace tenzor::jit;
@@ -302,4 +303,22 @@ TEST_F(JITTracerTest, RegisterTensorReturnsId) {
     EXPECT_FALSE(id.empty());
 
     tracer.end_trace({}, {});
+}
+
+// JIT-F010: AutotuneCache::lookup must reject a cached algorithm_id that cannot
+// address the current candidate list (e.g. a cache autotuned on another
+// architecture that exposed more candidates), preventing an out-of-range kernel
+// selection.
+TEST(AutotuneCacheValidation, LookupRejectsOutOfRangeAlgorithmId) {
+    AutotuneCache& cache = AutotuneCache::instance();
+    const std::string key =
+        AutotuneCache::make_key("MatMul", "Float32", "cuda:sm_90", {{128, 128}});
+    cache.record(key, /*algorithm_id=*/5, /*time_ms=*/1.0);
+
+    // No validation requested -> returns the stored id.
+    EXPECT_EQ(cache.lookup(key), std::optional<int>(5));
+    // Current build exposes only 3 candidates -> id 5 is out of range -> rejected.
+    EXPECT_EQ(cache.lookup(key, /*num_candidates=*/3), std::nullopt);
+    // id 5 is valid when there are >= 6 candidates.
+    EXPECT_EQ(cache.lookup(key, /*num_candidates=*/6), std::optional<int>(5));
 }

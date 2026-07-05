@@ -77,9 +77,16 @@ public:
      * lowest recorded benchmark time for this key.
      *
      * @param key Operation configuration key
-     * @return Best algorithm ID, or std::nullopt if no entry exists
+     * @param num_candidates If >= 0, the current number of available candidate
+     *        algorithms. A cached algorithm_id that is out of [0, num_candidates)
+     *        is rejected (returns nullopt) so a stale cache — e.g. one autotuned
+     *        on a different architecture that exposed more candidates — cannot
+     *        index past the current candidate list into an invalid/undefined
+     *        kernel. Pass -1 (default) to skip validation.
+     * @return Best algorithm ID, or std::nullopt if no (valid) entry exists
      */
-    auto lookup(const std::string& key) const -> std::optional<int>;
+    auto lookup(const std::string& key, int num_candidates = -1) const
+        -> std::optional<int>;
 
     /**
      * @brief Record a benchmark result for a key.
@@ -152,18 +159,22 @@ public:
      *
      * @param op_name Operation name (e.g., "MatMul", "Conv2d")
      * @param dtype Data type string (e.g., "Float32")
-     * @param device Target device/arch identifier (e.g., "cuda:0"). REQUIRED:
-     *        the cache is persisted to disk and reloaded across machines/GPUs,
-     *        so an autotuned algorithm choice for one architecture must not be
-     *        served for another (different SM/CU count, shared-mem size, tensor
-     *        cores, etc. select a different optimal config). Mirrors the
-     *        device-keying in codegen.cpp / compile.cpp (device().to_string()).
+     * @param device_arch Target architecture identifier. REQUIRED: the cache is
+     *        persisted to disk and reloaded across machines/GPUs, so an
+     *        autotuned choice for one architecture must not be served for
+     *        another (different SM/CU count, shared-mem size, tensor cores select
+     *        a different optimal config). This MUST uniquely identify the compute
+     *        architecture (e.g. "cuda:sm_90", "rocm:gfx942", "cpu"). Do NOT pass
+     *        Device::to_string() alone: it encodes only backend type + device
+     *        INDEX ("cuda:0"), so two different GPU generations both enumerated
+     *        at index 0 would alias to the same key and serve each other's config
+     *        (the lookup() num_candidates check is the correctness backstop).
      * @param shapes Tensor shapes
      * @return Formatted key string
      */
     static auto make_key(const std::string& op_name,
                          const std::string& dtype,
-                         const std::string& device,
+                         const std::string& device_arch,
                          const std::vector<std::vector<int64_t>>& shapes) -> std::string;
 
 private:

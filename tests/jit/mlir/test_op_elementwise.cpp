@@ -72,8 +72,11 @@ void check_matches_eager(const std::string& name, FnT fn,
         auto jitted = compiled(x);
         mt::assert_jit_used(name, target);
         auto jitted_cpu = jitted.tensor().to(::tenzor::Device::cpu());
+        // Compare in Float32 so the diff is not re-rounded in a low-precision
+        // dtype and item<float>() is valid for F16/BF16 outputs.
         auto diff = ::tenzor::max(::tenzor::abs(
-            eager_cpu - jitted_cpu)).template item<float>();
+            eager_cpu.to(::tenzor::DType::Float32) -
+            jitted_cpu.to(::tenzor::DType::Float32))).template item<float>();
         EXPECT_LT(diff, tol)
             << "op=" << name << " target=" << target << " diff=" << diff;
     }
@@ -122,6 +125,25 @@ TEST(OpElementwise, Exp) {
         auto y = x * 0.1F;
         return ::tenzor::exp(y);
     }, {16}, ::tenzor::DType::Float32, 1e-4F);
+}
+
+// JIT-F061: pow with a NEGATIVE integer exponent and a negative base must be
+// finite on GPU HAL targets (lowered as repeated-multiply + reciprocal), not
+// NaN from stablehlo.power's exp(y*log(x)). Compared to eager on every target.
+TEST(OpElementwise, PowNegativeIntExponent) {
+    check_matches_eager("pow_neg2", [](const ::tenzor::Variable& x) {
+        // x^-2 = 1/x^2 — finite for negative x (eager std::pow gives finite).
+        return ::tenzor::pow(x, -2.0);
+    }, {16}, ::tenzor::DType::Float32, 5e-3F);
+}
+
+// JIT-F037/F039: F16 transcendental must be widened to F32 in the lowering
+// (exercised end-to-end on every available IREE target, incl. GPU).
+TEST(OpElementwise, ExpF16) {
+    check_matches_eager("exp_f16", [](const ::tenzor::Variable& x) {
+        auto y = x * 0.1F;
+        return ::tenzor::exp(y);
+    }, {16}, ::tenzor::DType::Float16, 5e-3F);
 }
 
 TEST(OpElementwise, Log) {

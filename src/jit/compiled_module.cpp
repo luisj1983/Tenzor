@@ -98,6 +98,34 @@ auto CompiledModule::compute_shape_key(const std::vector<Variable>& inputs) -> s
     return key;
 }
 
+auto CompiledModule::throw_if_loaded_shape_mismatch(
+    const std::vector<std::vector<int64_t>>& call_shapes) const -> void {
+    // Only loaded modules that cannot retrace are guarded. If dynamic dims were
+    // configured (via mark_dynamic_dims after load) or a retrace path exists, the
+    // module can adapt and this guard does not apply.
+    if (!loaded_ || source_module_ || retrace_fn_ || !dynamic_dims_.empty()) {
+        return;
+    }
+    if (call_shapes == loaded_input_shapes_) {
+        return;
+    }
+    throw std::runtime_error(
+        "CompiledModule: input shape differs from the serialized trace and this "
+        "module was loaded from disk, which cannot retrace (the source module is "
+        "not serialized). Replaying would silently use the baked trace-time "
+        "shapes. Re-trace/re-export the module for the new shape, or call "
+        "mark_dynamic_dims() on the loaded module before forwarding.");
+}
+
+auto CompiledModule::set_traced_signature(const std::vector<Variable>& example_inputs)
+    -> void {
+    traced_shape_key_ = compute_shape_key(example_inputs);
+    if (!example_inputs.empty()) {
+        traced_device_ = example_inputs[0].tensor().device();
+        traced_dtype_  = example_inputs[0].tensor().dtype();
+    }
+}
+
 auto CompiledModule::forward(const Variable& input) -> Variable {
     // Serialise the whole call: forward() reassigns graph_, inserts into
     // shape_cache_, and overwrites traced_device_/traced_dtype_ on the retrace
@@ -122,6 +150,13 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             }
         }
         graph_->bind_symbolic_shapes(env);
+    }
+
+    // A loaded (non-retraceable) module must fail loudly on a shape change
+    // rather than replay a graph baked at the serialized trace shape.
+    {
+        auto s = input.tensor().shape();
+        throw_if_loaded_shape_mismatch({std::vector<int64_t>(s.begin(), s.end())});
     }
 
     // Device/dtype mismatch retrace: if the current graph was traced with a
@@ -224,13 +259,29 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     // the current graph_ was specialized for catches all three (a device/dtype
     // change on any input, AND a shape-only change that would otherwise replay a
     // graph with baked trace-shape creation ops).
+    // A loaded (non-retraceable) module must fail loudly on a shape change
+    // rather than replay a graph baked at the serialized trace shape.
+    {
+        std::vector<std::vector<int64_t>> call_shapes;
+        call_shapes.reserve(inputs.size());
+        for (const auto& v : inputs) {
+            auto s = v.tensor().shape();
+            call_shapes.emplace_back(s.begin(), s.end());
+        }
+        throw_if_loaded_shape_mismatch(call_shapes);
+    }
+
     auto key = compute_shape_key(inputs);
-    if (source_module_ && !inputs.empty() && key != traced_shape_key_) {
+    if ((source_module_ || retrace_fn_) && !inputs.empty() && key != traced_shape_key_) {
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
             graph_ = it->second;
         } else {
-            auto retraced = CompiledModule::trace(source_module_, inputs[0]);
+            // Prefer the multi-input retrace closure when present (e.g. a
+            // multi-argument script): the single-input source_module_ trace would
+            // drop all but inputs[0] and throw an argument-count mismatch.
+            auto retraced = retrace_fn_ ? retrace_fn_(inputs)
+                                        : CompiledModule::trace(source_module_, inputs[0]);
             retraced->optimize_for_inference();
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
                 shape_cache_[key] = retraced->graph_;
@@ -245,7 +296,7 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     auto results = graph_->forward(inputs);
 
     // Check if a ShapeGuard triggered a retrace request
-    if (graph_->needs_retrace() && source_module_ && !inputs.empty()) {
+    if (graph_->needs_retrace() && (source_module_ || retrace_fn_) && !inputs.empty()) {
         graph_->reset_retrace();
 
         auto key = compute_shape_key(inputs);
@@ -254,7 +305,8 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
         if (it != shape_cache_.end()) {
             graph_ = it->second;
         } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
-            auto retraced = CompiledModule::trace(source_module_, inputs[0]);
+            auto retraced = retrace_fn_ ? retrace_fn_(inputs)
+                                        : CompiledModule::trace(source_module_, inputs[0]);
             retraced->optimize_for_inference();
             shape_cache_[key] = retraced->graph_;
             graph_ = retraced->graph_;
@@ -347,6 +399,19 @@ auto CompiledModule::load(const std::string& path) -> std::shared_ptr<CompiledMo
     // Restore user KV metadata that was serialized with the graph.
     for (const auto& [key, value] : graph->string_metadata()) {
         module->add_metadata(key, value);
+    }
+    // A loaded module has no source module / retrace closure (neither is
+    // serialized), so it cannot retrace. Record that fact and the graph's baked
+    // input shapes so forward() fails loudly on a shape change instead of
+    // silently replaying the trace-time-baked graph (JIT-F011).
+    module->loaded_ = true;
+    for (const auto& in : module->graph_->inputs()) {
+        if (in) {
+            auto s = in->shape();
+            module->loaded_input_shapes_.emplace_back(s.begin(), s.end());
+        } else {
+            module->loaded_input_shapes_.emplace_back();
+        }
     }
     return module;
 }

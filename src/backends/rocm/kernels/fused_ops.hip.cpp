@@ -833,7 +833,9 @@ __global__ void fused_layer_norm_kernel(
     }
 
     Acc variance = shared_data[0] / static_cast<Acc>(norm_size);
-    Acc inv_std = rsqrt(variance + static_cast<Acc>(eps));
+    // Correctly-rounded 1/sqrt (not the rsqrt approximation intrinsic) so the
+    // eager fused LayerNorm bit-matches the CPU/JIT reference (JIT-F051).
+    Acc inv_std = static_cast<Acc>(1) / sqrt(variance + static_cast<Acc>(eps));
 
     // Normalize and scale (compute in double, narrow to T on store)
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
@@ -2070,7 +2072,9 @@ __global__ void fused_rms_norm_kernel(
     __shared__ T shared_rrms;
     if (threadIdx.x == 0) {
         double mean_sq = shared_data[0] / static_cast<double>(norm_size);
-        shared_rrms = static_cast<T>(rsqrt(mean_sq + static_cast<double>(eps)));
+        // Correctly-rounded 1/sqrt in double (not the rsqrt intrinsic) to
+        // bit-match the CPU/JIT RMSNorm reference (JIT-F051).
+        shared_rrms = static_cast<T>(1.0 / sqrt(mean_sq + static_cast<double>(eps)));
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();
@@ -2210,7 +2214,10 @@ __global__ void fused_conv2d_bn_relu_full_kernel(
         }
 
         // Apply batch normalization
-        T normalized = (conv_sum - bn_mean[c_out]) * rsqrtf(bn_var[c_out] + eps);
+        // 1/sqrt (not the rsqrtf approximation) to match the CUDA/CPU/JIT
+        // reference and the sibling ROCm norm kernels (JIT-F059).
+        T normalized = (conv_sum - bn_mean[c_out]) *
+                       (T(1) / sqrt(bn_var[c_out] + eps));
         T bn_out = normalized * bn_gamma[c_out] + bn_beta[c_out];
 
         // Apply ReLU

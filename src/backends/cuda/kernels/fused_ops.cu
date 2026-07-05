@@ -286,30 +286,34 @@ auto fused_linear_relu_cuda(
 // Fused BatchNorm + ReLU CUDA Kernel
 // ==============================================================================
 
-// Device helper for rsqrt that works with different types
+// Device helper for the inverse standard deviation. Uses a correctly-rounded
+// 1/sqrt (reciprocal OF a division of sqrt) rather than the rsqrt/hrsqrt
+// approximation intrinsics, so the eager fused-norm result bit-matches the CPU
+// and JIT reference (both use 1/sqrt); the rsqrt intrinsic diverges by ~1-2 ULP
+// (JIT-F051). Half/bf16 widen to float, compute in float, then narrow.
 template<typename T>
 __device__ __forceinline__ T device_rsqrt(T x) {
-    return rsqrtf(static_cast<float>(x));
+    return static_cast<T>(1.0f / sqrtf(static_cast<float>(x)));
 }
 
 template<>
 __device__ __forceinline__ float device_rsqrt<float>(float x) {
-    return rsqrtf(x);
+    return 1.0f / sqrtf(x);
 }
 
 template<>
 __device__ __forceinline__ double device_rsqrt<double>(double x) {
-    return rsqrt(x);
+    return 1.0 / sqrt(x);
 }
 
 template<>
 __device__ __forceinline__ __half device_rsqrt<__half>(__half x) {
-    return hrsqrt(x);
+    return __float2half(1.0f / sqrtf(__half2float(x)));
 }
 
 template<>
 __device__ __forceinline__ __nv_bfloat16 device_rsqrt<__nv_bfloat16>(__nv_bfloat16 x) {
-    return hrsqrt(x);
+    return __float2bfloat16(1.0f / sqrtf(__bfloat162float(x)));
 }
 
 template<typename T>
@@ -973,7 +977,9 @@ __global__ void fused_layer_norm_kernel(
     }
 
     Acc variance = shared_data[0] / static_cast<Acc>(norm_size);
-    Acc inv_std = rsqrt(variance + static_cast<Acc>(eps));
+    // 1/sqrt (not the rsqrt approximation) to match the CPU/JIT reference and
+    // the sibling kernels (JIT-F060).
+    Acc inv_std = static_cast<Acc>(1) / sqrt(variance + static_cast<Acc>(eps));
 
     // Save mean and inv_std for backward pass (narrow to T)
     if (threadIdx.x == 0) {
@@ -1388,7 +1394,8 @@ __global__ void fused_rms_norm_kernel(
     __shared__ Acc shared_rrms;
     if (threadIdx.x == 0) {
         double mean_sq = sum_sq / static_cast<double>(norm_size);
-        shared_rrms = static_cast<Acc>(rsqrt(mean_sq + static_cast<double>(eps)));
+        // 1/sqrt in double (not the rsqrt approximation) — matches CPU/JIT (JIT-F060).
+        shared_rrms = static_cast<Acc>(1.0 / sqrt(mean_sq + static_cast<double>(eps)));
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();

@@ -201,7 +201,12 @@ TEST_F(ControlFlowIntegrationTest, LoopBodySubgraphAttached) {
     // The body ran one iteration (state[0] + 1 = 1 Add op), so the
     // subgraph must contain at least one node.
     EXPECT_GE(loop_node->body()->nodes().size(), 1u);
-    EXPECT_EQ(loop_node->body()->outputs().size(), 1u);
+    // ONNX loop-body outputs are [cond, carried...]. Here cond is a freshly
+    // created constant (ones()) with no producing op; it must still be surfaced
+    // as a body output (materialized as a sub-graph constant, JIT-F017) so the
+    // interpreter reads body_outputs[0] as the next-iteration condition. Hence
+    // two outputs: the condition and the single carried value.
+    EXPECT_EQ(loop_node->body()->outputs().size(), 2u);
 }
 
 // ---------------------------------------------------------------------------

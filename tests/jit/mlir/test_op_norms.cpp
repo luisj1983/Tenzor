@@ -19,6 +19,8 @@
 
 #include <gtest/gtest.h>
 
+#include "mlir_target_util.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -140,20 +142,28 @@ namespace F = ::tenzor::nn::functional;
 void run_jit_vs_eager(::tenzor::jit::CompiledFunction::FnType fn,
                       const ::tenzor::Variable& x,
                       float tol = 5e-4F) {
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+    // Fan out over every available IREE target (llvm-cpu always; cuda / rocm /
+    // vulkan-spirv when present) so the GPU lowerings — not just llvm-cpu — are
+    // numerically validated against eager (JIT-F028).
+    namespace mt = ::tenzor::testing::mlir;
     auto eager = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jit   = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
-    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
-    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
-                    .template item<float>();
-    EXPECT_LT(diff, tol);
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jit = compiled(x);
+        mt::assert_jit_used("norm", target);
+        auto jit_cpu = jit.tensor().to(::tenzor::Device::cpu());
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager_cpu.to(::tenzor::DType::Float32) -
+            jit_cpu.to(::tenzor::DType::Float32))).template item<float>();
+        EXPECT_LT(diff, tol) << "target=" << target << " diff=" << diff;
+    }
 }
 
 }  // namespace tzn_e2e

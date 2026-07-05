@@ -292,6 +292,16 @@ TEST(MlirTrainingParity, InferenceMatchesEager_Rocm) {
     }
     run_inference(Device::rocm(0), "rocm");
 }
+// JIT-F036: Vulkan was omitted from the MLIR training-parity coverage. Vulkan has
+// an IREE target (vulkan-spirv), so both inference and backward-through-JIT are
+// exercised here. (OneAPI has no IREE HAL — see JIT-F030/F038 — so its JIT path
+// runs eagerly and is covered by the inference-vs-eager equivalence there.)
+TEST(MlirTrainingParity, InferenceMatchesEager_Vulkan) {
+    if (!mt::backend_present("vulkan")) {
+        GTEST_SKIP() << "no Vulkan backend";
+    }
+    run_inference(Device::vulkan(0), "vulkan");
+}
 
 // ── TRAINING parity per backend ──────────────────────────────────────────────
 TEST(MlirTrainingParity, TrainingThroughJIT_Cpu) {
@@ -308,6 +318,12 @@ TEST(MlirTrainingParity, TrainingThroughJIT_Rocm) {
         GTEST_SKIP() << "no ROCm backend";
     }
     run_training(Device::rocm(0), "rocm");
+}
+TEST(MlirTrainingParity, TrainingThroughJIT_Vulkan) {
+    if (!mt::backend_present("vulkan")) {
+        GTEST_SKIP() << "no Vulkan backend";
+    }
+    run_training(Device::vulkan(0), "vulkan");  // JIT-F036
 }
 
 // ── CPU finite-difference gradcheck on a CLOSURE-CAPTURED parameter ───────────

@@ -1019,6 +1019,26 @@ auto compile_script_multi_with_dummies(const char* source,
     auto compiled = std::make_shared<CompiledModule>(graph);
     auto module_base = std::static_pointer_cast<nn::Module>(module);
     compiled->set_source_module(module_base);
+    // Seed the traced signature from the dummies so the FIRST forward() with
+    // matching-shape inputs replays directly. Without this, traced_shape_key_
+    // stays empty, forward() always thinks the shape changed, and it retraces via
+    // the single-input source-module path — which cannot express an N-arg script
+    // and throws "argument count mismatch" (JIT-F003).
+    compiled->set_traced_signature(input_vars);
+    // A genuine shape/device/dtype change must retrace with ALL N inputs, so
+    // register a multi-input retrace closure that re-runs the N-arg script trace.
+    compiled->set_retrace_fn(
+        [module](const std::vector<Variable>& ins) -> std::shared_ptr<CompiledModule> {
+            auto g = jit::trace(
+                [module](const std::vector<Variable>& a) -> std::vector<Variable> {
+                    return {module->evaluator().evaluate(a)};
+                },
+                ins);
+            if (!g) {
+                throw std::runtime_error("compile_script: retrace produced null graph");
+            }
+            return std::make_shared<CompiledModule>(g);
+        });
     return compiled;
 }
 

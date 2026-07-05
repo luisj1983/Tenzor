@@ -426,6 +426,15 @@ extern "C" __global__ void fused_reduction_kernel(
     // Fold the per-thread compensation back before the tree reduction combines
     // the partial sums across threads.
     if (use_kahan) ss << "    sum = sum + kahan_c;\n";
+    // NOTE (JIT-F013 / cross-backend tolerance): this warp-shuffle tree folds over
+    // `warpSize` lanes, which is 32 under NVRTC (CUDA) but 64 under HIPRTC (ROCm).
+    // The lane grouping therefore differs between the two GPU backends, and the
+    // cross-lane combine is a plain reduction (Kahan compensation is per-thread
+    // only). As a result Sum/Mean/Softmax/Norm reductions are NOT bit-identical
+    // between CUDA and ROCm (nor vs the CPU's sequential compensated sum) for
+    // large reduce extents — the difference is a small multiple of ULP that grows
+    // ~log(N). Cross-backend parity tests over these ops must use a tolerance
+    // (not exact equality); do not tighten below the accumulated-rounding bound.
     ss << R"(
 
     // Warp-level reduction
@@ -603,13 +612,13 @@ extern "C" __global__ void fused_softmax_kernel(
         if (lane == 0) shared_sum[0] = thread_sum;
     }
     __syncthreads();
-    )" << C << R"( inv_sum = 1.0)" << F << R"( / shared_sum[0];
-
-    // Pass 3: recompute exp(x - max) in the compute type and normalize. The
-    // numerator stays in C until the single final narrowing store to T.
+    // Pass 3: recompute exp(x - max) in the compute type and normalize with a
+    // DIRECT divide (one correctly-rounded division) rather than a
+    // reciprocal-then-multiply (two roundings), to bit-match the eager softmax
+    // (JIT-F052). The numerator stays in C until the single final narrowing store.
     for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
         )" << C << R"( val = )" << exp_fn << R"((static_cast<)" << C << R"(>(row_input[c]) - row_max);
-        row_output[c] = static_cast<)" << T << R"(>(val * inv_sum);
+        row_output[c] = static_cast<)" << T << R"(>(val / shared_sum[0]);
     }
 }
 )";

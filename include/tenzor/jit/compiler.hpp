@@ -1352,6 +1352,23 @@ public:
         source_module_ = std::move(module);
     }
 
+    /// Set a retrace closure for modules whose retrace cannot be expressed as a
+    /// single-input Module trace (e.g. multi-argument scripts). When set, the
+    /// forward() retrace paths re-run THIS closure with ALL inputs instead of the
+    /// single-input source-module trace (which would drop args and throw an
+    /// "argument count mismatch").
+    auto set_retrace_fn(
+        std::function<std::shared_ptr<CompiledModule>(const std::vector<Variable>&)> fn)
+        -> void {
+        retrace_fn_ = std::move(fn);
+    }
+
+    /// Seed the traced signature (shape+device+dtype key) from the example inputs
+    /// the graph was traced with, so the first matching-shape forward() replays
+    /// directly instead of spuriously retracing (which, for a multi-arg module
+    /// built directly from a graph, would otherwise fire on the very first call).
+    auto set_traced_signature(const std::vector<Variable>& example_inputs) -> void;
+
 private:
     std::shared_ptr<Graph> graph_;                                   ///< IR graph
     std::unordered_map<std::string, std::string> metadata_;          ///< Metadata storage
@@ -1377,6 +1394,22 @@ private:
     Device traced_device_{Device::cpu()};                            ///< Device used at most recent trace
     DType  traced_dtype_{DType::Float32};                            ///< DType used at most recent trace
     std::string traced_shape_key_;                                   ///< Full shape+device+dtype key the current graph_ is specialized for
+    /// Optional multi-input retrace closure (see set_retrace_fn). Non-null for
+    /// modules that cannot be retraced via the single-input source_module_ path.
+    std::function<std::shared_ptr<CompiledModule>(const std::vector<Variable>&)> retrace_fn_;
+
+    /// True for a module reconstructed by load(). A loaded module has no source
+    /// module or retrace closure (neither is serialized), so it cannot retrace;
+    /// forward() therefore throws on a shape change rather than silently replaying
+    /// a graph baked at the serialized trace shape.
+    bool loaded_{false};
+    /// Input shapes the loaded graph was serialized at (used by the loaded-module
+    /// shape guard). Empty for non-loaded modules.
+    std::vector<std::vector<int64_t>> loaded_input_shapes_;
+    /// Throw a clear error if this is a loaded (non-retraceable) module being
+    /// called with input shapes different from the serialized trace shapes.
+    auto throw_if_loaded_shape_mismatch(
+        const std::vector<std::vector<int64_t>>& call_shapes) const -> void;
 
     /// Serialises the mutating paths of forward()/replay/capture so a single
     /// CompiledModule shared across inference threads (the natural server

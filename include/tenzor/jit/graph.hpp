@@ -316,7 +316,7 @@ public:
      * @param name Attribute name
      * @param value Float value
      */
-    auto set_attr(const std::string& name, float value) -> void {
+    auto set_attr(const std::string& name, double value) -> void {
         attrs_[name] = value;
     }
 
@@ -366,9 +366,9 @@ public:
      * @param name Attribute name
      * @return Attribute value (0.0 if not found)
      */
-    auto get_attr(const std::string& name) const -> float {
+    auto get_attr(const std::string& name) const -> double {
         auto it = attrs_.find(name);
-        return it != attrs_.end() ? it->second : 0.0f;
+        return it != attrs_.end() ? it->second : 0.0;
     }
 
     /**
@@ -492,7 +492,7 @@ public:
      * @return References to attribute storage
      */
     auto get_all_attrs() -> std::tuple<
-        std::unordered_map<std::string, float>&,
+        std::unordered_map<std::string, double>&,
         std::unordered_map<std::string, int64_t>&,
         std::unordered_map<std::string, std::vector<int64_t>>&,
         std::unordered_map<std::string, bool>&,
@@ -505,7 +505,7 @@ private:
     std::string name_;                                      ///< Node name
     std::vector<std::shared_ptr<Value>> inputs_;            ///< Input values
     std::vector<std::shared_ptr<Value>> outputs_;           ///< Output values
-    std::unordered_map<std::string, float> attrs_;          ///< Float attributes
+    std::unordered_map<std::string, double> attrs_;         ///< Scalar attrs (double; JIT-F057)
     std::unordered_map<std::string, int64_t> int_attrs_;    ///< Int attributes
     std::unordered_map<std::string, std::vector<int64_t>> vec_attrs_;  ///< Vector attributes
     std::unordered_map<std::string, bool> bool_attrs_;      ///< Boolean attributes

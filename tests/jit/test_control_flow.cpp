@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/tracer.hpp>
+#include <tenzor/jit/control_flow.hpp>
 
 using namespace tenzor;
 using namespace tenzor::jit;
@@ -16,6 +17,21 @@ public:
 };
 static ::testing::Environment* const env =
     ::testing::AddGlobalTestEnvironment(new JITControlFlowTestEnv);
+
+TEST(JITControlFlow, EagerCondTinyFloat64PredicateIsTruthy) {
+    // A nonzero Float64 condition below the Float32 denormal floor must NOT be
+    // flushed to "false" (JIT-F008): 1e-40 underflows Float32 to 0.0f but is a
+    // genuine nonzero predicate, so the then-branch must be taken.
+    auto tiny = full({1}, 1e-40, DType::Float64, Device::cpu());
+    auto x = Variable(ones({2}, DType::Float32, Device::cpu()), false);
+    auto out = cond(
+        tiny,
+        [](const Variable& in) -> Variable { return in + in; },          // then -> 2
+        [](const Variable& in) -> Variable { return tenzor::neg(in); },  // else -> -1
+        x);
+    auto r = out.tensor().to(Device::cpu());
+    EXPECT_NEAR(r.data<float>()[0], 2.0f, 1e-5);
+}
 
 TEST(JITControlFlow, TraceIfBasic) {
     Tracer tracer;
