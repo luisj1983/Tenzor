@@ -1594,6 +1594,12 @@ static void launch_dim_reduction_min_bf16(
 // Public API
 // ============================================================================
 
+// Maps an Int64 count tensor to a Bool "non-zero" tensor (used by the Bool sum
+// path, whose output is Bool = any non-zero along the reduced axis).
+__global__ void ne_zero_to_bool_kernel(const int64_t* in, bool* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) { out[i] = (in[i] != 0); }
+}
+
 auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     // audit-2026-05-03 bug #2: ensure contiguous input — same root cause as
     // the CPU sum_kernel fix. Non-contiguous slice/expand views were being
@@ -1771,6 +1777,20 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
             else      run(float{});
             break;
         }
+        case DType::Bool: {
+            // Bool sum yields Bool = (any non-zero along the reduced axis),
+            // matching the CPU backend. The public sum() op promotes Bool->Int64
+            // before dispatch, so this kernel path only serves direct calls.
+            Tensor counts = sum_kernel(input.to(DType::Int64), dim, keepdim, stream);
+            int64_t out_n = output.numel();
+            if (out_n > 0) {
+                int blocks = (out_n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+                ne_zero_to_bool_kernel<<<blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    counts.data<int64_t>(), output.data<bool>(), out_n);
+                CUDA_CHECK(cudaGetLastError());
+            }
+            break;
+        }
         default:
             throw std::runtime_error("sum: unsupported dtype");
     }
@@ -1813,9 +1833,18 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
 
     const auto dtype = input.dtype();
 
+    // Integer and Bool dtypes: widen to Float32 (on-device cast) and return
+    // Float32 — PyTorch convention that integer mean produces Float32, matching
+    // the CPU backend.
+    if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::Int32 ||
+        dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::UInt16 ||
+        dtype == DType::UInt32 || dtype == DType::UInt64 || dtype == DType::Bool) {
+        return mean_kernel(input.to(DType::Float32), dim, keepdim, stream);
+    }
+
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16 &&
         dtype != DType::Complex64 && dtype != DType::Complex128) {
-        throw std::runtime_error("mean: only Float32, Float64, Float16, BFloat16, Complex64, and Complex128 are supported");
+        throw std::runtime_error("mean: unsupported dtype");
     }
 
     // Normalize negative dim (INT64_MIN sentinel means full reduction).
@@ -3342,6 +3371,16 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStrea
         }
     }
 
+    // Reject empty reductions at entry (before any kernel launch): the full-
+    // reduction path seeds from element [0] and the dim path reads the slice, so
+    // a zero-size reduced axis would read out of bounds. Matches the CPU backend.
+    if (dim == INT64_MIN) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+    } else if (input_shape[normalized_dim] == 0) {
+        throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+    }
+
     // Compute output shape (always Int64 for indices)
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -3485,6 +3524,16 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStrea
         if (normalized_dim < 0 || normalized_dim >= static_cast<int64_t>(input_shape.size())) {
             throw std::invalid_argument("Dimension out of range in argmin_kernel");
         }
+    }
+
+    // Reject empty reductions at entry (before any kernel launch): the full-
+    // reduction path seeds from element [0] and the dim path reads the slice, so
+    // a zero-size reduced axis would read out of bounds. Matches the CPU backend.
+    if (dim == INT64_MIN) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
+    } else if (input_shape[normalized_dim] == 0) {
+        throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
     }
 
     // Compute output shape (always Int64 for indices)
@@ -3767,6 +3816,127 @@ static void launch_dim_reduction_prod(
     CUDA_CHECK(cudaGetLastError());
 }
 
+// ---- Complex product reduction (Complex64/128, interleaved re/im pairs) ----
+// Product of complex numbers requires complex multiplication, so the scalar
+// prod kernels (which rely on `*=` and warp `__shfl_down_sync` of a single
+// value) cannot be reused. These dedicated kernels operate on the interleaved
+// real storage; `in_idx` is in complex-element units so `2*in_idx` indexes the
+// real channel.
+template<typename Real>
+__global__ void prod_along_dim_complex_kernel(
+    const Real* input, Real* output, DimMeta meta,
+    int64_t ndim, int64_t dim, int64_t output_size, int64_t dim_size) {
+    const int64_t stride_out = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         out_idx < output_size; out_idx += stride_out) {
+        int64_t indices[DIM_META_MAX_RANK];
+        int64_t tmp = out_idx;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            if (d == dim) { indices[d] = 0; continue; }
+            indices[d] = tmp % meta.shape[d];
+            tmp /= meta.shape[d];
+        }
+        Real pr = 1, pi = 0;
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * meta.strides[d];
+            Real ar = input[2 * in_idx], ai = input[2 * in_idx + 1];
+            Real nr = pr * ar - pi * ai;
+            Real ni = pr * ai + pi * ar;
+            pr = nr; pi = ni;
+        }
+        output[2 * out_idx] = pr;
+        output[2 * out_idx + 1] = pi;
+    }
+}
+
+template<typename Real>
+__global__ void prod_reduce_complex_kernel(const Real* input, Real* output, int64_t n) {
+    __shared__ Real sh_re[REDUCTION_BLOCK_SIZE];
+    __shared__ Real sh_im[REDUCTION_BLOCK_SIZE];
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    Real pr = 1, pi = 0;  // multiplicative identity (1 + 0i)
+    for (int64_t i = idx; i < n; i += grid_size) {
+        Real ar = input[2 * i], ai = input[2 * i + 1];
+        Real nr = pr * ar - pi * ai, ni = pr * ai + pi * ar;
+        pr = nr; pi = ni;
+    }
+    sh_re[tid] = pr; sh_im[tid] = pi;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            Real ar = sh_re[tid], ai = sh_im[tid];
+            Real br = sh_re[tid + stride], bi = sh_im[tid + stride];
+            sh_re[tid] = ar * br - ai * bi;
+            sh_im[tid] = ar * bi + ai * br;
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+    if (tid < WARP_SIZE) {
+        Real vr = sh_re[tid], vi = sh_im[tid];
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+            Real orr = __shfl_down_sync(0xffffffff, vr, offset);
+            Real oii = __shfl_down_sync(0xffffffff, vi, offset);
+            Real nr = vr * orr - vi * oii, ni = vr * oii + vi * orr;
+            vr = nr; vi = ni;
+        }
+        if (tid == 0) { output[2 * blockIdx.x] = vr; output[2 * blockIdx.x + 1] = vi; }
+    }
+}
+
+template<typename Real>
+__global__ void fill_complex_one_kernel(Real* out) { out[0] = 1; out[1] = 0; }
+
+template<typename Real>
+static void launch_full_reduction_prod_complex(const Real* d_input, Real* d_output,
+                                               int64_t n, cudaStream_t stream) {
+    if (n == 0) {
+        fill_complex_one_kernel<<<1, 1, 0, stream>>>(d_output);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+    if (n == 1) {
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_output, d_input, 2 * sizeof(Real),
+                                          cudaMemcpyDeviceToDevice, stream));
+        return;
+    }
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+    if (num_blocks == 1) {
+        prod_reduce_complex_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * 2 * sizeof(Real));
+        auto* d_temp = static_cast<Real*>(d_temp_guard.get());
+        prod_reduce_complex_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
+        prod_reduce_complex_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+template<typename Real>
+static void launch_dim_reduction_prod_complex(
+    const Real* d_input, Real* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim, cudaStream_t stream) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) if (i != dim) output_size *= input_shape[i];
+    if (output_size == 0 || dim_size == 0) return;
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+    int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
+    prod_along_dim_complex_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 // Public API for prod (product reduction)
 auto prod_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     // Ensure contiguous input — same root cause as the sum_kernel fix
@@ -3867,6 +4037,34 @@ auto prod_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
                     normalized_dim, stream
                 );
+            }
+            break;
+        }
+        case DType::Complex64: {
+            auto* in = reinterpret_cast<const float*>(input.data_ptr());
+            auto* out = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
+            if (dim == INT64_MIN) {
+                launch_full_reduction_prod_complex(in, out, input.numel(), stream);
+            } else {
+                launch_dim_reduction_prod_complex(
+                    in, out,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim, stream);
+            }
+            break;
+        }
+        case DType::Complex128: {
+            auto* in = reinterpret_cast<const double*>(input.data_ptr());
+            auto* out = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
+            if (dim == INT64_MIN) {
+                launch_full_reduction_prod_complex(in, out, input.numel(), stream);
+            } else {
+                launch_dim_reduction_prod_complex(
+                    in, out,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim, stream);
             }
             break;
         }
@@ -4914,7 +5112,17 @@ __global__ void argsort_gather_kernel(const T* __restrict__ input,
         int64_t outer = seg / inner_size;
         int64_t inner = seg % inner_size;
         int64_t in_off = outer * dim_size * inner_size + i * inner_size + inner;
-        gathered[g] = input[in_off];
+        // F065: NaN sorts as the LARGEST value (last ascending / first
+        // descending, matching CPU nan_less/nan_greater and PyTorch). cub radix
+        // orders raw bits, so a negative-sign NaN would land below -inf; remap
+        // every NaN key to +inf so all NaN cluster as the maximum regardless of
+        // sign bit. Only the SORT KEY is remapped — output is indices, so the
+        // original values are untouched.
+        T v = input[in_off];
+        if constexpr (std::is_floating_point_v<T>) {
+            if (v != v) v = static_cast<T>(INFINITY);
+        }
+        gathered[g] = v;
         local_idx[g] = i;
     }
 }
@@ -5090,6 +5298,22 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStrea
             }
             break;
         }
+        case DType::Int32:
+            if (single_slice) {
+                launch_argsort(input_cont.data<int32_t>(), output.data<int64_t>(), n, descending, stream);
+            } else {
+                launch_argsort_along_dim(input_cont.data<int32_t>(), output.data<int64_t>(),
+                                         outer_size, dim_size, inner_size, descending, stream);
+            }
+            break;
+        case DType::Int64:
+            if (single_slice) {
+                launch_argsort(input_cont.data<int64_t>(), output.data<int64_t>(), n, descending, stream);
+            } else {
+                launch_argsort_along_dim(input_cont.data<int64_t>(), output.data<int64_t>(),
+                                         outer_size, dim_size, inner_size, descending, stream);
+            }
+            break;
         default:
             throw std::runtime_error("argsort_kernel: unsupported dtype");
     }
@@ -5735,6 +5959,24 @@ auto any_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
             }
             break;
         }
+        case DType::Int8: {
+            auto* input_data = input.data<int8_t>();
+            if (dim == INT64_MIN) launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            else launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
+            break;
+        }
+        case DType::UInt8: {
+            auto* input_data = input.data<uint8_t>();
+            if (dim == INT64_MIN) launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            else launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
+            break;
+        }
+        case DType::Int16: {
+            auto* input_data = input.data<int16_t>();
+            if (dim == INT64_MIN) launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            else launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
+            break;
+        }
         default:
             throw std::runtime_error("any: unsupported dtype");
     }
@@ -5842,6 +6084,24 @@ auto all_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
             } else {
                 launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             }
+            break;
+        }
+        case DType::Int8: {
+            auto* input_data = input.data<int8_t>();
+            if (dim == INT64_MIN) launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            else launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
+            break;
+        }
+        case DType::UInt8: {
+            auto* input_data = input.data<uint8_t>();
+            if (dim == INT64_MIN) launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            else launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
+            break;
+        }
+        case DType::Int16: {
+            auto* input_data = input.data<int16_t>();
+            if (dim == INT64_MIN) launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            else launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim, stream);
             break;
         }
         default:
@@ -6400,9 +6660,11 @@ __global__ void renorm_compute_norm_kernel(
     int64_t indices[DIM_META_MAX_RANK] = {};
     indices[dim] = slice_idx;
 
-    // Accumulate the p-norm in a wider type (float for Float16/BFloat16) to
-    // avoid precision loss over the slice; narrow back to T when storing.
-    using Acc = typename AccumType<T>::type;
+    // Accumulate the p-norm in double for every float dtype (not float for
+    // Float32) so the norm matches the CPU renorm, which uses a double
+    // accumulator — otherwise a Float32 slice near maxnorm could disagree on
+    // whether to scale. Narrowed back to T when storing.
+    using Acc = double;
     Acc acc = Acc(0);
     for (int64_t flat = 0; flat < slice_size; ++flat) {
         // Unpack flat index into multi-dim coords for dims != dim.

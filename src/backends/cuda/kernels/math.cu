@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
+#include <type_traits>
 #include <vector>
 #include <cstring>
 #include <chrono>
@@ -204,8 +206,17 @@ inline std::vector<int64_t> compute_broadcast_shape(const std::vector<int64_t>& 
         int64_t dim_a = i < shape_a.size() ? shape_a[shape_a.size() - 1 - i] : 1;
         int64_t dim_b = i < shape_b.size() ? shape_b[shape_b.size() - 1 - i] : 1;
 
-        if (dim_a == dim_b || dim_a == 1 || dim_b == 1) {
-            result[max_ndim - 1 - i] = std::max(dim_a, dim_b);
+        // A size-1 dimension broadcasts to the OTHER dimension's extent, which
+        // includes 0. std::max was wrong for the 0-vs-1 case: broadcast(0, 1)
+        // must be 0 (empty result), not 1 — otherwise an empty-input elementwise
+        // op allocates a non-empty output and reads the empty operand's
+        // (zero-length) buffer out of bounds. Mirrors CPU broadcast.hpp.
+        if (dim_a == dim_b) {
+            result[max_ndim - 1 - i] = dim_a;
+        } else if (dim_a == 1) {
+            result[max_ndim - 1 - i] = dim_b;
+        } else if (dim_b == 1) {
+            result[max_ndim - 1 - i] = dim_a;
         } else {
             throw std::runtime_error("Shapes are not broadcastable");
         }
@@ -668,6 +679,28 @@ __global__ void abs_kernel_complex64(const cuFloatComplex* input, float* output,
 __global__ void abs_kernel_complex128(const cuDoubleComplex* input, double* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = hypot(cuCreal(input[idx]), cuCimag(input[idx]));
+    }
+}
+
+// Sign (sgn) for Complex64: z/|z|, and 0 for z == 0 — matches torch.sgn and the
+// CPU complex slogdet sign. Output is complex.
+__global__ void sign_kernel_complex64(const cuFloatComplex* input, cuFloatComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float a = cuCrealf(input[idx]);
+        float b = cuCimagf(input[idx]);
+        float mag = hypotf(a, b);
+        output[idx] = (mag > 0.0f) ? make_cuFloatComplex(a / mag, b / mag)
+                                   : make_cuFloatComplex(0.0f, 0.0f);
+    }
+}
+
+__global__ void sign_kernel_complex128(const cuDoubleComplex* input, cuDoubleComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double a = cuCreal(input[idx]);
+        double b = cuCimag(input[idx]);
+        double mag = hypot(a, b);
+        output[idx] = (mag > 0.0) ? make_cuDoubleComplex(a / mag, b / mag)
+                                  : make_cuDoubleComplex(0.0, 0.0);
     }
 }
 
@@ -2413,6 +2446,16 @@ auto sign_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex64) {
+        sign_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data_ptr()),
+            reinterpret_cast<cuFloatComplex*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex128) {
+        sign_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data_ptr()),
+            reinterpret_cast<cuDoubleComplex*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         TENZOR_CUDA_INT_DISPATCH(input.dtype(), "sign",
             sign_int_kernel<T><<<grid, block, 0, stream>>>(
@@ -4087,56 +4130,104 @@ __global__ void init_curand_states(curandState* states, unsigned long long seed,
     }
 }
 
-// Kernel for uniform random [0, 1) generation
-__global__ void rand_kernel_device(float* output, curandState* states, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = curand_uniform(&states[idx]);
+// ============================================================================
+// Device Philox 4x32-10 (F042): a bit-for-bit port of the CPU
+// tenzor::cpu::philox implementation (philox.hpp), keyed by (seed, element
+// index). Producing the RNG stream from the same counter-based algorithm on
+// both backends makes rand/randint bit-identical across CPU and CUDA (the
+// uniform mapping is pure integer + power-of-two scaling). randn additionally
+// applies Box-Muller with log/cos, which differ by a few ULP between host libm
+// and device intrinsics, so normal samples match to ~1e-6, not bit-exactly.
+// ============================================================================
+__device__ __forceinline__ void dev_philox_round(uint32_t* ctr, const uint32_t* key) {
+    const uint64_t M0 = 0xD2511F53ULL, M1 = 0xCD9E8D57ULL;
+    uint64_t p0 = M0 * static_cast<uint64_t>(ctr[0]);
+    uint64_t p1 = M1 * static_cast<uint64_t>(ctr[2]);
+    uint32_t hi0 = static_cast<uint32_t>(p0 >> 32), lo0 = static_cast<uint32_t>(p0);
+    uint32_t hi1 = static_cast<uint32_t>(p1 >> 32), lo1 = static_cast<uint32_t>(p1);
+    ctr[0] = hi1 ^ ctr[1] ^ key[0];
+    ctr[1] = lo1;
+    ctr[2] = hi0 ^ ctr[3] ^ key[1];
+    ctr[3] = lo0;
+}
+__device__ __forceinline__ void dev_philox_gen(uint64_t seed, int64_t idx, uint32_t out[4]) {
+    uint32_t ctr[4] = {static_cast<uint32_t>(idx & 0xFFFFFFFFULL),
+                       static_cast<uint32_t>((idx >> 32) & 0xFFFFFFFFULL), 0u, 0u};
+    uint32_t k[2] = {static_cast<uint32_t>(seed & 0xFFFFFFFFULL),
+                     static_cast<uint32_t>((seed >> 32) & 0xFFFFFFFFULL)};
+    #pragma unroll
+    for (int r = 0; r < 10; ++r) {
+        dev_philox_round(ctr, k);
+        k[0] += 0x9E3779B9U;
+        k[1] += 0xBB67AE85U;
     }
+    out[0] = ctr[0]; out[1] = ctr[1]; out[2] = ctr[2]; out[3] = ctr[3];
+}
+__device__ __forceinline__ float dev_philox_uniform_f32(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    return static_cast<float>(o[0] >> 8) * (1.0f / 16777216.0f);
+}
+__device__ __forceinline__ float dev_philox_normal_f32(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    float u1 = static_cast<float>(o[0] >> 8) * (1.0f / 16777216.0f);
+    float u2 = static_cast<float>(o[1] >> 8) * (1.0f / 16777216.0f);
+    if (u1 < 1e-37f) u1 = 1e-37f;
+    return sqrtf(-2.0f * logf(u1)) * cosf(6.28318530718f * u2);
+}
+__device__ __forceinline__ double dev_philox_uniform_f64(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    uint64_t bits = (static_cast<uint64_t>(o[0]) << 21) | (static_cast<uint64_t>(o[1]) >> 11);
+    return static_cast<double>(bits) * (1.0 / 9007199254740992.0);
+}
+__device__ __forceinline__ double dev_philox_normal_f64(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    uint64_t b1 = (static_cast<uint64_t>(o[0]) << 21) | (static_cast<uint64_t>(o[1]) >> 11);
+    uint64_t b2 = (static_cast<uint64_t>(o[2]) << 21) | (static_cast<uint64_t>(o[3]) >> 11);
+    double u1 = static_cast<double>(b1) * (1.0 / 9007199254740992.0);
+    double u2 = static_cast<double>(b2) * (1.0 / 9007199254740992.0);
+    if (u1 < 1e-300) u1 = 1e-300;
+    return sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2);
 }
 
-// Kernel for normal distribution N(0,1) generation
-__global__ void randn_kernel_device(float* output, curandState* states, int64_t n) {
+// Uniform [0,1) — bit-identical to the CPU Philox stream for the same seed.
+__global__ void rand_kernel_device(float* output, uint64_t seed, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = curand_normal(&states[idx]);
+        output[idx] = dev_philox_uniform_f32(seed, idx);
     }
 }
-
-// FP16 uniform random kernel
-__global__ void rand_kernel_f16(__half* output, curandState* states, int64_t n) {
+__global__ void rand_kernel_double(double* output, uint64_t seed, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float val = curand_uniform(&states[idx]);
-        output[idx] = __float2half(val);
+        output[idx] = dev_philox_uniform_f64(seed, idx);
     }
 }
-
-// FP16 normal distribution kernel
-__global__ void randn_kernel_f16(__half* output, curandState* states, int64_t n) {
+__global__ void randn_kernel_device(float* output, uint64_t seed, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float val = curand_normal(&states[idx]);
-        output[idx] = __float2half(val);
+        output[idx] = dev_philox_normal_f32(seed, idx);
     }
 }
-
-// BFloat16 uniform random kernel
-__global__ void rand_kernel_bf16(__nv_bfloat16* output, curandState* states, int64_t n) {
+__global__ void randn_kernel_double(double* output, uint64_t seed, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float val = curand_uniform(&states[idx]);
-        output[idx] = __float2bfloat16(val);
+        output[idx] = dev_philox_normal_f64(seed, idx);
     }
 }
-
-// BFloat16 normal distribution kernel
-__global__ void randn_kernel_bf16(__nv_bfloat16* output, curandState* states, int64_t n) {
+__global__ void rand_kernel_f16(__half* output, uint64_t seed, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float val = curand_normal(&states[idx]);
-        output[idx] = __float2bfloat16(val);
+        output[idx] = __float2half(dev_philox_uniform_f32(seed, idx));
     }
 }
-
-// Float-to-double conversion kernel for proper type conversion
-__global__ void convert_float_to_double_kernel(const float* input, double* output, int64_t n) {
+__global__ void randn_kernel_f16(__half* output, uint64_t seed, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<double>(input[idx]);
+        output[idx] = __float2half(dev_philox_normal_f32(seed, idx));
+    }
+}
+__global__ void rand_kernel_bf16(__nv_bfloat16* output, uint64_t seed, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2bfloat16(dev_philox_uniform_f32(seed, idx));
+    }
+}
+__global__ void randn_kernel_bf16(__nv_bfloat16* output, uint64_t seed, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2bfloat16(dev_philox_normal_f32(seed, idx));
     }
 }
 
@@ -4156,38 +4247,23 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    // Allocate cuRAND states
-    backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
-    auto* d_states = static_cast<curandState*>(d_states_guard.get());
-
-    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
-    uint64_t seed = ::tenzor::get_global_seed();
-
-    init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
-    CUDA_CHECK(cudaGetLastError());
+    // F042: device Philox keyed by (seed, element index) — bit-identical to the
+    // CPU stream for the same seed, no per-element state array needed.
+    uint64_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
 
     if (dtype == DType::Float32) {
-        // Generate uniform random numbers
-        rand_kernel_device<<<grid, block, 0, stream>>>(result.data<float>(), d_states, n);
+        rand_kernel_device<<<grid, block, 0, stream>>>(result.data<float>(), seed, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float64) {
-        // For Float64, generate as float then convert properly
-        backend::CachedMemoryGuard temp_float_guard(n * sizeof(float));
-        auto* temp_float = static_cast<float*>(temp_float_guard.get());
-        rand_kernel_device<<<grid, block, 0, stream>>>(temp_float, d_states, n);
-        CUDA_CHECK(cudaGetLastError());
-
-        // Convert float to double using proper conversion kernel
-        double* output_double = result.data<double>();
-        convert_float_to_double_kernel<<<grid, block, 0, stream>>>(temp_float, output_double, n);
+        rand_kernel_double<<<grid, block, 0, stream>>>(result.data<double>(), seed, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float16) {
         rand_kernel_f16<<<grid, block, 0, stream>>>(
-            reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
+            reinterpret_cast<__half*>(result.data<Float16>()), seed, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::BFloat16) {
         rand_kernel_bf16<<<grid, block, 0, stream>>>(
-            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), d_states, n);
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), seed, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -4210,40 +4286,23 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    // Allocate cuRAND states
-    backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
-    auto* d_states = static_cast<curandState*>(d_states_guard.get());
-
-    // Honor `tenzor::manual_seed` for reproducibility. When the user has not
-    // set a manual seed, `get_global_seed` returns a time-based value, so
-    // we keep the existing entropy mix on top of that to preserve the
-    // previous "random per call" behavior in the unsetted case.
-    uint64_t seed = ::tenzor::get_global_seed();
-
-    init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
-    CUDA_CHECK(cudaGetLastError());
+    // F042: device Philox keyed by (seed, element index). The uniform stream is
+    // bit-identical to CPU; the Box-Muller transcendentals differ by ~ULP.
+    uint64_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
 
     if (dtype == DType::Float32) {
-        randn_kernel_device<<<grid, block, 0, stream>>>(result.data<float>(), d_states, n);
+        randn_kernel_device<<<grid, block, 0, stream>>>(result.data<float>(), seed, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float64) {
-        // For Float64, generate as float then convert properly
-        backend::CachedMemoryGuard temp_float_guard(n * sizeof(float));
-        auto* temp_float = static_cast<float*>(temp_float_guard.get());
-        randn_kernel_device<<<grid, block, 0, stream>>>(temp_float, d_states, n);
-        CUDA_CHECK(cudaGetLastError());
-
-        // Convert float to double using proper conversion kernel
-        double* output_double = result.data<double>();
-        convert_float_to_double_kernel<<<grid, block, 0, stream>>>(temp_float, output_double, n);
+        randn_kernel_double<<<grid, block, 0, stream>>>(result.data<double>(), seed, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float16) {
         randn_kernel_f16<<<grid, block, 0, stream>>>(
-            reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
+            reinterpret_cast<__half*>(result.data<Float16>()), seed, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::BFloat16) {
         randn_kernel_bf16<<<grid, block, 0, stream>>>(
-            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), d_states, n);
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), seed, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -4255,20 +4314,15 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 // ============================================================================
 
 // CUDA kernel: generate uniform float [0,1), scale to [low, high), cast to int
+// F042: device Philox uniform double in [0,1), scaled to [low, high) exactly as
+// the CPU randint (low + (int64_t)(philox_uniform_f64 * range)) — bit-identical.
 template<typename T>
-__global__ void randint_kernel_device(T* output, curandState* states, int64_t n, int64_t low, int64_t high) {
+__global__ void randint_kernel_device(T* output, uint64_t seed, int64_t n, int64_t low, int64_t high) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        // Generate uniform double in (0, 1]. Use double so the range scaling
-        // exactly represents integers up to 2^53, covering all supported int
-        // ranges (float32's 24-bit mantissa would bias/skip values for ranges
-        // above 2^24).
-        double r = curand_uniform_double(&states[idx]);
-        // Scale to [low, high) and cast to integer type
-        // curand_uniform_double returns (0, 1], so clamp to avoid hitting 'high'
+        double r = dev_philox_uniform_f64(seed, idx);  // [0, 1)
         int64_t range = high - low;
         int64_t val = low + static_cast<int64_t>(r * static_cast<double>(range));
-        // Clamp in case r == 1.0
-        if (val >= high) val = high - 1;
+        if (val >= high) val = high - 1;  // safety; r < 1 keeps val < high
         output[idx] = static_cast<T>(val);
     }
 }
@@ -4289,23 +4343,16 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    // Allocate cuRAND states
-    backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
-    auto* d_states = static_cast<curandState*>(d_states_guard.get());
-
-    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
-    uint64_t seed = ::tenzor::get_global_seed();
-
-    init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
-    CUDA_CHECK(cudaGetLastError());
+    // F042: device Philox keyed by (seed, element index) — bit-identical to CPU.
+    uint64_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
 
     if (dtype == DType::Int32) {
         randint_kernel_device<int32_t><<<grid, block, 0, stream>>>(
-            result.data<int32_t>(), d_states, n, low, high);
+            result.data<int32_t>(), seed, n, low, high);
         CUDA_CHECK(cudaGetLastError());
     } else {  // Int64
         randint_kernel_device<int64_t><<<grid, block, 0, stream>>>(
-            result.data<int64_t>(), d_states, n, low, high);
+            result.data<int64_t>(), seed, n, low, high);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -5775,8 +5822,25 @@ __global__ void arange_kernel_c128(cuDoubleComplex* output, double start, double
 }
 
 auto arange_kernel(double start, double end, double step, DType dtype, Device device, cudaStream_t stream) -> Tensor {
-    int64_t n = static_cast<int64_t>(std::ceil((end - start) / step));
-    if (n <= 0) n = 0;
+    // Match CPU/torch.arange length exactly: snap a near-integer ratio before
+    // ceil so a half-open interval like arange(0,1,0.1) yields exactly 10 (a
+    // naive ceil of 10.0000000002 would add a spurious 11th element past `end`).
+    int64_t n;
+    if ((step > 0 && start >= end) || (step < 0 && start <= end)) {
+        n = 0;
+    } else {
+        const double ratio = (end - start) / step;
+        const double rounded = std::round(ratio);
+        double count_d;
+        if (std::abs(ratio - rounded) < std::numeric_limits<double>::epsilon() *
+                                        std::max(1.0, std::abs(ratio)) * 4.0) {
+            count_d = rounded;  // exact integer ratio: half-open interval => rounded elements
+        } else {
+            count_d = std::ceil(ratio);
+        }
+        n = static_cast<int64_t>(count_d);
+        if (n < 0) n = 0;
+    }
     Tensor output({n}, dtype, device);
     if (n == 0) return output;
 
@@ -5955,7 +6019,9 @@ __global__ void eye_kernel_c128(cuDoubleComplex* output, int64_t rows, int64_t c
 }
 
 auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t stream) -> Tensor {
-    if (m <= 0) m = n;
+    // Only a negative sentinel means "square"; an explicit m==0 stays 0 and
+    // yields an (n,0) empty tensor, matching CPU creation.cpp and torch.eye(n,0).
+    if (m < 0) m = n;
     Tensor output({n, m}, dtype, device);
     int64_t total = n * m;
     int block_size = 256;
@@ -7049,33 +7115,44 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
     // Complex conversions: short-circuit before the main per-type dispatch
     // because Complex64/128 storage is interleaved pairs of real/imag, not
     // a single element the generic cast_from_standard template understands.
-    if (src_dtype == DType::Float32 && target_dtype == DType::Complex64) {
-        cast_f32_to_c64_kernel<<<grid, block, 0, stream>>>(
-            input.data<float>(),
-            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), n);
+    // Storage for Complex64/128 is interleaved (re, im) pairs. Any real<->complex
+    // conversion is decomposed through an intermediate real cast so every dtype
+    // pair is supported (matches CPU cast_cpu_raw): real->complex casts to the
+    // complex component type then zero-fills imag; complex->real extracts the real
+    // channel then casts to the target; C64<->C128 uses the direct kernels below.
+    const bool src_is_complex = (src_dtype == DType::Complex64 || src_dtype == DType::Complex128);
+    const bool tgt_is_complex = (target_dtype == DType::Complex64 || target_dtype == DType::Complex128);
+
+    if (tgt_is_complex && !src_is_complex) {
+        DType comp_t = (target_dtype == DType::Complex64) ? DType::Float32 : DType::Float64;
+        Tensor real_part = (src_dtype == comp_t) ? input : cuda_cast_kernel(input, comp_t, stream);
+        if (target_dtype == DType::Complex64) {
+            cast_f32_to_c64_kernel<<<grid, block, 0, stream>>>(
+                real_part.data<float>(),
+                reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), n);
+        } else {
+            cast_f64_to_c128_kernel<<<grid, block, 0, stream>>>(
+                real_part.data<double>(),
+                reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), n);
+        }
         CUDA_CHECK(cudaGetLastError());
         return result;
     }
-    if (src_dtype == DType::Float64 && target_dtype == DType::Complex128) {
-        cast_f64_to_c128_kernel<<<grid, block, 0, stream>>>(
-            input.data<double>(),
-            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), n);
+    if (src_is_complex && !tgt_is_complex) {
+        DType comp_t = (src_dtype == DType::Complex64) ? DType::Float32 : DType::Float64;
+        Tensor real_part(shape, comp_t, input.device());
+        if (src_dtype == DType::Complex64) {
+            cast_c64_to_f32_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(input.data_ptr()),
+                real_part.data<float>(), n);
+        } else {
+            cast_c128_to_f64_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const double*>(input.data_ptr()),
+                real_part.data<double>(), n);
+        }
         CUDA_CHECK(cudaGetLastError());
-        return result;
-    }
-    if (src_dtype == DType::Complex64 && target_dtype == DType::Float32) {
-        cast_c64_to_f32_kernel<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const float*>(input.data_ptr()),
-            result.data<float>(), n);
-        CUDA_CHECK(cudaGetLastError());
-        return result;
-    }
-    if (src_dtype == DType::Complex128 && target_dtype == DType::Float64) {
-        cast_c128_to_f64_kernel<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const double*>(input.data_ptr()),
-            result.data<double>(), n);
-        CUDA_CHECK(cudaGetLastError());
-        return result;
+        return (target_dtype == comp_t) ? real_part
+                                        : cuda_cast_kernel(real_part, target_dtype, stream);
     }
     if (src_dtype == DType::Complex64 && target_dtype == DType::Complex128) {
         cast_c64_to_c128_kernel<<<grid, block, 0, stream>>>(
@@ -8566,17 +8643,20 @@ auto logical_not_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor 
 // ============================================================================
 
 // --- minimum ---
+// NaN-propagating (torch.minimum semantics): if either operand is NaN the result
+// is NaN. fminf/fmin ignore NaN, so guard explicitly; (av+bv) yields NaN of the
+// correct type when either input is NaN.
 __global__ void minimum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = fminf(a[idx], b[idx]); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { float av = a[idx], bv = b[idx]; output[idx] = (isnan(av) || isnan(bv)) ? (av + bv) : fminf(av, bv); }
 }
 __global__ void minimum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = fmin(a[idx], b[idx]); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { double av = a[idx], bv = b[idx]; output[idx] = (isnan(av) || isnan(bv)) ? (av + bv) : fmin(av, bv); }
 }
 __global__ void minimum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2half(fminf(__half2float(a[idx]), __half2float(b[idx]))); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { float av = __half2float(a[idx]), bv = __half2float(b[idx]); float r = (isnan(av) || isnan(bv)) ? (av + bv) : fminf(av, bv); output[idx] = __float2half(r); }
 }
 __global__ void minimum_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(fminf(__bfloat162float(a[idx]), __bfloat162float(b[idx]))); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { float av = __bfloat162float(a[idx]), bv = __bfloat162float(b[idx]); float r = (isnan(av) || isnan(bv)) ? (av + bv) : fminf(av, bv); output[idx] = __float2bfloat16(r); }
 }
 template<typename T>
 __global__ void minimum_kernel_int(const T* a, const T* b, T* output, int64_t n) {
@@ -8593,46 +8673,53 @@ auto minimum_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream)
     compute_launch_config_1d(n, grid, block);
     if (a.dtype() == DType::Float32) {
         minimum_kernel_f32<<<grid, block, 0, stream>>>(a.data<float>(), b.data<float>(), result.data<float>(), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Float64) {
         minimum_kernel_f64<<<grid, block, 0, stream>>>(a.data<double>(), b.data<double>(), result.data<double>(), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Float16) {
         minimum_kernel_f16<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::BFloat16) {
         minimum_kernel_bf16<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
-        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Int8) {
+        minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+    } else if (a.dtype() == DType::Int16) {
+        minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
     } else if (a.dtype() == DType::Int32) {
         minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Int64) {
         minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
-        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt8) {
+        minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::UInt16) {
+        minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(), n);
+    } else if (a.dtype() == DType::UInt32) {
+        minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(), n);
+    } else if (a.dtype() == DType::UInt64) {
+        minimum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(), n);
     } else {
         throw std::runtime_error("minimum operation: unsupported dtype");
     }
+    CUDA_CHECK(cudaGetLastError());
     return result;
 }
 
 // --- maximum ---
 __global__ void maximum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = fmaxf(a[idx], b[idx]); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { float av = a[idx], bv = b[idx]; output[idx] = (isnan(av) || isnan(bv)) ? (av + bv) : fmaxf(av, bv); }
 }
 __global__ void maximum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = fmax(a[idx], b[idx]); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { double av = a[idx], bv = b[idx]; output[idx] = (isnan(av) || isnan(bv)) ? (av + bv) : fmax(av, bv); }
 }
 __global__ void maximum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2half(fmaxf(__half2float(a[idx]), __half2float(b[idx]))); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { float av = __half2float(a[idx]), bv = __half2float(b[idx]); float r = (isnan(av) || isnan(bv)) ? (av + bv) : fmaxf(av, bv); output[idx] = __float2half(r); }
 }
 __global__ void maximum_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* output, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { output[idx] = __float2bfloat16(fmaxf(__bfloat162float(a[idx]), __bfloat162float(b[idx]))); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { float av = __bfloat162float(a[idx]), bv = __bfloat162float(b[idx]); float r = (isnan(av) || isnan(bv)) ? (av + bv) : fmaxf(av, bv); output[idx] = __float2bfloat16(r); }
 }
 template<typename T>
 __global__ void maximum_kernel_int(const T* a, const T* b, T* output, int64_t n) {
@@ -8649,31 +8736,38 @@ auto maximum_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream)
     compute_launch_config_1d(n, grid, block);
     if (a.dtype() == DType::Float32) {
         maximum_kernel_f32<<<grid, block, 0, stream>>>(a.data<float>(), b.data<float>(), result.data<float>(), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Float64) {
         maximum_kernel_f64<<<grid, block, 0, stream>>>(a.data<double>(), b.data<double>(), result.data<double>(), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Float16) {
         maximum_kernel_f16<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::BFloat16) {
         maximum_kernel_bf16<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
-        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Int8) {
+        maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+    } else if (a.dtype() == DType::Int16) {
+        maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
     } else if (a.dtype() == DType::Int32) {
         maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
-        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Int64) {
         maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
-        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt8) {
+        maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::UInt16) {
+        maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(), n);
+    } else if (a.dtype() == DType::UInt32) {
+        maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(), n);
+    } else if (a.dtype() == DType::UInt64) {
+        maximum_kernel_int<<<grid, block, 0, stream>>>(a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(), n);
     } else {
         throw std::runtime_error("maximum operation: unsupported dtype");
     }
+    CUDA_CHECK(cudaGetLastError());
     return result;
 }
 
@@ -10016,97 +10110,97 @@ Tensor log_sigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& 
 }
 
 // Bitwise ops
-__global__ void bitwise_and_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; }
-}
-__global__ void bitwise_and_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; }
-}
-__global__ void bitwise_and_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; }
-}
-__global__ void bitwise_and_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; }
-}
-auto bitwise_and_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device());
+// Broadcast-aware functors. Bitwise and/or/xor promote nothing; shift ops define
+// out-of-range shift counts (UB in C++) to match the CPU kernels: left-shift by
+// s<0||s>=bitwidth -> 0, right-shift -> (x<0 ? -1 : 0). Left shift casts to the
+// unsigned type first to avoid signed-shift UB.
+struct BitAndOp { template<typename T> __device__ T operator()(T a, T b) const { return a & b; } };
+struct BitOrOp  { template<typename T> __device__ T operator()(T a, T b) const { return a | b; } };
+struct BitXorOp { template<typename T> __device__ T operator()(T a, T b) const { return a ^ b; } };
+struct LShiftOp {
+    template<typename T> __device__ T operator()(T x, T s) const {
+        constexpr int W = static_cast<int>(sizeof(T) * 8);
+        if constexpr (std::is_signed<T>::value) { if (s < 0) return static_cast<T>(0); }
+        if (s >= W) return static_cast<T>(0);
+        using U = typename std::make_unsigned<T>::type;
+        return static_cast<T>(static_cast<U>(x) << s);
+    }
+};
+struct RShiftOp {
+    template<typename T> __device__ T operator()(T x, T s) const {
+        constexpr int W = static_cast<int>(sizeof(T) * 8);
+        if constexpr (std::is_signed<T>::value) {
+            if (s < 0 || s >= W) return x < 0 ? static_cast<T>(-1) : static_cast<T>(0);
+        } else {
+            if (s >= W) return static_cast<T>(0);
+        }
+        return static_cast<T>(x >> s);
+    }
+};
+
+// Shared broadcast launcher for integer binary ops (bitwise/shift). Contiguifies,
+// computes the broadcast output shape+strides, and launches the generic
+// broadcast_kernel so `tensor OP scalar` (and any broadcastable shapes) is handled
+// correctly instead of reading the smaller operand out of bounds.
+template<typename Op>
+static Tensor launch_integer_broadcast_binary(const Tensor& a_in, const Tensor& b_in,
+                                              Op op, bool include_unsigned,
+                                              const char* name, cudaStream_t stream) {
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
+    std::vector<int64_t> a_shape(a.shape().begin(), a.shape().end());
+    std::vector<int64_t> b_shape(b.shape().begin(), b.shape().end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape, b_shape);
+    Tensor result(output_shape, a.dtype(), a.device());
+    int64_t n = result.numel();
     if (n == 0) return result;
+    std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape, output_shape);
+    std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape, output_shape);
+    BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, output_shape);
+    int64_t ndim = static_cast<int64_t>(output_shape.size());
     dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int8) {
-        bitwise_and_i8<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
-    } else if (a.dtype() == DType::Int16) {
-        bitwise_and_i16<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
-    } else if (a.dtype() == DType::Int32) {
-        bitwise_and_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
-    } else if (a.dtype() == DType::Int64) {
-        bitwise_and_i64<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
-    } else { throw std::runtime_error("bitwise_and: unsupported dtype"); }
+#define TENZOR_INT_BC_LAUNCH(CTYPE) \
+    broadcast_kernel<<<grid, block, 0, stream>>>(a.data<CTYPE>(), b.data<CTYPE>(), \
+        result.data<CTYPE>(), meta, ndim, n, op)
+    switch (a.dtype()) {
+        case DType::Int8:  TENZOR_INT_BC_LAUNCH(int8_t);  break;
+        case DType::Int16: TENZOR_INT_BC_LAUNCH(int16_t); break;
+        case DType::Int32: TENZOR_INT_BC_LAUNCH(int32_t); break;
+        case DType::Int64: TENZOR_INT_BC_LAUNCH(int64_t); break;
+        case DType::UInt8:  if (include_unsigned) { TENZOR_INT_BC_LAUNCH(uint8_t);  break; } goto unsupported;
+        case DType::UInt16: if (include_unsigned) { TENZOR_INT_BC_LAUNCH(uint16_t); break; } goto unsupported;
+        case DType::UInt32: if (include_unsigned) { TENZOR_INT_BC_LAUNCH(uint32_t); break; } goto unsupported;
+        case DType::UInt64: if (include_unsigned) { TENZOR_INT_BC_LAUNCH(uint64_t); break; } goto unsupported;
+        default: goto unsupported;
+    }
+#undef TENZOR_INT_BC_LAUNCH
     CUDA_CHECK(cudaGetLastError());
     return result;
+unsupported:
+    throw std::runtime_error(std::string(name) + ": unsupported dtype");
+}
+
+auto bitwise_and_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    return launch_integer_broadcast_binary(a, b, BitAndOp(), /*include_unsigned=*/true,
+                                           "bitwise_and", stream);
 }
 Tensor bitwise_and_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return bitwise_and_kernel(inputs[0], inputs[1], stream);
 }
 
-__global__ void bitwise_or_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; }
-}
-__global__ void bitwise_or_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; }
-}
-__global__ void bitwise_or_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; }
-}
-__global__ void bitwise_or_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; }
-}
 auto bitwise_or_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device());
-    if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int8) { bitwise_or_i8<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n); }
-    else if (a.dtype() == DType::Int16) { bitwise_or_i16<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (a.dtype() == DType::Int32) { bitwise_or_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64) { bitwise_or_i64<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_or: unsupported dtype"); }
-    CUDA_CHECK(cudaGetLastError());
-    return result;
+    return launch_integer_broadcast_binary(a, b, BitOrOp(), /*include_unsigned=*/true,
+                                           "bitwise_or", stream);
 }
 Tensor bitwise_or_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return bitwise_or_kernel(inputs[0], inputs[1], stream);
 }
 
-__global__ void bitwise_xor_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; }
-}
-__global__ void bitwise_xor_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; }
-}
-__global__ void bitwise_xor_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; }
-}
-__global__ void bitwise_xor_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; }
-}
 auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device());
-    if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int8) { bitwise_xor_i8<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n); }
-    else if (a.dtype() == DType::Int16) { bitwise_xor_i16<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (a.dtype() == DType::Int32) { bitwise_xor_i32<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64) { bitwise_xor_i64<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_xor: unsupported dtype"); }
-    CUDA_CHECK(cudaGetLastError());
-    return result;
+    return launch_integer_broadcast_binary(a, b, BitXorOp(), /*include_unsigned=*/true,
+                                           "bitwise_xor", stream);
 }
 Tensor bitwise_xor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
@@ -10148,62 +10242,18 @@ Tensor bitwise_not_dispatch(std::span<const Tensor> inputs, const OpAttributes& 
     return bitwise_not_kernel(inputs[0], stream);
 }
 
-__global__ void bitwise_lshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; }
-}
-__global__ void bitwise_lshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; }
-}
-__global__ void bitwise_lshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; }
-}
-__global__ void bitwise_lshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; }
-}
 auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, cudaStream_t stream) -> Tensor {
-    int64_t n = input.numel();
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
-    if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int8) { bitwise_lshift_i8<<<grid, block, 0, stream>>>(input.data<int8_t>(), shift.data<int8_t>(), result.data<int8_t>(), n); }
-    else if (input.dtype() == DType::Int16) { bitwise_lshift_i16<<<grid, block, 0, stream>>>(input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (input.dtype() == DType::Int32) { bitwise_lshift_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (input.dtype() == DType::Int64) { bitwise_lshift_i64<<<grid, block, 0, stream>>>(input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_left_shift: unsupported dtype"); }
-    CUDA_CHECK(cudaGetLastError());
-    return result;
+    return launch_integer_broadcast_binary(input, shift, LShiftOp(), /*include_unsigned=*/false,
+                                           "bitwise_left_shift", stream);
 }
 Tensor bitwise_left_shift_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return bitwise_left_shift_kernel(inputs[0], inputs[1], stream);
 }
 
-__global__ void bitwise_rshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; }
-}
-__global__ void bitwise_rshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; }
-}
-__global__ void bitwise_rshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; }
-}
-__global__ void bitwise_rshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; }
-}
 auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, cudaStream_t stream) -> Tensor {
-    int64_t n = input.numel();
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
-    if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int8) { bitwise_rshift_i8<<<grid, block, 0, stream>>>(input.data<int8_t>(), shift.data<int8_t>(), result.data<int8_t>(), n); }
-    else if (input.dtype() == DType::Int16) { bitwise_rshift_i16<<<grid, block, 0, stream>>>(input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (input.dtype() == DType::Int32) { bitwise_rshift_i32<<<grid, block, 0, stream>>>(input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (input.dtype() == DType::Int64) { bitwise_rshift_i64<<<grid, block, 0, stream>>>(input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_right_shift: unsupported dtype"); }
-    CUDA_CHECK(cudaGetLastError());
-    return result;
+    return launch_integer_broadcast_binary(input, shift, RShiftOp(), /*include_unsigned=*/false,
+                                           "bitwise_right_shift", stream);
 }
 Tensor bitwise_right_shift_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);

@@ -163,15 +163,33 @@ TEST_P(FinalUntestedMultiDTypeTest, NumericalGradient) {
 
 TEST_P(FinalUntestedMultiDTypeTest, SparseSoftmaxLogSoftmax) {
     FU_FLOAT_ONLY();
-    // sparse_softmax/log_softmax handle GPU input by copying to CPU
-    // internally for the per-row reduction (see src/sparse/sparse_ops.cpp:1412).
-    // Run on all backends to verify the GPU→CPU→GPU round-trip path.
-    auto dense = on_device({4, 4});
-    auto csr = SparseTensor::from_dense(dense).to_csr();
-    auto smax = sparse::sparse_softmax(csr);
-    auto lsmax = sparse::sparse_log_softmax(csr);
+    // F033: a native GPU CSR (log-)softmax kernel now runs on-device (the old
+    // path threw for GPU tensors). Build one deterministic sparse matrix on CPU
+    // (the reference) and the SAME one on the parameterized device, then verify
+    // the values match element-wise — not merely that the call returns.
+    tenzor::manual_seed(1234);
+    auto dense_cpu = randn({4, 4}, DType::Float32, Device::cpu()).to(dtype());
+    auto csr_cpu = SparseTensor::from_dense(dense_cpu).to_csr();
+    auto smax_ref  = sparse::sparse_softmax(csr_cpu);
+    auto lsmax_ref = sparse::sparse_log_softmax(csr_cpu);
+
+    auto csr_dev = csr_cpu.to(device());
+    auto smax  = sparse::sparse_softmax(csr_dev);
+    auto lsmax = sparse::sparse_log_softmax(csr_dev);
     EXPECT_EQ(smax.shape()[0], 4);
     EXPECT_EQ(lsmax.shape()[0], 4);
+
+    auto cmp = [](const SparseTensor& ref, const SparseTensor& got, const char* what) {
+        auto rv = ref.values().to(Device::cpu()).to(DType::Float64).contiguous();
+        auto gv = got.values().to(Device::cpu()).to(DType::Float64).contiguous();
+        ASSERT_EQ(rv.numel(), gv.numel());
+        const double* r = rv.data<double>();
+        const double* g = gv.data<double>();
+        for (int64_t i = 0; i < rv.numel(); ++i)
+            EXPECT_NEAR(r[i], g[i], 1e-4) << what << " value " << i;
+    };
+    cmp(smax_ref, smax, "softmax");
+    cmp(lsmax_ref, lsmax, "log_softmax");
 }
 
 TEST_P(FinalUntestedMultiDTypeTest, SparseSpGEMM) {

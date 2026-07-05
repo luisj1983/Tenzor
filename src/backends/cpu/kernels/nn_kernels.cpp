@@ -939,7 +939,10 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t paddi
     auto output = Tensor::empty_uninitialized(out_shape, weight.dtype(), weight.device());
 
     int64_t num_indices = indices.numel();
-    const int64_t* idx_data = indices.data<int64_t>();
+    // Accept Int32 or Int64 index tensors (the CUDA kernel supports both);
+    // normalize to Int64 so the lookup path is uniform.
+    Tensor indices_i64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+    const int64_t* idx_data = indices_i64.data<int64_t>();
 
     int64_t num_embeddings = w_shape[0];
 

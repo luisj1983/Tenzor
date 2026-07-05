@@ -437,6 +437,36 @@ TEST_P(NNPoolingParity, AvgPool2d_Backward) {
                      "AvgPool2d_bwd");
 }
 
+// F009: asymmetric (per-axis) 2D pooling. Float64 max-pool routes to the native
+// (non-cuDNN) CUDA kernel — which previously rejected asymmetric config — so
+// this exercises the per-axis native kernel end-to-end and requires it to match
+// CPU bit-for-bit.
+TEST_P(NNPoolingParity, MaxPool2dAsymmetric_F64) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
+    auto input = randn({2, 3, 7, 9}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::MaxPool2d pool({3, 2}, {2, 1}, {1, 0});
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-12f, 1e-12f, "MaxPool2dAsymmetric_F64");
+}
+
+TEST_P(NNPoolingParity, AvgPool2dAsymmetric) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
+    auto input = randn({2, 3, 7, 9}, DType::Float32, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::AvgPool2d pool({3, 2}, {2, 1}, {1, 0});
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-5f, 1e-6f, "AvgPool2dAsymmetric");
+}
+
+// F085: asymmetric avgpool backward parity.
+TEST_P(NNPoolingParity, AvgPool2dAsymmetric_Backward) {
+    pool_grad_parity([] { return nn::AvgPool2d({3, 2}, {2, 1}, {1, 0}); },
+                     {2, 3, 7, 9}, "AvgPool2dAsymmetric_bwd");
+}
+
 // FractionalMaxPool3d forward (free function in nn::functional)
 TEST_P(NNPoolingParity, FractionalMaxPool3d) {
     auto input = randn({1, 2, 4, 4, 4}, DType::Float32, Device::cpu());

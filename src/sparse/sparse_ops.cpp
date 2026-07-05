@@ -1900,12 +1900,28 @@ auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor {
         throw std::runtime_error("sparse_softmax: input must be 2D");
     }
 
-    // Refuse CPU fallback for GPU tensors (mirrors spmm/spmv/add). There is no
-    // registered GPU sparse-softmax kernel; the host loop below dereferences
-    // values()/crow_indices() via .data<T>(), which is UB on device memory.
-    // Round-tripping silently through the host would be a hidden CPU fallback,
-    // exactly what the rest of the sparse subsystem refuses — so fail loudly.
+    // GPU tensors route through the backend dispatch table (native GPU CSR
+    // softmax kernel, F033) — never a hidden CPU fallback. If no GPU kernel is
+    // registered for the device, fail loudly (mirrors spmm/spmv/add).
     if (sparse.device().type != Device::Type::CPU) {
+        auto& table = DispatchTableRegistry::get_table(sparse.device().type);
+        if (table.has_kernel(OpId::SparseSoftmax)) {
+            Device dev = sparse.device();
+            std::vector<int64_t> shp(shape.begin(), shape.end());
+            Tensor crow = sparse.crow_indices().to(dev).contiguous();
+            Tensor col  = sparse.col_indices().to(dev).contiguous();
+            Tensor vals = sparse.values().to(dev).contiguous();
+            std::vector<Tensor> inputs = {crow, col, vals};
+            OpAttributes attrs;
+            std::string shp_str;
+            for (size_t si = 0; si < shp.size(); ++si) {
+                if (si) shp_str += ",";
+                shp_str += std::to_string(shp[si]);
+            }
+            attrs.set(AttrKey::Shape, shp_str);
+            Tensor new_vals = table.dispatch_single(OpId::SparseSoftmax, inputs, attrs);
+            return SparseTensor::sparse_csr(crow, col, new_vals, shp);
+        }
         throw std::runtime_error(
             "sparse::sparse_softmax: GPU tensor but no GPU sparse-softmax kernel — "
             "refusing CPU fallback (move tensors to CPU explicitly)");
@@ -2015,10 +2031,27 @@ auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
         throw std::runtime_error("sparse_log_softmax: input must be 2D");
     }
 
-    // Refuse CPU fallback for GPU tensors (mirrors spmm/spmv/add). There is no
-    // registered GPU sparse-log-softmax kernel; the host loop below dereferences
-    // values()/crow_indices() via .data<T>(), which is UB on device memory.
+    // GPU tensors route through the backend dispatch table (native GPU CSR
+    // log-softmax kernel, F033) — never a hidden CPU fallback.
     if (sparse.device().type != Device::Type::CPU) {
+        auto& table = DispatchTableRegistry::get_table(sparse.device().type);
+        if (table.has_kernel(OpId::SparseLogSoftmax)) {
+            Device dev = sparse.device();
+            std::vector<int64_t> shp(shape.begin(), shape.end());
+            Tensor crow = sparse.crow_indices().to(dev).contiguous();
+            Tensor col  = sparse.col_indices().to(dev).contiguous();
+            Tensor vals = sparse.values().to(dev).contiguous();
+            std::vector<Tensor> inputs = {crow, col, vals};
+            OpAttributes attrs;
+            std::string shp_str;
+            for (size_t si = 0; si < shp.size(); ++si) {
+                if (si) shp_str += ",";
+                shp_str += std::to_string(shp[si]);
+            }
+            attrs.set(AttrKey::Shape, shp_str);
+            Tensor new_vals = table.dispatch_single(OpId::SparseLogSoftmax, inputs, attrs);
+            return SparseTensor::sparse_csr(crow, col, new_vals, shp);
+        }
         throw std::runtime_error(
             "sparse::sparse_log_softmax: GPU tensor but no GPU sparse-softmax kernel — "
             "refusing CPU fallback (move tensors to CPU explicitly)");

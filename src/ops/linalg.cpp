@@ -981,6 +981,288 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// Deterministic vector sign/phase canonicalization (findings F016, F015).
+//
+// SVD (U/Vh columns) and symmetric/Hermitian eigh (eigenvectors) are defined
+// only up to a per-vector sign (real) or unit phase (complex). LAPACK (CPU) and
+// cuSOLVER/rocSOLVER/etc. (GPU) legitimately pick opposite signs, so raw
+// element-wise cross-backend comparison diverges. We fix a single convention on
+// EVERY backend: scale each vector so its largest-magnitude entry is real and
+// positive. Reconstruction is preserved: for SVD the paired Vh row is scaled by
+// the inverse phase, so U·diag(S)·Vh is unchanged; for eigh V·diag(W)·Vᴴ is
+// unchanged (a column phase cancels in the outer product).
+// ---------------------------------------------------------------------------
+template <typename R>
+void canon_real_cols(R* U, R* Vt, int64_t nbatch, int64_t rows,
+                     int64_t ncolsU, int64_t ncolsVt, int64_t num_cols) {
+    for (int64_t b = 0; b < nbatch; ++b) {
+        R* Ub = U + b * rows * ncolsU;
+        R* Vtb = Vt ? Vt + b * num_cols * ncolsVt : nullptr;
+        for (int64_t j = 0; j < num_cols; ++j) {
+            int64_t istar = 0;
+            R best = R(-1);
+            for (int64_t i = 0; i < rows; ++i) {
+                R a = std::abs(Ub[i * ncolsU + j]);
+                if (a > best) { best = a; istar = i; }
+            }
+            if (Ub[istar * ncolsU + j] < R(0)) {
+                for (int64_t i = 0; i < rows; ++i)
+                    Ub[i * ncolsU + j] = -Ub[i * ncolsU + j];
+                if (Vtb)
+                    for (int64_t c = 0; c < ncolsVt; ++c)
+                        Vtb[j * ncolsVt + c] = -Vtb[j * ncolsVt + c];
+            }
+        }
+    }
+}
+
+template <typename R>
+void canon_complex_cols(std::complex<R>* U, std::complex<R>* Vt, int64_t nbatch,
+                        int64_t rows, int64_t ncolsU, int64_t ncolsVt,
+                        int64_t num_cols) {
+    for (int64_t b = 0; b < nbatch; ++b) {
+        std::complex<R>* Ub = U + b * rows * ncolsU;
+        std::complex<R>* Vtb = Vt ? Vt + b * num_cols * ncolsVt : nullptr;
+        for (int64_t j = 0; j < num_cols; ++j) {
+            int64_t istar = 0;
+            R best = R(-1);
+            for (int64_t i = 0; i < rows; ++i) {
+                R a = std::abs(Ub[i * ncolsU + j]);
+                if (a > best) { best = a; istar = i; }
+            }
+            std::complex<R> val = Ub[istar * ncolsU + j];
+            R mag = std::abs(val);
+            if (mag == R(0)) continue;
+            std::complex<R> c = std::conj(val) / mag;  // U[istar,j] -> real, +|val|
+            std::complex<R> d = val / mag;             // inverse phase for paired Vh
+            for (int64_t i = 0; i < rows; ++i) Ub[i * ncolsU + j] *= c;
+            if (Vtb)
+                for (int64_t cc = 0; cc < ncolsVt; ++cc)
+                    Vtb[j * ncolsVt + cc] *= d;
+        }
+    }
+}
+
+// Canonicalize the first `num_cols` columns of U (and, if have_vt, the paired
+// rows of Vt) on host copies, returning device-resident results. Float16/
+// BFloat16 are widened to Float32 for the decision and narrowed back (sign
+// flips are exact, but keeps the code single-path).
+std::pair<Tensor, Tensor> canonicalize_uv(const Tensor& U_in, const Tensor& Vt_in,
+                                          int64_t num_cols, bool have_vt) {
+    Device dev = U_in.device();
+    DType orig = U_in.dtype();
+    bool half = (orig == DType::Float16 || orig == DType::BFloat16);
+    Tensor U = (half ? U_in.to(DType::Float32) : U_in).cpu().contiguous();
+    Tensor Vt;
+    if (have_vt)
+        Vt = (half ? Vt_in.to(DType::Float32) : Vt_in).cpu().contiguous();
+
+    auto ush = U.shape();
+    int64_t un = static_cast<int64_t>(ush.size());
+    int64_t rows = ush[un - 2];
+    int64_t ncolsU = ush[un - 1];
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < un; ++i) nbatch *= ush[i];
+    int64_t ncolsVt = 0;
+    if (have_vt) { auto vsh = Vt.shape(); ncolsVt = vsh[vsh.size() - 1]; }
+
+    switch (U.dtype()) {
+        case DType::Float32:
+            canon_real_cols<float>(U.data<float>(),
+                                   have_vt ? Vt.data<float>() : nullptr,
+                                   nbatch, rows, ncolsU, ncolsVt, num_cols);
+            break;
+        case DType::Float64:
+            canon_real_cols<double>(U.data<double>(),
+                                    have_vt ? Vt.data<double>() : nullptr,
+                                    nbatch, rows, ncolsU, ncolsVt, num_cols);
+            break;
+        case DType::Complex64:
+            canon_complex_cols<float>(U.data<std::complex<float>>(),
+                                      have_vt ? Vt.data<std::complex<float>>() : nullptr,
+                                      nbatch, rows, ncolsU, ncolsVt, num_cols);
+            break;
+        case DType::Complex128:
+            canon_complex_cols<double>(U.data<std::complex<double>>(),
+                                       have_vt ? Vt.data<std::complex<double>>() : nullptr,
+                                       nbatch, rows, ncolsU, ncolsVt, num_cols);
+            break;
+        default:
+            break;
+    }
+
+    Tensor U_out = half ? U.to(orig).to(dev) : U.to(dev);
+    Tensor Vt_out = Vt_in;
+    if (have_vt) Vt_out = half ? Vt.to(orig).to(dev) : Vt.to(dev);
+    return {U_out, Vt_out};
+}
+
+// ---------------------------------------------------------------------------
+// eig canonicalization (findings F014 order, F015 sign).
+//
+// General eig eigenvalue ORDER and eigenvector sign/phase are algorithm-defined,
+// so CPU (LAPACK geev) and the GPU solvers diverge. We impose a single canonical
+// form on every backend WHERE IT IS WELL-DEFINED:
+//   * complex-input eig (V complex, no conjugate-pair packing): sort by
+//     (Re λ, Im λ) ascending and phase-fix each eigenvector.
+//   * real-input eig with an entirely REAL spectrum (the symmetric-matrix case
+//     of F014, and any real-eigenvalue non-symmetric matrix): sort ascending by
+//     eigenvalue and sign-fix each real eigenvector.
+//   * real-input eig with complex conjugate pairs: phase-fix each pair's
+//     eigenvector IN PLACE (no reorder). Reordering the LAPACK real-packed
+//     (Re,Im) column pairs is convention-laden and would risk splitting a pair,
+//     so order is left to the (residual-invariant) comparison there.
+// Reconstruction A·v = λ·v is preserved in every branch.
+// ---------------------------------------------------------------------------
+template <typename R>
+void canon_eig_real_packed(R* wr, R* wi, R* V, int64_t n) {
+    bool all_real = true;
+    for (int64_t i = 0; i < n; ++i)
+        if (wi[i] != R(0)) { all_real = false; break; }
+
+    if (all_real) {
+        std::vector<int64_t> idx(n);
+        for (int64_t i = 0; i < n; ++i) idx[i] = i;
+        std::stable_sort(idx.begin(), idx.end(),
+                         [&](int64_t a, int64_t b) { return wr[a] < wr[b]; });
+        std::vector<R> nwr(n);
+        std::vector<R> newV(static_cast<size_t>(n) * n);
+        for (int64_t c = 0; c < n; ++c) {
+            int64_t src = idx[c];
+            nwr[c] = wr[src];
+            int64_t istar = 0;
+            R best = R(-1);
+            for (int64_t i = 0; i < n; ++i) {
+                R a = std::abs(V[i * n + src]);
+                if (a > best) { best = a; istar = i; }
+            }
+            R s = (V[istar * n + src] < R(0)) ? R(-1) : R(1);
+            for (int64_t i = 0; i < n; ++i) newV[i * n + c] = s * V[i * n + src];
+        }
+        for (int64_t i = 0; i < n; ++i) { wr[i] = nwr[i]; wi[i] = R(0); }
+        for (size_t i = 0; i < static_cast<size_t>(n) * n; ++i) V[i] = newV[i];
+        return;
+    }
+
+    // Mixed / complex spectrum: phase-fix in place, no reorder.
+    for (int64_t j = 0; j < n;) {
+        if (wi[j] == R(0)) {
+            int64_t istar = 0;
+            R best = R(-1);
+            for (int64_t i = 0; i < n; ++i) {
+                R a = std::abs(V[i * n + j]);
+                if (a > best) { best = a; istar = i; }
+            }
+            if (V[istar * n + j] < R(0))
+                for (int64_t i = 0; i < n; ++i) V[i * n + j] = -V[i * n + j];
+            j += 1;
+        } else {
+            int64_t istar = 0;
+            R best = R(-1);
+            for (int64_t i = 0; i < n; ++i) {
+                R a = std::hypot(V[i * n + j], V[i * n + j + 1]);
+                if (a > best) { best = a; istar = i; }
+            }
+            std::complex<R> val(V[istar * n + j], V[istar * n + j + 1]);
+            R mag = std::abs(val);
+            std::complex<R> cph = (mag > R(0)) ? std::conj(val) / mag
+                                               : std::complex<R>(R(1), R(0));
+            for (int64_t i = 0; i < n; ++i) {
+                std::complex<R> cv = std::complex<R>(V[i * n + j], V[i * n + j + 1]) * cph;
+                V[i * n + j] = cv.real();
+                V[i * n + j + 1] = cv.imag();
+            }
+            j += 2;
+        }
+    }
+}
+
+template <typename R>
+void canon_eig_complex(R* wr, R* wi, std::complex<R>* V, int64_t n) {
+    std::vector<int64_t> idx(n);
+    for (int64_t i = 0; i < n; ++i) idx[i] = i;
+    std::stable_sort(idx.begin(), idx.end(), [&](int64_t a, int64_t b) {
+        if (wr[a] != wr[b]) return wr[a] < wr[b];
+        return wi[a] < wi[b];
+    });
+    std::vector<R> nwr(n), nwi(n);
+    std::vector<std::complex<R>> newV(static_cast<size_t>(n) * n);
+    for (int64_t c = 0; c < n; ++c) {
+        int64_t src = idx[c];
+        nwr[c] = wr[src];
+        nwi[c] = wi[src];
+        int64_t istar = 0;
+        R best = R(-1);
+        for (int64_t i = 0; i < n; ++i) {
+            R a = std::abs(V[i * n + src]);
+            if (a > best) { best = a; istar = i; }
+        }
+        std::complex<R> val = V[istar * n + src];
+        R mag = std::abs(val);
+        std::complex<R> cph = (mag > R(0)) ? std::conj(val) / mag
+                                           : std::complex<R>(R(1), R(0));
+        for (int64_t i = 0; i < n; ++i) newV[i * n + c] = V[i * n + src] * cph;
+    }
+    for (int64_t i = 0; i < n; ++i) { wr[i] = nwr[i]; wi[i] = nwi[i]; }
+    for (size_t i = 0; i < static_cast<size_t>(n) * n; ++i) V[i] = newV[i];
+}
+
+std::tuple<Tensor, Tensor, Tensor> canonicalize_eig(const Tensor& Wr_in,
+                                                    const Tensor& Wi_in,
+                                                    const Tensor& V_in) {
+    Device dev = V_in.device();
+    DType vdt = V_in.dtype();
+    bool is_complex = (vdt == DType::Complex64 || vdt == DType::Complex128);
+    DType worig = Wr_in.dtype();
+    bool half = (worig == DType::Float16 || worig == DType::BFloat16);
+
+    Tensor Wr = (half ? Wr_in.to(DType::Float32) : Wr_in).cpu().contiguous();
+    Tensor Wi = (half ? Wi_in.to(DType::Float32) : Wi_in).cpu().contiguous();
+    Tensor V = (half ? V_in.to(DType::Float32) : V_in).cpu().contiguous();
+
+    auto vsh = V.shape();
+    int64_t vn = static_cast<int64_t>(vsh.size());
+    int64_t n = vsh[vn - 1];
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < vn; ++i) nbatch *= vsh[i];
+
+    if (is_complex) {
+        if (Wr.dtype() == DType::Float32) {
+            auto* wr = Wr.data<float>(); auto* wi = Wi.data<float>();
+            auto* v = V.data<std::complex<float>>();
+            for (int64_t b = 0; b < nbatch; ++b)
+                canon_eig_complex<float>(wr + b * n, wi + b * n, v + b * n * n, n);
+        } else {
+            auto* wr = Wr.data<double>(); auto* wi = Wi.data<double>();
+            auto* v = V.data<std::complex<double>>();
+            for (int64_t b = 0; b < nbatch; ++b)
+                canon_eig_complex<double>(wr + b * n, wi + b * n, v + b * n * n, n);
+        }
+    } else {
+        if (V.dtype() == DType::Float32) {
+            auto* wr = Wr.data<float>(); auto* wi = Wi.data<float>();
+            auto* v = V.data<float>();
+            for (int64_t b = 0; b < nbatch; ++b)
+                canon_eig_real_packed<float>(wr + b * n, wi + b * n, v + b * n * n, n);
+        } else {
+            auto* wr = Wr.data<double>(); auto* wi = Wi.data<double>();
+            auto* v = V.data<double>();
+            for (int64_t b = 0; b < nbatch; ++b)
+                canon_eig_real_packed<double>(wr + b * n, wi + b * n, v + b * n * n, n);
+        }
+    }
+
+    Tensor Wr_out = half ? Wr.to(worig).to(dev) : Wr.to(dev);
+    Tensor Wi_out = half ? Wi.to(worig).to(dev) : Wi.to(dev);
+    Tensor V_out = half ? V.to(vdt).to(dev) : V.to(dev);
+    return {Wr_out, Wi_out, V_out};
+}
+
+} // namespace
+
 auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tensor> {
     // Try GPU dispatch first
     {
@@ -989,7 +1271,9 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
         OpAttributes attrs;
         attrs.set(AttrKey::FullMatrices, full_matrices);
         if (try_gpu_dispatch_multi(OpId::LinalgSVD, inputs, attrs, results)) {
-            return {results[0], results[1], results[2]};
+            int64_t k = results[1].shape().back();
+            auto [Uc, Vtc] = canonicalize_uv(results[0], results[2], k, /*have_vt=*/true);
+            return {Uc, results[1], Vtc};
         }
     }
 
@@ -1132,11 +1416,15 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
 
     if (is_complex) {
         // S is already real (Float32 or Float64); U and Vt keep complex dtype
-        return {U, S, Vt};
+        auto [Uc, Vtc] = canonicalize_uv(U, Vt, k, /*have_vt=*/true);
+        return {Uc, S, Vtc};
     }
-    return {maybe_downcast(U, original_dtype),
-            maybe_downcast(S, original_dtype),
-            maybe_downcast(Vt, original_dtype)};
+    {
+        auto Ud = maybe_downcast(U, original_dtype);
+        auto Vtd = maybe_downcast(Vt, original_dtype);
+        auto [Uc, Vtc] = canonicalize_uv(Ud, Vtd, k, /*have_vt=*/true);
+        return {Uc, maybe_downcast(S, original_dtype), Vtc};
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -1320,7 +1608,10 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         std::vector<Tensor> results;
         std::array<Tensor, 1> inputs = {A};
         if (try_gpu_dispatch_multi(OpId::LinalgEigh, inputs, {}, results)) {
-            return {results[0], results[1]};
+            int64_t nn = results[0].shape().back();
+            auto [Vc, unused] = canonicalize_uv(results[1], Tensor(), nn, /*have_vt=*/false);
+            (void)unused;
+            return {results[0], Vc};
         }
     }
 
@@ -1396,9 +1687,18 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     // work now contains eigenvectors (columns of orthogonal/unitary matrix)
     // For complex input, work still has the correct complex dtype; no downcast needed.
     if (original_dtype == DType::Complex64 || original_dtype == DType::Complex128) {
-        return {W, work};  // W is already the correct real dtype; work is complex eigenvectors
+        // W is already the correct real dtype; work holds complex eigenvectors.
+        auto [Vc, unused] = canonicalize_uv(work, Tensor(), n, /*have_vt=*/false);
+        (void)unused;
+        return {W, Vc};
     }
-    return {maybe_downcast(W, original_dtype), maybe_downcast(work, original_dtype)};
+    {
+        auto Wd = maybe_downcast(W, original_dtype);
+        auto Vd = maybe_downcast(work, original_dtype);
+        auto [Vc, unused] = canonicalize_uv(Vd, Tensor(), n, /*have_vt=*/false);
+        (void)unused;
+        return {Wd, Vc};
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -1493,7 +1793,7 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
         std::vector<Tensor> results;
         std::array<Tensor, 1> inputs = {A};
         if (try_gpu_dispatch_multi(OpId::LinalgEig, inputs, {}, results)) {
-            return {results[0], results[1], results[2]};
+            return canonicalize_eig(results[0], results[1], results[2]);
         }
     }
 
@@ -1570,7 +1870,7 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
                 }
             }
         }
-        return {Wr, Wi, V};
+        return canonicalize_eig(Wr, Wi, V);
     }
 
     auto Wr = zeros(w_shape, work.dtype(), Device::cpu());  // real part of eigenvalues
@@ -1622,9 +1922,9 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
         }
     }
 
-    return {maybe_downcast(Wr, original_dtype),
-            maybe_downcast(Wi, original_dtype),
-            maybe_downcast(Vr, original_dtype)};
+    return canonicalize_eig(maybe_downcast(Wr, original_dtype),
+                            maybe_downcast(Wi, original_dtype),
+                            maybe_downcast(Vr, original_dtype));
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 

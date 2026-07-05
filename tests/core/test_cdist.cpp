@@ -8,10 +8,54 @@
 #include "tenzor/tenzor.hpp"
 #include "../backend_test_fixture.hpp"
 #include <cmath>
+#include <limits>
 
 using namespace tenzor;
 
 class CDistTest : public tenzor::testing::BackendTest {};
+
+TEST_P(CDistTest, ND4DMatchesCPU) {
+    // 4-D inputs with a matching multi-dim batch (2,3) — the old CUDA cdist threw
+    // for ndim>3; CPU handles any ndim>=2.
+    auto ha = tenzor::randn({2, 3, 4, 5}, DType::Float32, Device::cpu());
+    auto hb = tenzor::randn({2, 3, 6, 5}, DType::Float32, Device::cpu());
+    auto rc = tenzor::cdist(ha, hb, 2.0);                       // CPU reference
+    auto rd = tenzor::cdist(ha.to(device), hb.to(device), 2.0).cpu();
+    ASSERT_EQ(rc.numel(), rd.numel());
+    EXPECT_EQ(rd.shape().size(), 4u);  // (2,3,4,6)
+    const float* a = rc.data<float>();
+    const float* b = rd.data<float>();
+    for (int64_t i = 0; i < rc.numel(); ++i)
+        EXPECT_NEAR(a[i], b[i], 1e-3f) << "elem " << i << " on " << device.to_string();
+}
+
+TEST_P(CDistTest, BatchOneBroadcastMatchesCPU) {
+    // 3-D with one batch == 1 broadcasts to the other's batch (CPU behavior).
+    auto ha = tenzor::randn({1, 4, 5}, DType::Float32, Device::cpu());
+    auto hb = tenzor::randn({3, 6, 5}, DType::Float32, Device::cpu());
+    auto rc = tenzor::cdist(ha, hb, 2.0);
+    auto rd = tenzor::cdist(ha.to(device), hb.to(device), 2.0).cpu();
+    ASSERT_EQ(rc.numel(), rd.numel());
+    const float* a = rc.data<float>();
+    const float* b = rd.data<float>();
+    for (int64_t i = 0; i < rc.numel(); ++i)
+        EXPECT_NEAR(a[i], b[i], 1e-3f) << "elem " << i << " on " << device.to_string();
+}
+
+TEST_P(CDistTest, PdistChebyshevInfinity) {
+    // p=inf → Chebyshev (max abs coordinate diff). Points [[0,0],[3,4],[1,-2]]:
+    //   (0,1)=max(3,4)=4 ; (0,2)=max(1,2)=2 ; (1,2)=max(2,6)=6.
+    // The old CUDA generic path returned all-ones for p=inf.
+    auto host = tenzor::empty({3, 2}, DType::Float32);
+    const float vals[6] = {0, 0, 3, 4, 1, -2};
+    for (int i = 0; i < 6; ++i) host.data<float>()[i] = vals[i];
+    auto x = host.to(device);
+    auto d = tenzor::pdist(x, std::numeric_limits<double>::infinity()).cpu();
+    const float* p = d.data<float>();
+    EXPECT_NEAR(p[0], 4.0f, 1e-5f) << "on " << device.to_string();
+    EXPECT_NEAR(p[1], 2.0f, 1e-5f) << "on " << device.to_string();
+    EXPECT_NEAR(p[2], 6.0f, 1e-5f) << "on " << device.to_string();
+}
 
 TEST_P(CDistTest, EuclideanDistance2D) {
     auto x1 = tenzor::zeros({2, 3}, DType::Float32, device);

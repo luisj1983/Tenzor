@@ -972,6 +972,53 @@ TEST_P(QuantizationTest, QuantizedLinear_WithBias) {
     EXPECT_EQ(output.shape()[1], out_features);
 }
 
+// F032: per-channel INT8 QuantizedLinear now dispatches to the on-device CUDA
+// kernel (previously it silently fell back to a host loop). Build the same
+// per-channel layer on CPU (host loop, reference) and on the parameterized
+// device (native kernel) and require the dequantized outputs to match.
+TEST_P(QuantizationTest, QuantizedLinear_PerChannel_CudaMatchesCpu) {
+    if (device.type == tenzor::Device::Type::CPU) return;  // CPU is the reference
+    const int64_t in_features = 32, out_features = 16;
+
+    Tensor w_cpu({out_features, in_features}, DType::Float32, Device::cpu());
+    {
+        auto* wp = w_cpu.data<float>();
+        for (int64_t o = 0; o < out_features; ++o)
+            for (int64_t i = 0; i < in_features; ++i)
+                wp[o * in_features + i] =
+                    0.02f * static_cast<float>(((o * 7 + i * 3) % 11) - 5) +
+                    0.01f * static_cast<float>(o);
+    }
+    Tensor x_cpu({4, in_features}, DType::Float32, Device::cpu());
+    {
+        auto* xp = x_cpu.data<float>();
+        for (int64_t i = 0; i < 4 * in_features; ++i)
+            xp[i] = 0.1f * static_cast<float>((i % 9) - 4);
+    }
+
+    auto make_out = [&](const tenzor::Device& dev) -> Tensor {
+        auto qconfig = DefaultQConfigs::default_qconfig();
+        auto obs = qconfig.create_weight_observer();
+        Tensor w = w_cpu.to(dev);
+        obs->observe(w);
+        auto wparams = obs->calculate_qparams(
+            QuantDType::INT8, QuantizationScheme::PerChannelSymmetric);
+        QuantizedLinear ql(in_features, out_features, wparams);
+        ql.set_weight(quantize_tensor(w, wparams));
+        auto qin = quantize_per_tensor_symmetric(x_cpu.to(dev));
+        return ql.forward_quantized(qin).to(Device::cpu());
+    };
+
+    Tensor ref = make_out(Device::cpu());
+    Tensor out = make_out(device);
+    ASSERT_EQ(ref.numel(), out.numel());
+    ASSERT_GT(ref.numel(), 0);
+    const float* r = ref.data<float>();
+    const float* o = out.data<float>();
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_NEAR(r[i], o[i], 1e-3f) << "per-channel quant linear elem " << i;
+}
+
 // ============================================================================
 // Calibration Tests
 // ============================================================================

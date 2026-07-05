@@ -3779,7 +3779,7 @@ template<typename T>
 __global__ void dropout_forward_kernel_impl(
     const T* __restrict__ input,
     T* __restrict__ output,
-    uint8_t* __restrict__ mask,
+    float* __restrict__ mask,   // Float32 scale-mask (1/(1-p) if kept, 0 if dropped)
     int64_t n,
     float p,
     float scale,
@@ -3793,7 +3793,9 @@ __global__ void dropout_forward_kernel_impl(
 
         float rand_val = curand_uniform(&state);
         bool keep = rand_val >= p;
-        mask[idx] = keep ? 1 : 0;
+        // Store the inverted-dropout scale (not a 0/1 flag) so the saved mask
+        // matches the CPU backend and backward is a plain grad * mask.
+        mask[idx] = keep ? scale : 0.0f;
         output[idx] = keep ? static_cast<T>(static_cast<float>(input[idx]) * scale) : T(0);
     }
 }
@@ -3801,7 +3803,7 @@ __global__ void dropout_forward_kernel_impl(
 __global__ void dropout_forward_kernel_f16(
     const __half* __restrict__ input,
     __half* __restrict__ output,
-    uint8_t* __restrict__ mask,
+    float* __restrict__ mask,
     int64_t n,
     float p,
     float scale,
@@ -3813,7 +3815,7 @@ __global__ void dropout_forward_kernel_f16(
 
         float rand_val = curand_uniform(&state);
         bool keep = rand_val >= p;
-        mask[idx] = keep ? 1 : 0;
+        mask[idx] = keep ? scale : 0.0f;  // Float32 scale-mask (matches CPU)
         float val = keep ? __half2float(input[idx]) * scale : 0.0f;
         output[idx] = float2half_sat(val);
     }
@@ -3822,25 +3824,25 @@ __global__ void dropout_forward_kernel_f16(
 template<typename T>
 __global__ void dropout_backward_kernel_impl(
     const T* __restrict__ grad_output,
-    const uint8_t* __restrict__ mask,
+    const float* __restrict__ mask,   // Float32 scale-mask (scale if kept, 0 if dropped)
     T* __restrict__ grad_input,
     int64_t n,
-    float scale) {
+    float /*scale*/) {                 // scale is baked into the mask, matching CPU
 
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        grad_input[idx] = mask[idx] ? static_cast<T>(static_cast<float>(grad_output[idx]) * scale) : T(0);
+        grad_input[idx] = static_cast<T>(static_cast<float>(grad_output[idx]) * mask[idx]);
     }
 }
 
 __global__ void dropout_backward_kernel_f16(
     const __half* __restrict__ grad_output,
-    const uint8_t* __restrict__ mask,
+    const float* __restrict__ mask,
     __half* __restrict__ grad_input,
     int64_t n,
     float scale) {
 
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float val = mask[idx] ? __half2float(grad_output[idx]) * scale : 0.0f;
+        float val = __half2float(grad_output[idx]) * mask[idx];  // scale baked into mask
         grad_input[idx] = float2half_sat(val);
     }
 }
@@ -3851,7 +3853,7 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
 
     if (!training || p == 0.0f) {
         // No dropout during inference or p=0
-        return {input, Tensor(std::vector<int64_t>{}, DType::UInt8, input.device())};
+        return {input, Tensor(std::vector<int64_t>{}, DType::Float32, input.device())};
     }
 
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
@@ -3860,8 +3862,8 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
         // Drop everything
         Tensor output(shape, input.dtype(), input.device());
         CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(output.dtype()), stream));
-        Tensor mask(shape, DType::UInt8, input.device());
-        CUDA_CHECK(cudaMemsetAsync(mask.data_ptr(), 0, mask.numel(), stream));
+        Tensor mask(shape, DType::Float32, input.device());
+        CUDA_CHECK(cudaMemsetAsync(mask.data_ptr(), 0, mask.numel() * sizeof(float), stream));
         return {output, mask};
     }
 
@@ -3869,7 +3871,7 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
     float scale = 1.0f / (1.0f - p);
 
     Tensor output(shape, input.dtype(), input.device());
-    Tensor mask(shape, DType::UInt8, input.device());
+    Tensor mask(shape, DType::Float32, input.device());
 
     int block_size = 256;
     int num_blocks = compute_grid_size(n, block_size);
@@ -3879,24 +3881,23 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
     // within the same clock tick (the un-seeded, time-based case) cannot collide
     // and produce identical masks. SplitMix64-style mixing keeps the counter
     // from merely perturbing the low bits.
-    static std::atomic<uint64_t> dropout_call_counter{0};
-    uint64_t mix = dropout_call_counter.fetch_add(1, std::memory_order_relaxed);
-    mix = (mix + 0x9E3779B97F4A7C15ULL);
-    mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
-    mix = mix ^ (mix >> 31);
-    uint64_t seed = ::tenzor::get_global_seed() ^ mix;
+    // Derive the dropout seed purely from the global seed (which manual_seed
+    // resets), matching the CPU backend. A previous never-reset process-wide
+    // call counter mixed in here made manual_seed(x) irreproducible on CUDA:
+    // the counter kept advancing across manual_seed calls, so the same seed
+    // yielded a different mask sequence than the CPU backend / than a fresh run.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     switch (input.dtype()) {
         case DType::Float32:
             dropout_forward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
-                input.data<float>(), output.data<float>(), mask.data<uint8_t>(),
+                input.data<float>(), output.data<float>(), mask.data<float>(),
                 n, p, scale, seed);
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float64:
             dropout_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
-                input.data<double>(), output.data<double>(), mask.data<uint8_t>(),
+                input.data<double>(), output.data<double>(), mask.data<float>(),
                 n, p, scale, seed);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -3904,7 +3905,7 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
             dropout_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()),
-                mask.data<uint8_t>(),
+                mask.data<float>(),
                 n, p, scale, seed);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -3912,7 +3913,7 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
             dropout_forward_kernel_impl<__nv_bfloat16><<<num_blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                mask.data<uint8_t>(),
+                mask.data<float>(),
                 n, p, scale, seed);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -3944,20 +3945,20 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     switch (grad_output.dtype()) {
         case DType::Float32:
             dropout_backward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
-                grad_output.data<float>(), mask.data<uint8_t>(), grad_input.data<float>(),
+                grad_output.data<float>(), mask.data<float>(), grad_input.data<float>(),
                 n, scale);
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float64:
             dropout_backward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
-                grad_output.data<double>(), mask.data<uint8_t>(), grad_input.data<double>(),
+                grad_output.data<double>(), mask.data<float>(), grad_input.data<double>(),
                 n, scale);
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float16:
             dropout_backward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_output.data_ptr()),
-                mask.data<uint8_t>(),
+                mask.data<float>(),
                 reinterpret_cast<__half*>(grad_input.data_ptr()),
                 n, scale);
             CUDA_CHECK(cudaGetLastError());
@@ -3965,7 +3966,7 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
         case DType::BFloat16:
             dropout_backward_kernel_impl<__nv_bfloat16><<<num_blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
-                mask.data<uint8_t>(),
+                mask.data<float>(),
                 reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
                 n, scale);
             CUDA_CHECK(cudaGetLastError());

@@ -2004,7 +2004,7 @@ auto batchnorm2d_fused_training_kernel(const Tensor& input, Tensor& running_mean
 
 auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
                            double lr, double momentum, double weight_decay,
-                           double dampening, bool nesterov) -> void {
+                           double dampening, bool nesterov, bool first_step) -> void {
     const int64_t n = param.numel();
 
     if (param.dtype() == DType::Float32) {
@@ -2020,7 +2020,10 @@ auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_b
 
             if (momentum != 0.0f && momentum_buffer) {
                 float* buf = momentum_buffer->data<float>();
-                buf[i] = momentum * buf[i] + (1.0f - dampening) * grad_val;
+                // PyTorch SGD: the first momentum step initializes buf = grad
+                // (no momentum decay, no dampening); subsequent steps blend.
+                buf[i] = first_step ? grad_val
+                                    : (momentum * buf[i] + (1.0f - dampening) * grad_val);
                 if (nesterov) {
                     grad_val = grad_val + momentum * buf[i];
                 } else {
@@ -2042,7 +2045,8 @@ auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_b
             }
             if (momentum != 0.0f && momentum_buffer) {
                 double* buf = momentum_buffer->data<double>();
-                buf[i] = static_cast<double>(momentum) * buf[i] + (1.0 - static_cast<double>(dampening)) * grad_val;
+                buf[i] = first_step ? grad_val
+                                    : (static_cast<double>(momentum) * buf[i] + (1.0 - static_cast<double>(dampening)) * grad_val);
                 if (nesterov) {
                     grad_val = grad_val + static_cast<double>(momentum) * buf[i];
                 } else {

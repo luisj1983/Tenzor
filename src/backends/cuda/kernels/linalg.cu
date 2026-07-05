@@ -215,6 +215,34 @@ __global__ void det_from_lu_f64(const double* lu_data, const int* ipiv,
     det_out[b] = d;
 }
 
+__global__ void det_from_lu_c64(const cuFloatComplex* lu_data, const int* ipiv,
+                                cuFloatComplex* det_out, int64_t n, int64_t nbatch) {
+    int64_t b = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (b >= nbatch) return;
+    const cuFloatComplex* mat = lu_data + b * n * n;
+    const int* piv = ipiv + b * n;
+    cuFloatComplex d = make_cuFloatComplex(1.0f, 0.0f);
+    for (int64_t i = 0; i < n; i++) {
+        d = cuCmulf(d, mat[i * n + i]);
+        if (piv[i] != i + 1) d = make_cuFloatComplex(-cuCrealf(d), -cuCimagf(d));
+    }
+    det_out[b] = d;
+}
+
+__global__ void det_from_lu_c128(const cuDoubleComplex* lu_data, const int* ipiv,
+                                 cuDoubleComplex* det_out, int64_t n, int64_t nbatch) {
+    int64_t b = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (b >= nbatch) return;
+    const cuDoubleComplex* mat = lu_data + b * n * n;
+    const int* piv = ipiv + b * n;
+    cuDoubleComplex d = make_cuDoubleComplex(1.0, 0.0);
+    for (int64_t i = 0; i < n; i++) {
+        d = cuCmul(d, mat[i * n + i]);
+        if (piv[i] != i + 1) d = make_cuDoubleComplex(-cuCreal(d), -cuCimag(d));
+    }
+    det_out[b] = d;
+}
+
 /// CUDA kernel to zero out one triangle after Cholesky.
 __global__ void zero_triangle_f32(float* data, int64_t n, int64_t nbatch, bool upper) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -768,7 +796,7 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         unsigned blocks = static_cast<unsigned>(blocks64);
         det_from_lu_f32<<<blocks, threads, 0, stream>>>(
             data, d_ipiv, result.data<float>(), n, nbatch);
-    } else {
+    } else if (A.dtype() == DType::Float64) {
         double* data = work.data<double>();
 
         for (int64_t b = 0; b < nbatch; b++) {
@@ -791,6 +819,40 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         unsigned blocks = static_cast<unsigned>(blocks64);
         det_from_lu_f64<<<blocks, threads, 0, stream>>>(
             data, d_ipiv, result.data<double>(), n, nbatch);
+    } else if (A.dtype() == DType::Complex64) {
+        auto* data = reinterpret_cast<cuFloatComplex*>(work.data_ptr());
+        for (int64_t b = 0; b < nbatch; b++) {
+            cuFloatComplex* mat = data + b * n * n;
+            int* piv = d_ipiv + b * n;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnCgetrf_bufferSize(handle, n, n, mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(cuFloatComplex));
+            CUSOLVER_CHECK(cusolverDnCgetrf(handle, n, n, mat, n,
+                static_cast<cuFloatComplex*>(workspace.ptr), piv, d_info.ptr));
+            check_cusolver_info_neg(d_info.ptr, "det");
+        }
+        int threads = 256;
+        unsigned blocks = static_cast<unsigned>((nbatch + threads - 1) / threads);
+        det_from_lu_c64<<<blocks, threads, 0, stream>>>(
+            data, d_ipiv, reinterpret_cast<cuFloatComplex*>(result.data_ptr()), n, nbatch);
+    } else if (A.dtype() == DType::Complex128) {
+        auto* data = reinterpret_cast<cuDoubleComplex*>(work.data_ptr());
+        for (int64_t b = 0; b < nbatch; b++) {
+            cuDoubleComplex* mat = data + b * n * n;
+            int* piv = d_ipiv + b * n;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnZgetrf_bufferSize(handle, n, n, mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(cuDoubleComplex));
+            CUSOLVER_CHECK(cusolverDnZgetrf(handle, n, n, mat, n,
+                static_cast<cuDoubleComplex*>(workspace.ptr), piv, d_info.ptr));
+            check_cusolver_info_neg(d_info.ptr, "det");
+        }
+        int threads = 256;
+        unsigned blocks = static_cast<unsigned>((nbatch + threads - 1) / threads);
+        det_from_lu_c128<<<blocks, threads, 0, stream>>>(
+            data, d_ipiv, reinterpret_cast<cuDoubleComplex*>(result.data_ptr()), n, nbatch);
+    } else {
+        throw std::runtime_error("linalg_det: unsupported dtype");
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
@@ -1455,6 +1517,84 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
 // Non-symmetric Eigendecomposition (eig)
 // ============================================================================
 
+// Split a complex eigenvalue array into real-typed (real, imag) tensors to match
+// the CPU {W_real, W_imag, V_complex} contract (autograd EigBackward, registry).
+template<typename CT, typename RealT>
+__global__ void eig_split_complex_kernel(const CT* w, RealT* wr, RealT* wi,
+                                         int64_t total) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    wr[i] = w[i].x;
+    wi[i] = w[i].y;
+}
+
+// Complex non-symmetric eig via cuSOLVER's generic Xgeev (cuSOLVER >= 11.6).
+// For a genuinely complex matrix the eigenvalues are complex-valued (no
+// real→conjugate-pair packing), so Xgeev's complex-W contract matches LAPACK
+// c/zgeev exactly. Returns {W_real, W_imag, V_complex}. Eigenpair ORDER is
+// backend-defined for the general eigenproblem — order-sensitive comparisons
+// must be permutation-invariant.
+template<typename CT, typename RealT>
+static auto eig_complex_xgeev(const Tensor& A, cudaDataType_t cdt,
+                              int64_t n, int64_t nbatch,
+                              const std::vector<int64_t>& batch_dims,
+                              cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    auto handle = CuSOLVERHandlePool::get(stream);
+    cusolverDnParams_t params = nullptr;
+    CUSOLVER_CHECK(cusolverDnCreateParams(&params));
+
+    // cuSOLVER is column-major; transpose so the contiguous buffer IS A in
+    // column-major (lda = n). Xgeev then factorizes A (not A^T).
+    Tensor A_cm = tenzor::transpose(A.contiguous(), -2, -1).contiguous();
+
+    std::vector<int64_t> w_shape = batch_dims; w_shape.push_back(n);
+    std::vector<int64_t> v_shape = batch_dims; v_shape.push_back(n); v_shape.push_back(n);
+    DType real_dtype = (cdt == CUDA_C_32F) ? DType::Float32 : DType::Float64;
+    Tensor Wc = zeros(w_shape, A.dtype(), A.device());
+    // Vt receives cuSOLVER's column-major eigenvectors (eigenvector j in column
+    // j). Stored into a row-major tensor that is VR^T, transposed back below so
+    // V[...,i,j] = i-th component of j-th eigenvector (LAPACK row-major contract).
+    Tensor Vt = zeros(v_shape, A.dtype(), A.device());
+
+    CT* a_ptr = reinterpret_cast<CT*>(A_cm.data_ptr());
+    CT* w_ptr = reinterpret_cast<CT*>(Wc.data_ptr());
+    CT* v_ptr = reinterpret_cast<CT*>(Vt.data_ptr());
+    DeviceInt d_info;
+
+    for (int64_t b = 0; b < nbatch; b++) {
+        CT* Ab = a_ptr + b * n * n;
+        CT* Wb = w_ptr + b * n;
+        CT* Vb = v_ptr + b * n * n;
+        size_t ws_dev = 0, ws_host = 0;
+        CUSOLVER_CHECK(cusolverDnXgeev_bufferSize(
+            handle, params, CUSOLVER_EIG_MODE_NOVECTOR, CUSOLVER_EIG_MODE_VECTOR,
+            n, cdt, Ab, n, cdt, Wb,
+            cdt, nullptr, n, cdt, Vb, n, cdt, &ws_dev, &ws_host));
+        DeviceWorkspace dwork(ws_dev);
+        std::vector<char> hwork(ws_host ? ws_host : 1);
+        CUSOLVER_CHECK(cusolverDnXgeev(
+            handle, params, CUSOLVER_EIG_MODE_NOVECTOR, CUSOLVER_EIG_MODE_VECTOR,
+            n, cdt, Ab, n, cdt, Wb,
+            cdt, nullptr, n, cdt, Vb, n, cdt,
+            dwork.ptr, ws_dev, hwork.data(), ws_host, d_info.ptr));
+        check_cusolver_info(d_info.ptr, "eig");
+    }
+    CUSOLVER_CHECK(cusolverDnDestroyParams(params));
+
+    Tensor Wr = zeros(w_shape, real_dtype, A.device());
+    Tensor Wi = zeros(w_shape, real_dtype, A.device());
+    int64_t total = nbatch * n;
+    int threads = 256;
+    unsigned blocks = static_cast<unsigned>((total + threads - 1) / threads);
+    eig_split_complex_kernel<CT, RealT><<<blocks, threads, 0, stream>>>(
+        w_ptr, Wr.data<RealT>(), Wi.data<RealT>(), total);
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    Tensor V = tenzor::transpose(Vt, -2, -1).contiguous();
+    return {Wr, Wi, V};
+}
+
 auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
     CudaDeviceGuard dev_guard(A.device().index);
@@ -1484,8 +1624,23 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
         auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
         return {wr.to(orig), wi.to(orig), V.to(orig)};
     }
+    if (A.dtype() == DType::Complex64 || A.dtype() == DType::Complex128) {
+        auto [n_c, ndim_c] = check_square(A);
+        (void)ndim_c;
+        std::vector<int64_t> batch_dims_c;
+        auto shp = A.shape();
+        for (size_t i = 0; i + 2 < shp.size(); i++) batch_dims_c.push_back(shp[i]);
+        int64_t nbatch_c = batch_size(A);
+        if (A.dtype() == DType::Complex64) {
+            return eig_complex_xgeev<cuFloatComplex, float>(
+                A, CUDA_C_32F, n_c, nbatch_c, batch_dims_c, stream);
+        }
+        return eig_complex_xgeev<cuDoubleComplex, double>(
+            A, CUDA_C_64F, n_c, nbatch_c, batch_dims_c, stream);
+    }
     if (A.dtype() != DType::Float32 && A.dtype() != DType::Float64) {
-        throw std::runtime_error("eig: only Float32 and Float64 supported");
+        throw std::runtime_error(
+            "eig: only Float32, Float64, Complex64, Complex128 supported");
     }
 
     auto [n, ndim] = check_square(A);
@@ -1824,7 +1979,8 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
             A.to(DType::Float32), B.to(DType::Float32),
             upper, unitriangular, stream).to(original_dtype);
     }
-    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64 &&
+        original_dtype != DType::Complex64 && original_dtype != DType::Complex128) {
         throw std::invalid_argument("linalg::solve_triangular: unsupported dtype");
     }
 
@@ -1857,13 +2013,35 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                             a_ptr + b * n * n, static_cast<int>(n),
                             b_ptr + b * n * nrhs, static_cast<int>(n)));
         }
-    } else {
+    } else if (original_dtype == DType::Float64) {
         double alpha = 1.0;
         double* a_ptr = a_cm.data<double>();
         double* b_ptr = b_cm.data<double>();
         for (int64_t b = 0; b < nbatch; ++b) {
             CUBLAS_CHECK(
                 cublasDtrsm(handle, CUBLAS_SIDE_LEFT, uplo, CUBLAS_OP_N, diag,
+                            static_cast<int>(n), static_cast<int>(nrhs), &alpha,
+                            a_ptr + b * n * n, static_cast<int>(n),
+                            b_ptr + b * n * nrhs, static_cast<int>(n)));
+        }
+    } else if (original_dtype == DType::Complex64) {
+        cuFloatComplex alpha = make_cuFloatComplex(1.0f, 0.0f);
+        auto* a_ptr = reinterpret_cast<cuFloatComplex*>(a_cm.data_ptr());
+        auto* b_ptr = reinterpret_cast<cuFloatComplex*>(b_cm.data_ptr());
+        for (int64_t b = 0; b < nbatch; ++b) {
+            CUBLAS_CHECK(
+                cublasCtrsm(handle, CUBLAS_SIDE_LEFT, uplo, CUBLAS_OP_N, diag,
+                            static_cast<int>(n), static_cast<int>(nrhs), &alpha,
+                            a_ptr + b * n * n, static_cast<int>(n),
+                            b_ptr + b * n * nrhs, static_cast<int>(n)));
+        }
+    } else {
+        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+        auto* a_ptr = reinterpret_cast<cuDoubleComplex*>(a_cm.data_ptr());
+        auto* b_ptr = reinterpret_cast<cuDoubleComplex*>(b_cm.data_ptr());
+        for (int64_t b = 0; b < nbatch; ++b) {
+            CUBLAS_CHECK(
+                cublasZtrsm(handle, CUBLAS_SIDE_LEFT, uplo, CUBLAS_OP_N, diag,
                             static_cast<int>(n), static_cast<int>(nrhs), &alpha,
                             a_ptr + b * n * n, static_cast<int>(n),
                             b_ptr + b * n * nrhs, static_cast<int>(n)));

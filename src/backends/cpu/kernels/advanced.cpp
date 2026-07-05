@@ -102,6 +102,48 @@ static void cumsum_f32_avx2(const float* data, float* output, int64_t dim_size,
 }
 #endif
 
+// NaN-aware ordering (finding F065). PyTorch treats NaN as the LARGEST value, so
+// NaN sorts to the end ascending and to the front descending. A bare `<`/`>` on
+// floats is not a strict weak ordering when NaN is present (every compare with
+// NaN is false → UB in std::sort/stable_sort), so all comparison-based selection
+// here (sort/topk/kthvalue/median/mode) routes through these helpers. This is
+// the SAME convention as the CUDA radix NaN→+inf remap, so value+index outputs
+// match across backends.
+//
+// IMPORTANT: this TU is compiled with -ffast-math (-ffinite-math-only), under
+// which std::isnan() folds to a compile-time false. NaN must therefore be
+// detected from the IEEE-754 bit pattern, not std::isnan.
+inline bool bit_isnan(float x) {
+    uint32_t u;
+    std::memcpy(&u, &x, sizeof(u));
+    return (u & 0x7fffffffu) > 0x7f800000u;
+}
+inline bool bit_isnan(double x) {
+    uint64_t u;
+    std::memcpy(&u, &x, sizeof(u));
+    return (u & 0x7fffffffffffffffull) > 0x7ff0000000000000ull;
+}
+template <typename T>
+inline bool nan_less(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = bit_isnan(a), nb = bit_isnan(b);
+        if (na || nb) return !na && nb;   // finite < NaN; NaN < nothing
+        return a < b;
+    } else {
+        return a < b;
+    }
+}
+template <typename T>
+inline bool nan_greater(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = bit_isnan(a), nb = bit_isnan(b);
+        if (na || nb) return na && !nb;   // NaN > finite; nothing > NaN
+        return a > b;
+    } else {
+        return a > b;
+    }
+}
+
 template<typename T>
 auto topk_impl(const T* data, [[maybe_unused]] int64_t numel, int64_t dim_size,
                int64_t outer_size, int64_t inner_size,
@@ -126,13 +168,15 @@ auto topk_impl(const T* data, [[maybe_unused]] int64_t numel, int64_t dim_size,
             if (largest) {
                 std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
                     [](const auto& a, const auto& b) {
-                        if (a.first != b.first) return a.first > b.first;
+                        if (nan_greater(a.first, b.first)) return true;
+                        if (nan_greater(b.first, a.first)) return false;
                         return a.second < b.second;
                     });
             } else {
                 std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
                     [](const auto& a, const auto& b) {
-                        if (a.first != b.first) return a.first < b.first;
+                        if (nan_less(a.first, b.first)) return true;
+                        if (nan_less(b.first, a.first)) return false;
                         return a.second < b.second;
                     });
             }
@@ -140,13 +184,15 @@ auto topk_impl(const T* data, [[maybe_unused]] int64_t numel, int64_t dim_size,
             if (sorted && largest) {
                 std::sort(pairs.begin(), pairs.begin() + k,
                     [](const auto& a, const auto& b) {
-                        if (a.first != b.first) return a.first > b.first;
+                        if (nan_greater(a.first, b.first)) return true;
+                        if (nan_greater(b.first, a.first)) return false;
                         return a.second < b.second;
                     });
             } else if (sorted) {
                 std::sort(pairs.begin(), pairs.begin() + k,
                     [](const auto& a, const auto& b) {
-                        if (a.first != b.first) return a.first < b.first;
+                        if (nan_less(a.first, b.first)) return true;
+                        if (nan_less(b.first, a.first)) return false;
                         return a.second < b.second;
                     });
             }
@@ -161,7 +207,7 @@ auto topk_impl(const T* data, [[maybe_unused]] int64_t numel, int64_t dim_size,
     }
 }
 
-template<typename T>
+template <typename T>
 auto sort_impl(const T* data, int64_t dim_size,
                int64_t outer_size, int64_t inner_size,
                bool descending,
@@ -178,10 +224,10 @@ auto sort_impl(const T* data, int64_t dim_size,
 
             if (descending) {
                 std::stable_sort(pairs.begin(), pairs.end(),
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
+                    [](const auto& a, const auto& b) { return nan_greater(a.first, b.first); });
             } else {
                 std::stable_sort(pairs.begin(), pairs.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                    [](const auto& a, const auto& b) { return nan_less(a.first, b.first); });
             }
 
             for (int64_t d = 0; d < dim_size; ++d) {
@@ -1161,7 +1207,8 @@ auto quantile_impl(const T* data, int64_t dim_size,
             for (int64_t d = 0; d < dim_size; ++d) {
                 slice[d] = data[(outer * dim_size + d) * inner_size + inner];
             }
-            std::sort(slice.begin(), slice.end());
+            std::sort(slice.begin(), slice.end(),
+                      [](const auto& a, const auto& b) { return nan_less(a, b); });
 
             // Linear interpolation at the q-th position
             double idx_f = q * static_cast<double>(dim_size - 1);
@@ -1204,7 +1251,8 @@ auto nanquantile_impl(const T* data, int64_t dim_size,
                 continue;
             }
 
-            std::sort(slice.begin(), slice.end());
+            std::sort(slice.begin(), slice.end(),
+                      [](const auto& a, const auto& b) { return nan_less(a, b); });
             int64_t n = static_cast<int64_t>(slice.size());
 
             double idx_f = q * static_cast<double>(n - 1);
@@ -1345,7 +1393,8 @@ auto nanmedian_impl(const T* data, int64_t dim_size,
                 continue;
             }
 
-            std::sort(slice.begin(), slice.end());
+            std::sort(slice.begin(), slice.end(),
+                      [](const auto& a, const auto& b) { return nan_less(a, b); });
             int64_t n = static_cast<int64_t>(slice.size());
             // PyTorch nanmedian returns the lower median (no interpolation)
             out_values[outer * inner_size + inner] = slice[n / 2];

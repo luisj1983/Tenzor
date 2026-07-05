@@ -315,6 +315,15 @@ auto lstm_cell_forward_kernel(
     int64_t hidden_size,
     cudaStream_t stream) -> std::pair<Tensor, Tensor> {
 
+    // Float16/BFloat16: widen to Float32, compute, narrow the outputs back
+    // (matches the CPU cell kernels; the fused device kernel is F32/F64 only).
+    if (gates.dtype() == DType::Float16 || gates.dtype() == DType::BFloat16) {
+        const DType orig = gates.dtype();
+        auto [h, c] = lstm_cell_forward_kernel(gates.to(DType::Float32),
+            c_prev.to(DType::Float32), batch_size, hidden_size, stream);
+        return {h.to(orig), c.to(orig)};
+    }
+
     std::vector<int64_t> output_shape = {batch_size, hidden_size};
     Tensor h_out(output_shape, gates.dtype(), gates.device());
     Tensor c_out(output_shape, gates.dtype(), gates.device());
@@ -350,6 +359,16 @@ auto lstm_cell_backward_kernel(
     int64_t batch_size,
     int64_t hidden_size,
     cudaStream_t stream) -> std::pair<Tensor, Tensor> {
+
+    // Float16/BFloat16: widen to Float32, compute, narrow the grads back.
+    if (gates.dtype() == DType::Float16 || gates.dtype() == DType::BFloat16) {
+        const DType orig = gates.dtype();
+        auto [gg, gc] = lstm_cell_backward_kernel(
+            grad_h.to(DType::Float32), grad_c.to(DType::Float32),
+            gates.to(DType::Float32), c_prev.to(DType::Float32),
+            c_out.to(DType::Float32), batch_size, hidden_size, stream);
+        return {gg.to(orig), gc.to(orig)};
+    }
 
     std::vector<int64_t> gate_shape = {batch_size, 4 * hidden_size};
     std::vector<int64_t> state_shape = {batch_size, hidden_size};

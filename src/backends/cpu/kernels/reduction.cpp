@@ -2375,6 +2375,32 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor
             }
             break;
         }
+        case DType::UInt32: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint32_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt64: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint64_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmax_impl(input_data, input_c.numel());
+            } else {
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
         case DType::Bool: {
             // Bool: false < true, so argmax returns index of first true
             auto input_c = input.contiguous();
@@ -2680,6 +2706,32 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor
             }
             break;
         }
+        case DType::UInt32: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint32_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
+        case DType::UInt64: {
+            auto input_c = input.contiguous();
+            auto* input_data = input_c.data<uint64_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = argmin_impl(input_data, input_c.numel());
+            } else {
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                               dim);
+            }
+            break;
+        }
         case DType::Bool: {
             // Bool: false < true, so argmin returns index of first false
             auto input_c = input.contiguous();
@@ -2747,6 +2799,43 @@ void parallel_merge_sort(int64_t* indices, int64_t* buffer, int64_t left, int64_
 
 } // anonymous namespace
 
+// F065: NaN-aware comparison for argsort. NaN is the LARGEST value (sorts last
+// ascending / first descending) and NaN == NaN so ties (including NaN-vs-NaN)
+// break by original index — matching the CUDA argsort radix NaN→+inf remap and
+// PyTorch. NaN is detected from the IEEE-754 bit pattern so it is correct even
+// under -ffast-math/-ffinite-math-only (where std::isnan folds to false).
+namespace {
+inline bool as_isnan(float x) {
+    uint32_t u; std::memcpy(&u, &x, sizeof(u));
+    return (u & 0x7fffffffu) > 0x7f800000u;
+}
+inline bool as_isnan(double x) {
+    uint64_t u; std::memcpy(&u, &x, sizeof(u));
+    return (u & 0x7fffffffffffffffull) > 0x7ff0000000000000ull;
+}
+template <typename T> inline bool as_nan_lt(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = as_isnan(a), nb = as_isnan(b);
+        if (na || nb) return !na && nb;
+        return a < b;
+    } else { return a < b; }
+}
+template <typename T> inline bool as_nan_gt(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = as_isnan(a), nb = as_isnan(b);
+        if (na || nb) return na && !nb;
+        return a > b;
+    } else { return a > b; }
+}
+template <typename T> inline bool as_nan_eq(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = as_isnan(a), nb = as_isnan(b);
+        if (na || nb) return na && nb;
+        return a == b;
+    } else { return a == b; }
+}
+}  // namespace
+
 template<typename T>
 auto argsort_impl(const T* data, int64_t n, bool descending) -> std::vector<int64_t> {
     // Create index array
@@ -2759,10 +2848,10 @@ auto argsort_impl(const T* data, int64_t n, bool descending) -> std::vector<int6
         // Small array: use standard sort
         if (descending) {
             std::sort(indices.begin(), indices.end(),
-                     [data](int64_t a, int64_t b) { return data[a] > data[b]; });
+                     [data](int64_t a, int64_t b) { return as_nan_gt(data[a], data[b]) || (as_nan_eq(data[a], data[b]) && a < b); });
         } else {
             std::sort(indices.begin(), indices.end(),
-                     [data](int64_t a, int64_t b) { return data[a] < data[b]; });
+                     [data](int64_t a, int64_t b) { return as_nan_lt(data[a], data[b]) || (as_nan_eq(data[a], data[b]) && a < b); });
         }
     } else {
         // Large array: use parallel merge sort
@@ -2774,14 +2863,14 @@ auto argsort_impl(const T* data, int64_t n, bool descending) -> std::vector<int6
         #endif
 
         if (descending) {
-            auto comp = [data](int64_t a, int64_t b) { return data[a] > data[b]; };
+            auto comp = [data](int64_t a, int64_t b) { return as_nan_gt(data[a], data[b]) || (as_nan_eq(data[a], data[b]) && a < b); };
             #pragma omp parallel
             {
                 #pragma omp single
                 parallel_merge_sort<T>(indices.data(), buffer.data(), 0, n, comp, depth);
             }
         } else {
-            auto comp = [data](int64_t a, int64_t b) { return data[a] < data[b]; };
+            auto comp = [data](int64_t a, int64_t b) { return as_nan_lt(data[a], data[b]) || (as_nan_eq(data[a], data[b]) && a < b); };
             #pragma omp parallel
             {
                 #pragma omp single
@@ -4340,9 +4429,15 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vecto
                 elems[i] = {in_data[flat_idx], i};
             }
 
-            // nth_element for O(n) median
+            // nth_element for O(n) median, with an index tie-break so a duplicated
+            // median value returns the lowest original index deterministically
+            // (matching the CUDA median, which takes sorted_idx[mid] from a stable sort).
+            // F065: NaN-aware selection (NaN is the LARGEST value → sorts last,
+            // matching the CUDA median's sort and the sort/argsort/kthvalue paths).
             std::nth_element(elems.begin(), elems.begin() + mid, elems.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+                [](const auto& a, const auto& b) {
+                    return as_nan_lt(a.first, b.first) || (as_nan_eq(a.first, b.first) && a.second < b.second);
+                });
 
             val_data[o] = elems[mid].first;
             idx_data[o] = elems[mid].second;
@@ -4365,6 +4460,14 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vecto
 // ============================================================================
 
 auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor> {
+    // Float16/BFloat16: widen to Float32 (exact for half values, so value
+    // groupings/counts are preserved), compute mode, then narrow the VALUES back;
+    // indices are dtype-independent. Matches the CUDA backend's launch_half path.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto res = mode_kernel(input.to(DType::Float32), dim, keepdim);
+        res[0] = res[0].to(input.dtype());
+        return res;
+    }
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -4447,9 +4550,14 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<
                 elems[i] = {in_data[flat_idx], i};
             }
 
-            // Sort by value, then find longest run of equal values
+            // Sort by value with an index tie-break (ascending index within each
+            // equal-value run) so the "last element of the longest run" is the
+            // highest original index deterministically — matching the CUDA mode,
+            // which uses a stable sort.
             std::sort(elems.begin(), elems.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+                [](const auto& a, const auto& b) {
+                    return a.first < b.first || (a.first == b.first && a.second < b.second);
+                });
 
             T best_val = elems[0].first;
             int64_t best_idx = elems[0].second;
@@ -4729,8 +4837,13 @@ auto logcumsumexp_kernel(const Tensor& input, int64_t dim) -> Tensor {
     const auto& shape = input.shape();
     const int64_t ndim = static_cast<int64_t>(shape.size());
 
+    // Float16/BFloat16: widen to Float32, compute, narrow the result back
+    // (matches the CUDA backend, which upcasts these dtypes).
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        return logcumsumexp_kernel(input.to(DType::Float32), dim).to(dtype);
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("logcumsumexp_kernel: only Float32 and Float64 supported");
+        throw std::runtime_error("logcumsumexp_kernel: only Float32, Float64, Float16, BFloat16 supported");
     }
 
     if (dim < 0) dim += ndim;

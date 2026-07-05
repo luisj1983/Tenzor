@@ -80,10 +80,13 @@ public:
      * @param dtype Target dtype for autocasting (Float16 or BFloat16)
      * @param device_type Device type to apply autocast (CUDA only by default)
      */
+    // device_type: which device the scope autocasts. Default (nullopt) applies
+    // to the op's actual device (both CPU and CUDA), so device-agnostic code
+    // autocasts identically on either backend. Pass an explicit type to restrict.
     explicit Autocast(
         bool enabled = true,
         DType dtype = DType::Float16,
-        Device::Type device_type = Device::Type::CUDA
+        std::optional<Device::Type> device_type = std::nullopt
     );
 
     /**

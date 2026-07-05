@@ -402,8 +402,10 @@ auto empty(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    // Use OpId dispatch for non-CPU devices
-    if (device.type != Device::Type::CPU) {
+    // F042: dispatch to the backend for ALL devices (including CPU) so CPU and
+    // GPU share the same Philox RNG stream. The CPU backend rand kernel is
+    // Philox-based and bit-identical to the CUDA device Philox for a given seed.
+    {
         OpAttributes attrs;
         attrs.set(AttrKey::Shape, shape_to_string(shape));
         attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
@@ -463,8 +465,10 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    // Use OpId dispatch for non-CPU devices
-    if (device.type != Device::Type::CPU) {
+    // F042: dispatch to the backend for ALL devices so CPU (Philox) and GPU
+    // (device Philox) share the same RNG stream; normal samples match to ~ULP
+    // (Box-Muller transcendentals differ between host libm and device intrinsics).
+    {
         OpAttributes attrs;
         attrs.set(AttrKey::Shape, shape_to_string(shape));
         attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
@@ -548,8 +552,9 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
         throw std::invalid_argument("randint: low must be less than high");
     }
 
-    // Use OpId dispatch for non-CPU devices
-    if (device.type != Device::Type::CPU) {
+    // F042: dispatch to the backend for ALL devices so CPU and GPU share the
+    // same Philox stream (bit-identical for integers).
+    {
         OpAttributes attrs;
         attrs.set(AttrKey::Start, static_cast<int64_t>(low));
         attrs.set(AttrKey::End, static_cast<int64_t>(high));

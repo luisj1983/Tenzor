@@ -9,6 +9,7 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
+#include "tenzor/backend/dtype_from_string.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -660,7 +661,7 @@ namespace cpu {
     // Fused optimizer steps
     auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
                                double lr, double momentum, double weight_decay,
-                               double dampening, bool nesterov) -> void;
+                               double dampening, bool nesterov, bool first_step) -> void;
     auto fused_adam_step_kernel(Tensor& param, const Tensor& grad,
                                Tensor& exp_avg, Tensor& exp_avg_sq,
                                double lr, double beta1, double beta2,
@@ -1721,7 +1722,13 @@ static void register_cpu_kernels_normalization(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        return cpu::batchnorm2d_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon);
+        // Dispatch contract (autograd/functional): {grad_output, input, weight,
+        // mean, invstd}. The kernel takes (grad_output, input, mean, variance,
+        // gamma); reconstruct variance from invstd = 1/sqrt(var+eps) and map
+        // gamma = weight. (Previously read as (mean, variance, gamma) — a swap
+        // that fed weight->mean, mean->variance, invstd->gamma.)
+        Tensor variance = tenzor::reciprocal(tenzor::square(inputs[4])) - static_cast<double>(epsilon);
+        return cpu::batchnorm2d_backward_kernel(inputs[0], inputs[1], inputs[3], variance, inputs[2], epsilon);
     });
 
     table.register_kernel(OpId::BatchNorm2dUpdateRunningStats, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -3255,8 +3262,12 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        // inputs: [grad_output, input, weight, rrms]
-        auto [grad_input, grad_weight] = cpu::rms_norm_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3]);
+        // inputs: [grad_output, input, rrms, weight] — order set by the autograd
+        // RMSNormBackward (saved [input, rrms, weight]). The kernel signature is
+        // (grad_output, input, weight, rrms), so weight=inputs[3], rrms=inputs[2].
+        // (Previously these were transposed — weight/rrms swapped — which corrupts
+        // indexing since norm_size is derived from weight.numel().)
+        auto [grad_input, grad_weight] = cpu::rms_norm_backward_kernel(inputs[0], inputs[1], inputs[3], inputs[2]);
         return std::vector<Tensor>{grad_input, grad_weight};
     });
 
@@ -3458,13 +3469,16 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
         double dampening = attrs.get_float(AttrKey::Dampening, 0.0);
         bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
+        // PyTorch SGD: the first momentum step initializes buf = grad (no
+        // dampening). Matches the CUDA backend, which already reads FirstStep.
+        bool first_step = attrs.get_bool(AttrKey::FirstStep, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0)
             ? &const_cast<Tensor&>(inputs[2]) : nullptr;
 
         cpu::fused_sgd_step_kernel(param, inputs[1], momentum_buffer,
-            lr, momentum, weight_decay, dampening, nesterov);
+            lr, momentum, weight_decay, dampening, nesterov, first_step);
         return std::vector<Tensor>{param};
     });
 
@@ -3520,8 +3534,14 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+        // The optimizer pushes grad_avg (index 3) only when centered, then
+        // momentum_buffer. So momentum_buffer is at index 3 when NOT centered and
+        // index 4 when centered. Hard-coding index 4 dropped the momentum buffer
+        // for the common (centered=false, momentum>0) case → momentum ignored.
         Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
-        Tensor* momentum_buffer = (momentum > 0.0 && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+        const size_t mb_idx = centered ? 4u : 3u;
+        Tensor* momentum_buffer = (momentum > 0.0 && inputs.size() > mb_idx)
+            ? &const_cast<Tensor&>(inputs[mb_idx]) : nullptr;
 
         cpu::fused_rmsprop_step_kernel(param, inputs[1], square_avg, grad_avg, momentum_buffer,
             lr, alpha, eps, weight_decay, momentum, centered);
@@ -3598,16 +3618,14 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Rand, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::rand_kernel(shape, dtype, device)};
     });
 
     table.register_kernel(OpId::Randn, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::randn_kernel(shape, dtype, device)};
     });
@@ -3616,8 +3634,7 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
         int64_t low = attrs.get_int(AttrKey::Start, 0);
         int64_t high = attrs.get_int(AttrKey::End, 0);
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Int32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "int32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::randint_kernel(low, high, shape, dtype, device)};
     });

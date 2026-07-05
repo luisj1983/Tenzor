@@ -192,6 +192,84 @@ auto quantized_linear_cuda(
 // full asymmetric zero-point correction (per-row sum_i / per-col sum_w computed in
 // int64) and a parity test before registering.
 
+// ============================================================================
+// INT4 (QInt4x2) quantized linear (F031). Weights are packed two signed int4
+// per byte ([out_features, in_features/2]); the input is int8. Symmetric only
+// (no zero-points), matching the CPU quantized_linear_int4_kernel. One thread
+// per output element unpacks each nibble (sign-extended) and accumulates.
+// ============================================================================
+__device__ __forceinline__ void unpack_int4_dev(uint8_t packed, int& low, int& high) {
+    int lo = packed & 0x0F;
+    if (lo & 0x08) lo |= ~0x0F;      // sign-extend bit 3
+    int hi = (packed >> 4) & 0x0F;
+    if (hi & 0x08) hi |= ~0x0F;
+    low = lo;
+    high = hi;
+}
+
+__global__ void quantized_linear_int4_cuda_kernel(
+    const int8_t* __restrict__ input,
+    const uint8_t* __restrict__ weight_packed,
+    const float* __restrict__ bias,
+    float* __restrict__ output,
+    int64_t batch_size, int64_t in_features, int64_t out_features,
+    float combined_scale,
+    const float* __restrict__ weight_scales,  // per-channel (nullptr => per-tensor)
+    float input_over_output)
+{
+    int64_t b = blockIdx.y;
+    int64_t o = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= batch_size || o >= out_features) return;
+
+    int64_t packed_features = in_features / 2;
+    const int8_t* input_row = input + b * in_features;
+    const uint8_t* weight_row = weight_packed + o * packed_features;
+
+    int64_t acc = 0;
+    for (int64_t p = 0; p < packed_features; ++p) {
+        int lo, hi;
+        unpack_int4_dev(weight_row[p], lo, hi);
+        acc += static_cast<int64_t>(input_row[p * 2]) * lo;
+        acc += static_cast<int64_t>(input_row[p * 2 + 1]) * hi;
+    }
+
+    float scale = weight_scales ? (input_over_output * weight_scales[o]) : combined_scale;
+    float result = static_cast<float>(acc) * scale;
+    if (bias != nullptr) result += bias[o];
+    output[b * out_features + o] = result;
+}
+
+auto quantized_linear_int4_cuda(
+    const int8_t* input,
+    const uint8_t* weight_packed,
+    const float* bias,
+    float* output,
+    int64_t batch_size,
+    int64_t in_features,
+    int64_t out_features,
+    float input_scale,
+    float weight_scale,
+    float output_scale,
+    cudaStream_t stream,
+    const float* weight_scales  // per-channel [out_features]; nullptr => per-tensor
+) -> void {
+    if (in_features % 2 != 0) {
+        throw std::invalid_argument("quantized_linear_int4_cuda: in_features must be even");
+    }
+    float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
+    float combined_scale = input_scale * weight_scale / safe_output_scale;
+    float input_over_output = input_scale / safe_output_scale;
+
+    dim3 block(256);
+    dim3 grid(static_cast<unsigned>((out_features + 255) / 256),
+              static_cast<unsigned>(batch_size));
+    quantized_linear_int4_cuda_kernel<<<grid, block, 0, stream>>>(
+        input, weight_packed, bias, output,
+        batch_size, in_features, out_features,
+        combined_scale, weight_scales, input_over_output);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+}
+
 } // namespace kernels
 } // namespace quantization
 } // namespace nn

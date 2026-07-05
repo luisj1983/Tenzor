@@ -231,6 +231,49 @@ TEST_P(SamplingParity, Uniform_EmpiricalMoments) {
     }
 }
 
+// F042: rand/randn/randint now share a Philox RNG stream across CPU and GPU.
+// For the same manual_seed, rand and randint are BIT-IDENTICAL; randn matches to
+// within Box-Muller transcendental ULP (host libm vs device intrinsics).
+TEST_P(SamplingParity, RandStreamMatchesCPU) {
+    if (device.type == Device::Type::CPU) return;
+    manual_seed(20240705);
+    auto ref32 = rand({128}, DType::Float32, Device::cpu());
+    manual_seed(20240705);
+    auto out32 = rand({128}, DType::Float32, device).to(Device::cpu());
+    ASSERT_EQ(ref32.numel(), out32.numel());
+    for (int64_t i = 0; i < ref32.numel(); ++i)
+        EXPECT_EQ(ref32.data<float>()[i], out32.data<float>()[i]) << "rand f32 " << i;
+
+    manual_seed(20240705);
+    auto ref64 = rand({128}, DType::Float64, Device::cpu());
+    manual_seed(20240705);
+    auto out64 = rand({128}, DType::Float64, device).to(Device::cpu());
+    for (int64_t i = 0; i < ref64.numel(); ++i)
+        EXPECT_EQ(ref64.data<double>()[i], out64.data<double>()[i]) << "rand f64 " << i;
+}
+
+TEST_P(SamplingParity, RandintStreamMatchesCPU) {
+    if (device.type == Device::Type::CPU) return;
+    manual_seed(31337);
+    auto ref = randint(0, 100000, {128}, DType::Int64, Device::cpu());
+    manual_seed(31337);
+    auto out = randint(0, 100000, {128}, DType::Int64, device).to(Device::cpu());
+    ASSERT_EQ(ref.numel(), out.numel());
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_EQ(ref.data<int64_t>()[i], out.data<int64_t>()[i]) << "randint " << i;
+}
+
+TEST_P(SamplingParity, RandnStreamMatchesCPU) {
+    if (device.type == Device::Type::CPU) return;
+    manual_seed(4242);
+    auto ref = randn({128}, DType::Float32, Device::cpu());
+    manual_seed(4242);
+    auto out = randn({128}, DType::Float32, device).to(Device::cpu());
+    ASSERT_EQ(ref.numel(), out.numel());
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_NEAR(ref.data<float>()[i], out.data<float>()[i], 1e-3f) << "randn " << i;
+}
+
 INSTANTIATE_BACKEND_TESTS(SamplingParity);
 
 

@@ -347,6 +347,13 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream =
 
 } // anonymous namespace
 
+// Generic (non-cuSPARSE) CSR SpMM/SpMV for the dtypes cuSPARSE cannot handle:
+// integer (no cuSPARSE integer path at all) and complex (routed here for a
+// single, always-compiled code path). Defined in the standalone section below
+// (F034 — matches the CPU generic CSR templates).
+Tensor cuda_spmm_generic(const SparseTensor& sparse, const Tensor& dense);
+Tensor cuda_spmv_generic(const SparseTensor& sparse, const Tensor& vec);
+
 Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense, cudaStream_t stream = 0) {
     // Make the operands' CUDA device current so the device-keyed cuSPARSE handle
     // and any widen/narrow kernel launches target the correct GPU. Restored on
@@ -381,8 +388,15 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense, cudaStr
         auto result_f32 = cuda_spmm_kernel(sparse_f32, dense_f32, stream);
         return narrow_from_f32_async(result_f32, dtype, stream);
     }
+    if (dtype == DType::Int32 || dtype == DType::Int64 ||
+        dtype == DType::Complex64 || dtype == DType::Complex128) {
+        // cuSPARSE has no integer path and we route complex through the same
+        // generic CSR kernel — matches the CPU spmm's generic dtype coverage.
+        return cuda_spmm_generic(sparse, dense);
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("cuda_spmm: only Float32/Float64/Float16/BFloat16 supported, got "
+        throw std::runtime_error("cuda_spmm: only Float32/Float64/Float16/BFloat16/"
+            "Int32/Int64/Complex64/Complex128 supported, got "
             + std::string(dtype_name(dtype)));
     }
 
@@ -520,8 +534,13 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec, cudaStrea
         auto result_f32 = cuda_spmv_kernel(sparse_f32, vec_f32, stream);
         return narrow_from_f32_async(result_f32, dtype, stream);
     }
+    if (dtype == DType::Int32 || dtype == DType::Int64 ||
+        dtype == DType::Complex64 || dtype == DType::Complex128) {
+        return cuda_spmv_generic(sparse, vec);
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("cuda_spmv: only Float32/Float64/Float16/BFloat16 supported, got "
+        throw std::runtime_error("cuda_spmv: only Float32/Float64/Float16/BFloat16/"
+            "Int32/Int64/Complex64/Complex128 supported, got "
             + std::string(dtype_name(dtype)));
     }
 
@@ -1751,6 +1770,7 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <cuda_runtime.h>
+#include <cuComplex.h>
 #include <cub/cub.cuh>
 #include <cstdint>
 #include <stdexcept>
@@ -1771,6 +1791,207 @@ namespace cuda {
         }                                                                      \
     } while (0)
 #endif
+
+// ============================================================================
+// SparseSoftmax / SparseLogSoftmax: row-wise (log-)softmax over CSR values.
+// Always compiled (no cuSPARSE dependency). One grid-strided thread per row;
+// each thread does the numerically-stable max / sum-exp / normalize over its
+// own disjoint CSR value range — matching CPU sparse_(log_)softmax (F033).
+// ============================================================================
+template <typename T>
+__global__ void csr_softmax_standalone_kernel(
+    const int64_t* __restrict__ crow, const T* __restrict__ vals,
+    T* __restrict__ out, int64_t M, bool log_mode)
+{
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < M; i += stride) {
+        int64_t start = crow[i];
+        int64_t end = crow[i + 1];
+        if (start == end) continue;
+        T max_val = vals[start];
+        for (int64_t j = start + 1; j < end; ++j)
+            if (vals[j] > max_val) max_val = vals[j];
+        T sum_exp = T(0);
+        for (int64_t j = start; j < end; ++j)
+            sum_exp += exp(vals[j] - max_val);
+        if (log_mode) {
+            T lse = max_val + log(sum_exp);
+            for (int64_t j = start; j < end; ++j) out[j] = vals[j] - lse;
+        } else {
+            T inv = T(1) / sum_exp;
+            for (int64_t j = start; j < end; ++j) out[j] = exp(vals[j] - max_val) * inv;
+        }
+    }
+}
+
+Tensor cuda_sparse_softmax_values(const Tensor& crow_in, const Tensor& vals_in,
+                                  int64_t M, bool log_mode) {
+    DType orig = vals_in.dtype();
+    if (orig == DType::Float16 || orig == DType::BFloat16) {
+        Tensor out = cuda_sparse_softmax_values(crow_in, vals_in.to(DType::Float32), M, log_mode);
+        return out.to(orig);
+    }
+    Device dev = vals_in.device().type == Device::Type::CUDA ? vals_in.device()
+                                                             : Device::cuda();
+    int prev_device = 0;
+    cudaGetDevice(&prev_device);
+    cudaSetDevice(dev.index);
+
+    Tensor crow = (crow_in.device() == dev ? crow_in : crow_in.to(dev)).contiguous();
+    Tensor vals = (vals_in.device() == dev ? vals_in : vals_in.to(dev)).contiguous();
+    int64_t nnz = vals.numel();
+    Tensor out = zeros({nnz}, vals.dtype(), dev);
+
+    int threads = 256;
+    int64_t b64 = (M + threads - 1) / threads;
+    unsigned blocks = static_cast<unsigned>(b64 > 2147483647LL ? 2147483647LL : (b64 < 1 ? 1 : b64));
+
+    if (vals.dtype() == DType::Float32) {
+        csr_softmax_standalone_kernel<float><<<blocks, threads>>>(
+            crow.data<int64_t>(), vals.data<float>(), out.data<float>(), M, log_mode);
+    } else if (vals.dtype() == DType::Float64) {
+        csr_softmax_standalone_kernel<double><<<blocks, threads>>>(
+            crow.data<int64_t>(), vals.data<double>(), out.data<double>(), M, log_mode);
+    } else {
+        cudaSetDevice(prev_device);
+        throw std::runtime_error(
+            "cuda_sparse_softmax: only Float32/Float64 (+F16/BF16 widened) supported");
+    }
+    CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+    cudaSetDevice(prev_device);
+    return out;
+}
+
+// ============================================================================
+// Generic CSR SpMM/SpMV (F034) — integer and complex dtypes cuSPARSE cannot
+// handle. Always compiled (no cuSPARSE dependency); one thread per output
+// element (SpMM) / row (SpMV). Matches the CPU generic CSR templates.
+// ============================================================================
+__device__ inline int32_t sp_mac(int32_t acc, int32_t a, int32_t b) { return acc + a * b; }
+__device__ inline int64_t sp_mac(int64_t acc, int64_t a, int64_t b) { return acc + a * b; }
+__device__ inline cuFloatComplex sp_mac(cuFloatComplex acc, cuFloatComplex a, cuFloatComplex b) {
+    return cuCaddf(acc, cuCmulf(a, b));
+}
+__device__ inline cuDoubleComplex sp_mac(cuDoubleComplex acc, cuDoubleComplex a, cuDoubleComplex b) {
+    return cuCadd(acc, cuCmul(a, b));
+}
+template <typename T> __device__ inline T sp_zero();
+template <> __device__ inline int32_t sp_zero<int32_t>() { return 0; }
+template <> __device__ inline int64_t sp_zero<int64_t>() { return 0; }
+template <> __device__ inline cuFloatComplex sp_zero<cuFloatComplex>() { return make_cuFloatComplex(0.f, 0.f); }
+template <> __device__ inline cuDoubleComplex sp_zero<cuDoubleComplex>() { return make_cuDoubleComplex(0.0, 0.0); }
+
+template <typename T>
+__global__ void csr_spmm_generic_kernel(
+    const int64_t* __restrict__ crow, const int64_t* __restrict__ col,
+    const T* __restrict__ vals, const T* __restrict__ B, T* __restrict__ C,
+    int64_t M, int64_t N)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = M * N;
+    if (idx >= total) return;
+    int64_t i = idx / N, j = idx % N;
+    T acc = sp_zero<T>();
+    for (int64_t nz = crow[i]; nz < crow[i + 1]; ++nz) {
+        acc = sp_mac(acc, vals[nz], B[col[nz] * N + j]);
+    }
+    C[idx] = acc;
+}
+
+template <typename T>
+__global__ void csr_spmv_generic_kernel(
+    const int64_t* __restrict__ crow, const int64_t* __restrict__ col,
+    const T* __restrict__ vals, const T* __restrict__ x, T* __restrict__ y,
+    int64_t M)
+{
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= M) return;
+    T acc = sp_zero<T>();
+    for (int64_t nz = crow[i]; nz < crow[i + 1]; ++nz) {
+        acc = sp_mac(acc, vals[nz], x[col[nz]]);
+    }
+    y[i] = acc;
+}
+
+Tensor cuda_spmm_generic(const SparseTensor& sparse, const Tensor& dense) {
+    Device dev = dense.device().type == Device::Type::CUDA ? dense.device() : Device::cuda();
+    int prev = 0; cudaGetDevice(&prev); cudaSetDevice(dev.index);
+
+    auto sp_shape = sparse.shape();
+    int64_t M = sp_shape[0], N = dense.shape()[1];
+    auto csr = (sparse.layout() == SparseLayout::CSR) ? sparse : sparse.to_csr();
+    Tensor crow = csr.crow_indices().to(dev).contiguous();
+    Tensor col  = csr.col_indices().to(dev).contiguous();
+    Tensor vals = csr.values().to(dev).contiguous();
+    Tensor B = dense.to(dev).contiguous();
+    DType dt = dense.dtype();
+    Tensor C = zeros({M, N}, dt, dev);
+
+    int64_t total = M * N;
+    int block = 256;
+    unsigned blocks = static_cast<unsigned>(std::min<int64_t>((total + block - 1) / block, 2147483647LL));
+    if (blocks == 0) blocks = 1;
+    const int64_t* cr = crow.data<int64_t>();
+    const int64_t* cl = col.data<int64_t>();
+    if (dt == DType::Int32) {
+        csr_spmm_generic_kernel<int32_t><<<blocks, block>>>(cr, cl, vals.data<int32_t>(), B.data<int32_t>(), C.data<int32_t>(), M, N);
+    } else if (dt == DType::Int64) {
+        csr_spmm_generic_kernel<int64_t><<<blocks, block>>>(cr, cl, vals.data<int64_t>(), B.data<int64_t>(), C.data<int64_t>(), M, N);
+    } else if (dt == DType::Complex64) {
+        csr_spmm_generic_kernel<cuFloatComplex><<<blocks, block>>>(cr, cl,
+            reinterpret_cast<const cuFloatComplex*>(vals.data_ptr()),
+            reinterpret_cast<const cuFloatComplex*>(B.data_ptr()),
+            reinterpret_cast<cuFloatComplex*>(C.data_ptr()), M, N);
+    } else {
+        csr_spmm_generic_kernel<cuDoubleComplex><<<blocks, block>>>(cr, cl,
+            reinterpret_cast<const cuDoubleComplex*>(vals.data_ptr()),
+            reinterpret_cast<const cuDoubleComplex*>(B.data_ptr()),
+            reinterpret_cast<cuDoubleComplex*>(C.data_ptr()), M, N);
+    }
+    CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+    cudaSetDevice(prev);
+    return C;
+}
+
+Tensor cuda_spmv_generic(const SparseTensor& sparse, const Tensor& vec) {
+    Device dev = vec.device().type == Device::Type::CUDA ? vec.device() : Device::cuda();
+    int prev = 0; cudaGetDevice(&prev); cudaSetDevice(dev.index);
+
+    auto sp_shape = sparse.shape();
+    int64_t M = sp_shape[0];
+    auto csr = (sparse.layout() == SparseLayout::CSR) ? sparse : sparse.to_csr();
+    Tensor crow = csr.crow_indices().to(dev).contiguous();
+    Tensor col  = csr.col_indices().to(dev).contiguous();
+    Tensor vals = csr.values().to(dev).contiguous();
+    Tensor x = vec.to(dev).contiguous();
+    DType dt = vec.dtype();
+    Tensor y = zeros({M}, dt, dev);
+
+    int block = 256;
+    unsigned blocks = static_cast<unsigned>(std::min<int64_t>((M + block - 1) / block, 2147483647LL));
+    if (blocks == 0) blocks = 1;
+    const int64_t* cr = crow.data<int64_t>();
+    const int64_t* cl = col.data<int64_t>();
+    if (dt == DType::Int32) {
+        csr_spmv_generic_kernel<int32_t><<<blocks, block>>>(cr, cl, vals.data<int32_t>(), x.data<int32_t>(), y.data<int32_t>(), M);
+    } else if (dt == DType::Int64) {
+        csr_spmv_generic_kernel<int64_t><<<blocks, block>>>(cr, cl, vals.data<int64_t>(), x.data<int64_t>(), y.data<int64_t>(), M);
+    } else if (dt == DType::Complex64) {
+        csr_spmv_generic_kernel<cuFloatComplex><<<blocks, block>>>(cr, cl,
+            reinterpret_cast<const cuFloatComplex*>(vals.data_ptr()),
+            reinterpret_cast<const cuFloatComplex*>(x.data_ptr()),
+            reinterpret_cast<cuFloatComplex*>(y.data_ptr()), M);
+    } else {
+        csr_spmv_generic_kernel<cuDoubleComplex><<<blocks, block>>>(cr, cl,
+            reinterpret_cast<const cuDoubleComplex*>(vals.data_ptr()),
+            reinterpret_cast<const cuDoubleComplex*>(x.data_ptr()),
+            reinterpret_cast<cuDoubleComplex*>(y.data_ptr()), M);
+    }
+    CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+    cudaSetDevice(prev);
+    return y;
+}
 
 // ============================================================================
 // SpGEMM: 3-pass algorithm (count -> prefix sum -> fill)

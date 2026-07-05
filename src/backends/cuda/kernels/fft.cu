@@ -232,6 +232,13 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("FFT: dimension out of range");
     }
+    // C2C transform: a real input must first be promoted to complex (the op-layer
+    // fft() pre-widens; a direct OpId::FFT dispatch with a real tensor would
+    // otherwise be reinterpreted as complex). Matches the CPU fft_kernel.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_fft_kernel(input.to(c), dim, n, norm, stream);
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     // Determine transform parameters
@@ -394,6 +401,12 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IFFT: dimension out of range");
+    }
+    // C2C inverse transform: promote a real input to complex first (matches CPU
+    // ifft_kernel; op-layer ifft() pre-widens, direct dispatch would not).
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_ifft_kernel(input.to(c), dim, n, norm, stream);
     }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
@@ -1834,6 +1847,13 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("FFT: dimension out of range");
     }
+    // C2C transform: a real input must first be promoted to complex (the op-layer
+    // fft() pre-widens; a direct OpId::FFT dispatch with a real tensor would
+    // otherwise be reinterpreted as complex). Matches the CPU fft_kernel.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_fft_kernel(input.to(c), dim, n, norm, stream);
+    }
     bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];
@@ -1951,6 +1971,12 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IFFT: dimension out of range");
+    }
+    // C2C inverse transform: promote a real input to complex first (matches CPU
+    // ifft_kernel; op-layer ifft() pre-widens, direct dispatch would not).
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_ifft_kernel(input.to(c), dim, n, norm, stream);
     }
     bool is_float32 = (input.dtype() == DType::Complex64);
 

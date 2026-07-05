@@ -11,6 +11,9 @@
 #include <tenzor/nn/loss/contrastive.hpp>  // InfoNCELoss / NTXentLoss / TripletLoss
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/ops/op_id.hpp>
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -170,6 +173,39 @@ TEST_P(NNLossParity, CTCLoss) {
         return loss.forward(Variable(inputs[0], false),
                           inputs[1], inputs[2], inputs[3]).tensor();
     }, std::vector<Tensor>{log_probs, targets, input_lengths, target_lengths}, device, 1e-4f, 1e-5f, "CTCLoss");
+}
+
+TEST_P(NNLossParity, CTCLoss_1DConcatenatedTargets) {
+    // Direct OpId::CTCLossForward dispatch with 1-D concatenated (PyTorch-style)
+    // Int32 targets: total length = sum(target_lengths). The old CUDA CTC assumed
+    // a 2-D layout and read targets + n*(total length), OOB for n >= 1; CPU
+    // handles the concatenated layout via a prefix sum.
+    const int64_t T = 30, N = 3, C = 8;
+    auto log_probs_raw = randn({T, N, C}, DType::Float32, Device::cpu());
+    auto log_probs = nn::log_softmax(Variable(log_probs_raw, false), 2).tensor().contiguous();
+    // per-sample target length 5 → concatenated targets of length 15, labels in [1, C).
+    auto targets = (rand({15}, DType::Float32, Device::cpu()) * static_cast<float>(C - 2) + 1.0f).to(DType::Int32);
+    auto input_lengths  = (ones({N}, DType::Int32, Device::cpu()) * static_cast<double>(T));
+    auto target_lengths = (ones({N}, DType::Int32, Device::cpu()) * 5.0);
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Blank, static_cast<int64_t>(0));
+    attrs.set(AttrKey::ZeroInfinity, false);
+
+    auto run = [&](Device dev) {
+        std::vector<Tensor> ins = {log_probs.to(dev), targets.to(dev),
+                                   input_lengths.to(dev), target_lengths.to(dev)};
+        auto outs = dispatch(OpId::CTCLossForward, ins, attrs);
+        return outs[0].to(Device::cpu()).to(DType::Float64);  // loss per sample (N,)
+    };
+    auto cpu_loss = run(Device::cpu());
+    if (device.type == Device::Type::CPU) return;  // reference == device
+    auto dev_loss = run(device);
+    ASSERT_EQ(cpu_loss.numel(), dev_loss.numel());
+    const double* cp = cpu_loss.data<double>();
+    const double* dp = dev_loss.data<double>();
+    for (int64_t i = 0; i < N; ++i)
+        EXPECT_NEAR(cp[i], dp[i], 1e-3) << "sample " << i << " on " << device.to_string();
 }
 
 TEST_P(NNLossParity, MultiLabelSoftMarginLoss) {

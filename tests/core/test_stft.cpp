@@ -83,4 +83,30 @@ TEST_P(STFTTest, DifferentHopLengths) {
     EXPECT_GT(result1.shape()[1], result2.shape()[1]);
 }
 
+TEST_P(STFTTest, NormalizedRoundtripReconstructs) {
+    // With normalized=true on BOTH stft and istft, the ortho-normalized round
+    // trip must reconstruct the original amplitude. The old CUDA istft ignored
+    // `normalized` and always used the "backward" inverse, mis-scaling the
+    // reconstruction by ~sqrt(n_fft).
+    const int64_t signal_len = 256, n_fft = 64, hop_length = 16;
+    auto host = tenzor::empty({signal_len}, DType::Float32);
+    for (int64_t i = 0; i < signal_len; ++i)
+        host.data<float>()[i] = std::sin(0.1f * static_cast<float>(i));
+    auto signal = host.to(device);
+
+    auto spec = tenzor::fft::stft(signal, n_fft, hop_length, /*win_length=*/-1,
+                                  /*window=*/Tensor{}, /*center=*/true,
+                                  /*normalized=*/true, /*onesided=*/true);
+    auto recon = tenzor::fft::istft(spec, n_fft, hop_length, /*win_length=*/-1,
+                                    /*window=*/Tensor{}, /*center=*/true,
+                                    /*normalized=*/true, /*onesided=*/true,
+                                    /*length=*/signal_len).cpu();
+    auto sig_cpu = signal.cpu();
+    const float* r = recon.data<float>();
+    const float* s = sig_cpu.data<float>();
+    // Interior samples (away from edge-window effects) reconstruct closely.
+    for (int64_t i = n_fft; i < signal_len - n_fft; ++i)
+        EXPECT_NEAR(r[i], s[i], 2e-2f) << "i=" << i << " on " << device.to_string();
+}
+
 INSTANTIATE_BACKEND_TESTS(STFTTest);

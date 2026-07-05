@@ -77,7 +77,7 @@ thread_local bool Autocast::enabled_ = false;
 thread_local std::optional<DType> Autocast::dtype_ = std::nullopt;
 thread_local std::optional<Device::Type> Autocast::device_type_ = std::nullopt;
 
-Autocast::Autocast(bool enabled, DType dtype, Device::Type device_type)
+Autocast::Autocast(bool enabled, DType dtype, std::optional<Device::Type> device_type)
     : prev_enabled_(enabled_)
     , prev_dtype_(dtype_)
     , prev_device_type_(device_type_) {
@@ -139,11 +139,9 @@ auto Autocast::should_autocast(const std::string& op_name, const Device& device)
     }
 
     // Only skip CPU autocast if no device type is specified (backward compat)
-    // When user explicitly enables CPU autocast, allow it (BFloat16 benefits on
-    // recent Intel CPUs with AMX/AVX-512 BF16 instructions)
-    if (device.type == Device::Type::CPU && !device_type_.has_value()) {
-        return false;
-    }
+    // With device_type unset (the default), autocast applies to the op's actual
+    // device — CPU included — so a device-agnostic Autocast scope behaves the
+    // same on CPU and CUDA. An explicit device_type (handled above) restricts it.
 
     // Stability-critical operations should not be autocast
     if (is_stability_critical_op(op_name)) {

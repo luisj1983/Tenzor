@@ -172,6 +172,36 @@ for (auto& [name, ptr] : layer.named_parameters()) {
         << "EmbeddingBagBackward grad_weight diff on " << backend_name(device);
 }
 
+TEST_P(EmbeddingBagParity, Backward_MaxMode_GradWeightMatchesCPU) {
+    // Max mode routes the gradient only to the per-feature argmax row. The old
+    // CUDA backward ignored max_indices and used the sum path, scatter-adding the
+    // full gradient into every row of each bag — a wrong grad_weight.
+    auto b = make_bag_inputs();
+
+    auto run = [&](Device target) {
+        nn::EmbeddingBag layer(16, 8, 0.0, 2.0, false, "max");
+        for (auto& [name, ptr] : layer.named_parameters()) {
+            if (name == "embedding.weight") { *ptr = Variable(b.weight.to(target), true); break; }
+        }
+        auto out = layer.forward(Variable(b.indices.to(target), false),
+                                 Variable(b.offsets.to(target), false));
+        auto loss = sum(out);
+        loss.backward();
+        target.synchronize();
+        std::shared_ptr<Variable> w;
+        for (auto& [name, ptr] : layer.named_parameters()) {
+            if (name == "embedding.weight") { w = ptr; break; }
+        }
+        return (*w->grad()).to(Device::cpu());
+    };
+
+    auto cpu_grad = run(Device::cpu());
+    if (device.type == Device::Type::CPU) return;
+    auto dev_grad = run(device);
+    EXPECT_LT(max_abs_diff(cpu_grad, dev_grad), 1e-4f)
+        << "EmbeddingBagBackward (max) grad_weight diff on " << backend_name(device);
+}
+
 // ----------------------------------------------------------------------------
 // Direct kernel path — exercises the OpId::EmbeddingBagBackward dispatch with
 // non-trivial indices to prove the kernel scatters to rows selected by

@@ -11,7 +11,13 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
+
+#include <tenzor/tenzor.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/ops/op_id.hpp>
 
 // Header-only fused INT8xINT4 dequantizing matmul used by QuantizedLinear's
 // QInt4x2 path. Exercised directly below (out_features>1 regression).
@@ -283,3 +289,50 @@ TEST(QuantizedLinearInt4Fused, MatchesReferenceKernel) {
 }
 
 }  // namespace
+
+// F031: INT4 (QInt4x2) QuantizedLinear now has a native CUDA kernel (previously a
+// silent host round-trip). Dispatch OpId::QuantizedLinear with a packed INT4
+// weight on CUDA and require it to match the CPU int4 kernel reference.
+TEST(QuantizedLinearInt4Cuda, DispatchMatchesCpuKernel) {
+    using namespace tenzor;
+    initialize();
+    bool has_cuda = false;
+    try { auto t = zeros({1}, DType::Float32, Device::cuda(0)); (void)t; has_cuda = true; }
+    catch (...) {}
+    if (!has_cuda) GTEST_SKIP();
+
+    const int64_t B = 3, K = 32, O = 8, PK = K / 2;
+    std::vector<int8_t> input(static_cast<size_t>(B * K));
+    for (int64_t i = 0; i < B * K; ++i) input[i] = static_cast<int8_t>((i % 17) - 8);
+    std::vector<int8_t> weights(static_cast<size_t>(O * K));
+    for (int64_t i = 0; i < O * K; ++i) weights[i] = static_cast<int8_t>((i % 15) - 7);
+
+    std::vector<uint8_t> packed(static_cast<size_t>(O * PK));
+    for (int64_t o = 0; o < O; ++o)
+        for (int64_t p = 0; p < PK; ++p)
+            packed[o * PK + p] = pack_pair(weights[o * K + 2 * p], weights[o * K + 2 * p + 1]);
+
+    const float in_scale = 0.05f, w_scale = 0.03f, out_scale = 1.0f;
+    std::vector<float> ref(static_cast<size_t>(B * O), 0.0f);
+    tenzor::nn::quantization::kernels::quantized_linear_int4_kernel(
+        input.data(), packed.data(), nullptr, ref.data(), B, K, O, in_scale, w_scale, out_scale);
+
+    Tensor in_t({B, K}, DType::Int8, Device::cpu());
+    std::memcpy(in_t.data_ptr(), input.data(), static_cast<size_t>(B * K));
+    Tensor w_t({O, PK}, DType::QInt4x2, Device::cpu());
+    std::memcpy(w_t.data_ptr(), packed.data(), static_cast<size_t>(O * PK));
+
+    auto in_cuda = in_t.to(Device::cuda(0));
+    auto w_cuda = w_t.to(Device::cuda(0));
+    OpAttributes attrs;
+    attrs.set(AttrKey::InputScale,   static_cast<double>(in_scale));
+    attrs.set(AttrKey::WeightScaleQ, static_cast<double>(w_scale));
+    attrs.set(AttrKey::OutputScale,  static_cast<double>(out_scale));
+    std::vector<Tensor> ins = {in_cuda, w_cuda};
+    Tensor out = dispatch(OpId::QuantizedLinear, ins, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(out.numel(), static_cast<int64_t>(ref.size()));
+    const float* op = out.data<float>();
+    for (size_t i = 0; i < ref.size(); ++i)
+        EXPECT_NEAR(ref[i], op[i], 1e-3f) << "int4 quant linear elem " << i;
+}

@@ -114,6 +114,20 @@ TEST_P(ScatterVariantsTest, SliceScatterBasic) {
     }
 }
 
+TEST_P(ScatterVariantsTest, SliceScatterNegativeEnd) {
+    // end=-1 must stop before the last element (torch semantics): writes [0,3)
+    // of a dim of size 4. Regression for the CUDA off-by-one (end += dim_size+1).
+    auto input = zeros({4}, DType::Float32, device);
+    auto src = ones({3}, DType::Float32, device);
+    auto result = slice_scatter(input, src, /*dim=*/0, /*start=*/0, /*end=*/-1);
+    auto r = result.cpu();
+    const float* p = r.data<float>();
+    EXPECT_FLOAT_EQ(p[0], 1.0f);
+    EXPECT_FLOAT_EQ(p[1], 1.0f);
+    EXPECT_FLOAT_EQ(p[2], 1.0f);
+    EXPECT_FLOAT_EQ(p[3], 0.0f);  // last element untouched
+}
+
 TEST_P(ScatterVariantsTest, SliceScatterWithStep) {
     // 6-element zeros, scatter at indices 0, 2, 4 (step=2)
     auto input = zeros({6}, DType::Float32, device);

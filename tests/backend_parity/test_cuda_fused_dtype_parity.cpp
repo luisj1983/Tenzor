@@ -197,9 +197,10 @@ static void check_rmsnorm_backward_native_matches_ref(DType native_dtype, float 
 
     OpAttributes attrs;
 
-    // Reference: F32 backward on CUDA.
+    // Reference: F32 backward on CUDA. Dispatch contract is
+    // [grad_output, input, rrms, weight] (autograd saves [input, rrms, weight]).
     auto grad_f32_cuda = grad_f32.to(Device::cuda(0));
-    std::vector<Tensor> ref_inputs = {grad_f32_cuda, in_f32_cuda, wt_f32_cuda, rrms_f32_cuda};
+    std::vector<Tensor> ref_inputs = {grad_f32_cuda, in_f32_cuda, rrms_f32_cuda, wt_f32_cuda};
     auto ref = dispatch(OpId::RMSNormBackward, ref_inputs, attrs);
     ASSERT_GE(ref.size(), 2u);
     Tensor ref_gi = ref[0].to(Device::cpu()).to(DType::Float32);
@@ -209,7 +210,7 @@ static void check_rmsnorm_backward_native_matches_ref(DType native_dtype, float 
     auto grad_nat_cuda = grad_f32.to(native_dtype).to(Device::cuda(0));
     auto in_nat_cuda   = input_f32.to(native_dtype).to(Device::cuda(0));
     auto wt_nat_cuda   = weight_f32.to(native_dtype).to(Device::cuda(0));
-    std::vector<Tensor> nat_inputs = {grad_nat_cuda, in_nat_cuda, wt_nat_cuda, rrms_f32_cuda};
+    std::vector<Tensor> nat_inputs = {grad_nat_cuda, in_nat_cuda, rrms_f32_cuda, wt_nat_cuda};
     auto nat = dispatch(OpId::RMSNormBackward, nat_inputs, attrs);
     ASSERT_GE(nat.size(), 2u);
     Tensor nat_gi = nat[0].to(Device::cpu()).to(DType::Float32);
@@ -254,4 +255,122 @@ TEST_F(CudaFusedDtypeParity, FusedRMSNormBackward_F16_MatchesRef) {
 TEST_F(CudaFusedDtypeParity, FusedRMSNormBackward_BF16_MatchesRef) {
     if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     check_rmsnorm_backward_native_matches_ref(DType::BFloat16, 1e-2f);
+}
+
+// F050: CUDA FusedConv2dBnReLU must honor dilation (was silently ignored) and the
+// training path (batch stats + running-stat update), matching the CPU kernel.
+namespace {
+static Tensor positive_var(int64_t c) {
+    auto t = zeros({c}, DType::Float32, Device::cpu());
+    auto* p = t.data<float>();
+    for (int64_t i = 0; i < c; ++i) p[i] = 1.0f + 0.1f * static_cast<float>(i);
+    return t;
+}
+}  // namespace
+
+TEST_F(CudaFusedDtypeParity, FusedConv2dBnReLU_DilationMatchesCPU) {
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+    auto input  = random_f32({2, 3, 8, 8});
+    auto weight = random_f32({4, 3, 3, 3});
+    auto bias   = random_f32({4});
+    auto gamma  = random_f32({4});
+    auto beta   = random_f32({4});
+    auto rm     = random_f32({4});
+    auto rv     = positive_var(4);
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Stride,   static_cast<int64_t>(1));
+    attrs.set(AttrKey::Padding,  static_cast<int64_t>(1));
+    attrs.set(AttrKey::Dilation, static_cast<int64_t>(2));
+    attrs.set(AttrKey::Eps,      static_cast<double>(1e-5));
+
+    std::vector<Tensor> cpu_in = {input, weight, bias, gamma, beta, rm, rv};
+    Tensor ref = dispatch(OpId::FusedConv2dBnReLU, cpu_in, attrs)[0];
+
+    std::vector<Tensor> cu_in = {
+        input.to(Device::cuda(0)), weight.to(Device::cuda(0)), bias.to(Device::cuda(0)),
+        gamma.to(Device::cuda(0)), beta.to(Device::cuda(0)),
+        rm.to(Device::cuda(0)), rv.to(Device::cuda(0))};
+    Tensor out = dispatch(OpId::FusedConv2dBnReLU, cu_in, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(ref.numel(), out.numel());
+    ASSERT_GT(ref.numel(), 0);
+    const float* rp = ref.data<float>();
+    const float* op = out.data<float>();
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_NEAR(rp[i], op[i], 1e-4f) << "dilated conv-bn-relu elem " << i;
+}
+
+// F055: fused conv-activation with asymmetric stride/padding. The non-cuDNN CUDA
+// fallback (native per-axis conv2d + activation) previously rejected asymmetric
+// config; this checks the op-level result matches CPU (cuDNN serves it here, the
+// native kernel is the non-cuDNN mirror of the same math).
+TEST_F(CudaFusedDtypeParity, FusedConv2dReLU_AsymmetricMatchesCPU) {
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+    auto input  = random_f32({2, 3, 9, 11});
+    auto weight = random_f32({4, 3, 3, 3});
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideH,  static_cast<int64_t>(2));
+    attrs.set(AttrKey::StrideW,  static_cast<int64_t>(1));
+    attrs.set(AttrKey::PaddingH, static_cast<int64_t>(2));
+    attrs.set(AttrKey::PaddingW, static_cast<int64_t>(1));
+    attrs.set(AttrKey::Groups,   static_cast<int64_t>(1));
+
+    std::vector<Tensor> cpu_in = {input, weight};
+    Tensor ref = dispatch(OpId::FusedConv2dReLU, cpu_in, attrs)[0];
+    std::vector<Tensor> cu_in = {input.to(Device::cuda(0)), weight.to(Device::cuda(0))};
+    Tensor out = dispatch(OpId::FusedConv2dReLU, cu_in, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(ref.numel(), out.numel());
+    ASSERT_GT(ref.numel(), 0);
+    const float* rp = ref.data<float>();
+    const float* op = out.data<float>();
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_NEAR(rp[i], op[i], 1e-3f) << "asymmetric fused conv-relu elem " << i;
+}
+
+TEST_F(CudaFusedDtypeParity, FusedConv2dBnReLU_TrainingMatchesCPU) {
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+    auto input  = random_f32({2, 3, 6, 6});
+    auto weight = random_f32({5, 3, 3, 3});
+    auto bias   = random_f32({5});
+    auto gamma  = random_f32({5});
+    auto beta   = random_f32({5});
+    auto rm0    = random_f32({5});
+    auto rv0    = positive_var(5);
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Stride,   static_cast<int64_t>(1));
+    attrs.set(AttrKey::Padding,  static_cast<int64_t>(1));
+    attrs.set(AttrKey::Momentum, static_cast<double>(0.1));
+    attrs.set(AttrKey::Eps,      static_cast<double>(1e-5));
+    attrs.set(AttrKey::Training, true);
+
+    // Independent running-stat copies per backend (updated in place by the op).
+    Tensor rm_cpu = rm0.clone(), rv_cpu = rv0.clone();
+    std::vector<Tensor> cpu_in = {input, weight, bias, gamma, beta, rm_cpu, rv_cpu};
+    Tensor ref = dispatch(OpId::FusedConv2dBnReLU, cpu_in, attrs)[0];
+
+    std::vector<Tensor> cu_in = {
+        input.to(Device::cuda(0)), weight.to(Device::cuda(0)), bias.to(Device::cuda(0)),
+        gamma.to(Device::cuda(0)), beta.to(Device::cuda(0)),
+        rm0.to(Device::cuda(0)), rv0.to(Device::cuda(0))};
+    Tensor out = dispatch(OpId::FusedConv2dBnReLU, cu_in, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(ref.numel(), out.numel());
+    const float* rp = ref.data<float>();
+    const float* op = out.data<float>();
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_NEAR(rp[i], op[i], 1e-4f) << "training conv-bn-relu elem " << i;
+
+    // Running statistics must be updated identically on both backends.
+    Tensor rm_cu = cu_in[5].to(Device::cpu());
+    Tensor rv_cu = cu_in[6].to(Device::cpu());
+    const float* rmc = rm_cpu.data<float>();  const float* rmg = rm_cu.data<float>();
+    const float* rvc = rv_cpu.data<float>();  const float* rvg = rv_cu.data<float>();
+    for (int64_t i = 0; i < rm_cpu.numel(); ++i) {
+        EXPECT_NEAR(rmc[i], rmg[i], 1e-5f) << "running_mean elem " << i;
+        EXPECT_NEAR(rvc[i], rvg[i], 1e-5f) << "running_var elem " << i;
+    }
 }

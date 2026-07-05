@@ -30,6 +30,10 @@
 #include "cuda_nan_helpers.cuh"
 
 #include "tenzor/ops/creation.hpp"
+// real()/imag() are forward-declared (not via ops/math.hpp) so we don't pull that
+// header's free-function names (sqrt/abs/hypot/…) into a translation unit that also
+// includes cuComplex.h, which triggers namespace-collision errors in the CUDA header.
+namespace tenzor { Tensor real(const Tensor& input); Tensor imag(const Tensor& input); }
 #include "tenzor/ops/transform.hpp"  // broadcast_to (F2)
 #include "tenzor/core/shape.hpp"     // broadcast_shapes (F2)
 
@@ -251,6 +255,7 @@ auto index_select_kernel(const Tensor& input_orig, int64_t dim, const Tensor& in
                     error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
+        case DType::Bool:    LAUNCH_INDEX_SELECT(bool); break;
         default:
             throw std::runtime_error("index_select: unsupported dtype");
     }
@@ -484,6 +489,7 @@ auto gather_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_or
                     total_output, dim_size, ndim_i, dim_i, meta, error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
+        case DType::Bool:    LAUNCH_GATHER(bool); break;
         default:
             throw std::runtime_error("gather: unsupported dtype");
     }
@@ -760,6 +766,7 @@ auto scatter_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_o
                     total_scatter, dim_size, ndim_i, dim_i, meta, error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
+        case DType::Bool:    LAUNCH_SCATTER(bool); break;
         default:
             throw std::runtime_error("scatter: unsupported dtype");
     }
@@ -1006,8 +1013,33 @@ __global__ void deterministic_apply_segments_kernel(
     }
 }
 
+// Validate a mask/condition tensor dtype for masked_fill / where / masked_select.
+// Matches the CPU backend contract: only Bool or a floating dtype is accepted; an
+// integer/complex mask throws (rather than being silently coerced), so both
+// backends agree on which mask dtypes are legal.
+static void validate_mask_dtype(const Tensor& mask, const char* op) {
+    const DType d = mask.dtype();
+    const bool ok = d == DType::Bool || d == DType::Float32 || d == DType::Float64 ||
+                    d == DType::Float16 || d == DType::BFloat16;
+    if (!ok) {
+        throw std::invalid_argument(std::string(op) +
+            ": mask tensor must have dtype Bool or a floating dtype");
+    }
+}
+
 auto scatter_add_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_orig,
                         const Tensor& src_orig, cudaStream_t stream) -> Tensor {
+    // Complex scatter_add decomposes into independent real/imag scatter_adds
+    // (complex addition is component-wise), reusing the real-dtype paths — both
+    // the deterministic and the atomic ones — and matching the CPU backend which
+    // accumulates std::complex. The recursive calls handle their own contiguity.
+    if (input_orig.dtype() == DType::Complex64 || input_orig.dtype() == DType::Complex128) {
+        Tensor out_re = scatter_add_kernel(::tenzor::real(input_orig), dim, index_orig,
+                                           ::tenzor::real(src_orig), stream);
+        Tensor out_im = scatter_add_kernel(::tenzor::imag(input_orig), dim, index_orig,
+                                           ::tenzor::imag(src_orig), stream);
+        return ::tenzor::complex(out_re, out_im);
+    }
     // Materialize contiguous copies (kernels index output via contiguous
     // strides and read index/src linearly). Shadow the params.
     Tensor input_contig, index_contig, src_contig;
@@ -1345,6 +1377,7 @@ auto scatter_add_kernel(const Tensor& input_orig, int64_t dim, const Tensor& ind
 
 auto masked_select_kernel(const Tensor& input, const Tensor& mask,
                           cudaStream_t stream) -> Tensor {
+    validate_mask_dtype(mask, "masked_select");
     int64_t n = input.numel();
 
     if (n == 0) {
@@ -1406,6 +1439,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
         case DType::UInt64:  RUN_FLAGGED_SELECT(uint64_t); break;
         case DType::Complex64:  RUN_FLAGGED_SELECT(float2); break;
         case DType::Complex128: RUN_FLAGGED_SELECT(double2); break;
+        case DType::Bool:       RUN_FLAGGED_SELECT(bool); break;
         default:
             throw std::runtime_error("masked_select: unsupported dtype");
     }
@@ -1470,6 +1504,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
     // silently miscompiled the per-element gate. broadcasting via the
     // existing `broadcast_to` op materialises a full mask once; the kernel
     // then sees a 1:1 mapping with input.
+    validate_mask_dtype(mask, "masked_fill");
     Tensor mask_broadcast = mask;
     std::vector<int64_t> input_shape_vec(input.shape().begin(), input.shape().end());
     std::vector<int64_t> mask_shape_vec(mask.shape().begin(), mask.shape().end());
@@ -1572,6 +1607,7 @@ __global__ void where_kernel_impl(
 
 auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
                   cudaStream_t stream) -> Tensor {
+    validate_mask_dtype(condition, "where");
     // PyTorch where() broadcasts condition, x and y to a common shape. The kernel
     // reads all three as flat arrays of length n, so a broadcastable-but-smaller
     // operand (scalar y, a (1,S) mask, ...) would read past the end of its buffer
@@ -1752,30 +1788,32 @@ __global__ void embedding_kernel_impl(
     int64_t num_indices,
     int64_t embedding_dim,
     int64_t num_embeddings,
+    int64_t padding_idx,
     int* error_flag) {
 
     // Row-oriented gather: one block per index row, threads stride over
-    // embedding_dim. Removes the per-element int64 div/mod of the old
-    // element-parallel loop (which dominated this bandwidth-bound kernel) and
-    // computes the row base offset once. OOB ids set the device error flag and
-    // write a zero row (memory-safe); the catchable throw is raised later at the
-    // next device sync (see cuda_drain_index_errors).
+    // embedding_dim. Negative ids wrap (idx += num_embeddings) to match CPU; an
+    // id equal to padding_idx yields a zero row (PyTorch padding semantics);
+    // still-OOB ids set the device error flag and write a zero row (memory-safe),
+    // with the catchable throw raised at the next device sync.
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
+        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives (matches CPU)
         const bool ok = (token_idx >= 0 && token_idx < num_embeddings);
         if (!ok && threadIdx.x == 0) {
             atomicExch(error_flag, 1);
         }
+        const bool copy = ok && !(padding_idx >= 0 && token_idx == padding_idx);
         T* dst = output + i * embedding_dim;
-        const T* src = ok ? (weight + token_idx * embedding_dim) : nullptr;
+        const T* src = copy ? (weight + token_idx * embedding_dim) : nullptr;
         for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
-            dst[j] = ok ? src[j] : T{};
+            dst[j] = copy ? src[j] : T{};
         }
     }
 }
 
 auto embedding_kernel(const Tensor& weight, const Tensor& indices,
-                      cudaStream_t stream) -> Tensor {
+                      int64_t padding_idx, cudaStream_t stream) -> Tensor {
     // weight: [num_embeddings, embedding_dim]
     // indices: [*] (any shape of int64 indices)
     // output: [*, embedding_dim]
@@ -1830,12 +1868,12 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
         if (idx_is_int32) { \
             embedding_kernel_impl<T, int32_t><<<emb_grid, emb_block, 0, stream>>>( \
                 weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
-                num_indices, embedding_dim, num_embeddings, err_flag); \
+                num_indices, embedding_dim, num_embeddings, padding_idx, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
         } else { \
             embedding_kernel_impl<T, int64_t><<<emb_grid, emb_block, 0, stream>>>( \
                 weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
-                num_indices, embedding_dim, num_embeddings, err_flag); \
+                num_indices, embedding_dim, num_embeddings, padding_idx, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
         }
 
@@ -1848,14 +1886,14 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, err_flag);
+                    num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 embedding_kernel_impl<__half, int64_t><<<emb_grid, emb_block, 0, stream>>>(
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, err_flag);
+                    num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -1865,14 +1903,14 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, err_flag);
+                    num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 embedding_kernel_impl<__nv_bfloat16, int64_t><<<emb_grid, emb_block, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, err_flag);
+                    num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -1913,6 +1951,7 @@ __global__ void embedding_backward_kernel_impl(
 
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
+        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives, matching CPU
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
         const T* go = grad_output + i * embedding_dim;
         T* gw = grad_weight + token_idx * embedding_dim;
@@ -1934,6 +1973,7 @@ __global__ void embedding_backward_fp16_kernel_impl(
 
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
+        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives, matching CPU
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
         const __half* go = grad_output + i * embedding_dim;
         for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
@@ -1979,6 +2019,7 @@ __global__ void embedding_backward_bf16_kernel_impl(
 
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
+        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives, matching CPU
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
         const __nv_bfloat16* go = grad_output + i * embedding_dim;
         for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
@@ -3065,6 +3106,21 @@ auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values,
                 seq_len, num_values, right);
             break;
         }
+        case DType::Int8:
+            LAUNCH_KERNEL(searchsorted_kernel_impl<int8_t>, num_values, stream,
+                seq_cont.data<int8_t>(), val_cont.data<int8_t>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        case DType::UInt8:
+            LAUNCH_KERNEL(searchsorted_kernel_impl<uint8_t>, num_values, stream,
+                seq_cont.data<uint8_t>(), val_cont.data<uint8_t>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        case DType::Int16:
+            LAUNCH_KERNEL(searchsorted_kernel_impl<int16_t>, num_values, stream,
+                seq_cont.data<int16_t>(), val_cont.data<int16_t>(), out_ptr,
+                seq_len, num_values, right);
+            break;
         default:
             throw std::runtime_error("searchsorted: unsupported dtype");
     }
@@ -3116,9 +3172,36 @@ __global__ void embedding_bag_backward_kernel_cuda(
     }
 }
 
+// Max-mode backward: the forward emits, per (bag, feature), the GLOBAL element
+// index into `indices` that achieved the maximum (or -1 for an empty bag). The
+// gradient flows only to that winning row, mirroring the CPU max backward.
+template<typename T>
+__global__ void embedding_bag_backward_max_kernel_cuda(
+    const T* grad_output,
+    const int64_t* max_indices,   // [num_bags, embedding_dim]
+    const int64_t* indices,       // [total_elements]
+    T* grad_weight,
+    int64_t num_bags,
+    int64_t embedding_dim,
+    int64_t total_elements,
+    int64_t num_embeddings)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        int64_t elem = max_indices[bag * embedding_dim + j];
+        if (elem < 0 || elem >= total_elements) continue;  // empty bag / OOB
+        int64_t row = indices[elem];
+        if (row < 0 || row >= num_embeddings) continue;
+        atomicAdd(&grad_weight[row * embedding_dim + j],
+                  grad_output[bag * embedding_dim + j]);
+    }
+}
+
 auto embedding_bag_backward_kernel(const Tensor& grad_output,
                                    const Tensor& indices,
                                    const Tensor& offsets,
+                                   const Tensor& max_indices,
                                    const OpAttributes& attrs,
                                    cudaStream_t stream) -> Tensor {
     int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
@@ -3141,7 +3224,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
     // FP16/BF16: upcast to Float32 (indices stays Int64)
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         auto go_f32 = grad_output.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, attrs, stream);
+        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, max_indices, attrs, stream);
         return result.to(grad_output.dtype());
     }
 
@@ -3151,6 +3234,38 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
 
     int threads = std::min(static_cast<int>(embedding_dim), 256);
     int blocks = static_cast<int>(num_bags);
+
+    // Max mode: route the gradient only to the per-feature argmax row, using the
+    // max_indices saved by the forward (matches CPU). Without this, max-mode
+    // backward fell through to the sum path below and scatter-added the full
+    // gradient into every row of each bag — wrong grad_weight.
+    if (mode == "max") {
+        if (!max_indices.is_valid() || max_indices.numel() == 0) {
+            throw std::runtime_error(
+                "embedding_bag_backward: mode=\"max\" requires the per-feature "
+                "argmax indices (4th input) produced by EmbeddingBagForward.");
+        }
+        if (max_indices.dtype() != DType::Int64) {
+            throw std::runtime_error("embedding_bag_backward: max_indices must be Int64");
+        }
+        switch (grad_output.dtype()) {
+            case DType::Float32:
+                embedding_bag_backward_max_kernel_cuda<float><<<blocks, threads, 0, stream>>>(
+                    grad_output.data<float>(), max_indices.data<int64_t>(), indices.data<int64_t>(),
+                    grad_weight.data<float>(), num_bags, embedding_dim, total_elements, num_embeddings);
+                break;
+            case DType::Float64:
+                embedding_bag_backward_max_kernel_cuda<double><<<blocks, threads, 0, stream>>>(
+                    grad_output.data<double>(), max_indices.data<int64_t>(), indices.data<int64_t>(),
+                    grad_weight.data<double>(), num_bags, embedding_dim, total_elements, num_embeddings);
+                break;
+            default:
+                throw std::runtime_error("embedding_bag_backward: unsupported dtype");
+        }
+        CUDA_CHECK(cudaGetLastError());
+        return grad_weight;
+    }
+
     bool is_mean = (mode == "mean");
 
     switch (grad_output.dtype()) {

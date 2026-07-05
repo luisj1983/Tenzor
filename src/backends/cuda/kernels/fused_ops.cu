@@ -1724,6 +1724,8 @@ __global__ void fused_conv2d_bn_relu_kernel(
     int64_t stride_w,
     int64_t padding_h,
     int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     T eps,
     bool has_bias
 ) {
@@ -1743,8 +1745,8 @@ __global__ void fused_conv2d_bn_relu_kernel(
         for (int64_t c_in = 0; c_in < in_channels; ++c_in) {
             for (int64_t kh = 0; kh < kernel_h; ++kh) {
                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                    int64_t h_in = h_out * stride_h - padding_h + kh;
-                    int64_t w_in = w_out * stride_w - padding_w + kw;
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
 
                     if (h_in >= 0 && h_in < in_h && w_in >= 0 && w_in < in_w) {
                         int64_t input_idx = ((n * in_channels + c_in) * in_h + h_in) * in_w + w_in;
@@ -1779,6 +1781,7 @@ static void launch_fused_conv2d_bn_relu(
     int64_t in_h, int64_t in_w, int64_t out_h, int64_t out_w,
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+    int64_t dilation_h, int64_t dilation_w,
     float eps, cudaStream_t stream)
 {
     int64_t total_elements = batch_size * out_channels * out_h * out_w;
@@ -1793,7 +1796,160 @@ static void launch_fused_conv2d_bn_relu(
         output.data<T>(),
         batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
         kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
-        static_cast<T>(eps), bias != nullptr);
+        dilation_h, dilation_w, static_cast<T>(eps), bias != nullptr);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+}
+
+// --- Training path (findings F050): compute per-channel batch statistics, update
+// running_mean/running_var in place (momentum), normalize with the BATCH stats,
+// then scale/shift + ReLU — matching the CPU conv_bn_relu_training semantics
+// exactly (biased var for normalization, unbiased var for the running update,
+// double-precision reductions).
+
+// Raw conv (+bias), dilation-aware, into conv_out [N, C_out, out_h, out_w].
+template <typename T>
+__global__ void fused_conv2d_raw_kernel(
+    const T* input, const T* weight, const T* bias, T* conv_out,
+    int64_t batch_size, int64_t in_channels, int64_t out_channels,
+    int64_t in_h, int64_t in_w, int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+    int64_t dilation_h, int64_t dilation_w, bool has_bias)
+{
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = batch_size * out_channels * out_h * out_w;
+    int64_t step = blockDim.x * gridDim.x;
+    for (int64_t idx = tid; idx < total; idx += step) {
+        int64_t w_out = idx % out_w;
+        int64_t h_out = (idx / out_w) % out_h;
+        int64_t c_out = (idx / (out_w * out_h)) % out_channels;
+        int64_t n = idx / (out_w * out_h * out_channels);
+        T s = 0;
+        for (int64_t c_in = 0; c_in < in_channels; ++c_in)
+            for (int64_t kh = 0; kh < kernel_h; ++kh)
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
+                    if (h_in >= 0 && h_in < in_h && w_in >= 0 && w_in < in_w) {
+                        int64_t ii = ((n * in_channels + c_in) * in_h + h_in) * in_w + w_in;
+                        int64_t wi = ((c_out * in_channels + c_in) * kernel_h + kh) * kernel_w + kw;
+                        s += input[ii] * weight[wi];
+                    }
+                }
+        if (has_bias) s += bias[c_out];
+        conv_out[idx] = s;
+    }
+}
+
+// One block per output channel: reduce mean and biased variance in double,
+// write batch_mean/batch_var (biased) and update running stats in place.
+template <typename T>
+__global__ void fused_bn_channel_stats_kernel(
+    const T* conv_out, T* batch_mean, T* batch_var,
+    T* running_mean, T* running_var,
+    int64_t batch_size, int64_t out_channels, int64_t spatial, float momentum)
+{
+    int64_t oc = blockIdx.x;
+    if (oc >= out_channels) return;
+    int64_t samples = batch_size * spatial;
+    extern __shared__ double sdata[];
+    double* ssum = sdata;
+    double* ssq = sdata + blockDim.x;
+
+    double local_sum = 0.0, local_sq = 0.0;
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const T* base = conv_out + (b * out_channels + oc) * spatial;
+        for (int64_t s = threadIdx.x; s < spatial; s += blockDim.x) {
+            double v = static_cast<double>(base[s]);
+            local_sum += v;
+            local_sq += v * v;
+        }
+    }
+    ssum[threadIdx.x] = local_sum;
+    ssq[threadIdx.x] = local_sq;
+    __syncthreads();
+    for (int64_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            ssum[threadIdx.x] += ssum[threadIdx.x + stride];
+            ssq[threadIdx.x] += ssq[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        double n_d = static_cast<double>(samples);
+        double mean_d = ssum[0] / n_d;
+        double var_biased = ssq[0] / n_d - mean_d * mean_d;
+        if (var_biased < 0.0) var_biased = 0.0;  // guard fp rounding
+        batch_mean[oc] = static_cast<T>(mean_d);
+        batch_var[oc] = static_cast<T>(var_biased);
+        double var_unbiased = (samples > 1) ? var_biased * n_d / (n_d - 1.0) : var_biased;
+        running_mean[oc] = static_cast<T>((1.0 - momentum) * static_cast<double>(running_mean[oc])
+                                          + momentum * mean_d);
+        running_var[oc] = static_cast<T>((1.0 - momentum) * static_cast<double>(running_var[oc])
+                                         + momentum * var_unbiased);
+    }
+}
+
+// Normalize conv_out with batch stats, scale/shift, ReLU into output.
+template <typename T>
+__global__ void fused_bn_relu_apply_kernel(
+    const T* conv_out, const T* batch_mean, const T* batch_var,
+    const T* bn_gamma, const T* bn_beta, T* output,
+    int64_t total, int64_t out_channels, int64_t spatial, T eps)
+{
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t step = blockDim.x * gridDim.x;
+    for (int64_t idx = tid; idx < total; idx += step) {
+        int64_t oc = (idx / spatial) % out_channels;
+        T inv_std = T(1) / sqrt(batch_var[oc] + eps);
+        T norm = (conv_out[idx] - batch_mean[oc]) * inv_std;
+        T bn = norm * bn_gamma[oc] + bn_beta[oc];
+        output[idx] = (bn > T(0)) ? bn : T(0);
+    }
+}
+
+template <typename T>
+static void launch_fused_conv2d_bn_relu_training(
+    const Tensor& input, const Tensor& weight, const Tensor* bias,
+    Tensor& running_mean, Tensor& running_var, const Tensor& bn_gamma, const Tensor& bn_beta,
+    Tensor& output,
+    int64_t batch_size, int64_t in_channels, int64_t out_channels,
+    int64_t in_h, int64_t in_w, int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+    int64_t dilation_h, int64_t dilation_w,
+    float momentum, float eps, cudaStream_t stream)
+{
+    int64_t spatial = out_h * out_w;
+    int64_t total = batch_size * out_channels * spatial;
+
+    Tensor conv_out = create_cuda_zeros({batch_size, out_channels, out_h, out_w},
+                                        input.dtype(), input.device());
+    Tensor batch_mean = create_cuda_zeros({out_channels}, input.dtype(), input.device());
+    Tensor batch_var = create_cuda_zeros({out_channels}, input.dtype(), input.device());
+
+    int block = 256;
+    int blocks = clamp_blocks((total + block - 1) / block);
+    const T* bias_ptr = bias ? bias->data<T>() : nullptr;
+    fused_conv2d_raw_kernel<T><<<blocks, block, 0, stream>>>(
+        input.data<T>(), weight.data<T>(), bias_ptr, conv_out.data<T>(),
+        batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
+        kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
+        dilation_h, dilation_w, bias != nullptr);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    int stat_block = 256;
+    size_t shmem = 2 * static_cast<size_t>(stat_block) * sizeof(double);
+    fused_bn_channel_stats_kernel<T><<<static_cast<unsigned>(out_channels), stat_block, shmem, stream>>>(
+        conv_out.data<T>(), batch_mean.data<T>(), batch_var.data<T>(),
+        running_mean.data<T>(), running_var.data<T>(),
+        batch_size, out_channels, spatial, momentum);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    fused_bn_relu_apply_kernel<T><<<blocks, block, 0, stream>>>(
+        conv_out.data<T>(), batch_mean.data<T>(), batch_var.data<T>(),
+        bn_gamma.data<T>(), bn_beta.data<T>(), output.data<T>(),
+        total, out_channels, spatial, static_cast<T>(eps));
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
@@ -1809,9 +1965,16 @@ auto fused_conv2d_bn_relu_cuda(
     int64_t stride_w,
     int64_t padding_h,
     int64_t padding_w,
-    float eps
+    int64_t dilation_h,
+    int64_t dilation_w,
+    float momentum,
+    float eps,
+    bool training
 ) -> Tensor {
-    // Float16/BFloat16: widen to Float32 on device, compute, narrow back (on-GPU casts).
+    // Float16/BFloat16: widen to Float32 on device, compute, narrow back (on-GPU
+    // casts). Mirrors the CPU kernel: the running-stat update in training mode
+    // lands on the Float32 copies (as on CPU), so neither backend writes the
+    // half-precision running tensors — parity preserved.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         const DType orig = input.dtype();
         Tensor bias_f32;
@@ -1821,7 +1984,8 @@ auto fused_conv2d_bn_relu_cuda(
             input.to(DType::Float32), weight.to(DType::Float32), bias_ptr,
             bn_mean.to(DType::Float32), bn_var.to(DType::Float32),
             bn_gamma.to(DType::Float32), bn_beta.to(DType::Float32),
-            stride_h, stride_w, padding_h, padding_w, eps);
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
+            momentum, eps, training);
         return out.to(orig);
     }
 
@@ -1834,22 +1998,42 @@ auto fused_conv2d_bn_relu_cuda(
     int64_t kernel_h = weight.shape()[2];
     int64_t kernel_w = weight.shape()[3];
 
-    int64_t out_h = (in_h + 2 * padding_h - kernel_h) / stride_h + 1;
-    int64_t out_w = (in_w + 2 * padding_w - kernel_w) / stride_w + 1;
+    int64_t out_h = (in_h + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (in_w + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     Tensor output = create_cuda_zeros({batch_size, out_channels, out_h, out_w}, input.dtype(), input.device());
     int32_t device_id = input.device().index;
     auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
     cudaStream_t stream = stream_guard.get();
 
-    if (input.dtype() == DType::Float32) {
+    if (training) {
+        // running_mean/running_var are updated in place; take non-const handles
+        // that share storage with the passed tensors (mirrors the CPU kernel).
+        Tensor rm = bn_mean;
+        Tensor rv = bn_var;
+        if (input.dtype() == DType::Float32) {
+            launch_fused_conv2d_bn_relu_training<float>(input, weight, bias, rm, rv, bn_gamma, bn_beta,
+                output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
+                dilation_h, dilation_w, momentum, eps, stream);
+        } else if (input.dtype() == DType::Float64) {
+            launch_fused_conv2d_bn_relu_training<double>(input, weight, bias, rm, rv, bn_gamma, bn_beta,
+                output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
+                dilation_h, dilation_w, momentum, eps, stream);
+        } else {
+            throw std::runtime_error("fused_conv2d_bn_relu_cuda: unsupported dtype");
+        }
+    } else if (input.dtype() == DType::Float32) {
         launch_fused_conv2d_bn_relu<float>(input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta,
             output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
-            kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, eps, stream);
+            kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
+            dilation_h, dilation_w, eps, stream);
     } else if (input.dtype() == DType::Float64) {
         launch_fused_conv2d_bn_relu<double>(input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta,
             output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
-            kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, eps, stream);
+            kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
+            dilation_h, dilation_w, eps, stream);
     } else {
         throw std::runtime_error("fused_conv2d_bn_relu_cuda: unsupported dtype");
     }

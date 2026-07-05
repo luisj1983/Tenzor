@@ -42,6 +42,38 @@ struct std::hash<tenzor::BFloat16> {
 
 namespace tenzor {
 
+namespace {
+// NaN-aware ordering for the CPU sort/topk/median/mode paths (finding F065).
+// PyTorch treats NaN as the LARGEST value (sorts last ascending / first
+// descending). A bare `<`/`>` on floats is not a strict weak ordering when NaN
+// is present (all NaN compares are false → UB in std::sort), and the value would
+// otherwise diverge from the CUDA backend (which orders NaN as the maximum via a
+// radix key remap). NaN is detected from the IEEE-754 bit pattern so the result
+// is correct even if the TU is built with -ffast-math/-ffinite-math-only.
+inline bool ord_isnan(float x) {
+    uint32_t u; std::memcpy(&u, &x, sizeof(u));
+    return (u & 0x7fffffffu) > 0x7f800000u;
+}
+inline bool ord_isnan(double x) {
+    uint64_t u; std::memcpy(&u, &x, sizeof(u));
+    return (u & 0x7fffffffffffffffull) > 0x7ff0000000000000ull;
+}
+template <typename T> inline bool ord_less(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = ord_isnan(a), nb = ord_isnan(b);
+        if (na || nb) return !na && nb;
+        return a < b;
+    } else { return a < b; }
+}
+template <typename T> inline bool ord_greater(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = ord_isnan(a), nb = ord_isnan(b);
+        if (na || nb) return na && !nb;
+        return a > b;
+    } else { return a > b; }
+}
+}  // namespace
+
 auto topk(const Tensor& input,
           int64_t k,
           int64_t dim,
@@ -151,20 +183,20 @@ auto topk(const Tensor& input,
                 // Partial sort to get top-k
                 if (largest) {
                     std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                        [](const auto& a, const auto& b) { return a.first > b.first; });
+                        [](const auto& a, const auto& b) { return ord_greater(a.first, b.first); });
                 } else {
                     std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                        [](const auto& a, const auto& b) { return a.first < b.first; });
+                        [](const auto& a, const auto& b) { return ord_less(a.first, b.first); });
                 }
 
                 // Optionally sort the top-k
                 if (sorted) {
                     if (largest) {
                         std::sort(pairs.begin(), pairs.begin() + k,
-                            [](const auto& a, const auto& b) { return a.first > b.first; });
+                            [](const auto& a, const auto& b) { return ord_greater(a.first, b.first); });
                     } else {
                         std::sort(pairs.begin(), pairs.begin() + k,
-                            [](const auto& a, const auto& b) { return a.first < b.first; });
+                            [](const auto& a, const auto& b) { return ord_less(a.first, b.first); });
                     }
                 }
 
@@ -295,10 +327,10 @@ auto sort(const Tensor& input,
                 // Sort
                 if (descending) {
                     std::sort(pairs.begin(), pairs.end(),
-                        [](const auto& a, const auto& b) { return a.first > b.first; });
+                        [](const auto& a, const auto& b) { return ord_greater(a.first, b.first); });
                 } else {
                     std::sort(pairs.begin(), pairs.end(),
-                        [](const auto& a, const auto& b) { return a.first < b.first; });
+                        [](const auto& a, const auto& b) { return ord_less(a.first, b.first); });
                 }
 
                 // Write results

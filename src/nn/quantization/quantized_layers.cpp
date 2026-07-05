@@ -132,11 +132,15 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
         bool wt_per_channel = (weight_params.scheme == QuantizationScheme::PerChannelSymmetric ||
                                weight_params.scheme == QuantizationScheme::PerChannelAsymmetric);
         bool wt_int4 = (weight_.data().dtype() == DType::QInt4x2);
+        // F032/F031: per-channel INT8 AND packed INT4 (QInt4x2) now dispatch to
+        // their on-device CUDA kernels (no silent host round-trip). INT8 reads
+        // weight scale/zp as inputs[3]/[4]; INT4 is symmetric per-tensor (scalar
+        // weight scale), matching the CPU int4 kernel.
         bool dispatch_eligible =
             original_device.type != Device::Type::CPU &&
-            !wt_per_channel && !wt_int4 &&
             input.data().dtype() == DType::Int8 &&
-            weight_.data().dtype() == DType::Int8;
+            (weight_.data().dtype() == DType::Int8 ||
+             weight_.data().dtype() == DType::QInt4x2);
 
         if (dispatch_eligible) {
             // The OpId::QuantizedLinear contract is per-tensor scalar attrs,
@@ -172,11 +176,29 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
             std::vector<Tensor> inputs_vec;
             inputs_vec.push_back(input_2d);
             inputs_vec.push_back(weight_.data());
+            // Always occupy the bias slot (inputs[2]) — empty when absent — so the
+            // per-channel weight scale/zp land at the fixed inputs[3]/[4] positions
+            // the kernel expects.
             if (bias_.has_value()) {
                 Tensor bias_dev = *bias_;
                 if (bias_dev.dtype() != DType::Float32) bias_dev = bias_dev.to(DType::Float32);
                 if (bias_dev.device() != original_device) bias_dev = bias_dev.to(original_device);
                 inputs_vec.push_back(bias_dev);
+            } else {
+                inputs_vec.push_back(Tensor({0}, DType::Float32, original_device));
+            }
+            if (wt_per_channel && !wt_int4) {
+                // Per-channel weight scale ([out_features] Float32) and zero-point
+                // ([out_features] Int32) as device tensors; the kernel dequantizes
+                // each output channel with its own scale/zp.
+                Tensor wscale = weight_params.scale;
+                if (wscale.dtype() != DType::Float32) wscale = wscale.to(DType::Float32);
+                if (wscale.device() != original_device) wscale = wscale.to(original_device);
+                Tensor wzp = weight_params.zero_point;
+                if (wzp.dtype() != DType::Int32) wzp = wzp.to(DType::Int32);
+                if (wzp.device() != original_device) wzp = wzp.to(original_device);
+                inputs_vec.push_back(wscale.contiguous());
+                inputs_vec.push_back(wzp.contiguous());
             }
             Tensor disp_out = dispatch<OpId::QuantizedLinear>(inputs_vec, attrs)[0];
             // Restore the original leading dims: [rows, out_features] ->

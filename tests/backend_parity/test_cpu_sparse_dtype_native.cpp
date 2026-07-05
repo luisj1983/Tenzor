@@ -8,6 +8,7 @@
 // these dtypes.
 
 #include <gtest/gtest.h>
+#include <complex>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/sparse/sparse_tensor.hpp>
 #include <tenzor/sparse/sparse_ops.hpp>
@@ -191,5 +192,96 @@ TEST_F(CpuSparseDtypeNative, SpMM_F16_NativeMatchesF32) {
     auto out_to_f32 = out_f16.to(DType::Float32);
     for (int64_t i = 0; i < ref.numel(); ++i) {
         EXPECT_NEAR(ref_to_f16.data<float>()[i], out_to_f32.data<float>()[i], 5e-3f);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F034: integer & complex SpMM/SpMV now run natively on CUDA (cuSPARSE has no
+// integer path and complex was rejected). Verify the GPU result matches the CPU
+// reference element-wise.
+// ---------------------------------------------------------------------------
+namespace {
+static bool has_cuda_dev() {
+    try { auto t = zeros({1}, DType::Float32, Device::cuda(0)); (void)t; return true; }
+    catch (...) { return false; }
+}
+}  // namespace
+
+TEST_F(CpuSparseDtypeNative, SpMV_Int32_CudaMatchesCpu) {
+    if (!has_cuda_dev()) GTEST_SKIP();
+    auto sp = build_csr_4x4(DType::Int32);
+    auto vec = zeros({4}, DType::Int32, Device::cpu());
+    auto* v = vec.data<int32_t>(); v[0] = 1; v[1] = 2; v[2] = 3; v[3] = 4;
+    Tensor ref = sparse::spmv(sp, vec);
+    Tensor out = sparse::spmv(sp.to(Device::cuda(0)), vec.to(Device::cuda(0))).to(Device::cpu());
+    ASSERT_EQ(out.dtype(), DType::Int32);
+    ASSERT_EQ(ref.numel(), out.numel());
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_EQ(ref.data<int32_t>()[i], out.data<int32_t>()[i]) << "spmv i32 " << i;
+}
+
+TEST_F(CpuSparseDtypeNative, SpMM_Int64_CudaMatchesCpu) {
+    if (!has_cuda_dev()) GTEST_SKIP();
+    auto sp = build_csr_4x4(DType::Int64);
+    auto dense = zeros({4, 3}, DType::Int64, Device::cpu());
+    auto* d = dense.data<int64_t>();
+    for (int i = 0; i < 12; ++i) d[i] = (i % 5) - 2;
+    Tensor ref = sparse::spmm(sp, dense);
+    Tensor out = sparse::spmm(sp.to(Device::cuda(0)), dense.to(Device::cuda(0))).to(Device::cpu());
+    ASSERT_EQ(out.dtype(), DType::Int64);
+    ASSERT_EQ(ref.numel(), out.numel());
+    for (int64_t i = 0; i < ref.numel(); ++i)
+        EXPECT_EQ(ref.data<int64_t>()[i], out.data<int64_t>()[i]) << "spmm i64 " << i;
+}
+
+TEST_F(CpuSparseDtypeNative, SpMV_Complex64_CudaMatchesCpu) {
+    if (!has_cuda_dev()) GTEST_SKIP();
+    auto crow = zeros({3}, DType::Int64, Device::cpu());
+    auto col  = zeros({3}, DType::Int64, Device::cpu());
+    auto vals = zeros({3}, DType::Complex64, Device::cpu());
+    int64_t* cp = crow.data<int64_t>(); int64_t* lp = col.data<int64_t>();
+    cp[0] = 0; cp[1] = 2; cp[2] = 3;
+    lp[0] = 0; lp[1] = 1; lp[2] = 1;
+    auto* vp = vals.data<std::complex<float>>();
+    vp[0] = {1.f, 1.f}; vp[1] = {0.f, -2.f}; vp[2] = {3.f, 0.5f};
+    auto sp = SparseTensor::sparse_csr(crow, col, vals, {2, 2});
+    auto x = zeros({2}, DType::Complex64, Device::cpu());
+    x.data<std::complex<float>>()[0] = {2.f, 0.f};
+    x.data<std::complex<float>>()[1] = {-1.f, 1.f};
+    Tensor ref = sparse::spmv(sp, x);
+    Tensor out = sparse::spmv(sp.to(Device::cuda(0)), x.to(Device::cuda(0))).to(Device::cpu());
+    ASSERT_EQ(out.dtype(), DType::Complex64);
+    ASSERT_EQ(ref.numel(), out.numel());
+    for (int64_t i = 0; i < ref.numel(); ++i) {
+        auto r = ref.data<std::complex<float>>()[i];
+        auto o = out.data<std::complex<float>>()[i];
+        EXPECT_NEAR(r.real(), o.real(), 1e-5f) << "spmv c64 re " << i;
+        EXPECT_NEAR(r.imag(), o.imag(), 1e-5f) << "spmv c64 im " << i;
+    }
+}
+
+TEST_F(CpuSparseDtypeNative, SpMM_Complex128_CudaMatchesCpu) {
+    if (!has_cuda_dev()) GTEST_SKIP();
+    auto crow = zeros({3}, DType::Int64, Device::cpu());
+    auto col  = zeros({3}, DType::Int64, Device::cpu());
+    auto vals = zeros({3}, DType::Complex128, Device::cpu());
+    int64_t* cp = crow.data<int64_t>(); int64_t* lp = col.data<int64_t>();
+    cp[0] = 0; cp[1] = 2; cp[2] = 3;
+    lp[0] = 0; lp[1] = 1; lp[2] = 0;
+    auto* vp = vals.data<std::complex<double>>();
+    vp[0] = {1.0, 1.0}; vp[1] = {2.0, -1.0}; vp[2] = {0.5, 0.5};
+    auto sp = SparseTensor::sparse_csr(crow, col, vals, {2, 2});
+    auto dense = zeros({2, 2}, DType::Complex128, Device::cpu());
+    auto* dp = dense.data<std::complex<double>>();
+    dp[0] = {1.0, 0.0}; dp[1] = {0.0, 1.0}; dp[2] = {-1.0, 1.0}; dp[3] = {2.0, 0.0};
+    Tensor ref = sparse::spmm(sp, dense);
+    Tensor out = sparse::spmm(sp.to(Device::cuda(0)), dense.to(Device::cuda(0))).to(Device::cpu());
+    ASSERT_EQ(out.dtype(), DType::Complex128);
+    ASSERT_EQ(ref.numel(), out.numel());
+    for (int64_t i = 0; i < ref.numel(); ++i) {
+        auto r = ref.data<std::complex<double>>()[i];
+        auto o = out.data<std::complex<double>>()[i];
+        EXPECT_NEAR(r.real(), o.real(), 1e-10) << "spmm c128 re " << i;
+        EXPECT_NEAR(r.imag(), o.imag(), 1e-10) << "spmm c128 im " << i;
     }
 }

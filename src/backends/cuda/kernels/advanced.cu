@@ -27,7 +27,12 @@
 #include <thrust/execution_policy.h>
 #include <thrust/sequence.h>
 #include <thrust/gather.h>
+#include <thrust/scatter.h>
+#include <thrust/functional.h>
+#include <thrust/iterator/counting_iterator.h>
 #include <thrust/scan.h>
+#include <thrust/reduce.h>
+#include <thrust/extrema.h>
 #include <cfloat>
 #include <cstdint>  // INT64_MAX
 #include <limits>  // std::numeric_limits for type-correct reduction identities (device-usable via --expt-relaxed-constexpr)
@@ -52,13 +57,34 @@ struct MultOp {
     __device__ __forceinline__ T operator()(const T& a, const T& b) const { return a * b; }
 };
 
-// Safe comparison helpers for half/bfloat16 types (C++ operators may not exist on all archs)
+// Safe comparison helpers for half/bfloat16 types (C++ operators may not exist on all archs).
+// F065: NaN is treated as the LARGEST value (NaN > everything, NaN == NaN) so
+// topk(largest) surfaces NaN first and topk ties among NaNs break by index —
+// matching the CPU nan_greater/nan_less topk comparators and PyTorch.
 template<typename T>
-__device__ __forceinline__ bool cuda_gt(const T& a, const T& b) { return a > b; }
+__device__ __forceinline__ bool cuda_gt(const T& a, const T& b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = a != a, nb = b != b;
+        if (na || nb) return na && !nb;
+        return a > b;
+    } else { return a > b; }
+}
 template<typename T>
-__device__ __forceinline__ bool cuda_lt(const T& a, const T& b) { return a < b; }
+__device__ __forceinline__ bool cuda_lt(const T& a, const T& b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = a != a, nb = b != b;
+        if (na || nb) return !na && nb;
+        return a < b;
+    } else { return a < b; }
+}
 template<typename T>
-__device__ __forceinline__ bool cuda_eq(const T& a, const T& b) { return a == b; }
+__device__ __forceinline__ bool cuda_eq(const T& a, const T& b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = a != a, nb = b != b;
+        if (na || nb) return na && nb;   // NaN == NaN, NaN != finite
+        return a == b;
+    } else { return a == b; }
+}
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 530
 template<> __device__ __forceinline__ bool cuda_gt(const __half& a, const __half& b) { return __hgt(a, b); }
@@ -292,6 +318,36 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
 // Sort kernel using Thrust
 // ============================================================================
 
+// NaN-aware comparators (finding F065): NaN is treated as the LARGEST value, so
+// it sorts last ascending / first descending — matching the CPU nan_less/
+// nan_greater helpers and PyTorch. `x != x` is the branch-free NaN test. For
+// integer T the float branch is compiled out (plain </>). thrust::sort accepts
+// these; cub radix (no custom comparator) uses a NaN→+inf key remap instead.
+template <typename T>
+struct NanLess {
+    __host__ __device__ bool operator()(const T& a, const T& b) const {
+        if constexpr (std::is_floating_point_v<T>) {
+            bool na = a != a, nb = b != b;
+            if (na || nb) return !na && nb;
+            return a < b;
+        } else {
+            return a < b;
+        }
+    }
+};
+template <typename T>
+struct NanGreater {
+    __host__ __device__ bool operator()(const T& a, const T& b) const {
+        if constexpr (std::is_floating_point_v<T>) {
+            bool na = a != a, nb = b != b;
+            if (na || nb) return na && !nb;
+            return a > b;
+        } else {
+            return a > b;
+        }
+    }
+};
+
 template<typename T>
 static void sort_1d_thrust(const T* input, T* values, int64_t* indices_out,
                            int64_t n, bool descending, cudaStream_t stream)
@@ -313,12 +369,13 @@ static void sort_1d_thrust(const T* input, T* values, int64_t* indices_out,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
             thrust::device_pointer_cast(indices_out),
-            thrust::greater<T>());
+            NanGreater<T>());
     } else {
         thrust::stable_sort_by_key(policy,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
-            thrust::device_pointer_cast(indices_out));
+            thrust::device_pointer_cast(indices_out),
+            NanLess<T>());
     }
 }
 
@@ -881,6 +938,69 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
             d_orig_idx, d_offsets, inverse_tensor.data<int64_t>(),
             num_unique, numel);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    }
+
+    // First-appearance order (sorted_output == false): reorder the unique values
+    // (and counts + inverse) into order of first occurrence in the input, matching
+    // the CPU unique. The RLE path above always produces sorted order.
+    if (!sorted_output && num_unique > 0) {
+        // first_idx[g] = smallest original index among elements equal to unique g.
+        backend::CachedMemoryGuard first_idx_guard(num_unique * sizeof(int64_t));
+        int64_t* d_first_idx = static_cast<int64_t*>(first_idx_guard.get());
+        backend::CachedMemoryGuard keys_out_guard(num_unique * sizeof(T));
+        T* d_keys_out = static_cast<T*>(keys_out_guard.get());
+        thrust::reduce_by_key(policy,
+            thrust::device_pointer_cast(d_sorted),
+            thrust::device_pointer_cast(d_sorted + numel),
+            thrust::device_pointer_cast(d_orig_idx),
+            thrust::device_pointer_cast(d_keys_out),
+            thrust::device_pointer_cast(d_first_idx),
+            thrust::equal_to<T>(),
+            thrust::minimum<int64_t>());
+
+        // perm[k] = sorted-group index that is k-th by first appearance.
+        backend::CachedMemoryGuard perm_guard(num_unique * sizeof(int64_t));
+        int64_t* d_perm = static_cast<int64_t*>(perm_guard.get());
+        thrust::sequence(policy, thrust::device_pointer_cast(d_perm),
+                         thrust::device_pointer_cast(d_perm + num_unique), int64_t(0));
+        thrust::sort_by_key(policy,
+            thrust::device_pointer_cast(d_first_idx),
+            thrust::device_pointer_cast(d_first_idx + num_unique),
+            thrust::device_pointer_cast(d_perm));
+
+        Tensor uv2({num_unique}, input.dtype(), device);
+        thrust::gather(policy,
+            thrust::device_pointer_cast(d_perm),
+            thrust::device_pointer_cast(d_perm + num_unique),
+            thrust::device_pointer_cast(unique_vals.data<T>()),
+            thrust::device_pointer_cast(uv2.data<T>()));
+        unique_vals = uv2;
+        if (return_counts) {
+            Tensor c2({num_unique}, DType::Int64, device);
+            thrust::gather(policy,
+                thrust::device_pointer_cast(d_perm),
+                thrust::device_pointer_cast(d_perm + num_unique),
+                thrust::device_pointer_cast(counts_tensor.data<int64_t>()),
+                thrust::device_pointer_cast(c2.data<int64_t>()));
+            counts_tensor = c2;
+        }
+        if (return_inverse) {
+            // inv_perm[perm[k]] = k : sorted-group index -> first-appearance slot.
+            backend::CachedMemoryGuard inv_perm_guard(num_unique * sizeof(int64_t));
+            int64_t* d_inv_perm = static_cast<int64_t*>(inv_perm_guard.get());
+            thrust::scatter(policy,
+                thrust::counting_iterator<int64_t>(0),
+                thrust::counting_iterator<int64_t>(num_unique),
+                thrust::device_pointer_cast(d_perm),
+                thrust::device_pointer_cast(d_inv_perm));
+            Tensor inv2({numel}, DType::Int64, device);
+            thrust::gather(policy,
+                thrust::device_pointer_cast(inverse_tensor.data<int64_t>()),
+                thrust::device_pointer_cast(inverse_tensor.data<int64_t>() + numel),
+                thrust::device_pointer_cast(d_inv_perm),
+                thrust::device_pointer_cast(inv2.data<int64_t>()));
+            inverse_tensor = inv2;
+        }
     }
 
     cudaStreamSynchronize(stream);
@@ -1707,6 +1827,10 @@ __global__ void multinomial_es_keys_kernel(const float* __restrict__ probs,
     keys[tid] = -logf(u) / w;
 }
 
+// Defined in reduction.cu; used to validate that each row's probabilities sum
+// to a positive value (matches the CPU multinomial, which throws otherwise).
+auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+
 auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                         bool replacement, cudaStream_t stream) -> Tensor {
     auto input = probs.contiguous();
@@ -1726,6 +1850,23 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
     if (!replacement && num_samples > num_categories) {
         throw std::runtime_error("multinomial: cannot sample more than "
                                   "num_categories without replacement");
+    }
+
+    // Every row must have a positive probability sum (matches CPU, which throws
+    // "sum of probabilities must be > 0"). Without this, all-zero rows produce
+    // arbitrary/garbage indices on CUDA (all +inf keys for the no-replacement
+    // path, a degenerate CDF for with-replacement) while CPU errors.
+    {
+        Tensor row_sums = sum_kernel(input, /*dim=*/1, /*keepdim=*/false, stream);
+        std::vector<float> sums(static_cast<size_t>(batch_size));
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(sums.data(), row_sums.data<float>(),
+            batch_size * sizeof(float), cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+        for (int64_t b = 0; b < batch_size; ++b) {
+            if (!(sums[b] > 0.0f)) {
+                throw std::runtime_error("multinomial: sum of probabilities must be > 0");
+            }
+        }
     }
 
     // Without replacement: Efraimidis-Spirakis weighted reservoir sampling
@@ -1762,47 +1903,32 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
         return result;
     }
 
-    // The with-replacement CDF is built by a single-block scan whose block
-    // size is capped at 1024. That scan only writes cdf[tid] for tid < 1024,
-    // so for more categories the tail of the CDF stays uninitialized and the
-    // sampler reads garbage. Reject that case explicitly rather than sampling
-    // from a corrupt distribution.
-    if (num_categories > 1024) {
-        throw std::runtime_error(
-            "multinomial: with-replacement sampling supports at most 1024 "
-            "categories on CUDA");
-    }
-
     auto result = Tensor({batch_size, num_samples}, DType::Int64, input.device());
-    auto cdf_buf = Tensor({batch_size, num_categories}, DType::Float32, input.device());
+
+    // Build the per-row CDF with a general prefix sum (cumsum along categories),
+    // which works for any num_categories — the old single-block scan capped the
+    // block at 1024 threads and left the CDF tail uninitialized for larger
+    // vocabularies (LM sampling uses 32k-50k categories).
+    Tensor cdf_buf = cumsum_kernel(input, /*dim=*/1, stream);  // [batch, num_categories]
+
+    // Row totals (last CDF column); rows summing to <= 0 were already rejected
+    // by the validation above.
+    std::vector<float> totals(static_cast<size_t>(batch_size));
+    for (int64_t b = 0; b < batch_size; ++b) {
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&totals[b],
+            cdf_buf.data<float>() + b * num_categories + (num_categories - 1),
+            sizeof(float), cudaMemcpyDeviceToHost, stream));
+    }
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     uint64_t seed = ::tenzor::get_global_seed();
-
     for (int64_t b = 0; b < batch_size; ++b) {
-        const float* prob_ptr = input.data<float>() + b * num_categories;
-        float* cdf_ptr = cdf_buf.data<float>() + b * num_categories;
+        const float* cdf_ptr = cdf_buf.data<float>() + b * num_categories;
         int64_t* out_ptr = result.data<int64_t>() + b * num_samples;
-
-        // Compute CDF
-        int block_size = 1;
-        while (block_size < num_categories) block_size *= 2;
-        if (block_size > 1024) block_size = 1024;
-        multinomial_cdf_kernel<<<1, block_size, block_size * sizeof(float), stream>>>(
-            prob_ptr, cdf_ptr, num_categories);
-
-        // Get total (last element of CDF) - copy to host
-        float total = 0.0f;
-        // audit V.17: previously dropped the cudaMemcpyAsync return code.
-        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&total, cdf_ptr + num_categories - 1, sizeof(float),
-                        cudaMemcpyDeviceToHost, stream));
-        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
-        if (total <= 0.0f) total = 1.0f;
-
-        // Sample
         int threads = 256;
         int blocks = (num_samples + threads - 1) / threads;
         multinomial_sample_kernel<<<blocks, threads, 0, stream>>>(
-            cdf_ptr, out_ptr, num_categories, num_samples, total,
+            cdf_ptr, out_ptr, num_categories, num_samples, totals[b],
             seed + b * 1000003);
     }
 
@@ -1929,9 +2055,10 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
     auto run = [&](auto dummy) -> std::pair<Tensor, Tensor> {
         using T = decltype(dummy);
 
-        // Auto-detect range if not specified — compute min/max on device via CUB,
-        // then read 2 scalars back to host (necessary metadata, not a CPU fallback).
-        if (min_val == 0.0 && max_val == 0.0 && n > 0) {
+        // Auto-detect range whenever the user range is unset/inverted/equal
+        // (min >= max) — matches the CPU histogram convention. Compute min/max on
+        // device via CUB, then read 2 scalars back (metadata, not a CPU fallback).
+        if (min_val >= max_val && n > 0) {
             backend::CachedMemoryGuard scratch_guard(2 * sizeof(T));
             T* d_min_max = static_cast<T*>(scratch_guard.get());
 
@@ -1959,7 +2086,9 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
             min_val = static_cast<double>(h_min_max[0]);
             max_val = static_cast<double>(h_min_max[1]);
         }
-        if (max_val <= min_val) max_val = min_val + 1.0;
+        // Constant-data / still-degenerate range: center a unit interval on the
+        // value ([v-0.5, v+0.5]) to match the CPU histogram, rather than [v, v+1].
+        if (max_val <= min_val) { double c = min_val; min_val = c - 0.5; max_val = c + 0.5; }
 
         // Keep bin_width in double for Float64; cast to T for the kernels.
         double bin_width_d = (max_val - min_val) / static_cast<double>(bins);
@@ -2121,6 +2250,43 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
     auto b = x2.contiguous();
     if (a.dtype() != compute_dtype) a = a.to(compute_dtype);
     if (b.dtype() != compute_dtype) b = b.to(compute_dtype);
+
+    // General N-D path with batch broadcasting (matches CPU cdist): the last two
+    // dims are the matrix (P/R, M); all leading dims are the batch, which
+    // broadcasts when one side is 1. Normalize to a matching-batch 3D problem,
+    // recurse into the 3D path, then reshape the result back. (Previously CUDA
+    // threw for ndim>3 and required an exactly-matching 3D batch.)
+    {
+        const int64_t an = a.ndim(), bn = b.ndim();
+        if (an < 2 || bn < 2) throw std::runtime_error("cdist: inputs must have >= 2 dims");
+        const bool nd_general = an > 3 || bn > 3 || an != bn ||
+            (an == 3 && bn == 3 && a.shape()[0] != b.shape()[0]);
+        if (nd_general) {
+            std::vector<int64_t> batchA(a.shape().begin(), a.shape().end() - 2);
+            std::vector<int64_t> batchB(b.shape().begin(), b.shape().end() - 2);
+            const size_t bl = std::max(batchA.size(), batchB.size());
+            std::vector<int64_t> batch(bl);
+            for (size_t i = 0; i < bl; ++i) {
+                int64_t da = i < batchA.size() ? batchA[batchA.size() - 1 - i] : 1;
+                int64_t db = i < batchB.size() ? batchB[batchB.size() - 1 - i] : 1;
+                if (da != db && da != 1 && db != 1)
+                    throw std::runtime_error("cdist: batch dimensions are not broadcastable");
+                batch[bl - 1 - i] = (da == 1) ? db : da;
+            }
+            const int64_t P = a.shape()[an - 2], M = a.shape()[an - 1];
+            const int64_t R = b.shape()[bn - 2];
+            std::vector<int64_t> aT = batch; aT.push_back(P); aT.push_back(M);
+            std::vector<int64_t> bT = batch; bT.push_back(R); bT.push_back(M);
+            Tensor aE = ::tenzor::expand(a, aT).contiguous();
+            Tensor bE = ::tenzor::expand(b, bT).contiguous();
+            int64_t Bp = 1; for (int64_t d : batch) Bp *= d;
+            Tensor a3 = ::tenzor::reshape(aE, {Bp, P, M});
+            Tensor b3 = ::tenzor::reshape(bE, {Bp, R, M});
+            Tensor r3 = cdist_kernel(a3, b3, p, stream);
+            std::vector<int64_t> rShape = batch; rShape.push_back(P); rShape.push_back(R);
+            return ::tenzor::reshape(r3, rShape).to(out_dtype);
+        }
+    }
 
     // Accept either 2D (P, M) or 3D (B, P, M). The 2D case is treated as B=1.
     int64_t B, P, M, R;
@@ -2656,8 +2822,15 @@ auto stft_cuda_kernel(const Tensor& input, int64_t n_fft,
     int64_t batch_size = 1;
     for (int64_t d = 0; d < ndim - 1; ++d) batch_size *= in_shape[d];
 
+    // center=True reflects n_fft/2 samples off each end; that requires
+    // n_fft/2 < signal_length or the reflection index runs off the signal. CPU
+    // throws here; do the same instead of silently clamping the reflection.
+    if (center && (n_fft / 2) >= signal_length) {
+        throw std::runtime_error("stft: center=True requires n_fft/2 < signal_length");
+    }
     int64_t pad = center ? (n_fft / 2) : 0;
     int64_t padded_length = signal_length + 2 * pad;
+    if (padded_length < n_fft) throw std::runtime_error("stft: signal too short for n_fft");
     int64_t num_frames = (padded_length - n_fft) / hop_length + 1;
     if (num_frames <= 0) throw std::runtime_error("stft: signal too short");
 
@@ -2762,13 +2935,13 @@ __global__ void istft_normalize_kernel(
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= total) return;
     float ws = window_sum[idx];
-    if (ws > 1e-11f) output[idx] /= ws;
+    if (ws > 1e-10f) output[idx] /= ws;  // threshold matches CPU torch.istft
 }
 
 auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
                        int64_t hop_length, int64_t win_length,
                        const Tensor& window, bool center,
-                       bool /*normalized*/, bool onesided,
+                       bool normalized, bool onesided,
                        int64_t length, cudaStream_t stream) -> Tensor {
     if (n_fft <= 0) throw std::runtime_error("istft: n_fft must be > 0");
     if (hop_length <= 0) hop_length = n_fft / 4;
@@ -2794,13 +2967,17 @@ auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
     Tensor transposed_contig = transposed.contiguous();
 
     // Inverse FFT along last dim → (B, num_frames, n_fft) real
+    // Honor `normalized`: an ortho-normalized STFT must be inverted with the
+    // ortho convention so the round-trip reconstructs the original amplitude
+    // (a plain "backward" inverse mis-scales by ~sqrt(n_fft)). Matches CPU ISTFT.
+    const char* inv_norm = normalized ? "ortho" : "backward";
     Tensor time_frames;
     if (onesided) {
         time_frames = cuda_irfft_kernel(transposed_contig, /*dim=*/2, n_fft,
-                                        "backward", stream);
+                                        inv_norm, stream);
     } else {
         time_frames = cuda_ifft_kernel(transposed_contig, /*dim=*/2, n_fft,
-                                       "backward", stream);
+                                       inv_norm, stream);
         // ifft returns complex; take real part
         // Use existing real() dispatch to extract real component
         time_frames = tenzor::real(time_frames);
@@ -2863,6 +3040,29 @@ auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
     int64_t pad = center ? (n_fft / 2) : 0;
     int64_t out_length = expected_length - 2 * pad;
     if (length >= 0) out_length = length;
+
+    // NOLA (non-zero overlap-add) check, matching CPU torch.istft: the squared-
+    // window envelope over the returned region must exceed 1e-10, else the
+    // inverse is ill-defined. Throw rather than silently emitting garbage/zeros.
+    {
+        const int64_t avail = expected_length - pad;
+        const int64_t clen = out_length < avail ? out_length : avail;
+        if (clen > 0) {
+            Tensor ws_region = tenzor::slice(wsum_buf, 1, pad, pad + clen).contiguous();
+            auto begin = thrust::device_pointer_cast(ws_region.data<float>());
+            auto min_it = thrust::min_element(thrust::cuda::par.on(stream),
+                                              begin, begin + ws_region.numel());
+            float wmin = std::numeric_limits<float>::infinity();
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&wmin, min_it.get(), sizeof(float),
+                                              cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+            if (wmin < 1e-10f) {
+                throw std::runtime_error(
+                    "istft: window overlap-add (NOLA) constraint not met "
+                    "(squared-window envelope has a near-zero region)");
+            }
+        }
+    }
 
     Tensor result;
     if (pad == 0 && length < 0) {
@@ -3072,12 +3272,23 @@ __global__ void bincount_find_minmax_kernel(
 auto bincount_kernel(const Tensor& input, const Tensor* weights,
                      int64_t minlength, cudaStream_t stream) -> Tensor
 {
+    // Match the CPU contract: bincount requires an Int32/Int64 input (not a
+    // silently-truncated float/other dtype).
+    if (input.dtype() != DType::Int32 && input.dtype() != DType::Int64) {
+        throw std::runtime_error("bincount: input must be Int32 or Int64");
+    }
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     Tensor input_i64 = (input_cont.dtype() == DType::Int64)
         ? input_cont : input_cont.to(DType::Int64);
 
     int64_t n = input_i64.numel();
     auto device = input.device();
+    // Weights (if given) must match the input length, else the weight kernel
+    // reads w[i] out of bounds. CPU validates this; mirror it here.
+    if (weights != nullptr && weights->numel() != n) {
+        throw std::runtime_error("bincount: weights must have the same length as input (" +
+            std::to_string(weights->numel()) + " vs " + std::to_string(n) + ")");
+    }
 
     // Find max and min value on GPU (min is used to reject negative inputs).
     Tensor minmax_tensor({2}, DType::Int64, device);
@@ -3132,10 +3343,16 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
                 bincount_weights_f64_kernel<<<grid, block, 0, stream>>>(
                     input_i64.data<int64_t>(), w_cont.data<double>(),
                     output.data<double>(), n);
-            } else {
-                Tensor w_f32 = (w_cont.dtype() == DType::Float32) ? w_cont : w_cont.to(DType::Float32);
+            } else if (w_cont.dtype() == DType::Float32) {
                 bincount_weights_f32_kernel<<<grid, block, 0, stream>>>(
-                    input_i64.data<int64_t>(), w_f32.data<float>(),
+                    input_i64.data<int64_t>(), w_cont.data<float>(),
+                    output.data<double>(), n);
+            } else {
+                // Non-Float32/Float64 weights: widen to Float64 (matches CPU, which
+                // accumulates weighted bincount in double regardless of weight dtype).
+                Tensor w_f64 = w_cont.to(DType::Float64);
+                bincount_weights_f64_kernel<<<grid, block, 0, stream>>>(
+                    input_i64.data<int64_t>(), w_f64.data<double>(),
                     output.data<double>(), n);
             }
             TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -3689,7 +3906,19 @@ __global__ void kthvalue_kernel_impl(
         int64_t min_idx = i;
         T min_val = ws[i];
         for (int64_t j = i + 1; j < dim_size; ++j) {
-            if (ws[j] < min_val) {
+            // Tie-break on the ORIGINAL index so a duplicated k-th value returns
+            // the lowest original index, matching the CPU kthvalue (nth_element
+            // with a (value, index) comparator). The unstable swap below would
+            // otherwise reverse the relative order of equal elements.
+            // F065: NaN-aware selection. NaN is the LARGEST value, so it is never
+            // chosen as the running minimum (a plain `ws[j] < min_val` is false
+            // whenever min_val seeds to a NaN, which would wrongly bubble NaN to
+            // the front). NaN == NaN so ties among NaNs break by original index.
+            bool jn = (ws[j] != ws[j]);
+            bool mn = (min_val != min_val);
+            bool less  = (jn || mn) ? (!jn && mn) : (ws[j] < min_val);
+            bool equal = (jn || mn) ? (jn && mn) : (ws[j] == min_val);
+            if (less || (equal && ws_idx[j] < ws_idx[min_idx])) {
                 min_val = ws[j];
                 min_idx = j;
             }
@@ -3710,6 +3939,12 @@ __global__ void kthvalue_kernel_impl(
 auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
                      cudaStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // Float16/BFloat16: widen to Float32, compute, narrow the VALUES back
+    // (indices are dtype-independent). Matches the CPU kthvalue.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto [vals, idx] = kthvalue_kernel(input.to(DType::Float32), k, dim, keepdim, stream);
+        return {vals.to(input.dtype()), idx};
+    }
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
@@ -4068,41 +4303,58 @@ __global__ void histc_kernel_impl(const T* __restrict__ input, T* __restrict__ o
     }
 }
 
+// NaN-ignoring min/max reduction functors (torch.histc skips NaN when
+// auto-detecting the range).
+template<typename T> struct HistMinIgnoreNaN {
+    __host__ __device__ T operator()(const T& a, const T& b) const {
+        if (a != a) return b; if (b != b) return a; return a < b ? a : b;
+    }
+};
+template<typename T> struct HistMaxIgnoreNaN {
+    __host__ __device__ T operator()(const T& a, const T& b) const {
+        if (a != a) return b; if (b != b) return a; return a > b ? a : b;
+    }
+};
+
 auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val,
                   cudaStream_t stream) -> Tensor
 {
+    // Float16/BFloat16: widen to Float32, compute, narrow the result back
+    // (matches the CPU histc, which widens through Float32).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return histc_kernel(input.to(DType::Float32), bins, min_val, max_val, stream)
+            .to(input.dtype());
+    }
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     int64_t n = input_cont.numel();
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
 
-    // Auto-detect range if min_val >= max_val
-    if (min_val >= max_val) {
-        // Use thrust to find min/max
+    // Auto-detect range ONLY when both bounds are 0 (torch.histc convention),
+    // skipping NaN when scanning for min/max. A user-supplied range — including an
+    // inverted or equal one — is honored (then fixed by the degenerate guard).
+    if (min_val == 0.0 && max_val == 0.0 && n > 0) {
         if (dtype == DType::Float32) {
             auto begin = thrust::device_pointer_cast(input_cont.data<float>());
-            auto end = begin + n;
-            auto minmax = thrust::minmax_element(thrust::cuda::par.on(stream), begin, end);
-            float h_min, h_max;
-            // audit V.17.
-            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(float), cudaMemcpyDeviceToHost, stream));
-            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(float), cudaMemcpyDeviceToHost, stream));
-            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+            float h_min = thrust::reduce(thrust::cuda::par.on(stream), begin, begin + n,
+                std::numeric_limits<float>::infinity(), HistMinIgnoreNaN<float>());
+            float h_max = thrust::reduce(thrust::cuda::par.on(stream), begin, begin + n,
+                -std::numeric_limits<float>::infinity(), HistMaxIgnoreNaN<float>());
             min_val = h_min;
             max_val = h_max;
         } else if (dtype == DType::Float64) {
             auto begin = thrust::device_pointer_cast(input_cont.data<double>());
-            auto end = begin + n;
-            auto minmax = thrust::minmax_element(thrust::cuda::par.on(stream), begin, end);
-            double h_min, h_max;
-            // audit V.17.
-            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(double), cudaMemcpyDeviceToHost, stream));
-            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(double), cudaMemcpyDeviceToHost, stream));
-            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+            double h_min = thrust::reduce(thrust::cuda::par.on(stream), begin, begin + n,
+                std::numeric_limits<double>::infinity(), HistMinIgnoreNaN<double>());
+            double h_max = thrust::reduce(thrust::cuda::par.on(stream), begin, begin + n,
+                -std::numeric_limits<double>::infinity(), HistMaxIgnoreNaN<double>());
             min_val = h_min;
             max_val = h_max;
         }
     }
+    // Degenerate-range guard (matches CPU: if (lo >= hi) hi = lo + 1) so bin_width
+    // is never zero/negative (which would give NaN/garbage bin indices).
+    if (min_val >= max_val) max_val = min_val + 1.0;
 
     Tensor output({bins}, dtype, device);
     TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, bins * output.element_size(), stream));
@@ -4751,6 +5003,15 @@ __global__ void pdist_kernel_impl(
     } else if (p == scalar_t(1)) {
         for (uint32_t d = 0; d < D; d++) {
             sum += ::fabs(data[i * D + d] - data[j * D + d]);
+        }
+        output[idx] = sum;
+    } else if (::isinf(p)) {
+        // p = inf: Chebyshev distance = max_d |x_i,d - x_j,d|. The generic
+        // pow() path computes pow(diff, inf) -> inf, then pow(inf, 0) -> 1,
+        // returning all-ones instead of the max — matches CPU's isinf branch.
+        for (uint32_t d = 0; d < D; d++) {
+            scalar_t a = ::fabs(data[i * D + d] - data[j * D + d]);
+            if (a > sum) sum = a;
         }
         output[idx] = sum;
     } else {

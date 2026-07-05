@@ -53,6 +53,29 @@ TEST_P(MultinomialTest, DeterministicWeight) {
     }
 }
 
+TEST_P(MultinomialTest, LargeVocabularyWithReplacement) {
+    // >1024 categories must work with replacement (LM-vocab sampling); the old
+    // CUDA single-block CDF scan capped at 1024 and threw.
+    const int64_t V = 5000;
+    auto probs_cpu = tenzor::zeros({V}, DType::Float32);
+    probs_cpu.data<float>()[4321] = 1.0f;  // all mass on one category
+    auto probs = probs_cpu.to(device);
+    auto samples = tenzor::multinomial(probs, 8, /*replacement=*/true).cpu();
+    auto* d = samples.data<int64_t>();
+    for (int i = 0; i < 8; ++i)
+        EXPECT_EQ(d[i], 4321) << "Failed on " << device.to_string();
+}
+
+TEST_P(MultinomialTest, AllZeroWeightsThrows) {
+    // A row with zero total probability must throw on every backend (not return
+    // garbage indices).
+    auto probs = tenzor::zeros({6}, DType::Float32).to(device);
+    EXPECT_ANY_THROW(tenzor::multinomial(probs, 3, /*replacement=*/true))
+        << "Failed on " << device.to_string();
+    EXPECT_ANY_THROW(tenzor::multinomial(probs, 3, /*replacement=*/false))
+        << "Failed on " << device.to_string();
+}
+
 TEST_P(MultinomialTest, WithoutReplacement) {
     auto probs = tenzor::ones({5}, DType::Float32, device);
     auto samples = tenzor::multinomial(probs, 5, /*replacement=*/false);

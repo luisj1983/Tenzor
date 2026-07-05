@@ -5364,21 +5364,17 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b_in) -> Tensor& {
         case DType::Int32: {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
+            // Integer divide-by-zero returns 0 (not a SIGFPE trap and not a throw),
+            // matching out-of-place cpu::DivOp and the CUDA in-place DivOp so
+            // `x /= y` is consistent across backends and with `x / y`.
             if (same_shape) {
-                // Serial: integer divide-by-zero must throw, which is UB across an
-                // OpenMP parallel region, so this path is intentionally not parallelized.
+                _Pragma("omp parallel for if(n > 65536)")
                 for (int64_t i = 0; i < n; i++) {
-                    if (b_data[i] == 0) {
-                        throw std::runtime_error("Integer division by zero");
-                    }
-                    a_data[i] /= b_data[i];
+                    a_data[i] = (b_data[i] == 0) ? 0 : (a_data[i] / b_data[i]);
                 }
             } else {
                 detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
-                    [](int32_t x, int32_t y) {
-                        if (y == 0) throw std::runtime_error("Integer division by zero");
-                        return x / y;
-                    });
+                    [](int32_t x, int32_t y) -> int32_t { return y == 0 ? 0 : x / y; });
             }
             break;
         }
@@ -5386,19 +5382,13 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b_in) -> Tensor& {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             if (same_shape) {
-                // Serial: see Int32 note above (throw is UB across an OpenMP region).
+                _Pragma("omp parallel for if(n > 65536)")
                 for (int64_t i = 0; i < n; i++) {
-                    if (b_data[i] == 0) {
-                        throw std::runtime_error("Integer division by zero");
-                    }
-                    a_data[i] /= b_data[i];
+                    a_data[i] = (b_data[i] == 0) ? 0 : (a_data[i] / b_data[i]);
                 }
             } else {
                 detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
-                    [](int64_t x, int64_t y) {
-                        if (y == 0) throw std::runtime_error("Integer division by zero");
-                        return x / y;
-                    });
+                    [](int64_t x, int64_t y) -> int64_t { return y == 0 ? 0 : x / y; });
             }
             break;
         }
@@ -5934,16 +5924,23 @@ static void minimum_typed(const T* a_data, const T* b_data, T* c_data,
     // Compare via float promotion so the template works for Float16/BFloat16
     // (which expose explicit `operator float()` but not `operator<`). For
     // float/double/integer types this cast is a compile-time no-op.
-    auto less = [](T x, T y) -> bool {
-        return static_cast<float>(x) < static_cast<float>(y);
+    // NaN-propagating (torch.minimum semantics): if either operand is NaN the
+    // result is NaN. `fx != fx` detects NaN after the float promotion that lets
+    // this template also serve Float16/BFloat16 (int-promoted floats are never
+    // NaN, so integer types keep exact min behavior).
+    auto sel = [](T x, T y) -> T {
+        float fx = static_cast<float>(x), fy = static_cast<float>(y);
+        if (fx != fx) return x;
+        if (fy != fy) return y;
+        return fx < fy ? x : y;
     };
     if (detail::have_same_shape(a, b)) {
         size_t n = static_cast<size_t>(a.numel());
         for (size_t i = 0; i < n; ++i)
-            c_data[i] = less(a_data[i], b_data[i]) ? a_data[i] : b_data[i];
+            c_data[i] = sel(a_data[i], b_data[i]);
     } else {
         detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-            [less](T x, T y) -> T { return less(x, y) ? x : y; });
+            [sel](T x, T y) -> T { return sel(x, y); });
     }
 }
 
@@ -5984,16 +5981,21 @@ static void maximum_typed(const T* a_data, const T* b_data, T* c_data,
                           std::vector<int64_t>& shape_a_vec,
                           std::vector<int64_t>& shape_b_vec,
                           std::vector<int64_t>& output_shape) {
-    auto greater = [](T x, T y) -> bool {
-        return static_cast<float>(x) > static_cast<float>(y);
+    // NaN-propagating (torch.maximum semantics): if either operand is NaN the
+    // result is NaN. See minimum_typed for the `fx != fx` NaN-detection rationale.
+    auto sel = [](T x, T y) -> T {
+        float fx = static_cast<float>(x), fy = static_cast<float>(y);
+        if (fx != fx) return x;
+        if (fy != fy) return y;
+        return fx > fy ? x : y;
     };
     if (detail::have_same_shape(a, b)) {
         size_t n = static_cast<size_t>(a.numel());
         for (size_t i = 0; i < n; ++i)
-            c_data[i] = greater(a_data[i], b_data[i]) ? a_data[i] : b_data[i];
+            c_data[i] = sel(a_data[i], b_data[i]);
     } else {
         detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-            [greater](T x, T y) -> T { return greater(x, y) ? x : y; });
+            [sel](T x, T y) -> T { return sel(x, y); });
     }
 }
 
@@ -9340,6 +9342,11 @@ auto spherical_bessel_j0_kernel(const Tensor& input) -> Tensor {
 // Renorm: normalize slices along dim so p-norm <= maxnorm
 // ============================================================================
 auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tensor {
+    // Float16/BFloat16: widen to Float32, compute, narrow the result back
+    // (matches the CUDA renorm, which widens these dtypes).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return renorm_kernel(input.to(DType::Float32), p, dim, maxnorm).to(input.dtype());
+    }
     auto result = input.contiguous().clone();
     auto shape = result.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());

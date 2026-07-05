@@ -1207,6 +1207,50 @@ auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, cudaStre
 }
 
 // ============================================================================
+// 16-byte POD for byte-wise triangular copy/zero of Complex128 (triu/tril/diag
+// are pure data movement; an all-zero-byte fill equals 0 + 0i). Complex64 reuses
+// int64_t (also 8 bytes, all-zero == 0 + 0i).
+struct alignas(16) TriBytes16 { int64_t a, b; __device__ TriBytes16() {} __device__ TriBytes16(int) : a(0), b(0) {} };
+
+// Extra dtype cases shared by triu/tril (pure copy/zero data movement). CPU is
+// dtype-agnostic; this brings CUDA to parity for Bool/narrow-int/Complex. Uses
+// the switch's local `cont`, `output`, `rows`, `cols`, `batch_size`, `diagonal`,
+// `stream`, `total`. Complex reuses same-size int types (all-zero == 0 + 0i).
+#define TENZOR_TRI_EXTRA_DTYPE_CASES(IMPL) \
+    case DType::Int8:   { auto [g_, b_] = optimal_launch_config(IMPL<int8_t>,   total); IMPL<<<g_, b_, 0, stream>>>(cont.data<int8_t>(),   output.data<int8_t>(),   rows, cols, batch_size, diagonal); break; } \
+    case DType::UInt8:  { auto [g_, b_] = optimal_launch_config(IMPL<uint8_t>,  total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint8_t>(),  output.data<uint8_t>(),  rows, cols, batch_size, diagonal); break; } \
+    case DType::Int16:  { auto [g_, b_] = optimal_launch_config(IMPL<int16_t>,  total); IMPL<<<g_, b_, 0, stream>>>(cont.data<int16_t>(),  output.data<int16_t>(),  rows, cols, batch_size, diagonal); break; } \
+    case DType::UInt16: { auto [g_, b_] = optimal_launch_config(IMPL<uint16_t>, total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint16_t>(), output.data<uint16_t>(), rows, cols, batch_size, diagonal); break; } \
+    case DType::UInt32: { auto [g_, b_] = optimal_launch_config(IMPL<uint32_t>, total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint32_t>(), output.data<uint32_t>(), rows, cols, batch_size, diagonal); break; } \
+    case DType::UInt64: { auto [g_, b_] = optimal_launch_config(IMPL<uint64_t>, total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint64_t>(), output.data<uint64_t>(), rows, cols, batch_size, diagonal); break; } \
+    case DType::Bool:   { auto [g_, b_] = optimal_launch_config(IMPL<bool>,     total); IMPL<<<g_, b_, 0, stream>>>(cont.data<bool>(),     output.data<bool>(),     rows, cols, batch_size, diagonal); break; } \
+    case DType::Complex64:  { auto [g_, b_] = optimal_launch_config(IMPL<int64_t>,    total); IMPL<<<g_, b_, 0, stream>>>(reinterpret_cast<const int64_t*>(cont.data_ptr()),    reinterpret_cast<int64_t*>(output.data_ptr()),    rows, cols, batch_size, diagonal); break; } \
+    case DType::Complex128: { auto [g_, b_] = optimal_launch_config(IMPL<TriBytes16>, total); IMPL<<<g_, b_, 0, stream>>>(reinterpret_cast<const TriBytes16*>(cont.data_ptr()), reinterpret_cast<TriBytes16*>(output.data_ptr()), rows, cols, batch_size, diagonal); break; }
+
+// diag EXTRACT (matrix -> diagonal vector): args (cont, output, diag_size, rows, cols, diagonal); launch over diag_size.
+#define TENZOR_DIAG_EXTRACT_EXTRA_CASES(IMPL) \
+    case DType::Int8:   { auto [g_, b_] = optimal_launch_config(IMPL<int8_t>,   diag_size); IMPL<<<g_, b_, 0, stream>>>(cont.data<int8_t>(),   output.data<int8_t>(),   diag_size, rows, cols, diagonal); break; } \
+    case DType::UInt8:  { auto [g_, b_] = optimal_launch_config(IMPL<uint8_t>,  diag_size); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint8_t>(),  output.data<uint8_t>(),  diag_size, rows, cols, diagonal); break; } \
+    case DType::Int16:  { auto [g_, b_] = optimal_launch_config(IMPL<int16_t>,  diag_size); IMPL<<<g_, b_, 0, stream>>>(cont.data<int16_t>(),  output.data<int16_t>(),  diag_size, rows, cols, diagonal); break; } \
+    case DType::UInt16: { auto [g_, b_] = optimal_launch_config(IMPL<uint16_t>, diag_size); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint16_t>(), output.data<uint16_t>(), diag_size, rows, cols, diagonal); break; } \
+    case DType::UInt32: { auto [g_, b_] = optimal_launch_config(IMPL<uint32_t>, diag_size); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint32_t>(), output.data<uint32_t>(), diag_size, rows, cols, diagonal); break; } \
+    case DType::UInt64: { auto [g_, b_] = optimal_launch_config(IMPL<uint64_t>, diag_size); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint64_t>(), output.data<uint64_t>(), diag_size, rows, cols, diagonal); break; } \
+    case DType::Bool:   { auto [g_, b_] = optimal_launch_config(IMPL<bool>,     diag_size); IMPL<<<g_, b_, 0, stream>>>(cont.data<bool>(),     output.data<bool>(),     diag_size, rows, cols, diagonal); break; } \
+    case DType::Complex64:  { auto [g_, b_] = optimal_launch_config(IMPL<int64_t>,    diag_size); IMPL<<<g_, b_, 0, stream>>>(reinterpret_cast<const int64_t*>(cont.data_ptr()),    reinterpret_cast<int64_t*>(output.data_ptr()),    diag_size, rows, cols, diagonal); break; } \
+    case DType::Complex128: { auto [g_, b_] = optimal_launch_config(IMPL<TriBytes16>, diag_size); IMPL<<<g_, b_, 0, stream>>>(reinterpret_cast<const TriBytes16*>(cont.data_ptr()), reinterpret_cast<TriBytes16*>(output.data_ptr()), diag_size, rows, cols, diagonal); break; }
+
+// diag CONSTRUCT (vector -> matrix, off-diagonal zero): args (cont, output, n, diag_size, diagonal); launch over total.
+#define TENZOR_DIAG_CONSTRUCT_EXTRA_CASES(IMPL) \
+    case DType::Int8:   { auto [g_, b_] = optimal_launch_config(IMPL<int8_t>,   total); IMPL<<<g_, b_, 0, stream>>>(cont.data<int8_t>(),   output.data<int8_t>(),   n, diag_size, diagonal); break; } \
+    case DType::UInt8:  { auto [g_, b_] = optimal_launch_config(IMPL<uint8_t>,  total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint8_t>(),  output.data<uint8_t>(),  n, diag_size, diagonal); break; } \
+    case DType::Int16:  { auto [g_, b_] = optimal_launch_config(IMPL<int16_t>,  total); IMPL<<<g_, b_, 0, stream>>>(cont.data<int16_t>(),  output.data<int16_t>(),  n, diag_size, diagonal); break; } \
+    case DType::UInt16: { auto [g_, b_] = optimal_launch_config(IMPL<uint16_t>, total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint16_t>(), output.data<uint16_t>(), n, diag_size, diagonal); break; } \
+    case DType::UInt32: { auto [g_, b_] = optimal_launch_config(IMPL<uint32_t>, total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint32_t>(), output.data<uint32_t>(), n, diag_size, diagonal); break; } \
+    case DType::UInt64: { auto [g_, b_] = optimal_launch_config(IMPL<uint64_t>, total); IMPL<<<g_, b_, 0, stream>>>(cont.data<uint64_t>(), output.data<uint64_t>(), n, diag_size, diagonal); break; } \
+    case DType::Bool:   { auto [g_, b_] = optimal_launch_config(IMPL<bool>,     total); IMPL<<<g_, b_, 0, stream>>>(cont.data<bool>(),     output.data<bool>(),     n, diag_size, diagonal); break; } \
+    case DType::Complex64:  { auto [g_, b_] = optimal_launch_config(IMPL<int64_t>,    total); IMPL<<<g_, b_, 0, stream>>>(reinterpret_cast<const int64_t*>(cont.data_ptr()),    reinterpret_cast<int64_t*>(output.data_ptr()),    n, diag_size, diagonal); break; } \
+    case DType::Complex128: { auto [g_, b_] = optimal_launch_config(IMPL<TriBytes16>, total); IMPL<<<g_, b_, 0, stream>>>(reinterpret_cast<const TriBytes16*>(cont.data_ptr()), reinterpret_cast<TriBytes16*>(output.data_ptr()), n, diag_size, diagonal); break; }
+
 // Triu kernel — upper triangular: zero out elements below diagonal+k
 // ============================================================================
 
@@ -1328,6 +1372,7 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> 
                 cont.data<int64_t>(), output.data<int64_t>(), rows, cols, batch_size, diagonal);
             break;
         }
+        TENZOR_TRI_EXTRA_DTYPE_CASES(triu_kernel_impl)
         default:
             throw std::runtime_error("triu_kernel: unsupported dtype");
     }
@@ -1456,6 +1501,7 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> 
                 cont.data<int64_t>(), output.data<int64_t>(), rows, cols, batch_size, diagonal);
             break;
         }
+        TENZOR_TRI_EXTRA_DTYPE_CASES(tril_kernel_impl)
         default:
             throw std::runtime_error("tril_kernel: unsupported dtype");
     }
@@ -1642,6 +1688,7 @@ auto diag_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> 
                     cont.data<int64_t>(), output.data<int64_t>(), diag_size, rows, cols, diagonal);
                 break;
             }
+            TENZOR_DIAG_EXTRACT_EXTRA_CASES(diag_extract_kernel_impl)
             default:
                 throw std::runtime_error("diag_kernel: unsupported dtype");
         }
@@ -1699,6 +1746,7 @@ auto diag_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> 
                     cont.data<int64_t>(), output.data<int64_t>(), n, diag_size, diagonal);
                 break;
             }
+            TENZOR_DIAG_CONSTRUCT_EXTRA_CASES(diag_construct_kernel_impl)
             default:
                 throw std::runtime_error("diag_kernel: unsupported dtype");
         }

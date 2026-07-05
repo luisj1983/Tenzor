@@ -164,8 +164,11 @@ __global__ void gru_cell_backward_fused(
         grad_new_input[idx] = dn_input;
         grad_new_hidden[idx] = dn_hidden;
 
-        // Gradient for previous hidden also comes from new gate hidden part
-        dh_prev += dn_hidden;  // This will be added to dh_prev from z_t path
+        // grad_h_prev is ONLY the direct interpolation path (dh * z_t). The
+        // new-gate hidden path (dn_hidden through W_hn) reaches h_prev via the
+        // wrapper's matmul(d_gates_hh, w_hh) — grad_new_hidden is the n-chunk of
+        // d_gates_hh. Adding dn_hidden here as well double-counted that path and
+        // produced a wrong grad_h_prev/grad_input (fails gradcheck vs CPU).
         grad_h_prev[idx] = dh_prev;
     }
 }
@@ -306,6 +309,16 @@ auto gru_cell_forward_kernel(
     int64_t hidden_size,
     cudaStream_t stream) -> Tensor {
 
+    // Float16/BFloat16: widen to Float32, compute, narrow the output back.
+    if (reset_gates.dtype() == DType::Float16 || reset_gates.dtype() == DType::BFloat16) {
+        const DType orig = reset_gates.dtype();
+        Tensor h = gru_cell_forward_kernel(
+            reset_gates.to(DType::Float32), update_gates.to(DType::Float32),
+            new_gates_input.to(DType::Float32), new_gates_hidden.to(DType::Float32),
+            h_prev.to(DType::Float32), batch_size, hidden_size, stream);
+        return h.to(orig);
+    }
+
     std::vector<int64_t> output_shape = {batch_size, hidden_size};
     Tensor h_out(output_shape, reset_gates.dtype(), reset_gates.device());
 
@@ -351,6 +364,22 @@ auto gru_cell_backward_kernel(
     int64_t batch_size,
     int64_t hidden_size,
     cudaStream_t stream) -> GRUBackwardOutputs {
+
+    // Float16/BFloat16: widen to Float32, compute, narrow all grads back.
+    if (grad_h.dtype() == DType::Float16 || grad_h.dtype() == DType::BFloat16) {
+        const DType orig = grad_h.dtype();
+        GRUBackwardOutputs o = gru_cell_backward_kernel(
+            grad_h.to(DType::Float32), reset_gates.to(DType::Float32),
+            update_gates.to(DType::Float32), new_gates_input.to(DType::Float32),
+            new_gates_hidden.to(DType::Float32), h_prev.to(DType::Float32),
+            batch_size, hidden_size, stream);
+        o.grad_reset = o.grad_reset.to(orig);
+        o.grad_update = o.grad_update.to(orig);
+        o.grad_new_input = o.grad_new_input.to(orig);
+        o.grad_new_hidden = o.grad_new_hidden.to(orig);
+        o.grad_h_prev = o.grad_h_prev.to(orig);
+        return o;
+    }
 
     std::vector<int64_t> state_shape = {batch_size, hidden_size};
 
