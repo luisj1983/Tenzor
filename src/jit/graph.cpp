@@ -467,9 +467,26 @@ auto Graph::infer_types() -> void {
             case OpType::SiLU:
             case OpType::RMSNorm:
             case OpType::RoPE:
+            // Shape-preserving unary activations, normalizations and reorderings.
+            case OpType::ELU:
+            case OpType::LeakyReLU:
+            case OpType::Mish:
+            case OpType::Softplus:
+            case OpType::Flip:
+            case OpType::Roll:
+            case OpType::GroupNorm:
+            case OpType::InstanceNorm:
+            case OpType::Scatter:      // scatters into self; output shape == input[0]
             case OpType::LogicalNot:   // unary; Bool output shape == input shape
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            // Gather (torch.gather / take_along_dim): output shape == indices shape.
+            case OpType::Gather:
+                if (input_shapes.size() >= 2) {
+                    output_shapes.push_back(input_shapes[1]);
                 }
                 break;
 
@@ -1356,9 +1373,26 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::SiLU:
             case OpType::RMSNorm:
             case OpType::RoPE:
+            // Shape-preserving unary activations, normalizations and reorderings.
+            case OpType::ELU:
+            case OpType::LeakyReLU:
+            case OpType::Mish:
+            case OpType::Softplus:
+            case OpType::Flip:
+            case OpType::Roll:
+            case OpType::GroupNorm:
+            case OpType::InstanceNorm:
+            case OpType::Scatter:      // scatters into self; output shape == input[0]
             case OpType::LogicalNot:   // unary; Bool output shape == input shape
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            // Gather (torch.gather / take_along_dim): output shape == indices shape.
+            case OpType::Gather:
+                if (input_sym_shapes.size() >= 2) {
+                    output_sym_shapes.push_back(input_sym_shapes[1]);
                 }
                 break;
 

@@ -71,17 +71,9 @@ inline Tensor reduce_mean_hip(const Tensor& t) {
     return result;
 }
 
-// Error checking macro
-#define HIP_CHECK(call) \
-    do { \
-        hipError_t error = call; \
-        if (error != hipSuccess) { \
-            throw std::runtime_error( \
-                std::string("HIP error at ") + __FILE__ + ":" + \
-                std::to_string(__LINE__) + " - " + hipGetErrorString(error) \
-            ); \
-        } \
-    } while(0)
+// HIP_CHECK is provided by rocm_error.hpp (pulled in via ../hip_buffer.hpp).
+// The shared definition is functionally equivalent, so no local redefinition
+// is needed here.
 
 // ==============================================================================
 // Fused Linear + ReLU HIP Kernel

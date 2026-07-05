@@ -867,8 +867,6 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
 
-    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
-
     // Float16: compute in Float32 and narrow (the global QR shader is f32/f64 only).
     if (is_f16) {
         auto res = dispatchLinalgQR(dispatchCast(input.contiguous(), DType::Float32));
@@ -1322,11 +1320,8 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
-    bool is_f16 = (input.dtype() == DType::Float16);
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
-
-    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     // Output: eigenvalues (batch, n), eigenvectors (batch, n, n)
     std::vector<int64_t> w_shape(shape.begin(), shape.end() - 2);
@@ -3395,15 +3390,12 @@ auto VulkanBackend::dispatchGeqrf(const Tensor& input) -> std::vector<Tensor> {
     if (ndim < 2) throw std::runtime_error("linalg.geqrf: input must be at least 2D");
     int64_t m = shape[ndim - 2];
     int64_t n = shape[ndim - 1];
-    int64_t k = std::min(m, n);
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
-
-    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     // Both small and large matrix paths use runBlockedQR which produces
     // packed Householder reflectors (below diagonal) + R (on/above diagonal) + tau.

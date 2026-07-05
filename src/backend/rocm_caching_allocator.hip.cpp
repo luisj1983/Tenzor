@@ -247,7 +247,7 @@ void RocmCachingAllocator::free(void* ptr, int device) {
     // super-block. Single-stream mode skips this entirely (no overhead).
     if (device_alloc.multi_stream) {
         // Ensure the event is created/recorded on the block's device.
-        hipSetDevice(device);
+        (void)hipSetDevice(device);
         hipEvent_t ev = acquire_event(device_alloc.event_pool);
         if (ev != nullptr) {
             if (hipEventRecord(ev, block->stream) == hipSuccess) {
@@ -329,7 +329,7 @@ void RocmCachingAllocator::empty_cache(int device) {
         }
         // Destroy recycled completion events (handles, not memory).
         for (hipEvent_t ev : da.event_pool) {
-            if (ev) hipEventDestroy(ev);
+            if (ev) (void)hipEventDestroy(ev);
         }
         da.event_pool.clear();
     };
@@ -607,7 +607,7 @@ Block* RocmCachingAllocator::try_allocate_from_cache(size_t size, int device, hi
         // are recycled for re-recording.
         for (auto& pe : block->pending_events) {
             if (pe.first != stream && pe.second != nullptr) {
-                hipStreamWaitEvent(stream, pe.second, 0);
+                (void)hipStreamWaitEvent(stream, pe.second, 0);
             }
             recycle_event(device_alloc.event_pool, pe.second);
         }

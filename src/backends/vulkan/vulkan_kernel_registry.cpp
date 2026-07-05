@@ -3835,12 +3835,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             // Indices broadcast: each is shaped {batch_0, ..., batch_{m-1}, diag_len}.
             std::vector<int64_t> batch_sizes;
             std::vector<int64_t> batch_dims;
-            int64_t batch_rank = 0;
             for (int64_t d = 0; d < ndim; ++d) {
                 if (d == dim1 || d == dim2) continue;
                 batch_dims.push_back(d);
                 batch_sizes.push_back(shape[d]);
-                ++batch_rank;
             }
 
             // Shape of every index tensor: [batch..., diag_len]
@@ -4102,7 +4100,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // MaskedScatter — native Vulkan via CumSum prefix on mask + scatter shader
     // =========================================================================
-    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         auto input = inputs[0];
         auto mask = inputs[1];
         auto source = inputs[2];

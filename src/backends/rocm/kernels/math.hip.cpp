@@ -48,12 +48,9 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
 // HIP Error Checking
 // ============================================================================
 
-#define HIP_CHECK(call) do { \
-    hipError_t err = call; \
-    if (err != hipSuccess) { \
-        throw std::runtime_error(std::string("HIP error: ") + hipGetErrorString(err)); \
-    } \
-} while(0)
+// HIP_CHECK is provided by rocm_error.hpp (pulled in via ../hip_buffer.hpp).
+// The shared definition is functionally equivalent (and additionally reports
+// __FILE__:__LINE__), so no local redefinition is needed here.
 
 // ============================================================================
 // Kernel Launch Helpers
@@ -1326,9 +1323,9 @@ auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     // because the same-shape fast path was skipped. HIP rejects zero-grid
     // launches, so free the broadcast metadata and return the empty result.
     if (n == 0) {
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         return result;
     }
 
@@ -1403,9 +1400,9 @@ auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     } else {
         // Free the broadcast metadata before throwing to avoid leaking the
         // device stride/shape buffers on the unsupported-dtype path.
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for add operation");
     }
 
@@ -1539,9 +1536,9 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     // because the same-shape fast path was skipped. HIP rejects zero-grid
     // launches, so free the broadcast metadata and return the empty result.
     if (n == 0) {
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         return result;
     }
 
@@ -1611,9 +1608,9 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     } else {
         // Free the broadcast metadata before throwing to avoid leaking the
         // device stride/shape buffers on the unsupported-dtype path.
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for sub operation");
     }
 
@@ -1749,9 +1746,9 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     // because the same-shape fast path was skipped. HIP rejects zero-grid
     // launches, so free the broadcast metadata and return the empty result.
     if (n == 0) {
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         return result;
     }
 
@@ -1826,9 +1823,9 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     } else {
         // Free the broadcast metadata before throwing to avoid leaking the
         // device stride/shape buffers on the unsupported-dtype path.
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for mul operation");
     }
 
@@ -1957,9 +1954,9 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     // because the same-shape fast path was skipped. HIP rejects zero-grid
     // launches, so free the broadcast metadata and return the empty result.
     if (n == 0) {
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         return result;
     }
 
@@ -2021,9 +2018,9 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     } else {
         // Free the broadcast metadata before throwing to avoid leaking the
         // device stride/shape buffers on the unsupported-dtype path.
-        hipFree(d_strides_a);
-        hipFree(d_strides_b);
-        hipFree(d_output_shape);
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
         throw std::runtime_error("Unsupported dtype for div operation");
     }
 
@@ -7579,8 +7576,8 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
         return output;
     } else {
         Tensor output({output_size}, DType::Int64, device);
-        hipMemsetAsync(output.data<int64_t>(), 0,
-                       static_cast<size_t>(output_size) * sizeof(int64_t), stream);
+        HIP_CHECK(hipMemsetAsync(output.data<int64_t>(), 0,
+                       static_cast<size_t>(output_size) * sizeof(int64_t), stream));
 
         if (n > 0) {
             dim3 grid, block;
@@ -8877,14 +8874,14 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, hipStream_
         case DType::Float32: {
             void* d_temp = nullptr;
             size_t temp_bytes = 0;
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<float>(), test_sorted.data<float>(),
-                static_cast<int>(num_test), 0, sizeof(float) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(float) * 8, stream));
             HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
             Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Float32, test_sorted.device());
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<float>(), temp_buf.data<float>(),
-                static_cast<int>(num_test), 0, sizeof(float) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(float) * 8, stream));
             HIP_CHECK(hipFree(d_temp));
             hipLaunchKernelGGL(isin_hip_kernel<float>, grid_dim, block_dim, 0, stream,
                 elem_cont.data<float>(), num_elements, temp_buf.data<float>(), num_test,
@@ -8894,14 +8891,14 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, hipStream_
         case DType::Float64: {
             void* d_temp = nullptr;
             size_t temp_bytes = 0;
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<double>(), test_sorted.data<double>(),
-                static_cast<int>(num_test), 0, sizeof(double) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(double) * 8, stream));
             HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
             Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Float64, test_sorted.device());
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<double>(), temp_buf.data<double>(),
-                static_cast<int>(num_test), 0, sizeof(double) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(double) * 8, stream));
             HIP_CHECK(hipFree(d_temp));
             hipLaunchKernelGGL(isin_hip_kernel<double>, grid_dim, block_dim, 0, stream,
                 elem_cont.data<double>(), num_elements, temp_buf.data<double>(), num_test,
@@ -8911,14 +8908,14 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, hipStream_
         case DType::Int32: {
             void* d_temp = nullptr;
             size_t temp_bytes = 0;
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<int32_t>(), test_sorted.data<int32_t>(),
-                static_cast<int>(num_test), 0, sizeof(int32_t) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(int32_t) * 8, stream));
             HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
             Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Int32, test_sorted.device());
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<int32_t>(), temp_buf.data<int32_t>(),
-                static_cast<int>(num_test), 0, sizeof(int32_t) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(int32_t) * 8, stream));
             HIP_CHECK(hipFree(d_temp));
             hipLaunchKernelGGL(isin_hip_kernel<int32_t>, grid_dim, block_dim, 0, stream,
                 elem_cont.data<int32_t>(), num_elements, temp_buf.data<int32_t>(), num_test,
@@ -8928,14 +8925,14 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, hipStream_
         case DType::Int64: {
             void* d_temp = nullptr;
             size_t temp_bytes = 0;
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<int64_t>(), test_sorted.data<int64_t>(),
-                static_cast<int>(num_test), 0, sizeof(int64_t) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(int64_t) * 8, stream));
             HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
             Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Int64, test_sorted.device());
-            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+            HIP_CHECK(hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
                 test_sorted.data<int64_t>(), temp_buf.data<int64_t>(),
-                static_cast<int>(num_test), 0, sizeof(int64_t) * 8, stream);
+                static_cast<int>(num_test), 0, sizeof(int64_t) * 8, stream));
             HIP_CHECK(hipFree(d_temp));
             hipLaunchKernelGGL(isin_hip_kernel<int64_t>, grid_dim, block_dim, 0, stream,
                 elem_cont.data<int64_t>(), num_elements, temp_buf.data<int64_t>(), num_test,

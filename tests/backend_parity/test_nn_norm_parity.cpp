@@ -272,7 +272,11 @@ TEST_P(NNNormParity, SyncBatchNorm) {
     // Identity all-reduce (single process): no-op
     auto identity_all_reduce = [](Tensor& /*tensor*/) {};
 
+    // intentionally exercising deprecated legacy SyncBatchNorm ctor
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     nn::SyncBatchNorm sbn(16, identity_all_reduce, /*world_size=*/1);
+#pragma GCC diagnostic pop
     // Run a training forward to populate running stats
     auto train_input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
     sbn.train();
@@ -284,7 +288,11 @@ TEST_P(NNNormParity, SyncBatchNorm) {
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
+            // intentionally exercising deprecated legacy SyncBatchNorm ctor
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
             nn::SyncBatchNorm sbn_dev(16, identity_all_reduce, /*world_size=*/1);
+#pragma GCC diagnostic pop
             sbn_dev.train();
             auto params_src = sbn.parameters();
             auto params_dst = sbn_dev.parameters();

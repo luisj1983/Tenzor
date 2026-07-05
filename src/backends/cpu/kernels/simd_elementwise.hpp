@@ -62,7 +62,7 @@ namespace tenzor::cpu {
 template<typename T, typename Op>
 void elementwise_unary(const T* input, T* output, size_t n, Op op) {
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        if (n >= ELEMENTWISE_OMP_THRESHOLD) {
+        if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
             for (size_t i = 0; i < n; ++i) {
                 output[i] = op(input[i]);
@@ -99,7 +99,7 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
                     _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
             }
         };
-        if (n >= ELEMENTWISE_OMP_THRESHOLD) {
+        if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
             for (size_t chunk = 0; chunk < n; chunk += 512) {
                 process_chunk(chunk, std::min(chunk + 512, n));
@@ -142,7 +142,7 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
                 output[i] = static_cast<T>(op(val));
             }
         };
-        if (n >= ELEMENTWISE_OMP_THRESHOLD) {
+        if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
             for (size_t chunk = 0; chunk < n; chunk += 512) {
                 process_chunk(chunk, std::min(chunk + 512, n));
@@ -176,7 +176,7 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
 template<typename T, typename Op>
 void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        if (n >= ELEMENTWISE_OMP_THRESHOLD) {
+        if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
             for (size_t i = 0; i < n; ++i) {
                 output[i] = op(a[i], b[i]);
@@ -217,7 +217,7 @@ void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
                     _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
             }
         };
-        if (n >= ELEMENTWISE_OMP_THRESHOLD) {
+        if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
             for (size_t chunk = 0; chunk < n; chunk += 512) {
                 process_chunk(chunk, std::min(chunk + 512, n));
@@ -263,7 +263,7 @@ void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
                 output[i] = static_cast<T>(op(va, vb));
             }
         };
-        if (n >= ELEMENTWISE_OMP_THRESHOLD) {
+        if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
             for (size_t chunk = 0; chunk < n; chunk += 512) {
                 process_chunk(chunk, std::min(chunk + 512, n));

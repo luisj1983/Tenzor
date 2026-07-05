@@ -3491,7 +3491,7 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
             dim3(cast_blocks), dim3(CAST_BLOCK), 0, stream,
             repeats_cont.data<double>(), d_repeats_i64, in_dim_size);
     } else {
-        hipFree(d_repeats_i64);
+        (void)hipFree(d_repeats_i64);
         throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
     }
 
@@ -3501,15 +3501,15 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
 
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
-    hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
-                                     static_cast<int>(in_dim_size), stream);
+    HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
+                                     static_cast<int>(in_dim_size), stream));
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
-    hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
-                                     static_cast<int>(in_dim_size), stream);
+    HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
+                                     static_cast<int>(in_dim_size), stream));
     // audit-9 JJ.5: ExclusiveSum is async on `stream`; sync before freeing
     // the temp workspace.
     HIP_CHECK(hipStreamSynchronize(stream));
-    hipFree(d_temp);
+    (void)hipFree(d_temp);
 
     // Read only the total from device (2 scalars: last prefix + last repeat)
     int64_t last_prefix = 0, last_repeat = 0;
@@ -3523,7 +3523,7 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     HIP_CHECK(hipMemcpyAsync(d_prefix + in_dim_size, &out_dim_size,
                              sizeof(int64_t), hipMemcpyHostToDevice, stream));
 
-    hipFree(d_repeats_i64);
+    (void)hipFree(d_repeats_i64);
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = out_dim_size;
@@ -3533,7 +3533,7 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     int64_t total = 1;
     for (auto s : out_shape) total *= s;
     if (total == 0) {
-        hipFree(d_prefix);
+        (void)hipFree(d_prefix);
         return output;
     }
 
@@ -3576,13 +3576,13 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
             reinterpret_cast<uint16_t*>(output.data<BFloat16>()), d_prefix,
             total, in_dim_size, out_dim_size, inner_size);
     } else {
-        hipFree(d_prefix);
+        (void)hipFree(d_prefix);
         throw std::runtime_error("repeat_interleave_tensor_kernel: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());
     HIP_CHECK(hipStreamSynchronize(stream));
-    hipFree(d_prefix);
+    (void)hipFree(d_prefix);
     return output;
 }
 

@@ -17,7 +17,11 @@ class SyncBatchNormMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     SyncBatchNorm createSyncBN(int64_t num_features) {
         AllReduceFn noop_allreduce = [](Tensor&) {};
+        // intentionally exercising deprecated legacy SyncBatchNorm ctor
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         return SyncBatchNorm(num_features, noop_allreduce, /*world_size=*/1);
+#pragma GCC diagnostic pop
     }
 };
 

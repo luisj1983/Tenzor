@@ -3328,7 +3328,7 @@ auto linalg_ldl_factor_kernel(const Tensor& A, sycl::queue& queue)
             h.parallel_for(sycl::nd_range<1>(nbatch, 1),
                 [=](sycl::nd_item<1> item) {
                     int batch_idx = item.get_group_linear_id();
-                    char* smem_raw = smem.get_pointer();
+                    char* smem_raw = smem.get_multi_ptr<sycl::access::decorated::no>().get();
                     T* As = reinterpret_cast<T*>(smem_raw);
                     T* scratch = As + n_ * n_;
 
@@ -3497,7 +3497,7 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
             h.parallel_for(sycl::nd_range<1>(nbatch, 1),
                 [=](sycl::nd_item<1> item) {
                     int batch_idx = item.get_group_linear_id();
-                    char* smem_raw = smem.get_pointer();
+                    char* smem_raw = smem.get_multi_ptr<sycl::access::decorated::no>().get();
                     T* LDs = reinterpret_cast<T*>(smem_raw);
                     T* Bs = LDs + n_ * n_;
 

@@ -716,8 +716,6 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     const auto& grad_W = grad_W_t;          // dL/dW, (..., N)
     const auto& grad_V = grad_V_t;          // dL/dV, (..., N, N)
 
-    auto N = W.shape()[W.ndim() - 1];
-
     // B.8: batch-aware F matrix. For W shaped (..., N), build F shaped
     //   (..., N, N) via unsqueeze+broadcast: F[..., i, j] = 1/(w_j - w_i)
     //   for i != j, 0 on diagonal. This makes higher-order autograd
@@ -1285,7 +1283,6 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     }
 
     auto V = Variable(V_tensor, false);
-    auto N = W_tensor.shape()[W_tensor.ndim() - 1];
 
     // Compute F matrix (constant — from eigenvalues). Batch-aware build
     // mirroring the first-order path (B.8/GG.7): for W shaped (..., N) form

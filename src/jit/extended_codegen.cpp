@@ -911,6 +911,13 @@ auto extended_kernel_name(FusionKind kind) -> std::string {
         case FusionKind::LayerNorm:    return "fused_layer_norm_kernel";
         case FusionKind::RMSNorm:      return "fused_rms_norm_kernel";
         case FusionKind::SmallMLP:     return "fused_small_mlp_kernel";
+        // Not extended-codegen kinds; these are emitted by the basic
+        // element-wise codegen path, which has no extended entry-point symbol.
+        case FusionKind::ElementWise:
+        case FusionKind::GeluVariant:
+        case FusionKind::RotaryEmbedding:
+        case FusionKind::SwiGLU:
+            return "";
     }
     return "";
 }

@@ -20,6 +20,7 @@
 #include "tenzor/core/device.hpp"
 #include "hip_graph.hpp"
 #include "rocm_stream.hpp"
+#include "rocm_error.hpp"  // HIP_CHECK for checked device-set paths
 
 #include <hip/hip_runtime.h>
 #include <cstdio>
@@ -27,6 +28,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>  // std::ignore for intentional discards in dtor/cleanup
 
 namespace tenzor {
 namespace {
@@ -34,7 +36,7 @@ namespace {
 class HIPGraphImpl : public CUDAGraph {
 public:
     explicit HIPGraphImpl(int32_t device_id) : device_id_(device_id) {
-        hipSetDevice(device_id_);
+        HIP_CHECK(hipSetDevice(device_id_));
         auto err = hipStreamCreate(&stream_);
         if (err != hipSuccess) {
             throw std::runtime_error(
@@ -46,12 +48,12 @@ public:
     ~HIPGraphImpl() override {
         // Never leave the thread-local current stream dangling on this thread.
         rocm::rocm_current_stream() = nullptr;
-        if (stream_) hipStreamDestroy(stream_);
-        (void)hipGetLastError();  // drain any sticky error (dtor must not throw)
+        if (stream_) std::ignore = hipStreamDestroy(stream_);
+        std::ignore = hipGetLastError();  // drain any sticky error (dtor must not throw)
     }
 
     void begin_capture() override {
-        hipSetDevice(device_id_);
+        HIP_CHECK(hipSetDevice(device_id_));
         // Route all subsequent dispatch launches onto the capture stream.
         rocm::rocm_current_stream() = stream_;
         try {
@@ -74,7 +76,7 @@ public:
     }
 
     void replay() override {
-        hipSetDevice(device_id_);
+        HIP_CHECK(hipSetDevice(device_id_));
         graph_.replay(stream_);  // launches then synchronizes stream_
     }
 

@@ -335,6 +335,12 @@ SyncBatchNorm::SyncBatchNorm(
 // synthesized from `process_group` so the existing first-order forward
 // path is unchanged; the gradient path uses the PG directly via
 // `distributed_all_reduce` for autograd-aware higher-order support.
+// The preferred ProcessGroup-based ctor intentionally delegates into the legacy
+// AllReduceFn ctor below, synthesizing the callback from `process_group`. The
+// deprecation on that target ctor is therefore a false positive on our own
+// delegation, not a caller using the deprecated API — suppress it only here.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 SyncBatchNorm::SyncBatchNorm(
     int64_t num_features,
     std::shared_ptr<distributed::ProcessGroupBase> process_group,
@@ -355,6 +361,7 @@ SyncBatchNorm::SyncBatchNorm(
           eps, momentum, affine, track_running_stats,
           process_group)
 {}
+#pragma GCC diagnostic pop
 
 auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
     auto x = input.tensor();

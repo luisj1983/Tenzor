@@ -891,9 +891,13 @@ TEST_P(GradCheckMultiBackendTest, SyncBatchNorm) {
     // Single-process: SyncBatchNorm with world_size=1 and no-op all-reduce
     // degenerates to BatchNorm2d.
     nn::AllReduceFn no_op = [](Tensor&){};
+    // intentionally exercising deprecated legacy SyncBatchNorm ctor
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     nn::SyncBatchNorm sbn(C, no_op, /*world_size=*/1,
                           /*eps=*/1e-5, /*momentum=*/0.1,
                           /*affine=*/true, /*track_running_stats=*/true);
+#pragma GCC diagnostic pop
     sbn.to(device());
     sbn.to(dtype());
     auto x = Variable(randn({2, C, 3, 3}, dtype(), device()), true);

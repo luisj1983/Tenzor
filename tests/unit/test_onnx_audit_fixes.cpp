@@ -578,7 +578,7 @@ namespace {
 // spatial rank the importer infers (rank-4 weight => spatial_dims == 2).
 std::vector<uint8_t> serialize_model(const tenzor_onnx::ModelProto& m) {
     std::string s;
-    m.SerializeToString(&s);
+    EXPECT_TRUE(m.SerializeToString(&s)) << "failed to serialize ModelProto";
     return std::vector<uint8_t>(s.begin(), s.end());
 }
 

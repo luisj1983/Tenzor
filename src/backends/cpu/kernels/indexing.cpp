@@ -887,7 +887,6 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, double value
         }
         mask = tenzor::broadcast_to(mask_in, input_shape_vec).contiguous();
     }
-    auto mask_shape = mask.shape();
 
     const int64_t numel = input.numel();
 

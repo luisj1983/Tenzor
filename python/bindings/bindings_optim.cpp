@@ -95,7 +95,14 @@ void register_optim(py::module_& m) {
                          std::optional<double> trust_ratio_max,
                          std::optional<double> lambd,
                          std::optional<double> t0) {
-            tenzor::optim::ParamGroup g{std::move(params), lr, weight_decay};
+            // Value-initialize so every std::optional hyperparameter starts as
+            // std::nullopt (the struct's intended default); the three required
+            // members are set below. An empty-brace init avoids the partial
+            // aggregate-initializer -Wmissing-field-initializers warning.
+            tenzor::optim::ParamGroup g{};
+            g.params                     = std::move(params);
+            g.lr                         = lr;
+            g.weight_decay               = weight_decay;
             g.momentum                   = momentum;
             g.dampening                  = dampening;
             g.nesterov                   = nesterov;

@@ -328,13 +328,10 @@ auto pad_sequence(const std::vector<Tensor>& sequences,
     int64_t batch_size = static_cast<int64_t>(sequences.size());
 
     // Trailing dimensions are taken from sequences[0] and assumed identical for
-    // every sequence (the memcpy below uses trail_elems derived from
-    // sequences[0] for all sources). Validate this so a mismatched trailing
-    // shape cannot over-read a smaller source buffer or silently truncate.
+    // every sequence. Validate this so a mismatched trailing shape cannot
+    // over-read a smaller source buffer or silently truncate.
     auto trailing = std::vector<int64_t>(
         sequences[0].shape().begin() + 1, sequences[0].shape().end());
-    int64_t trail_elems = 1;
-    for (auto d : trailing) trail_elems *= d;
 
     for (size_t i = 0; i < sequences.size(); ++i) {
         const auto& seq = sequences[i];

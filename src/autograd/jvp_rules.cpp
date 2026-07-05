@@ -3818,28 +3818,6 @@ JvpResult jvp_adapter_flex_attention(std::span<const Tensor> primals,
     return dual_to_result(jvp_sdpa_forward(Q, K, V, scale, /*causal=*/false));
 }
 
-// NestedAttention: per-segment scaled dot-product over a packed [SumL, H, E]
-// values buffer governed by Int64 offsets. The forward kernel iterates over
-// segments and the JVP would need to (a) re-derive the per-segment softmax
-// and (b) re-apply the offset-driven gather pattern in dual form. The
-// underlying primitives (NestedAttention is dispatched as a single fused op)
-// are not exposed at the tensor-level API, so a faithful JVP requires
-// integration in C++ at kernel level. Refuse for now with a typed exception.
-JvpResult jvp_adapter_nested_attention(std::span<const Tensor> primals,
-                                       std::span<const Tensor> /*tangents*/,
-                                       const OpAttributes& /*attrs*/) {
-    if (primals.size() != 5) {
-        throw std::runtime_error(
-            "jvp_adapter_nested_attention: expected 5 inputs "
-            "(Q_vals, K_vals, V_vals, offsets, mask?)");
-    }
-    throw NonDifferentiable(
-        "NestedAttention forward-mode JVP not implemented: the fused "
-        "per-segment kernel is not decomposable at the Tensor-level API. "
-        "Use forward-mode AD through the manual unpadded matmul+softmax path "
-        "instead.");
-}
-
 // ---- Loss adapters -------------------------------------------------------
 
 // FusedSoftmaxCrossEntropy(logits, targets) JVP. `targets` is integer (no
@@ -3857,21 +3835,6 @@ JvpResult jvp_adapter_fused_softmax_cross_entropy(
     auto logits = make_dual(primals[0], tangents[0]);
     return dual_to_result(
         jvp_fused_softmax_cross_entropy(logits, primals[1], reduction));
-}
-
-// CTCLossForward: dynamic-programming forward-backward over log-prob
-// alignments. Forward-mode through DP requires propagating tangents through
-// the per-(t, s) lattice using the same recurrence — feasible but requires
-// a dedicated DP kernel (not just primitives). Refuse explicitly rather
-// than silently zeroing tangents.
-JvpResult jvp_adapter_ctc_loss_forward(std::span<const Tensor> /*primals*/,
-                                       std::span<const Tensor> /*tangents*/,
-                                       const OpAttributes& /*attrs*/) {
-    throw NonDifferentiable(
-        "CTCLossForward forward-mode JVP not implemented: the dynamic-"
-        "programming alpha-beta recurrence is not expressible as a "
-        "composition of registered primitives. A dedicated dual-DP kernel "
-        "would be needed.");
 }
 
 // ---- Adaptive max pool: gather-at-saved-indices --------------------------
@@ -4146,47 +4109,6 @@ JvpMultiResult jvp_adapter_median(std::span<const Tensor> primals,
                           {std::move(values_t), std::move(indices_t)}};
 }
 
-// ---- NonDifferentiable stubs: Quantile / Nanquantile / Nanmedian ---------
-//
-// Quantile uses linear interpolation between two sorted neighbours; the
-// per-element interpolation indices and weights are not exposed by the
-// kernel, so a closed-form JVP would require either (a) re-implementing
-// the search at the autograd layer or (b) extending the kernel to return
-// the index pair. Until one of those lands, we mark these explicitly
-// non-differentiable rather than silently zeroing tangents.
-//
-// Nanmedian's NaN-aware median selects different elements depending on the
-// NaN mask of the input — the output is discontinuous with respect to
-// continuous perturbations that flip a NaN to a finite value (and vice
-// versa). Even the finite-NaN case lacks an "indices" output to gather
-// against.
-JvpResult jvp_adapter_quantile(std::span<const Tensor> /*primals*/,
-                               std::span<const Tensor> /*tangents*/,
-                               const OpAttributes& /*attrs*/) {
-    throw NonDifferentiable(
-        "Quantile forward-mode JVP not implemented: linear-interpolation "
-        "indices/weights are not exposed by the kernel. Use Median for an "
-        "indexed quantile path that supports JVP.");
-}
-
-JvpResult jvp_adapter_nanquantile(std::span<const Tensor> /*primals*/,
-                                  std::span<const Tensor> /*tangents*/,
-                                  const OpAttributes& /*attrs*/) {
-    throw NonDifferentiable(
-        "Nanquantile forward-mode JVP not implemented: NaN-mask-dependent "
-        "selection makes the JVP discontinuous, and interpolation indices "
-        "are not exposed.");
-}
-
-JvpResult jvp_adapter_nanmedian(std::span<const Tensor> /*primals*/,
-                                std::span<const Tensor> /*tangents*/,
-                                const OpAttributes& /*attrs*/) {
-    throw NonDifferentiable(
-        "Nanmedian forward-mode JVP not implemented: the kernel does not "
-        "return indices, and NaN-driven selection is discontinuous in the "
-        "input.");
-}
-
 // ---- Nested softmax / log-softmax: per-segment linear-in-input JVP -------
 //
 // NestedSoftmax / NestedLogSoftmax operate on packed `values` over segments
@@ -4278,20 +4200,6 @@ JvpResult jvp_adapter_nested_log_softmax(std::span<const Tensor> primals,
         tangent = tenzor::sub(dvalues, tenzor::mul(P, seg_sum_dv));
     }
     return JvpResult{std::move(logP), std::move(tangent)};
-}
-
-// NestedLayerNorm: requires per-segment mean/var statistics that are not
-// exposed by the nested kernel; the dispatch returns only the normalised
-// values. A correct JVP needs the saved mean/rstd to express the chain
-// rule (same shape as the dense LayerNorm rule), so we refuse rather than
-// silently zeroing tangents.
-JvpResult jvp_adapter_nested_layer_norm(std::span<const Tensor> /*primals*/,
-                                        std::span<const Tensor> /*tangents*/,
-                                        const OpAttributes& /*attrs*/) {
-    throw NonDifferentiable(
-        "NestedLayerNorm forward-mode JVP not implemented: the dispatcher "
-        "returns only the normalised values; per-segment mean/rstd are not "
-        "exposed and are required to express the chain rule.");
 }
 
 } // anonymous (batch 8)
@@ -5790,64 +5698,10 @@ TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_batch_norm2d_mean_var,
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_batch_norm2d_update_running_stats,
     "BatchNorm2dUpdateRunningStats updates running mean/var buffers in place; "
     "stateful side-effecting op with no JVP.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_batch_norm2d_forward,
-    "BatchNorm2dForward (non-affine variant) JVP not yet implemented; "
-    "use BatchNorm2dForwardAffine which has a registered multi-output rule.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_batch_norm2d_fused_training,
-    "BatchNorm2dFusedTraining (cuDNN-fused) JVP not implemented at this layer; "
-    "the saved mean/rstd outputs follow the same pattern as "
-    "BatchNorm2dForwardAffine but the fused kernel does not expose them in a "
-    "stable layout across backends.")
 
 // Multi-output linalg factorisations where the JVP requires the full saved
 // factorisation outputs (Q/R, U/S/V, L/U/P, …) plus skew-symmetric
 // derivation. These have well-defined JVPs but each needs a bespoke kernel:
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_svd,
-    "LinalgSVD JVP requires the saved (U, S, V) and a skew-symmetric "
-    "derivation; not yet implemented. Use LinalgEigh for the symmetric case.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_qr,
-    "LinalgQR JVP requires the saved (Q, R) and a strict-upper-triangular "
-    "projection; not yet implemented.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_eig,
-    "LinalgEig JVP requires the saved complex eigenvectors and the "
-    "Sylvester-equation update; not yet implemented (only LinalgEigh for "
-    "the symmetric/Hermitian case is supported).")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_lu,
-    "LinalgLU JVP requires the saved (L, U, P) and a triangular extraction "
-    "step; not yet implemented.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_householder,
-    "LinalgHouseholder (orgqr) JVP requires the saved Householder reflectors "
-    "and a sequenced reflector-update; not yet implemented.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_linalg_ldl_factor,
-    "LinalgLDLFactor JVP requires the saved (L, D) and a permutation-aware "
-    "factorisation update; not yet implemented.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_ldl_solve,
-    "LinalgLDLSolve JVP requires the saved (L, D) factors and an A-side "
-    "tangent; not yet implemented.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_lu_solve,
-    "LinalgLUSolve JVP requires the saved LU pivots and an A-side tangent; "
-    "not yet implemented.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_cholesky_solve,
-    "LinalgCholeskySolve JVP requires the saved Cholesky factor and an "
-    "A-side tangent; not yet implemented.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_geqrf,
-    "Geqrf JVP requires the saved (tau, R) reflector representation and a "
-    "Householder update; not yet implemented.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_ormqr,
-    "Ormqr JVP requires the saved Householder factors and a reflector chain; "
-    "not yet implemented.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_tensor_inv,
-    "TensorInv JVP requires reshaping into a matrix inverse plus the saved "
-    "inverse output; not yet implemented (linalg.inv covers the matrix case).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_tensor_solve,
-    "TensorSolve JVP requires the saved factorisation; not yet implemented "
-    "(LinalgSolve covers the matrix-vector case).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_solve_triangular,
-    "SolveTriangular JVP requires the A-side tangent contribution X' = "
-    "L^{-1}(B' - L'X); not yet implemented (LinalgSolve covers the general case).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cholesky_inverse,
-    "CholeskyInverse JVP requires the saved L factor and the inverse output; "
-    "not yet implemented.")
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_lobpcg,
     "LOBPCG returns only the k extreme eigenpairs. The eigenvalue tangent "
     "dλ_i = v_iᵀ dA v_i is well defined, but the eigenvector tangent "
@@ -5859,30 +5713,10 @@ TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_lobpcg,
 // Sequence-level RNN forwards: implementable via per-step replay of the cell
 // rules, but the cell-level forward Functions are the supported entry point
 // for JVP. Listed loudly here so callers know to use the cell ops.
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_lstm_forward,
-    "LSTMForward (full-sequence) has no direct JVP; drive forward-mode AD "
-    "through LSTMCellForward which has a registered multi-output rule and "
-    "replay over the sequence in user code.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_gru_forward,
-    "GRUForward (full-sequence) has no direct JVP; use GRUCellForward.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_lstm_multilayer_forward,
-    "LSTMMultiLayerForward has no direct JVP; use LSTMCellForward per layer.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_gru_multilayer_forward,
-    "GRUMultiLayerForward has no direct JVP; use GRUCellForward per layer.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_bilstm_forward,
-    "BiLSTMForward has no direct JVP; use LSTMCellForward for each direction.")
 
 // Search/sort multi-output ops that don't expose the saved index-permutation
 // in a tangent-friendly layout. (CumMax/CumMin/Aminmax/Kthvalue are already
 // registered as multi-output rules in earlier batches.)
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_topk,
-    "TopK JVP requires the saved indices to gather the top-k tangent slots; "
-    "the dispatch layer does expose them, but the K-permuted-output layout "
-    "is not yet wired into the dual walker. Use TakeAlongDim + ArgSort for "
-    "an explicit JVP path.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_sort,
-    "Sort JVP requires the saved permutation indices to scatter the tangent; "
-    "not yet wired into the dual walker. Use TakeAlongDim + ArgSort.")
 
 // Specialised / quantized ops.
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_quantized_linear,
@@ -5915,57 +5749,6 @@ TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_deformable_conv2d_forward,
 
 // DCT/IDCT/STFT/ISTFT/MelScale/MFCC: most are linear in input but kernels do
 // not expose their basis matrices for tangent re-application.
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_dct,
-    "DCT JVP not implemented: the basis-matrix application is linear, but "
-    "the dispatch surface for DCT-IV/etc. does not expose the type/norm "
-    "attributes in a tangent-stable form.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_idct,
-    "IDCT JVP not implemented (linear; see DCT note).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_stft,
-    "STFT JVP not implemented: the windowing convolution is linear, but the "
-    "window tensor is a saved op-input that requires multi-input JVP wiring "
-    "not yet exposed for STFT.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_istft,
-    "ISTFT JVP not implemented (linear; see STFT note).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_mel_scale,
-    "MelScale JVP not implemented: linear filterbank application, but the "
-    "filterbank tensor is constructed inside the kernel and not exposed.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_mfcc,
-    "MFCC JVP not implemented: composite STFT + MelScale + log + DCT; each "
-    "stage's JVP would need to be wired up.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cdist,
-    "CDist JVP not implemented: pairwise p-distance derivative requires "
-    "p-specific kernels (p=2 reduces to MatMul-like form, but other p values "
-    "need bespoke handling).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_pairwise_distance,
-    "PairwiseDistance JVP not implemented (see CDist).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_pdist,
-    "Pdist JVP not implemented (see CDist).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cosine_similarity,
-    "CosineSimilarity JVP not implemented: derivative requires the saved "
-    "norms in each operand; not yet wired up.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_renorm,
-    "Renorm JVP not implemented: per-row p-norm-conditional scaling has a "
-    "piecewise derivative at the maxnorm boundary; not yet wired up.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cov,
-    "Cov JVP not implemented: composite mean-centering + bilinear sum has a "
-    "well-defined Jacobian but requires the saved mean and bias correction.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_corrcoef,
-    "Corrcoef JVP not implemented: composite Cov + diagonal-normalisation; "
-    "see Cov above.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_vector_norm,
-    "LinalgVectorNorm JVP not implemented: the p-norm derivative is well-"
-    "defined but requires the saved primal norm and sign(x); a future batch "
-    "can register this rule using the existing Norm primitive.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_linalg_matrix_norm,
-    "LinalgMatrixNorm JVP not implemented: Frobenius is straightforward but "
-    "spectral/nuclear norms require SVD-based derivations (see LinalgSVD).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_chunk,
-    "Chunk JVP requires multi-output dispatch (returns N tensors); not yet "
-    "wired into the dual walker. Use Slice repeatedly for a single-output JVP.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_split,
-    "Split JVP requires multi-output dispatch (returns variable-N tensors); "
-    "not yet wired into the dual walker. Use Slice for a single-output JVP.")
 
 // Fused composite forwards: most fuse a linear op + an activation; the JVP
 // composition would reuse the constituent rules but the kernel-side fusion
@@ -6012,17 +5795,10 @@ TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_all,
     "All has no derivative: Bool reduction.")
 
 // Sparse non-bilinear ops.
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_to_dense,
-    "SparseToDense JVP not implemented: dense-out tangent would need to be "
-    "sparse-scattered from the values tangent, which is structurally available "
-    "but not yet wired through the JVP dispatch surface.")
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_dense_to_sparse,
     "DenseToSparse JVP not implemented: the structural sparsity pattern is "
     "data-dependent (non-zero mask), making the derivative ill-defined at the "
     "zero-boundary.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_spgemm,
-    "SparseSpGEMM JVP not implemented: the result-pattern depends on the "
-    "operand patterns, so values-only tangents are not sufficient.")
 
 // Ops whose former _s15 adapters built a fixed-eps (1e-3) central finite
 // difference as the "tangent". A fixed-step FD is not a true JVP — it ignores
@@ -6050,32 +5826,10 @@ TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nanquantile,
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nanmedian,
     "Nanmedian JVP not implemented: piecewise-constant in x; a fixed-eps "
     "finite-difference probe is not a valid JVP (needs an argquantile gather).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_trsv,
-    "SparseTrsv JVP not implemented: triangular solve requires an A-side "
-    "tangent contribution mirroring the dense LinalgSolve case.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_trsm,
-    "SparseTrsm JVP not implemented (see SparseTrsv).")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_softmax,
-    "SparseSoftmax JVP not implemented: per-row softmax over nonzero values "
-    "follows the dense softmax rule, but the CSR layout needs threading.")
-TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_log_softmax,
-    "SparseLogSoftmax JVP not implemented (see SparseSoftmax).")
 
 // GroupNorm / InstanceNorm / RMSNorm: same algebraic shape as LayerNorm but
 // over different axes. Until a bespoke multi-output rule lands, mark
 // NonDifferentiable rather than reusing LayerNorm with wrong axes.
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_group_norm,
-    "GroupNorm JVP not yet implemented: per-group mean/rstd statistics not "
-    "exposed by the kernel; the algebraic JVP follows the LayerNorm shape "
-    "applied to (N, G, C/G, *spatial) groups.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_instance_norm,
-    "InstanceNorm JVP not yet implemented: per-instance mean/rstd statistics "
-    "not exposed in the multi-output form; see LayerNorm for the algebraic "
-    "shape.")
-TENZOR_JVP_NONDIFF_MULTI(jvp_adapter_nondiff_rms_norm,
-    "RMSNorm JVP not yet implemented: the RMS rstd is computed without "
-    "mean-centering, simpler than LayerNorm but the kernel does not yet "
-    "expose rstd as a saved output.")
 
 // ============================================================================
 // Batch 9 follow-ups — small bundle to close the remaining gap.

@@ -46,8 +46,8 @@ GroupedQueryAttention::GroupedQueryAttention(int64_t embed_dim,
       num_kv_heads_(num_kv_heads),
       dropout_(dropout),
       is_causal_(is_causal),
-      rope_(std::move(rope)),
-      window_size_(window_size) {
+      window_size_(window_size),
+      rope_(std::move(rope)) {
 
     // Validate parameters
     if (embed_dim_ % num_heads_ != 0) {

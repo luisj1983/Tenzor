@@ -3312,7 +3312,7 @@ auto QuantizationPass::compute_scale_and_zero(const Tensor& weight)
     return {scale, 0};  // symmetric quantization: zero_point = 0
 }
 
-auto QuantizationPass::quantize_linear(std::shared_ptr<Node> node, Graph& graph) -> bool {
+auto QuantizationPass::quantize_linear(std::shared_ptr<Node> node, Graph& /*graph*/) -> bool {
     // A traced Linear carries its operands as INPUTS in dispatch order:
     // [x, weight(, bias)] — the weight is a captured-parameter constant at
     // input[1], NOT a node attribute. Retag the node to QuantizedLinear keeping

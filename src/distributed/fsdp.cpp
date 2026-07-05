@@ -272,7 +272,6 @@ auto FSDPUnit::unflatten_params() -> void {
     }
 
     // Write values from flat_param_ back into original parameter Variables
-    auto dtype = flat_param_.dtype();
     size_t offset = 0;
     for (size_t i = 0; i < original_params_.size(); ++i) {
         auto& param = original_params_[i];

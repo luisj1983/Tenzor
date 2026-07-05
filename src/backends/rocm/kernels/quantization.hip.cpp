@@ -508,10 +508,10 @@ auto quantized_conv2d_hip(
     HIP_CHECK(hipMalloc(&gemm_output, M * N * sizeof(int32_t)));
 
     auto free_all = [&]() {
-        if (col_buffer)      hipFree(col_buffer);
-        if (weight_col_sums) hipFree(weight_col_sums);
-        if (row_sums)        hipFree(row_sums);
-        if (gemm_output)     hipFree(gemm_output);
+        if (col_buffer)      (void)hipFree(col_buffer);
+        if (weight_col_sums) (void)hipFree(weight_col_sums);
+        if (row_sums)        (void)hipFree(row_sums);
+        if (gemm_output)     (void)hipFree(gemm_output);
     };
 
     try {

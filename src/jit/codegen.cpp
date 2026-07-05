@@ -22,6 +22,7 @@
 #include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
 #include <iostream>
 #include <functional>
+#include <tuple>  // std::ignore for intentional discard in destructor cleanup
 
 // Runtime GPU codegen can target CUDA (NVRTC) and/or ROCm (HIPRTC). A combined
 // build compiles this ONE host TU with TENZOR_USE_CUDA defined AND TENZOR_HAS_ROCM
@@ -396,7 +397,7 @@ auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
 CompiledKernel::~CompiledKernel() {
 #if CODEGEN_HIP_AVAILABLE
     if (is_hip) {
-        if (module) hipModuleUnload(static_cast<hipModule_t>(module));
+        if (module) std::ignore = hipModuleUnload(static_cast<hipModule_t>(module));
         return;
     }
 #endif

@@ -1420,7 +1420,7 @@ auto cat_hip(
     // normal path after the switch, leaking on any launch failure).
     struct CatScratchGuard {
         void* a; void* b;
-        ~CatScratchGuard() noexcept { if (a) hipFree(a); if (b) hipFree(b); }
+        ~CatScratchGuard() noexcept { if (a) (void)hipFree(a); if (b) (void)hipFree(b); }
     } cat_scratch{d_input_ptrs, d_dim_sizes};
 
     HIP_CHECK(hipMemcpy(d_input_ptrs, h_input_ptrs.data(), cont_tensors.size() * sizeof(void*), hipMemcpyHostToDevice));
@@ -4036,9 +4036,9 @@ auto masked_scatter_hip(const Tensor& input, const Tensor& mask,
     // Use hipcub for exclusive scan
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
-    hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
+    HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream));
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
-    hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
+    HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream));
     HIP_CHECK(hipFree(d_temp));
     HIP_CHECK(hipFree(d_int_mask));
 

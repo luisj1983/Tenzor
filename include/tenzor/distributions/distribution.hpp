@@ -516,7 +516,7 @@ public:
 
     auto probs() const -> const Tensor& { return probs_; }
 
-    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+    auto sample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
         return bernoulli(probs_);
     }
 
@@ -4006,7 +4006,6 @@ public:
     auto cov_diag() const -> const Tensor& { return cov_diag_; }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
-        auto p = loc_.shape().back();
         auto rank = cov_factor_.shape().back();
         auto shape = sample_shape.empty()
             ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())

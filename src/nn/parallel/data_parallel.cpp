@@ -83,8 +83,9 @@ DataParallel::DataParallel(
     int dim,
     ::tenzor::distributed::ReduceOp reduce_op
 ) : module_(std::move(module)), device_ids_(std::move(device_ids)),
-    output_device_(output_device), dim_(dim), reduce_op_(reduce_op),
-    module_factory_(std::move(module_factory)), pg_(std::move(pg)) {
+    output_device_(output_device), dim_(dim),
+    module_factory_(std::move(module_factory)), pg_(std::move(pg)),
+    reduce_op_(reduce_op) {
     if (!module_) {
         throw std::invalid_argument("DataParallel: module cannot be null");
     }

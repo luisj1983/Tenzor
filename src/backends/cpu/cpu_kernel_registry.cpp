@@ -4596,14 +4596,14 @@ static void register_cpu_kernels_fused_gemm(BackendDispatchTable& table) {
     // =========================================================================
     // MaskedScatter
     // =========================================================================
-    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         return cpu::masked_scatter_kernel(inputs[0], inputs[1], inputs[2]);
     });
 
     // =========================================================================
     // TrilIndices
     // =========================================================================
-    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor>, const OpAttributes& attrs) -> Tensor {
         int64_t row = attrs.get_int(AttrKey::M, 0);
         int64_t col = attrs.get_int(AttrKey::N, 0);
         int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
@@ -4613,7 +4613,7 @@ static void register_cpu_kernels_fused_gemm(BackendDispatchTable& table) {
     // =========================================================================
     // TriuIndices
     // =========================================================================
-    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor>, const OpAttributes& attrs) -> Tensor {
         int64_t row = attrs.get_int(AttrKey::M, 0);
         int64_t col = attrs.get_int(AttrKey::N, 0);
         int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);

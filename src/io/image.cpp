@@ -25,7 +25,13 @@
 #include "tenzor/io/stb/stb_image.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+// stb_image_write.h is vendored upstream single-header code that emits
+// -Wmissing-field-initializers from its own aggregate initializers. Suppress
+// that warning ONLY around this third-party include; do not edit the header.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #include "tenzor/io/stb/stb_image_write.h"
+#pragma GCC diagnostic pop
 
 #include "tenzor/io/image.hpp"
 #include "tenzor/ops/creation.hpp"

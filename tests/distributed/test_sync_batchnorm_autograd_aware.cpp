@@ -111,7 +111,11 @@ TEST_F(C1Test, LegacyConstructor_NoPG_KeepsBackwardCompat) {
     // higher-order remains correct.
     int seen = 0;
     nn::AllReduceFn callback = [&seen](Tensor&) { ++seen; };
+    // intentionally exercising deprecated legacy SyncBatchNorm ctor
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     nn::SyncBatchNorm sbn(/*num_features=*/4, callback, /*world_size=*/1);
+#pragma GCC diagnostic pop
     sbn.train();
     auto input = Variable(zeros({2, 4, 3, 3}, DType::Float32, Device::cpu()), true);
     auto out = sbn.forward(input);

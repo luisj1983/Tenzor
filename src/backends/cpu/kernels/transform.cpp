@@ -440,12 +440,6 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
 
     // General case with block copying - parallelize outer blocks
     if (block_dim > 0 && inner_block_size > 1) {
-        // Calculate outer dimensions for parallelization
-        int64_t outer_size = 1;
-        for (int64_t dim = 0; dim < block_dim; ++dim) {
-            outer_size *= shape[dim];
-        }
-
         #pragma omp parallel for schedule(static)
         for (int64_t block_idx = 0; block_idx < num_blocks; ++block_idx) {
             // Convert block index to multi-dimensional indices for outer dims

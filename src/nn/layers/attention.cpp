@@ -600,7 +600,6 @@ auto MultiheadAttention::forward(const Variable& query,
     }
 
     int64_t batch_size = q_shape[0];
-    int64_t seq_len_q = q_shape[1];
     int64_t seq_len_k = k_shape[1];
     // Number of key/value rows appended by add_bias_kv / add_zero_attn. These
     // extend seq_len_k beyond the user-supplied key length, so a user-provided

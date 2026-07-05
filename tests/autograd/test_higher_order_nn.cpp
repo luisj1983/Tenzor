@@ -155,7 +155,11 @@ TEST_P(HigherOrderNNTest, SyncBatchNorm_DoubleBackward) {
     // so create_graph=true produces a real second-order graph — distributed
     // path still disconnects (flagged via is_higher_order_stub).
     auto identity_all_reduce = [](const Tensor& t) { return t; };
+    // intentionally exercising deprecated legacy SyncBatchNorm ctor
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     nn::SyncBatchNorm sbn(4, identity_all_reduce, /*world_size=*/1);
+#pragma GCC diagnostic pop
     sbn.train();
     sbn.to(device);  // move running stats + weight/bias onto the test device
 

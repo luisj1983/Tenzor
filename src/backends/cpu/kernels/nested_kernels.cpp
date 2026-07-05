@@ -340,7 +340,7 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
 // =========================================================================
 
 auto nested_sum_kernel(const Tensor& values, const Tensor& offsets,
-                       int64_t dim, bool keepdim) -> Tensor {
+                       int64_t /*dim*/, bool keepdim) -> Tensor {
     auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off_ptr = offsets_cpu.data<int64_t>();
@@ -414,7 +414,7 @@ auto nested_sum_kernel(const Tensor& values, const Tensor& offsets,
 // =========================================================================
 
 auto nested_mean_kernel(const Tensor& values, const Tensor& offsets,
-                        int64_t dim, bool keepdim) -> Tensor {
+                        int64_t /*dim*/, bool /*keepdim*/) -> Tensor {
     auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off_ptr = offsets_cpu.data<int64_t>();

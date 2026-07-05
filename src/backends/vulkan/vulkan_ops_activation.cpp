@@ -217,7 +217,6 @@ auto VulkanBackend::dispatchNestedLogSoftmax(const Tensor& values, const Tensor&
                                               int64_t /*dim*/) -> Tensor {
     int32_t device_id = values.device().index;
     auto shape = values.shape();
-    int64_t total_len = shape[0];
     uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
     uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
 

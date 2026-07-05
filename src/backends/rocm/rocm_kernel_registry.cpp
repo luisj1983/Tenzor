@@ -2375,8 +2375,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             offset_t = tenzor::zeros({1}, DType::Int64, inputs[0].device());
             int64_t seed_host = static_cast<int64_t>(rng_seed);
             int64_t offset_host = 0;
-            hipMemcpy(seed_t.data_ptr(), &seed_host, sizeof(int64_t), hipMemcpyHostToDevice);
-            hipMemcpy(offset_t.data_ptr(), &offset_host, sizeof(int64_t), hipMemcpyHostToDevice);
+            HIP_CHECK(hipMemcpy(seed_t.data_ptr(), &seed_host, sizeof(int64_t), hipMemcpyHostToDevice));
+            HIP_CHECK(hipMemcpy(offset_t.data_ptr(), &offset_host, sizeof(int64_t), hipMemcpyHostToDevice));
         }
         return std::vector<Tensor>{output, lse, seed_t, offset_t};
     });
@@ -4921,7 +4921,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
             const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
             if (dst_slice.is_contiguous()) {
-                hipMemcpyAsync(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice, stream);
+                HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice, stream));
             } else {
                 auto dst_shape_v = dst_slice.shape();
                 auto dst_strides = dst_slice.strides();
@@ -4932,7 +4932,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     for (int64_t d = 0; d < ndims; d++) {
                         byte_offset += coord[d] * dst_strides[d] * elem_size;
                     }
-                    hipMemcpyAsync(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice, stream);
+                    HIP_CHECK(hipMemcpyAsync(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice, stream));
                     for (int64_t d = ndims - 1; d >= 0; d--) {
                         coord[d]++;
                         if (coord[d] < dst_shape_v[d]) break;
@@ -4942,7 +4942,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             }
             // src_reshaped is a local temporary; sync so its buffer outlives
             // the stream-ordered copies before it is destroyed.
-            hipStreamSynchronize(stream);
+            HIP_CHECK(hipStreamSynchronize(stream));
             return output;
         });
 
@@ -4976,7 +4976,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
             const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
             if (dst_slice.is_contiguous()) {
-                hipMemcpyAsync(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice, stream);
+                HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice, stream));
             } else {
                 auto dst_shape_v = dst_slice.shape();
                 auto dst_strides = dst_slice.strides();
@@ -4987,7 +4987,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     for (int64_t d = 0; d < ndims; d++) {
                         byte_offset += coord[d] * dst_strides[d] * elem_size;
                     }
-                    hipMemcpyAsync(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice, stream);
+                    HIP_CHECK(hipMemcpyAsync(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice, stream));
                     for (int64_t d = ndims - 1; d >= 0; d--) {
                         coord[d]++;
                         if (coord[d] < dst_shape_v[d]) break;
@@ -4997,7 +4997,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             }
             // src_reshaped is a local temporary; sync so its buffer outlives
             // the stream-ordered copies before it is destroyed.
-            hipStreamSynchronize(stream);
+            HIP_CHECK(hipStreamSynchronize(stream));
             return output;
         });
 
@@ -5055,9 +5055,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 for (int64_t k = 0; k < diag_len; k++) {
                     int64_t out_elem_offset = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
                     int64_t src_elem_idx = b * diag_len + k;
-                    hipMemcpyAsync(out_ptr + out_elem_offset * elem_size,
+                    HIP_CHECK(hipMemcpyAsync(out_ptr + out_elem_offset * elem_size,
                                    src_ptr + src_elem_idx * elem_size, elem_size,
-                                   hipMemcpyDeviceToDevice, stream);
+                                   hipMemcpyDeviceToDevice, stream));
                 }
 
                 for (int64_t i = static_cast<int64_t>(batch_dims.size()) - 1; i >= 0; i--) {
@@ -5068,7 +5068,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             }
             // src is a local contiguous temporary; sync so its buffer outlives
             // the stream-ordered copies before it is destroyed.
-            hipStreamSynchronize(stream);
+            HIP_CHECK(hipStreamSynchronize(stream));
             return output;
         });
 
@@ -5252,7 +5252,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // TrilIndices
     // =========================================================================
-    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor> /*inputs*/, const OpAttributes& attrs) -> Tensor {
         int64_t row = attrs.get_int(AttrKey::M, 0);
         int64_t col = attrs.get_int(AttrKey::N, 0);
         int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
@@ -5262,7 +5262,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // TriuIndices
     // =========================================================================
-    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor> /*inputs*/, const OpAttributes& attrs) -> Tensor {
         int64_t row = attrs.get_int(AttrKey::M, 0);
         int64_t col = attrs.get_int(AttrKey::N, 0);
         int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);

@@ -183,7 +183,13 @@ public:
         // to http/https ONLY: a remote mirror must never be able to redirect
         // into file:// (or any other scheme), which would turn a 30x response
         // into an arbitrary local-file read.
-#if defined(CURLOPT_PROTOCOLS_STR)
+// CURLOPT_PROTOCOLS/CURLOPT_REDIR_PROTOCOLS are deprecated since libcurl
+// 7.85.0 (0x075500) in favour of the comma-separated *_STR variants. Guard on
+// the library version number (a real preprocessor macro) rather than on
+// CURLOPT_PROTOCOLS_STR, which is an enum constant and thus invisible to
+// `#if defined(...)`. Same allowed sets as before: file access is permitted on
+// the initial request only, never on redirects.
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x075500
         curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https,file");
         curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
 #else
@@ -1196,24 +1202,24 @@ static void initialize_default_registry(std::unordered_map<std::string, ModelWei
     // should call `download_pretrained_safetensors`.
     models.push_back({std::string("resnet18"), get_pytorch_model_url("resnet18-5c106cde"),
                      std::string(""), 0, std::string("ResNet-18"),
-                     get_timm_safetensors_url("resnet18.a1_in1k")});
+                     get_timm_safetensors_url("resnet18.a1_in1k"), std::string("")});
     models.push_back({std::string("resnet34"), get_pytorch_model_url("resnet34-333f7ec4"),
                      std::string(""), 0, std::string("ResNet-34"),
-                     get_timm_safetensors_url("resnet34.a1_in1k")});
+                     get_timm_safetensors_url("resnet34.a1_in1k"), std::string("")});
     models.push_back({std::string("resnet50"), get_pytorch_model_url("resnet50-19c8e357"),
                      std::string(""), 0, std::string("ResNet-50"),
-                     get_timm_safetensors_url("resnet50.a1_in1k")});
+                     get_timm_safetensors_url("resnet50.a1_in1k"), std::string("")});
     models.push_back({std::string("resnet101"), get_pytorch_model_url("resnet101-5d3b4d8f"),
                      std::string(""), 0, std::string("ResNet-101"),
-                     get_timm_safetensors_url("resnet101.a1_in1k")});
+                     get_timm_safetensors_url("resnet101.a1_in1k"), std::string("")});
     models.push_back({std::string("resnet152"), get_pytorch_model_url("resnet152-b121ed2d"),
                      std::string(""), 0, std::string("ResNet-152"),
-                     get_timm_safetensors_url("resnet152.a1h_in1k")});
+                     get_timm_safetensors_url("resnet152.a1h_in1k"), std::string("")});
 
     // ----- MobileNet V2 ------------------------------------------------------
     models.push_back({std::string("mobilenet_v2"), get_pytorch_model_url("mobilenet_v2-b0353104"),
                      std::string(""), 0, std::string("MobileNet V2"),
-                     get_timm_safetensors_url("mobilenetv2_100.ra_in1k")});
+                     get_timm_safetensors_url("mobilenetv2_100.ra_in1k"), std::string("")});
 
     // ----- EfficientNet (B0..B7, all timm-mirrored) --------------------------
     for (int i = 0; i <= 7; i++) {
@@ -1221,72 +1227,72 @@ static void initialize_default_registry(std::unordered_map<std::string, ModelWei
         std::string timm_id = "tf_efficientnet_b" + std::to_string(i) + ".in1k";
         models.push_back({name, get_pytorch_model_url(name), std::string(""), 0,
                           std::string("EfficientNet-B") + std::to_string(i),
-                          get_timm_safetensors_url(timm_id)});
+                          get_timm_safetensors_url(timm_id), std::string("")});
     }
 
     // ----- ResNeXt / Wide ResNet --------------------------------------------
     models.push_back({std::string("resnext50_32x4d"),
                       get_pytorch_model_url("resnext50_32x4d-7cdf4587"),
                       std::string(""), 0, std::string("ResNeXt-50 32x4d"),
-                      get_timm_safetensors_url("resnext50_32x4d.a1h_in1k")});
+                      get_timm_safetensors_url("resnext50_32x4d.a1h_in1k"), std::string("")});
     models.push_back({std::string("resnext101_32x8d"),
                       get_pytorch_model_url("resnext101_32x8d-8ba56ff5"),
                       std::string(""), 0, std::string("ResNeXt-101 32x8d"),
-                      get_timm_safetensors_url("resnext101_32x8d.tv_in1k")});
+                      get_timm_safetensors_url("resnext101_32x8d.tv_in1k"), std::string("")});
     models.push_back({std::string("wide_resnet50_2"),
                       get_pytorch_model_url("wide_resnet50_2-95faca4d"),
                       std::string(""), 0, std::string("Wide ResNet 50-2"),
-                      get_timm_safetensors_url("wide_resnet50_2.racm_in1k")});
+                      get_timm_safetensors_url("wide_resnet50_2.racm_in1k"), std::string("")});
     models.push_back({std::string("wide_resnet101_2"),
                       get_pytorch_model_url("wide_resnet101_2-32ee1156"),
                       std::string(""), 0, std::string("Wide ResNet 101-2"),
-                      get_timm_safetensors_url("wide_resnet101_2.tv2_in1k")});
+                      get_timm_safetensors_url("wide_resnet101_2.tv2_in1k"), std::string("")});
 
     // ----- MobileNet V3 ------------------------------------------------------
     models.push_back({std::string("mobilenet_v3_large"),
                       get_pytorch_model_url("mobilenet_v3_large-8738ca79"),
                       std::string(""), 0, std::string("MobileNet V3 Large"),
-                      get_timm_safetensors_url("mobilenetv3_large_100.ra_in1k")});
+                      get_timm_safetensors_url("mobilenetv3_large_100.ra_in1k"), std::string("")});
     models.push_back({std::string("mobilenet_v3_small"),
                       get_pytorch_model_url("mobilenet_v3_small-047dcff4"),
                       std::string(""), 0, std::string("MobileNet V3 Small"),
-                      get_timm_safetensors_url("mobilenetv3_small_100.lamb_in1k")});
+                      get_timm_safetensors_url("mobilenetv3_small_100.lamb_in1k"), std::string("")});
 
     // ----- ConvNeXt ----------------------------------------------------------
     models.push_back({std::string("convnext_tiny"),
                       get_pytorch_model_url("convnext_tiny-983f1562"),
                       std::string(""), 0, std::string("ConvNeXt-Tiny"),
-                      get_timm_safetensors_url("convnext_tiny.fb_in1k")});
+                      get_timm_safetensors_url("convnext_tiny.fb_in1k"), std::string("")});
     models.push_back({std::string("convnext_small"),
                       get_pytorch_model_url("convnext_small-0c510722"),
                       std::string(""), 0, std::string("ConvNeXt-Small"),
-                      get_timm_safetensors_url("convnext_small.fb_in1k")});
+                      get_timm_safetensors_url("convnext_small.fb_in1k"), std::string("")});
     models.push_back({std::string("convnext_base"),
                       get_pytorch_model_url("convnext_base-6075fbad"),
                       std::string(""), 0, std::string("ConvNeXt-Base"),
-                      get_timm_safetensors_url("convnext_base.fb_in1k")});
+                      get_timm_safetensors_url("convnext_base.fb_in1k"), std::string("")});
     models.push_back({std::string("convnext_large"),
                       get_pytorch_model_url("convnext_large-ea097f82"),
                       std::string(""), 0, std::string("ConvNeXt-Large"),
-                      get_timm_safetensors_url("convnext_large.fb_in1k")});
+                      get_timm_safetensors_url("convnext_large.fb_in1k"), std::string("")});
 
     // ----- Swin Transformer V1 ----------------------------------------------
     models.push_back({std::string("swin_t"),
                       get_pytorch_model_url("swin_t-704ceda3"),
                       std::string(""), 0, std::string("Swin Transformer Tiny"),
-                      get_timm_safetensors_url("swin_tiny_patch4_window7_224.ms_in1k")});
+                      get_timm_safetensors_url("swin_tiny_patch4_window7_224.ms_in1k"), std::string("")});
     models.push_back({std::string("swin_s"),
                       get_pytorch_model_url("swin_s-5e29d889"),
                       std::string(""), 0, std::string("Swin Transformer Small"),
-                      get_timm_safetensors_url("swin_small_patch4_window7_224.ms_in1k")});
+                      get_timm_safetensors_url("swin_small_patch4_window7_224.ms_in1k"), std::string("")});
     models.push_back({std::string("swin_b"),
                       get_pytorch_model_url("swin_b-68c6b09e"),
                       std::string(""), 0, std::string("Swin Transformer Base"),
-                      get_timm_safetensors_url("swin_base_patch4_window7_224.ms_in1k")});
+                      get_timm_safetensors_url("swin_base_patch4_window7_224.ms_in1k"), std::string("")});
     models.push_back({std::string("swin_large"),
                       std::string(""), std::string(""), 0,
                       std::string("Swin Transformer Large"),
-                      get_timm_safetensors_url("swin_large_patch4_window7_224.ms_in22k_ft_in1k")});
+                      get_timm_safetensors_url("swin_large_patch4_window7_224.ms_in22k_ft_in1k"), std::string("")});
 
     // ============================================================================
     // REMOVED — kept only as a comment manifest so future grep finds it:

@@ -2090,7 +2090,6 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
     }
 
     int64_t seq_len = x.shape()[0];
-    int64_t batch = x.shape()[1];
     int64_t num_directions = bidirectional_ ? 2 : 1;
 
     Tensor output;
