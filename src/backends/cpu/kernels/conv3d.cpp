@@ -525,6 +525,11 @@ auto conv3d_forward_kernel(
     int64_t dD, int64_t dH, int64_t dW,
     int64_t groups
 ) -> Tensor {
+    // The impl divides out_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv3d: groups must be positive (got " + std::to_string(groups) + ")");
+    }
     auto is = input.shape();
     auto ws = weight.shape();
 
@@ -590,6 +595,12 @@ auto conv3d_backward_input_kernel(
     int64_t dD, int64_t dH, int64_t dW,
     int64_t groups
 ) -> Tensor {
+    // The impl divides out_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv3d_backward_input: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
     // Flat-indexing impl: contiguify grad_output/weight (a non-contiguous
@@ -632,6 +643,12 @@ auto conv3d_backward_weight_kernel(
     int64_t dD, int64_t dH, int64_t dW,
     int64_t groups
 ) -> Tensor {
+    // The impl divides out_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv3d_backward_weight: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
     // Flat-indexing impl: contiguify grad_output/input before use.
@@ -993,16 +1010,45 @@ auto conv_transpose3d_forward_kernel(
     int64_t out_channels = out_channels_per_group * groups;
     int64_t kD = w_shape[2], kH = w_shape[3], kW = w_shape[4];
 
+    // The impl divides in_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv_transpose3d: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
+
     int64_t out_d = calc_transpose_out_size(in_shape[2], kD, sD, pD, opD, dD);
     int64_t out_h = calc_transpose_out_size(in_shape[3], kH, sH, pH, opH, dH);
     int64_t out_w = calc_transpose_out_size(in_shape[4], kW, sW, pW, opW, dW);
 
+    // A pathological padding/output-padding config can drive an extent
+    // non-positive; the impl's memset over batch*out_channels*out_d*out_h*out_w
+    // would then compute a negative product -> huge size_t -> heap OOB write.
+    // Reject before allocation, mirroring conv2d/conv3d forward.
+    if (out_d <= 0 || out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "Invalid ConvTranspose3d configuration: output dimensions are "
+            "non-positive (out_d=" + std::to_string(out_d) + ", out_h=" +
+            std::to_string(out_h) + ", out_w=" + std::to_string(out_w) +
+            "); check padding / output_padding / dilation / kernel size");
+    }
+
+    // conv_transpose3d_forward_impl indexes input/weight as flat packed
+    // NCDHW/OIDHW buffers; a non-contiguous view would be read in the wrong
+    // order. Materialize contiguous copies once (no-op when already packed).
+    // The F16/BF16 path is already contiguous via .to(Float32).
+    const Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor w_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c;
+    const Tensor* bias_ptr = bias;
+    if (bias && !bias->is_contiguous()) { bias_c = bias->contiguous(); bias_ptr = &bias_c; }
+
     Tensor output({batch, out_channels, out_d, out_h, out_w}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        conv_transpose3d_forward_impl<float>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        conv_transpose3d_forward_impl<float>(in_c, w_c, bias_ptr, output, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float64) {
-        conv_transpose3d_forward_impl<double>(input, weight, bias, output, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        conv_transpose3d_forward_impl<double>(in_c, w_c, bias_ptr, output, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         auto in_f32 = input.to(DType::Float32);
@@ -1040,12 +1086,23 @@ auto conv_transpose3d_backward_input_kernel(
     int64_t dD, int64_t dH, int64_t dW,
     int64_t groups
 ) -> Tensor {
+    // The impl divides in_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv_transpose3d_backward_input: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
+    // Flat-indexing impl: contiguify grad_output/weight (a non-contiguous
+    // grad_output is common when an upstream transpose feeds the gradient).
+    const Tensor go_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor w_c = weight.is_contiguous() ? weight : weight.contiguous();
+
     if (grad_output.dtype() == DType::Float32) {
-        conv_transpose3d_backward_input_impl<float>(grad_output, weight, grad_input, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        conv_transpose3d_backward_input_impl<float>(go_c, w_c, grad_input, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv_transpose3d_backward_input_impl<double>(grad_output, weight, grad_input, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        conv_transpose3d_backward_input_impl<double>(go_c, w_c, grad_input, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
@@ -1080,12 +1137,22 @@ auto conv_transpose3d_backward_weight_kernel(
     int64_t dD, int64_t dH, int64_t dW,
     int64_t groups
 ) -> Tensor {
+    // The impl divides in_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv_transpose3d_backward_weight: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
+    // Flat-indexing impl: contiguify grad_output/input before use.
+    const Tensor go_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+
     if (grad_output.dtype() == DType::Float32) {
-        conv_transpose3d_backward_weight_impl<float>(grad_output, input, grad_weight, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        conv_transpose3d_backward_weight_impl<float>(go_c, in_c, grad_weight, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv_transpose3d_backward_weight_impl<double>(grad_output, input, grad_weight, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
+        conv_transpose3d_backward_weight_impl<double>(go_c, in_c, grad_weight, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);

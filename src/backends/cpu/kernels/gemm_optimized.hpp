@@ -772,14 +772,18 @@ inline void gemm_transA_optimized(
     }
 
 #else
+    // Accumulate in double, matching the sibling scalar fallbacks
+    // (gemm_optimized :478/626, gemm_transB_optimized :707). A `float`
+    // accumulator here loses mantissa bits over large-K conv weight-gradient
+    // reductions and diverges from the double-accumulated paths.
     #pragma omp parallel for collapse(2) if(M * N > OMP_THRESHOLD_GEMM)
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
-            float sum = 0.0f;
+            double sum = 0.0;
             for (int64_t k = 0; k < K; ++k) {
-                sum += A[k * M + i] * B[k * N + j];
+                sum += static_cast<double>(A[k * M + i]) * static_cast<double>(B[k * N + j]);
             }
-            C[i * N + j] = sum;
+            C[i * N + j] = static_cast<float>(sum);
         }
     }
 #endif

@@ -757,7 +757,12 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
 
                     T dn = dh * (T(1) - z_gate[h]);
                     T dz = dh * (hx_data[b * hidden_size + h] - n_gate[h]);
-                    d_hx[b * hidden_size + h] = dh * z_gate[h];
+                    // Accumulate (not assign): earlier h-iterations' reset-path
+                    // inner loop (dn_pre * r * W_hn) already wrote into this
+                    // d_hx[b*hidden+h] slot; assigning here would discard the
+                    // strictly-lower-triangular reset Jacobian. grad_hx is
+                    // zero-initialised, so += is the correct diagonal contribution.
+                    d_hx[b * hidden_size + h] += dh * z_gate[h];
 
                     T dn_pre = dn * (T(1) - n_gate[h] * n_gate[h]);
 

@@ -1237,7 +1237,11 @@ void dft_1d_strided(const std::complex<T>* in,
     // Fallback: O(N²) direct DFT. Handles resampling (N_in != N_out) and
     // strided (inner > 1) axes — the Bluestein path can't handle those
     // because the chirp permutation assumes a flat contiguous row.
-    const T two_pi_sign = static_cast<T>(is_forward ? -2.0 * M_PI : 2.0 * M_PI);
+    // Accumulate the O(N) sum in double precision regardless of T (e.g. Complex64
+    // with T=float): summing N terms in std::complex<float> grows round-off error
+    // O(N), so mirror the double-accumulation policy used elsewhere in this file
+    // and narrow only on store.
+    const double two_pi_sign = is_forward ? -2.0 * M_PI : 2.0 * M_PI;
     #pragma omp parallel for collapse(2) schedule(static) if (outer * inner > 64)
     for (int64_t o = 0; o < outer; ++o) {
         for (int64_t j = 0; j < inner; ++j) {
@@ -1245,14 +1249,20 @@ void dft_1d_strided(const std::complex<T>* in,
             std::complex<T>* y = out + (o * N_out) * inner + j;
             const int64_t L = (N_in < N_out) ? N_in : N_out;
             for (int64_t k = 0; k < N_out; ++k) {
-                std::complex<T> acc(0, 0);
-                const T phase_base = two_pi_sign * static_cast<T>(k) / static_cast<T>(N_out);
+                std::complex<double> acc(0, 0);
+                const double phase_base =
+                    two_pi_sign * static_cast<double>(k) / static_cast<double>(N_out);
                 for (int64_t n = 0; n < L; ++n) {
-                    T phase = phase_base * static_cast<T>(n);
-                    std::complex<T> w(std::cos(phase), std::sin(phase));
-                    acc += x[n * inner] * w;
+                    double phase = phase_base * static_cast<double>(n);
+                    std::complex<double> w(std::cos(phase), std::sin(phase));
+                    const std::complex<T>& xn = x[n * inner];
+                    std::complex<double> xnd(static_cast<double>(xn.real()),
+                                             static_cast<double>(xn.imag()));
+                    acc += xnd * w;
                 }
-                y[k * inner] = acc * static_cast<T>(scale);
+                std::complex<double> res = acc * scale;
+                y[k * inner] = std::complex<T>(static_cast<T>(res.real()),
+                                               static_cast<T>(res.imag()));
             }
         }
     }
@@ -1377,7 +1387,12 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
         for (int64_t o = 0; o < outer; ++o) {
             for (int64_t j = 0; j < inner; ++j) {
                 // Positive frequencies (and DC, Nyquist if N even) copied directly.
-                for (int64_t k = 0; k < half; ++k) {
+                // A real signal of length N occupies only the first N/2+1 Hermitian
+                // bins, so when the input carries more bins than fit (half > N) the
+                // extra bins are ignored — never write past the length-N transform
+                // axis of `full` (matches the MKL gather_len=min(...) fast path).
+                const int64_t copy_len = (half < N) ? half : N;
+                for (int64_t k = 0; k < copy_len; ++k) {
                     y[(o * N + k) * inner + j] = x[(o * half + k) * inner + j];
                 }
                 // Negative frequencies: conjugate-symmetric.
@@ -1472,7 +1487,12 @@ auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t
     int64_t padded_length = signal_length;
     std::vector<float> padded_data;
     const float* src_data = nullptr;
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    // The Float32 fast path still needs a contiguous buffer: data<float>() is read
+    // with flat indices below, so a strided/transposed Float32 view would be walked
+    // in physical storage order. (.to(Float32) already materializes contiguous.)
+    Tensor input_f32 = (input.dtype() != DType::Float32)
+                           ? input.to(DType::Float32)
+                           : (input.is_contiguous() ? input : input.contiguous());
 
     if (center) {
         int64_t pad = n_fft / 2;
@@ -1660,8 +1680,12 @@ auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_
     if (nola_len < 0) nola_len = 0;
     const int64_t nola_end = nola_start + nola_len;
 
-    // Ensure input is Complex64
-    Tensor input_c64 = (input.dtype() != DType::Complex64) ? input.to(DType::Complex64) : input;
+    // Ensure input is Complex64 AND contiguous: in_ptr is reinterpret_cast from
+    // data_ptr() and indexed flat below, so a strided/transposed Complex64 view
+    // must be materialized contiguous first. (.to(Complex64) already does so.)
+    Tensor input_c64 = (input.dtype() != DType::Complex64)
+                           ? input.to(DType::Complex64)
+                           : (input.is_contiguous() ? input : input.contiguous());
     auto* in_ptr = reinterpret_cast<const std::complex<float>*>(input_c64.data_ptr());
 
     // Output shape: (..., signal_length)

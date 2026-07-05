@@ -28,6 +28,7 @@ inline std::vector<int64_t> shape_vec(const tenzor::Tensor& t) {
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifdef _OPENMP
@@ -36,12 +37,56 @@ inline std::vector<int64_t> shape_vec(const tenzor::Tensor& t) {
 
 namespace tenzor::cpu {
 
+namespace {
+
+// -------------------------------------------------------------------------
+// Shared guards for the nested kernels.
+// -------------------------------------------------------------------------
+
+// F049: the nested kernels index the packed `values` buffer with a flat stride
+// derived from shape (inner_size = prod(shape[1:])) rather than actual strides.
+// Materialize a contiguous copy at entry so that assumption always holds.
+inline Tensor as_contiguous(const Tensor& t) {
+    return t.is_contiguous() ? t : t.contiguous();
+}
+
+// F065: a nested tensor is a batch of variable-length sequences x feature, so
+// its packed `values` buffer is inherently >= 2-D (feature width = shape.back(),
+// row count = numel()/feature). For rank-1 those two axes alias; for 0-d it is
+// undefined behaviour. Reject clearly before any indexing.
+inline void require_ndim_ge2(const Tensor& t, const char* kernel) {
+    if (t.ndim() < 2) {
+        throw std::invalid_argument(
+            std::string(kernel) + ": expected values with ndim >= 2 "
+            "(batch-of-sequences x feature), got ndim " +
+            std::to_string(t.ndim()));
+    }
+}
+
+// Note: the segmented reduction kernels (softmax/log_softmax/sum/mean) always
+// reduce over the ragged/segment axis; `dim` is accepted but nominal, matching
+// the CUDA/ROCm nested kernels (which likewise ignore its value). Do NOT reject
+// specific dim values here — that would break CPU/GPU parity and the documented
+// contract that `dim=-1` denotes the segment softmax.
+
+}  // namespace
+
 // =========================================================================
 // Segmented Softmax
 // =========================================================================
 
-auto nested_softmax_kernel(const Tensor& values, const Tensor& offsets,
-                           [[maybe_unused]] int64_t dim) -> Tensor {
+auto nested_softmax_kernel(const Tensor& values_in, const Tensor& offsets,
+                           int64_t dim) -> Tensor {
+
+    // F043: half precisions widen to Float32, compute, narrow back (mirrors
+    // nested_layer_norm/nested_attention) instead of throwing.
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        const DType orig = values_in.dtype();
+        return nested_softmax_kernel(values_in.to(DType::Float32), offsets, dim)
+            .to(orig);
+    }
+
+    const Tensor values = as_contiguous(values_in);  // F049
     auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off_ptr = offsets_cpu.data<int64_t>();
@@ -142,8 +187,17 @@ auto nested_softmax_kernel(const Tensor& values, const Tensor& offsets,
 // Segmented Log-Softmax
 // =========================================================================
 
-auto nested_log_softmax_kernel(const Tensor& values, const Tensor& offsets,
-                               [[maybe_unused]] int64_t dim) -> Tensor {
+auto nested_log_softmax_kernel(const Tensor& values_in, const Tensor& offsets,
+                               int64_t dim) -> Tensor {
+
+    // F043: half precisions widen to Float32, compute, narrow back.
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        const DType orig = values_in.dtype();
+        return nested_log_softmax_kernel(values_in.to(DType::Float32), offsets, dim)
+            .to(orig);
+    }
+
+    const Tensor values = as_contiguous(values_in);  // F049
     auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off_ptr = offsets_cpu.data<int64_t>();
@@ -239,9 +293,12 @@ auto nested_log_softmax_kernel(const Tensor& values, const Tensor& offsets,
 // Segmented Layer Norm
 // =========================================================================
 
-auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
+auto nested_layer_norm_kernel(const Tensor& values_in, const Tensor& offsets,
                               const Tensor& weight, const Tensor& bias,
                               double eps) -> Tensor {
+    require_ndim_ge2(values_in, "nested_layer_norm_kernel");  // F065
+    const Tensor values = as_contiguous(values_in);           // F049
+
     // Layer norm normalizes over the last dimension(s).
     // For nested tensors with values [total_len, D], this normalizes each
     // row independently, which doesn't need segment awareness.
@@ -258,8 +315,11 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
         const auto* w_ptr = weight.data<float>();
         const auto* b_ptr = bias.data<float>();
 
+        // F033: the feature width is the last dim; every row of that width must
+        // be normalized, so the row count is numel()/D (product of ALL leading
+        // dims), not just shape[0] — otherwise middle dims leave rows unwritten.
         int64_t D = values.shape().back();
-        int64_t total_rows = values.shape()[0];
+        int64_t total_rows = (D > 0) ? values.numel() / D : 0;
         #ifdef _OPENMP
         #pragma omp parallel for if(total_rows > 64) schedule(static)
         #endif
@@ -291,8 +351,11 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
         const auto* w_ptr = weight.data<double>();
         const auto* b_ptr = bias.data<double>();
 
+        // F033: the feature width is the last dim; every row of that width must
+        // be normalized, so the row count is numel()/D (product of ALL leading
+        // dims), not just shape[0] — otherwise middle dims leave rows unwritten.
         int64_t D = values.shape().back();
-        int64_t total_rows = values.shape()[0];
+        int64_t total_rows = (D > 0) ? values.numel() / D : 0;
 
         #ifdef _OPENMP
         #pragma omp parallel for if(total_rows > 64) schedule(static)
@@ -339,8 +402,17 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
 // Segmented Sum
 // =========================================================================
 
-auto nested_sum_kernel(const Tensor& values, const Tensor& offsets,
-                       int64_t /*dim*/, bool keepdim) -> Tensor {
+auto nested_sum_kernel(const Tensor& values_in, const Tensor& offsets,
+                       int64_t dim, bool keepdim) -> Tensor {
+
+    // F043: half precisions widen to Float32, compute, narrow back.
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        const DType orig = values_in.dtype();
+        return nested_sum_kernel(values_in.to(DType::Float32), offsets, dim, keepdim)
+            .to(orig);
+    }
+
+    const Tensor values = as_contiguous(values_in);  // F049
     auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off_ptr = offsets_cpu.data<int64_t>();
@@ -352,12 +424,13 @@ auto nested_sum_kernel(const Tensor& values, const Tensor& offsets,
         inner_size *= values.shape()[d];
     }
 
-    // Result: one row per batch element (or one per batch if keepdim)
+    // Result: one row per batch element. F034: with keepdim=true the reduced
+    // (ragged/segment) axis is retained as size 1 rather than dropped, so the
+    // output is [B, 1, inner...] instead of [B, inner...].
     std::vector<int64_t> out_shape;
+    out_shape.push_back(B);
     if (keepdim) {
-        out_shape.push_back(B);
-    } else {
-        out_shape.push_back(B);
+        out_shape.push_back(1);
     }
     for (int64_t d = 1; d < values.ndim(); ++d) {
         out_shape.push_back(values.shape()[d]);
@@ -413,8 +486,17 @@ auto nested_sum_kernel(const Tensor& values, const Tensor& offsets,
 // Segmented Mean
 // =========================================================================
 
-auto nested_mean_kernel(const Tensor& values, const Tensor& offsets,
-                        int64_t /*dim*/, bool /*keepdim*/) -> Tensor {
+auto nested_mean_kernel(const Tensor& values_in, const Tensor& offsets,
+                        int64_t dim, bool keepdim) -> Tensor {
+
+    // F043: half precisions widen to Float32, compute, narrow back.
+    if (values_in.dtype() == DType::Float16 || values_in.dtype() == DType::BFloat16) {
+        const DType orig = values_in.dtype();
+        return nested_mean_kernel(values_in.to(DType::Float32), offsets, dim, keepdim)
+            .to(orig);
+    }
+
+    const Tensor values = as_contiguous(values_in);  // F049
     auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off_ptr = offsets_cpu.data<int64_t>();
@@ -425,7 +507,13 @@ auto nested_mean_kernel(const Tensor& values, const Tensor& offsets,
         inner_size *= values.shape()[d];
     }
 
-    std::vector<int64_t> out_shape = {B};
+    // Mirror nested_sum's keepdim semantics (F034): retain the reduced ragged
+    // axis as size 1 when keepdim=true -> [B, 1, inner...].
+    std::vector<int64_t> out_shape;
+    out_shape.push_back(B);
+    if (keepdim) {
+        out_shape.push_back(1);
+    }
     for (int64_t d = 1; d < values.ndim(); ++d) {
         out_shape.push_back(values.shape()[d]);
     }
@@ -488,17 +576,25 @@ auto nested_mean_kernel(const Tensor& values, const Tensor& offsets,
 // Nested Attention (variable-length scaled dot-product)
 // =========================================================================
 
-auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
+auto nested_attention_kernel(const Tensor& Q_in, const Tensor& K_in, const Tensor& V_in,
                               const Tensor& q_offsets, const Tensor& kv_offsets,
                               float scale, bool causal) -> Tensor {
+    require_ndim_ge2(Q_in, "nested_attention_kernel");  // F065
+
     // Float16 / BFloat16: widen to Float32, compute, narrow back.
-    if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
-        const DType orig = Q.dtype();
+    if (Q_in.dtype() == DType::Float16 || Q_in.dtype() == DType::BFloat16) {
+        const DType orig = Q_in.dtype();
         auto out = nested_attention_kernel(
-            Q.to(DType::Float32), K.to(DType::Float32), V.to(DType::Float32),
+            Q_in.to(DType::Float32), K_in.to(DType::Float32), V_in.to(DType::Float32),
             q_offsets, kv_offsets, scale, causal);
         return out.to(orig);
     }
+
+    // F049: kernels index Q/K/V with dense [row*hd + d] offsets, so a
+    // non-contiguous ragged buffer would be misread. Materialize contiguous.
+    const Tensor Q = as_contiguous(Q_in);
+    const Tensor K = as_contiguous(K_in);
+    const Tensor V = as_contiguous(V_in);
 
     auto q_off_cpu = (q_offsets.device().type != Device::Type::CPU)
         ? q_offsets.to(Device::cpu()) : q_offsets;
@@ -597,8 +693,9 @@ auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
 // Nested to Padded
 // =========================================================================
 
-auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets,
+auto nested_to_padded_kernel(const Tensor& values_in, const Tensor& offsets,
                               int64_t max_len, float padding_value) -> Tensor {
+    const Tensor values = as_contiguous(values_in);  // F049
     auto off_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off = off_cpu.data<int64_t>();
@@ -658,7 +755,9 @@ auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets,
 // Nested from Padded
 // =========================================================================
 
-auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> Tensor {
+auto nested_from_padded_kernel(const Tensor& padded_in, const Tensor& offsets) -> Tensor {
+    require_ndim_ge2(padded_in, "nested_from_padded_kernel");  // F065
+    const Tensor padded = as_contiguous(padded_in);            // F049
     auto off_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
     const auto* off = off_cpu.data<int64_t>();

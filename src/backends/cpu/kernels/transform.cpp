@@ -347,6 +347,15 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     const int64_t total_elements = input.numel();
     const size_t element_size = dtype_size(input.dtype());
 
+    // An empty tensor (numel==0, e.g. a view with a size-0 dim) is trivially
+    // contiguous; `result` was already allocated with the correct 0-containing
+    // shape. Short-circuit here BEFORE the pointer walk and the
+    // num_blocks = total_elements / inner_block_size division below, which
+    // divides by zero when a size-0 dim collapses inner_block_size to 0 (F057).
+    if (total_elements == 0) {
+        return result;
+    }
+
     auto* src = static_cast<uint8_t*>(const_cast<void*>(input.storage()->data()));
     auto* dst = static_cast<uint8_t*>(static_cast<void*>(result.storage()->data()));
 
@@ -591,6 +600,15 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("slice_kernel: dim out of range");
+    }
+
+    // A zero or negative step is invalid for OpId::Slice (PyTorch requires
+    // step >= 1). Validate BEFORE slice_size = (end-start+step-1)/step, which
+    // divides by step, and before the copy loop, which assumes a positive step
+    // (F048).
+    if (step <= 0) {
+        throw std::invalid_argument("slice_kernel: step must be positive (got " +
+                                    std::to_string(step) + ")");
     }
 
     // Handle negative indices
@@ -874,6 +892,20 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim) -> std::vect
     }
     int64_t dim_size = shape[dim];
     int64_t split_size = (dim_size + chunks - 1) / chunks;
+    // For a zero-size chunk dim, split_size collapses to 0, which split_kernel
+    // rejects with a throw. PyTorch's chunk() on an empty dim returns empty
+    // chunks instead, so build `chunks` empty tensors (each carrying a 0 in the
+    // chunk dim) directly here (F075).
+    if (split_size == 0) {
+        std::vector<Tensor> result;
+        result.reserve(static_cast<size_t>(chunks));
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[dim] = 0;
+        for (int64_t c = 0; c < chunks; ++c) {
+            result.emplace_back(out_shape, input.dtype(), input.device());
+        }
+        return result;
+    }
     return split_kernel(input, split_size, dim);
 }
 

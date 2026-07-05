@@ -144,9 +144,12 @@ TEST_P(SDPAMultiDTypeTest, CrossAttention_Forward) {
 // ============================================================================
 
 TEST_P(SDPAMultiDTypeTest, Backward_ProducesFiniteInputGrad) {
-    if (dtype() == DType::Float64) {
+    // CPU supports the Float64 attention backward natively (the
+    // flash_attention_backward_typed<double> path), so it must run there; only
+    // GPU backends that lack an FP64 attention backward are skipped.
+    if (dtype() == DType::Float64 && device_.type != Device::Type::CPU) {
         SKIP_WITH_REASON(SkipReason::DtypeUnsupportedOnBackend,
-                         "Float64 attention backward is not supported on every backend");
+                         "Float64 attention backward is not supported on this backend");
     }
 
     const int64_t batch = 2, seq = 8, embed = 32, heads = 4;

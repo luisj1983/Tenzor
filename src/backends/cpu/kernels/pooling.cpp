@@ -299,6 +299,15 @@ auto maxpool2d_forward_kernel(const Tensor& input_orig,
     int64_t H_out = (H + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) / stride[0] + 1;
     int64_t W_out = (W + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) / stride[1] + 1;
 
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (H_out <= 0 || W_out <= 0) {
+        throw std::invalid_argument(
+            "maxpool2d: computed output size (" + std::to_string(H_out) + "x" +
+            std::to_string(W_out) + ") is non-positive; the (dilated) kernel does "
+            "not fit the padded input");
+    }
+
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
     auto indices = Tensor::empty_uninitialized({N, C, H_out, W_out}, DType::Int64, input.device());
     int64_t* idx_data = indices.data<int64_t>();
@@ -453,6 +462,15 @@ auto avgpool2d_forward_kernel(const Tensor& input_orig,
 
     int64_t H_out = (H + 2 * padding[0] - kernel_size[0]) / stride[0] + 1;
     int64_t W_out = (W + 2 * padding[1] - kernel_size[1]) / stride[1] + 1;
+
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (H_out <= 0 || W_out <= 0) {
+        throw std::invalid_argument(
+            "avgpool2d: computed output size (" + std::to_string(H_out) + "x" +
+            std::to_string(W_out) + ") is non-positive; the kernel does not fit "
+            "the padded input");
+    }
 
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
 
@@ -929,6 +947,14 @@ auto maxpool1d_forward_kernel(const Tensor& input_orig, int64_t kernel_size,
 
     int64_t L_out = (L + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (L_out <= 0) {
+        throw std::invalid_argument(
+            "maxpool1d: computed output size (" + std::to_string(L_out) +
+            ") is non-positive; the (dilated) kernel does not fit the padded input");
+    }
+
     auto output = Tensor::empty_uninitialized({N, C, L_out}, input.dtype(), input.device());
     auto indices = Tensor::empty_uninitialized({N, C, L_out}, DType::Int64, input.device());
     int64_t* idx_data = indices.data<int64_t>();
@@ -1048,6 +1074,14 @@ auto avgpool1d_forward_kernel(const Tensor& input_orig, int64_t kernel_size,
     int64_t L = shape[2];
 
     int64_t L_out = (L + 2 * padding - kernel_size) / stride + 1;
+
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (L_out <= 0) {
+        throw std::invalid_argument(
+            "avgpool1d: computed output size (" + std::to_string(L_out) +
+            ") is non-positive; the kernel does not fit the padded input");
+    }
 
     auto output = Tensor::empty_uninitialized({N, C, L_out}, input.dtype(), input.device());
 
@@ -1463,6 +1497,15 @@ auto maxpool3d_forward_kernel(const Tensor& input_orig,
     int64_t H_out = (H + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) / stride[1] + 1;
     int64_t W_out = (W + 2 * padding[2] - dilation[2] * (kernel_size[2] - 1) - 1) / stride[2] + 1;
 
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (D_out <= 0 || H_out <= 0 || W_out <= 0) {
+        throw std::invalid_argument(
+            "maxpool3d: computed output size (" + std::to_string(D_out) + "x" +
+            std::to_string(H_out) + "x" + std::to_string(W_out) + ") is "
+            "non-positive; the (dilated) kernel does not fit the padded input");
+    }
+
     auto output = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
     auto indices = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, DType::Int64, input.device());
     int64_t* idx_data = indices.data<int64_t>();
@@ -1619,6 +1662,15 @@ auto avgpool3d_forward_kernel(const Tensor& input_orig,
     int64_t D_out = (D + 2 * padding[0] - kernel_size[0]) / stride[0] + 1;
     int64_t H_out = (H + 2 * padding[1] - kernel_size[1]) / stride[1] + 1;
     int64_t W_out = (W + 2 * padding[2] - kernel_size[2]) / stride[2] + 1;
+
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (D_out <= 0 || H_out <= 0 || W_out <= 0) {
+        throw std::invalid_argument(
+            "avgpool3d: computed output size (" + std::to_string(D_out) + "x" +
+            std::to_string(H_out) + "x" + std::to_string(W_out) + ") is "
+            "non-positive; the kernel does not fit the padded input");
+    }
 
     auto output = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
 
@@ -2061,9 +2113,14 @@ inline int64_t frac_pool_start(int64_t i, int64_t in_size, int64_t out_size,
         start = static_cast<int64_t>((static_cast<float>(i) + sample) * alpha) -
                 static_cast<int64_t>(sample * alpha);
     }
-    // Clamp so the pool-wide window stays inside [0, in_size).
-    if (start < 0) start = 0;
+    // Clamp so the pool-wide window stays inside [0, in_size). The lower bound
+    // (>= 0) MUST be applied AFTER the upper bound: when pool > in_size the
+    // upper bound (in_size - pool) is negative, so clamping to it would drive
+    // start negative and produce an out-of-bounds input read. Clamping to 0
+    // last guarantees start >= 0; the window is then truncated to the input
+    // extent by the h_end/w_end = min(start + pool, in_size) callers.
     if (start > in_size - pool) start = in_size - pool;
+    if (start < 0) start = 0;
     return start;
 }
 

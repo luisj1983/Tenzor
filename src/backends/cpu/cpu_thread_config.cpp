@@ -39,7 +39,7 @@ namespace {
 std::once_flag g_once;
 int g_threads = 0;
 
-auto parse_positive_int_env(const char* name) -> int {
+auto parse_positive_int_env(const char* name, bool allow_nested_list = false) -> int {
     const char* env = std::getenv(name);
     if (env == nullptr || *env == '\0') {
         return 0;
@@ -51,9 +51,18 @@ auto parse_positive_int_env(const char* name) -> int {
     errno = 0;
     char* end = nullptr;
     long value = std::strtol(env, &end, 10);
-    // Reject trailing garbage (e.g. "8x", "4,8") as documented: end must reach
-    // the terminating NUL, not just a leading numeric prefix.
-    if (end == env || *end != '\0' || errno == ERANGE || value <= 0) {
+    // Terminator handling:
+    //   * TENZOR_NUM_THREADS (allow_nested_list=false): reject any trailing
+    //     garbage (e.g. "8x", "4,8") — end must reach the terminating NUL.
+    //   * OMP_NUM_THREADS (allow_nested_list=true): the OpenMP spec permits a
+    //     comma-separated NESTED list, e.g. "4,2", where the FIRST value is the
+    //     outer-level (top team) thread count the runtime actually uses. Parse
+    //     that leading integer and accept a trailing ",..." remainder so
+    //     get_configured_threads() matches the OMP runtime instead of falling
+    //     through to auto-detect. A bare "8x" is still rejected.
+    const bool ok_terminator =
+        (*end == '\0') || (allow_nested_list && *end == ',');
+    if (end == env || !ok_terminator || errno == ERANGE || value <= 0) {
         return 0;
     }
     if (value > static_cast<long>(std::numeric_limits<int>::max())) {
@@ -78,7 +87,7 @@ auto detect_online_cores() -> int {
 void configure_omp_threads() {
     std::call_once(g_once, [] {
         // Precedence: OMP_NUM_THREADS > TENZOR_NUM_THREADS > auto detect.
-        int chosen = parse_positive_int_env("OMP_NUM_THREADS");
+        int chosen = parse_positive_int_env("OMP_NUM_THREADS", /*allow_nested_list=*/true);
         if (chosen == 0) {
             chosen = parse_positive_int_env("TENZOR_NUM_THREADS");
         }

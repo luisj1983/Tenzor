@@ -112,7 +112,7 @@ static float simd_max_f32_avx512(const float* data, int64_t n) {
     float max_val = hmax_avx512(vmax);
 
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] > max_val) max_val = data[i];
+        if (std::isnan(data[i]) || data[i] > max_val) max_val = data[i];
     }
 
     return max_val;
@@ -136,7 +136,7 @@ static float simd_min_f32_avx512(const float* data, int64_t n) {
     float min_val = hmin_avx512(vmin);
 
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] < min_val) min_val = data[i];
+        if (std::isnan(data[i]) || data[i] < min_val) min_val = data[i];
     }
 
     return min_val;
@@ -244,7 +244,7 @@ static float simd_max_f32_avx2(const float* data, int64_t n) {
     float max_val = hmax_avx2(vmax);
 
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] > max_val) max_val = data[i];
+        if (std::isnan(data[i]) || data[i] > max_val) max_val = data[i];
     }
 
     return max_val;
@@ -268,7 +268,7 @@ static float simd_min_f32_avx2(const float* data, int64_t n) {
     float min_val = hmin_avx2(vmin);
 
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] < min_val) min_val = data[i];
+        if (std::isnan(data[i]) || data[i] < min_val) min_val = data[i];
     }
 
     return min_val;
@@ -331,7 +331,7 @@ static double simd_max_f64_avx512(const double* data, int64_t n) {
     }
     double max_val = _mm512_reduce_max_pd(vmax);
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] > max_val) max_val = data[i];
+        if (std::isnan(data[i]) || data[i] > max_val) max_val = data[i];
     }
     return max_val;
 }
@@ -348,7 +348,7 @@ static double simd_min_f64_avx512(const double* data, int64_t n) {
     }
     double min_val = _mm512_reduce_min_pd(vmin);
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] < min_val) min_val = data[i];
+        if (std::isnan(data[i]) || data[i] < min_val) min_val = data[i];
     }
     return min_val;
 }
@@ -425,7 +425,7 @@ static double simd_max_f64_avx2(const double* data, int64_t n) {
     }
     double max_val = hmax_avx2_f64(vmax);
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] > max_val) max_val = data[i];
+        if (std::isnan(data[i]) || data[i] > max_val) max_val = data[i];
     }
     return max_val;
 }
@@ -442,7 +442,7 @@ static double simd_min_f64_avx2(const double* data, int64_t n) {
     }
     double min_val = hmin_avx2_f64(vmin);
     for (int64_t i = vec_end; i < n; i++) {
-        if (data[i] < min_val) min_val = data[i];
+        if (std::isnan(data[i]) || data[i] < min_val) min_val = data[i];
     }
     return min_val;
 }
@@ -1364,6 +1364,17 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         return mean_kernel(f32_input, dim, keepdim);
     }
 
+    // Float16/BFloat16: widen to Float32, compute the mean, then narrow the
+    // RESULT back. Computing the half mean via sum_kernel narrows the Float32
+    // accumulator to the half type BEFORE the division, so a sum exceeding the
+    // half range becomes inf even when the mean itself is representable (F004).
+    // Widening the whole computation keeps the intermediate sum in Float32.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto f32_input = input.to(DType::Float32);
+        auto f32_result = mean_kernel(f32_input, dim, keepdim);
+        return f32_result.to(dtype);
+    }
+
     // Complex dtypes: sum then divide by count in complex domain
     if (dtype == DType::Complex64 || dtype == DType::Complex128) {
         dim = normalize_dim(dim, ndim);
@@ -1568,6 +1579,18 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
 
     // Normalize negative dimension
     dim = normalize_dim(dim, ndim);
+
+    // max has no identity element: a zero-size reduction is undefined. Guard
+    // BOTH the full-reduction (numel==0) and per-dim (dim_size==0) empty cases
+    // here at kernel entry — BEFORE any OpenMP region — because the downstream
+    // paths seed an accumulator from element [0] and would read out of bounds
+    // (throwing inside an OpenMP region would call std::terminate).
+    if (dim == REDUCE_ALL) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("max: cannot reduce over a zero-size dimension");
+    } else if (input_shape[dim] == 0) {
+        throw std::invalid_argument("max: cannot reduce over a zero-size dimension");
+    }
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -1861,6 +1884,17 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
 
     // Normalize negative dimension
     dim = normalize_dim(dim, ndim);
+
+    // min has no identity element: a zero-size reduction is undefined. Guard
+    // BOTH the full-reduction (numel==0) and per-dim (dim_size==0) empty cases
+    // here at kernel entry — BEFORE any OpenMP region — because the downstream
+    // paths seed an accumulator from element [0] and would read out of bounds.
+    if (dim == REDUCE_ALL) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("min: cannot reduce over a zero-size dimension");
+    } else if (input_shape[dim] == 0) {
+        throw std::invalid_argument("min: cannot reduce over a zero-size dimension");
+    }
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -2199,6 +2233,17 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor
     // Normalize negative dimension
     dim = normalize_dim(dim, ndim);
 
+    // argmax has no identity element: the index of the max over an empty range
+    // is undefined. Guard BOTH the full-reduction (numel==0) and per-dim
+    // (dim_size==0) empty cases here at kernel entry — BEFORE any OpenMP region —
+    // because the downstream paths seed from element [0] and read out of bounds.
+    if (dim == REDUCE_ALL) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+    } else if (input_shape_vec[dim] == 0) {
+        throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+    }
+
     auto output_shape = compute_reduction_shape(input_shape_vec, dim, keepdim);
     auto output = Tensor::empty_uninitialized(output_shape, DType::Int64, input.device());
 
@@ -2493,6 +2538,17 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor
 
     // Normalize negative dimension
     dim = normalize_dim(dim, ndim);
+
+    // argmin has no identity element: the index of the min over an empty range
+    // is undefined. Guard BOTH the full-reduction (numel==0) and per-dim
+    // (dim_size==0) empty cases here at kernel entry — BEFORE any OpenMP region —
+    // because the downstream paths seed from element [0] and read out of bounds.
+    if (dim == REDUCE_ALL) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
+    } else if (input_shape_vec[dim] == 0) {
+        throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
+    }
 
     auto output_shape = compute_reduction_shape(input_shape_vec, dim, keepdim);
     auto output = Tensor::empty_uninitialized(output_shape, DType::Int64, input.device());
@@ -3551,20 +3607,23 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
         case DType::Float32: {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
-            float norm_value = 0.0f;
+            // Accumulate in double — matching the per-dim path norm_kernel_dim<float>
+            // (which reduces in double) — then narrow to float only on store, so the
+            // full-reduction norm(x) has the same precision as norm(x, dim=...) (F005).
+            double norm_value = 0.0;
             if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) norm_value += std::abs(input_data[i]);
+                for (int64_t i = 0; i < n; i++) norm_value += std::abs(static_cast<double>(input_data[i]));
             } else if (std::isinf(p)) {
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
-                    float abs_val = std::abs(input_data[i]);
+                    double abs_val = std::abs(static_cast<double>(input_data[i]));
                     if (abs_val > norm_value) norm_value = abs_val;
                 }
             } else {
-                norm_value = scaled_lp(0.0f, [&](int64_t i) { return std::abs(input_data[i]); });
+                norm_value = scaled_lp(0.0, [&](int64_t i) { return std::abs(static_cast<double>(input_data[i])); });
             }
-            output_data[0] = norm_value;
+            output_data[0] = static_cast<float>(norm_value);
             break;
         }
         case DType::Float64: {
@@ -4191,6 +4250,18 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vecto
 
     dim = normalize_dim(dim, ndim);
 
+    // median has no identity element: it selects an actual element, which does
+    // not exist for an empty reduction. Guard BOTH the full-reduction (numel==0)
+    // and per-dim (dim_size==0) empty cases here at kernel entry — BEFORE any
+    // OpenMP region — because the reduction reads elems[mid] out of bounds on an
+    // empty slice.
+    if (dim == REDUCE_ALL) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
+    } else if (input_shape[dim] == 0) {
+        throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
+    }
+
     // Float16/BFloat16: no native comparison path. Widen to Float32, compute,
     // then narrow the value tensor back. median selects an actual element, so
     // the Float32->half cast reproduces the original half value exactly; the
@@ -4300,6 +4371,17 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
     dim = normalize_dim(dim, ndim);
+
+    // mode has no identity element: it selects an actual element, which does not
+    // exist for an empty reduction. Guard BOTH the full-reduction (numel==0) and
+    // per-dim (dim_size==0) empty cases here at kernel entry — BEFORE any OpenMP
+    // region — because the reduction seeds from elems[0] on an empty slice.
+    if (dim == REDUCE_ALL) {
+        if (input.numel() == 0)
+            throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
+    } else if (input_shape[dim] == 0) {
+        throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
+    }
 
     // For full reduction, flatten to 1D then reduce along dim 0
     if (dim == REDUCE_ALL) {
@@ -4539,6 +4621,14 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
             int64_t nb = bins[sd];
             T fmin = static_cast<T>(ranges[sd].first);
             T fmax = static_cast<T>(ranges[sd].second);
+            // A caller-supplied degenerate range (fmin >= fmax) yields step<=0, so
+            // (v - fmin)/step at bin time is 0/0 = NaN (F072). The auto-range path
+            // already widens an equal-bounds interval by ±0.5 (:vmin/vmax fixup
+            // above); reuse that logic here so step stays strictly positive.
+            if (fmin >= fmax) {
+                fmin -= static_cast<T>(0.5);
+                fmax += static_cast<T>(0.5);
+            }
             T step = (fmax - fmin) / static_cast<T>(nb);
             dim_min[sd] = fmin;
             dim_step[sd] = step;
@@ -4582,7 +4672,11 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
                 T step_d = dim_step[sd];
                 int64_t nb = bins[sd];
 
-                if (v < fmin_d || v > dim_max[sd]) {
+                // A non-finite sample (NaN/±inf) compares false against both range
+                // bounds, so without this guard it would slip through and
+                // static_cast<int64_t>(NaN) is UB (F072). Treat it as out of range.
+                if (!std::isfinite(static_cast<double>(v)) ||
+                    v < fmin_d || v > dim_max[sd]) {
                     in_range = false;
                     break;
                 }

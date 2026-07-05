@@ -61,7 +61,11 @@ inline T reflect_coord_impl(T coord, int64_t size, bool align_corners) {
 template <typename T>
 inline T apply_padding(T coord, int64_t size, const std::string& padding_mode, bool align_corners) {
     if (padding_mode == "border") {
-        coord = std::clamp(coord, T(0), static_cast<T>(size - 1));
+        // min/max ordering (not std::clamp) so a size==0 spatial dim, where
+        // hi = size-1 = -1 < lo = 0, does not violate std::clamp's precondition.
+        // The sample is out of bounds anyway; the later is_in_bounds check skips
+        // the read.
+        coord = std::min(std::max(coord, T(0)), static_cast<T>(size - 1));
     } else if (padding_mode == "reflection") {
         coord = reflect_coord_impl<T>(coord, size, align_corners);
     }
@@ -223,9 +227,11 @@ auto grid_sample_forward_impl(const Tensor& input, const Tensor& grid,
                     out_data[((n * C + c) * H_out + h) * W_out + w] = val;
                 }
             } else if (mode == "nearest") {
-                int64_t nx = static_cast<int64_t>(std::round(
+                // nearbyint = round-half-to-even, matching PyTorch/ATen
+                // grid_sampler nearest (std::round is half-away-from-zero).
+                int64_t nx = static_cast<int64_t>(std::nearbyint(
                     apply_padding<T>(ix, W_in, padding_mode, align_corners)));
-                int64_t ny = static_cast<int64_t>(std::round(
+                int64_t ny = static_cast<int64_t>(std::nearbyint(
                     apply_padding<T>(iy, H_in, padding_mode, align_corners)));
 
                 bool in_bounds = is_in_bounds<T>(static_cast<T>(ny), static_cast<T>(nx), H_in, W_in);
@@ -258,8 +264,26 @@ auto grid_sample_forward_impl(const Tensor& input, const Tensor& grid,
                             if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
                             return ch_data[y * W_in + x];
                         }
-                        y = std::clamp(y, int64_t(0), H_in - 1);
-                        x = std::clamp(x, int64_t(0), W_in - 1);
+                        // No in-bounds pixel to clamp/reflect to when a spatial
+                        // dim is empty; avoid the OOB read (also guards the
+                        // size==0 clamp precondition).
+                        if (H_in == 0 || W_in == 0) return T(0);
+                        if (padding_mode == "reflection") {
+                            // Reflect the out-of-range 4x4 neighbour back into
+                            // [0, size-1] (PyTorch reflection semantics) instead
+                            // of edge-clamping. reflect_coord_impl already clips
+                            // to the sampleable range, so the cast is in-bounds.
+                            int64_t ry = static_cast<int64_t>(
+                                reflect_coord_impl<T>(static_cast<T>(y), H_in, align_corners));
+                            int64_t rx = static_cast<int64_t>(
+                                reflect_coord_impl<T>(static_cast<T>(x), W_in, align_corners));
+                            ry = std::min(std::max(ry, int64_t(0)), H_in - 1);
+                            rx = std::min(std::max(rx, int64_t(0)), W_in - 1);
+                            return ch_data[ry * W_in + rx];
+                        }
+                        // border: edge-clamp with min/max ordering.
+                        y = std::min(std::max(y, int64_t(0)), H_in - 1);
+                        x = std::min(std::max(x, int64_t(0)), W_in - 1);
                         return ch_data[y * W_in + x];
                     };
                     T val = T(0);
@@ -585,8 +609,10 @@ void grid_sample_backward_impl(
                     gg_data[grid_idx]     += sum_dx * scale_x;
                     gg_data[grid_idx + 1] += sum_dy * scale_y;
                 } else if (mode == "nearest") {
-                    const int64_t nx = static_cast<int64_t>(std::round(ix));
-                    const int64_t ny = static_cast<int64_t>(std::round(iy));
+                    // nearbyint = round-half-to-even, matching the forward and
+                    // PyTorch/ATen (std::round is half-away-from-zero).
+                    const int64_t nx = static_cast<int64_t>(std::nearbyint(ix));
+                    const int64_t ny = static_cast<int64_t>(std::nearbyint(iy));
                     if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
                         for (int64_t c = 0; c < C; ++c) {
                             const T go = go_data[((n * C + c) * H_out + h) * W_out + w];
@@ -605,9 +631,24 @@ void grid_sample_backward_impl(
                     cubic_dweights_T<T>(tx, dwx);
                     cubic_dweights_T<T>(ty, dwy);
 
+                    // Reflect an out-of-range 4x4 neighbour back into
+                    // [0, size-1] (PyTorch reflection semantics), matching the
+                    // forward safe_get. reflect_coord_impl already clips to the
+                    // sampleable range.
+                    auto reflect_index = [&](int64_t v, int64_t size) -> int64_t {
+                        int64_t r = static_cast<int64_t>(
+                            reflect_coord_impl<T>(static_cast<T>(v), size, align_corners));
+                        return clamp_idx(r, 0, size - 1);
+                    };
                     auto fetch = [&](int64_t c, int64_t y, int64_t x) -> T {
                         if (padding_mode == "zeros") {
                             if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
+                            return in_data[((n * C + c) * H_in + y) * W_in + x];
+                        }
+                        if (H_in == 0 || W_in == 0) return T(0);
+                        if (padding_mode == "reflection") {
+                            y = reflect_index(y, H_in);
+                            x = reflect_index(x, W_in);
                             return in_data[((n * C + c) * H_in + y) * W_in + x];
                         }
                         y = clamp_idx(y, 0, H_in - 1);
@@ -619,6 +660,13 @@ void grid_sample_backward_impl(
                             if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
                                 gi_data[((n * C + c) * H_in + y) * W_in + x] += weight;
                             }
+                            return;
+                        }
+                        if (H_in == 0 || W_in == 0) return;
+                        if (padding_mode == "reflection") {
+                            y = reflect_index(y, H_in);
+                            x = reflect_index(x, W_in);
+                            gi_data[((n * C + c) * H_in + y) * W_in + x] += weight;
                             return;
                         }
                         y = clamp_idx(y, 0, H_in - 1);

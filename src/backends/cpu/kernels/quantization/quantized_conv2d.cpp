@@ -31,8 +31,14 @@ namespace kernels {
 // (_mm512_dpbssd_epi32) needs AVX10 / AVX-VNNI-INT8 which we do not require.
 // We widen signed int8 -> int16 (_mm*_cvtepi8_epi16) and use _mm*_madd_epi16
 // (signed*signed), mirroring quantized_linear.cpp.
-static inline int32_t dot_int8(const int8_t* a, const int8_t* b, int64_t len) {
-    int32_t acc = 0;
+// Returns the full int8×int8 dot product in int64 to avoid silent int32
+// wraparound for wide receptive fields (col_width = in_channels_per_group*kH*kW
+// can exceed ~133k, at which point a 127×127 dot overflows INT32_MAX). Per-lane
+// int32 madd accumulation is safe (the sum is spread across the SIMD lanes); the
+// final horizontal reduction is widened to int64. Mirrors the int64 accumulator
+// of quantized_linear.cpp / the CUDA kernel.
+static inline int64_t dot_int8(const int8_t* a, const int8_t* b, int64_t len) {
+    int64_t acc = 0;
     int64_t i = 0;
 
 #if defined(__AVX512BW__)
@@ -44,7 +50,14 @@ static inline int32_t dot_int8(const int8_t* a, const int8_t* b, int64_t len) {
         __m512i vb16 = _mm512_cvtepi8_epi16(vb8);
         acc_vec = _mm512_add_epi32(acc_vec, _mm512_madd_epi16(va16, vb16));
     }
-    acc = _mm512_reduce_add_epi32(acc_vec);
+    // Widen the 16 int32 lanes to int64 before the horizontal reduction so it
+    // cannot overflow int32. AVX512F-only extracts (castsi512_si256 +
+    // extracti64x4) keep this within the __AVX512BW__ feature set.
+    __m256i lo32 = _mm512_castsi512_si256(acc_vec);
+    __m256i hi32 = _mm512_extracti64x4_epi64(acc_vec, 1);
+    __m512i lo64 = _mm512_cvtepi32_epi64(lo32);
+    __m512i hi64 = _mm512_cvtepi32_epi64(hi32);
+    acc = _mm512_reduce_add_epi64(_mm512_add_epi64(lo64, hi64));
 #elif defined(__AVX2__)
     __m256i acc_vec = _mm256_setzero_si256();
     for (; i + 32 <= len; i += 32) {
@@ -64,13 +77,18 @@ static inline int32_t dot_int8(const int8_t* a, const int8_t* b, int64_t len) {
     __m128i sum128 = _mm_add_epi32(
         _mm256_castsi256_si128(acc_vec),
         _mm256_extracti128_si256(acc_vec, 1));
-    sum128 = _mm_hadd_epi32(sum128, sum128);
-    sum128 = _mm_hadd_epi32(sum128, sum128);
-    acc = _mm_cvtsi128_si32(sum128);
+    // Widen the 4 int32 lanes to int64 before summing so the horizontal
+    // reduction cannot overflow int32.
+    __m256i sum64 = _mm256_cvtepi32_epi64(sum128);
+    __m128i s64 = _mm_add_epi64(
+        _mm256_castsi256_si128(sum64),
+        _mm256_extracti128_si256(sum64, 1));
+    acc = static_cast<int64_t>(_mm_extract_epi64(s64, 0)) +
+          static_cast<int64_t>(_mm_extract_epi64(s64, 1));
 #endif
 
     for (; i < len; ++i) {
-        acc += static_cast<int32_t>(a[i]) * static_cast<int32_t>(b[i]);
+        acc += static_cast<int64_t>(a[i]) * static_cast<int64_t>(b[i]);
     }
     return acc;
 }
@@ -162,6 +180,8 @@ auto quantized_conv2d_kernel(
     int64_t dil_w,
     int64_t groups
 ) -> void {
+    if (groups <= 0)
+        throw std::invalid_argument("quantized_conv2d: groups must be positive");
     if (in_channels % groups != 0)
         throw std::invalid_argument("quantized_conv2d: in_channels must be divisible by groups");
     if (out_channels % groups != 0)
@@ -178,12 +198,16 @@ auto quantized_conv2d_kernel(
     //   = raw_dot - input_zp*sum_w[oc] - weight_zp*sum_col[s]
     //     + input_zp*weight_zp*col_width
     // (with im2col padding == input_zp so padded taps contribute zero).
-    std::vector<int32_t> sum_w(out_channels, 0);
+    // Accumulate in int64: for a wide receptive field the dot product and the
+    // correction term input_zp*weight_zp*col_width overflow int32 (uint8 zps
+    // ~255*255=65025 times col_width > ~33k exceeds INT32_MAX). Mirrors the
+    // int64 accumulators in quantized_linear.cpp.
+    std::vector<int64_t> sum_w(out_channels, 0);
     #pragma omp parallel for
     for (int64_t oc = 0; oc < out_channels; ++oc) {
-        int32_t s = 0;
+        int64_t s = 0;
         const int8_t* wr = weight + oc * col_width;
-        for (int64_t j = 0; j < col_width; ++j) s += static_cast<int32_t>(wr[j]);
+        for (int64_t j = 0; j < col_width; ++j) s += static_cast<int64_t>(wr[j]);
         sum_w[oc] = s;
     }
 
@@ -192,7 +216,7 @@ auto quantized_conv2d_kernel(
     {
         // Per-thread column buffer to avoid allocation contention
         std::vector<int8_t> col_buffer(spatial_out * col_width);
-        std::vector<int32_t> sum_col(spatial_out);
+        std::vector<int64_t> sum_col(spatial_out);
 
         #pragma omp for
         for (int64_t b = 0; b < batch; ++b) {
@@ -209,9 +233,9 @@ auto quantized_conv2d_kernel(
 
                 // Per-column activation sums (includes input_zp-padded taps).
                 for (int64_t s = 0; s < spatial_out; ++s) {
-                    int32_t cs = 0;
+                    int64_t cs = 0;
                     const int8_t* cr = col_buffer.data() + s * col_width;
-                    for (int64_t j = 0; j < col_width; ++j) cs += static_cast<int32_t>(cr[j]);
+                    for (int64_t j = 0; j < col_width; ++j) cs += static_cast<int64_t>(cr[j]);
                     sum_col[s] = cs;
                 }
 
@@ -223,13 +247,13 @@ auto quantized_conv2d_kernel(
                     for (int64_t s = 0; s < spatial_out; ++s) {
                         const int8_t* col_row = col_buffer.data() + s * col_width;
 
-                        // SIMD-accelerated signed INT8 dot product
-                        int32_t acc = dot_int8(weight_row, col_row, col_width);
+                        // SIMD-accelerated signed INT8 dot product (int64 acc).
+                        int64_t acc = dot_int8(weight_row, col_row, col_width);
 
-                        // Asymmetric zero-point correction (full expansion).
-                        acc -= input_zp * sum_w[oc];
-                        acc -= weight_zp * sum_col[s];
-                        acc += input_zp * weight_zp * static_cast<int32_t>(col_width);
+                        // Asymmetric zero-point correction (full expansion, int64).
+                        acc -= static_cast<int64_t>(input_zp) * sum_w[oc];
+                        acc -= static_cast<int64_t>(weight_zp) * sum_col[s];
+                        acc += static_cast<int64_t>(input_zp) * static_cast<int64_t>(weight_zp) * col_width;
 
                         // Dequantize and add bias
                         float result = static_cast<float>(acc) * combined_scale;
@@ -278,6 +302,8 @@ auto quantized_conv2d_per_channel_kernel(
     int64_t dil_w,
     int64_t groups
 ) -> void {
+    if (groups <= 0)
+        throw std::invalid_argument("quantized_conv2d_per_channel: groups must be positive");
     if (in_channels % groups != 0)
         throw std::invalid_argument("quantized_conv2d_per_channel: in_channels must be divisible by groups");
     if (out_channels % groups != 0)
@@ -289,19 +315,21 @@ auto quantized_conv2d_per_channel_kernel(
     const int64_t spatial_out = h_out * w_out;
 
     // Per-output-channel weight sums for the asymmetric zero-point correction.
-    std::vector<int32_t> sum_w(out_channels, 0);
+    // int64 accumulation to avoid overflow on wide receptive fields (see the
+    // matching note in quantized_conv2d_kernel).
+    std::vector<int64_t> sum_w(out_channels, 0);
     #pragma omp parallel for
     for (int64_t oc = 0; oc < out_channels; ++oc) {
-        int32_t s = 0;
+        int64_t s = 0;
         const int8_t* wr = weight + oc * col_width;
-        for (int64_t j = 0; j < col_width; ++j) s += static_cast<int32_t>(wr[j]);
+        for (int64_t j = 0; j < col_width; ++j) s += static_cast<int64_t>(wr[j]);
         sum_w[oc] = s;
     }
 
     #pragma omp parallel
     {
         std::vector<int8_t> col_buffer(spatial_out * col_width);
-        std::vector<int32_t> sum_col(spatial_out);
+        std::vector<int64_t> sum_col(spatial_out);
 
         #pragma omp for
         for (int64_t b = 0; b < batch; ++b) {
@@ -316,9 +344,9 @@ auto quantized_conv2d_per_channel_kernel(
 
                 // Per-column activation sums (includes input_zp-padded taps).
                 for (int64_t s = 0; s < spatial_out; ++s) {
-                    int32_t cs = 0;
+                    int64_t cs = 0;
                     const int8_t* cr = col_buffer.data() + s * col_width;
-                    for (int64_t j = 0; j < col_width; ++j) cs += static_cast<int32_t>(cr[j]);
+                    for (int64_t j = 0; j < col_width; ++j) cs += static_cast<int64_t>(cr[j]);
                     sum_col[s] = cs;
                 }
 
@@ -334,11 +362,11 @@ auto quantized_conv2d_per_channel_kernel(
                     for (int64_t s = 0; s < spatial_out; ++s) {
                         const int8_t* col_row = col_buffer.data() + s * col_width;
 
-                        int32_t acc = dot_int8(weight_row, col_row, col_width);
-                        // Asymmetric zero-point correction (full expansion).
-                        acc -= input_zp * sum_w[oc];
-                        acc -= w_zp * sum_col[s];
-                        acc += input_zp * w_zp * static_cast<int32_t>(col_width);
+                        int64_t acc = dot_int8(weight_row, col_row, col_width);
+                        // Asymmetric zero-point correction (full expansion, int64).
+                        acc -= static_cast<int64_t>(input_zp) * sum_w[oc];
+                        acc -= static_cast<int64_t>(w_zp) * sum_col[s];
+                        acc += static_cast<int64_t>(input_zp) * static_cast<int64_t>(w_zp) * col_width;
 
                         float result = static_cast<float>(acc) * combined_scale;
                         if (bias != nullptr) {

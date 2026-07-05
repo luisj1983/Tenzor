@@ -54,36 +54,36 @@ namespace {
 // tensors after casting to Float64 for comparison. We use Float64 because
 // the F16/BF16 paths have measurable rounding noise we want to characterise
 // numerically rather than mask by quantising the comparison.
-struct ToleranceReport {
-    double max_abs;
-    double max_rel;
-};
-ToleranceReport compare(const Tensor& a, const Tensor& b) {
-    auto a64 = a.to(DType::Float64).contiguous();
-    auto b64 = b.to(DType::Float64).contiguous();
+void expect_close(const Tensor& got, const Tensor& want,
+                  double abs_tol, double rel_tol, const char* tag) {
+    // Element-wise allclose: |a-b| <= abs_tol + rel_tol*|b| (numpy semantics).
+    // Checking max_abs and max_rel as two INDEPENDENT bounds is wrong for
+    // near-zero outputs: a conv output that cancels to a tiny magnitude has a
+    // negligible absolute error but an exploding *relative* error, producing a
+    // false failure that only shows up for some random draws. The combined
+    // bound (same 5e-5 atol/rtol) still catches any genuine regression because
+    // a real error exceeds abs_tol + rel_tol*|b|.
+    auto a64 = got.to(DType::Float64).contiguous();
+    auto b64 = want.to(DType::Float64).contiguous();
     const double* pa = a64.data<double>();
     const double* pb = b64.data<double>();
     const int64_t n = a64.numel();
-    double max_abs = 0.0;
-    double max_rel = 0.0;
+    double worst_excess = 0.0, worst_diff = 0.0, worst_a = 0.0, worst_b = 0.0;
+    int64_t worst_idx = -1;
     for (int64_t i = 0; i < n; ++i) {
-        const double da = pa[i];
-        const double db = pb[i];
-        const double diff = std::abs(da - db);
-        const double denom = std::max(std::abs(da), std::abs(db));
-        if (diff > max_abs) max_abs = diff;
-        if (denom > 1e-12 && diff / denom > max_rel) max_rel = diff / denom;
+        const double diff = std::abs(pa[i] - pb[i]);
+        const double bound = abs_tol + rel_tol * std::abs(pb[i]);
+        const double excess = diff - bound;
+        if (excess > worst_excess) {
+            worst_excess = excess; worst_diff = diff;
+            worst_a = pa[i]; worst_b = pb[i]; worst_idx = i;
+        }
     }
-    return {max_abs, max_rel};
-}
-
-void expect_close(const Tensor& got, const Tensor& want,
-                  double abs_tol, double rel_tol, const char* tag) {
-    auto rep = compare(got, want);
-    EXPECT_LE(rep.max_abs, abs_tol)
-        << tag << " max-abs " << rep.max_abs << " > tol " << abs_tol;
-    EXPECT_LE(rep.max_rel, rel_tol)
-        << tag << " max-rel " << rep.max_rel << " > tol " << rel_tol;
+    EXPECT_LE(worst_excess, 0.0)
+        << tag << " allclose violated at index " << worst_idx
+        << ": |" << worst_a << " - " << worst_b << "| = " << worst_diff
+        << " > atol+rtol*|b| = " << (abs_tol + rel_tol * std::abs(worst_b))
+        << " (atol=" << abs_tol << ", rtol=" << rel_tol << ")";
 }
 
 // ----- 1-D dispatch helpers -----

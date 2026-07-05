@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 #include <immintrin.h>  // For SIMD operations
 
@@ -88,6 +89,18 @@ auto quantized_linear_kernel(
     int32_t input_zp,
     int32_t weight_zp
 ) -> void {
+    // Output contract (see the ground-truth reference in
+    // tests/backends/test_quantized_linear_signed.cpp):
+    //   output[b][o] = combined_scale * sum_k (q_x - x_zp)(q_w - w_zp) + bias[o]
+    //   combined_scale = input_scale * weight_scale / output_scale
+    // The FP32 bias is supplied in the SAME (output) units as the scaled dot,
+    // so it is added un-scaled here — there is no unit mismatch (F001 was a
+    // false positive; this reference-verified formula is authoritative).
+    // Guard against a degenerate output_scale (division by zero -> inf/nan).
+    if (output_scale <= 0.0f) {
+        throw std::invalid_argument(
+            "quantized_linear_kernel: output_scale must be > 0");
+    }
     float combined_scale = input_scale * weight_scale / output_scale;
 
     // Verify alignment expectations for SIMD loads. On Haswell+ CPUs, unaligned
@@ -237,7 +250,8 @@ auto quantized_linear_kernel(
  * Each output channel has its own weight_scale and weight_zp, enabling
  * higher accuracy quantization for weights with varying magnitude ranges.
  *
- * output[b][o] = (dot(input[b], weight[o]) - zp_correction[o]) * (input_scale * weight_scales[o] / output_scale) + bias[o]
+ * output[b][o] = (dot(input[b], weight[o]) - zp_correction[o]) * (input_scale * weight_scales[o]) + bias[o]
+ * (output = input_scale*weight_scale/output_scale * dot + bias; see quantized_linear_kernel)
  */
 auto quantized_linear_per_channel_kernel(
     const int8_t* input,
@@ -253,6 +267,12 @@ auto quantized_linear_per_channel_kernel(
     int32_t input_zp,
     const int32_t* weight_zps       // [out_features] per-channel zero points
 ) -> void {
+    // Per-channel combined_scale = input_scale * weight_scales[o] / output_scale
+    // (see the note in quantized_linear_kernel). Guard degenerate output_scale.
+    if (output_scale <= 0.0f) {
+        throw std::invalid_argument(
+            "quantized_linear_per_channel_kernel: output_scale must be > 0");
+    }
 
     // Per-row sums for the asymmetric zero-point correction (see notes in
     // quantized_linear_kernel above).

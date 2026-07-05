@@ -12,6 +12,7 @@
 #include <exception>
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
 #include <vector>
 #include <unordered_set>
 #include <thread>
@@ -280,7 +281,15 @@ auto CPUCachingAllocator::allocate(size_t bytes) -> void* {
         drain_pending_decrements(get_local_pool());
     }
 
-    // Round up to alignment
+    // Round up to alignment (overflow-checked, mirroring buffer_pool.hpp's
+    // align_up_checked). A byte count within (ALIGNMENT-1) of SIZE_MAX would
+    // otherwise wrap to a tiny value (or 0) and posix_memalign would hand back
+    // far less than the caller believes it owns, so subsequent writes overrun
+    // the heap. Reject it up front — allocate() is contracted to throw
+    // std::bad_alloc when the request cannot be satisfied.
+    if (bytes > std::numeric_limits<size_t>::max() - (ALIGNMENT - 1)) {
+        throw std::bad_alloc();
+    }
     bytes = (bytes + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 
     void* ptr = nullptr;
@@ -419,6 +428,7 @@ void CPUCachingAllocator::deallocate(void* ptr) {
     }
 
     // Check global allocated blocks (cross-thread dealloc path)
+    bool freed_cross_thread = false;
     {
         std::lock_guard<std::mutex> lock(global_mutex_);
         auto git = global_allocated_blocks_.find(ptr);
@@ -474,8 +484,20 @@ void CPUCachingAllocator::deallocate(void* ptr) {
                 per_thread_pending_frees_[block.originating_tid].push_back(ptr);
             }
 
-            return;
+            freed_cross_thread = true;
         }
+    }
+
+    if (freed_cross_thread) {
+        // Enforce the global cache cap on the cross-thread free path too, just
+        // as the same-thread path above does. Without this a producer/consumer
+        // pattern (thread A allocates, thread B frees) takes this branch on
+        // every free and max_cached_bytes_ is never enforced, so the global
+        // cache grows unbounded until true system OOM. Called AFTER releasing
+        // global_mutex_ because check_memory_pressure() re-acquires it (the
+        // mutex is non-recursive, so calling it under the lock would deadlock).
+        check_memory_pressure();
+        return;
     }
 
     // Unknown pointer - might be from before caching was enabled
@@ -830,94 +852,6 @@ auto CPUCachingAllocator::find_best_fit(std::multimap<size_t, Block>& blocks,
     return blocks.lower_bound(bytes);
 }
 
-auto CPUCachingAllocator::maybe_split_block(Block& block, size_t requested_size,
-                                             std::multimap<size_t, Block>& free_blocks,
-                                             ThreadLocalPool& local)
-    -> bool {
-    size_t min_split = min_split_size_.load();
-
-    // Only split if:
-    // 1. Block is at least 2x the requested size
-    // 2. Remainder would be >= min_split_size
-    size_t remainder = block.size - requested_size;
-    if (block.size >= 2 * requested_size && remainder >= min_split) {
-        // Create remainder block
-        Block remainder_block;
-        remainder_block.ptr = static_cast<char*>(block.ptr) + requested_size;
-        remainder_block.size = remainder;
-        remainder_block.allocated_size = block.allocated_size;
-        remainder_block.root_ptr = block.root_ptr;
-        remainder_block.is_split = true;
-
-        // Add remainder to free pool
-        free_blocks.insert({remainder_block.size, remainder_block});
-        local.cached_bytes += remainder;
-
-        // Update CENTRAL root allocation - increment fragment count, add freed_size for remainder
-        {
-            std::lock_guard<std::mutex> lock(global_mutex_);
-            auto root_it = global_root_allocations_.find(block.root_ptr);
-            if (root_it != global_root_allocations_.end()) {
-                root_it->second.fragment_count++;
-                root_it->second.freed_size += remainder;
-            }
-        }
-
-        // Update original block
-        block.size = requested_size;
-        block.is_split = true;
-
-        // Update stats
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            global_stats_.num_splits++;
-            global_stats_.cached_bytes += remainder;
-        }
-
-        return true;
-    }
-
-    return false;
-}
-
-auto CPUCachingAllocator::maybe_split_block_global(Block& block, size_t requested_size,
-                                                    std::multimap<size_t, Block>& free_blocks)
-    -> bool {
-    size_t min_split = min_split_size_.load();
-
-    size_t remainder = block.size - requested_size;
-    if (block.size >= 2 * requested_size && remainder >= min_split) {
-        Block remainder_block;
-        remainder_block.ptr = static_cast<char*>(block.ptr) + requested_size;
-        remainder_block.size = remainder;
-        remainder_block.allocated_size = block.allocated_size;
-        remainder_block.root_ptr = block.root_ptr;
-        remainder_block.is_split = true;
-
-        free_blocks.insert({remainder_block.size, remainder_block});
-
-        // Update global root allocation
-        auto root_it = global_root_allocations_.find(block.root_ptr);
-        if (root_it != global_root_allocations_.end()) {
-            root_it->second.fragment_count++;
-            root_it->second.freed_size += remainder;
-        }
-
-        block.size = requested_size;
-        block.is_split = true;
-
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            global_stats_.num_splits++;
-            global_stats_.cached_bytes += remainder;
-        }
-
-        return true;
-    }
-
-    return false;
-}
-
 void CPUCachingAllocator::migrate_to_global(ThreadLocalPool& local, bool migrate_all) {
     std::lock_guard<std::mutex> lock(global_mutex_);
 
@@ -943,18 +877,16 @@ void CPUCachingAllocator::migrate_to_global(ThreadLocalPool& local, bool migrate
 }
 
 void CPUCachingAllocator::check_memory_pressure() {
-    // Check if total cached bytes exceeds limit
-    size_t total_cached = 0;
+    const size_t limit = max_cached_bytes_.load();
+
+    // Fast path: if the TOTAL cached bytes across all pools is already within
+    // the cap, there is definitely nothing to reclaim.
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
-        total_cached = global_stats_.cached_bytes;
+        if (global_stats_.cached_bytes <= limit) {
+            return;  // Under limit, nothing to do
+        }
     }
-
-    const size_t limit = max_cached_bytes_.load();
-    if (total_cached <= limit) {
-        return;  // Under limit, nothing to do
-    }
-    const size_t pressure = total_cached - limit;
 
     // Thread-local free blocks count toward cached_bytes (see deallocate) but
     // live in the per-thread pool, which the eviction passes below — operating
@@ -974,6 +906,28 @@ void CPUCachingAllocator::check_memory_pressure() {
     // A root can only be freed if freed_size == root.size (all blocks returned to pools).
 
     std::lock_guard<std::mutex> lock(global_mutex_);
+
+    // The pressure metric must count only bytes the eviction passes below can
+    // actually reach: the GLOBAL free pool (the caller's local pool was just
+    // migrated into it). Free blocks still parked in OTHER threads' local pools
+    // are counted in global_stats_.cached_bytes but are UNREACHABLE from here —
+    // thread_local storage cannot be touched cross-thread (the whole reason for
+    // per_thread_pending_frees_). Counting them in the pressure figure made this
+    // pass spin and emit a spurious over-budget warning (and let siblings force
+    // a false std::bad_alloc) even when the reclaimable portion is already under
+    // the cap. Each sibling local pool is independently bounded by
+    // max_local_cached_bytes_ and migrates into the global pool — subjecting
+    // itself to this cap — as soon as it exceeds that bound, so excluding it
+    // here does not defeat the global limit.
+    size_t global_cached = 0;
+    for (auto& [size, block] : global_free_blocks_) {
+        (void)size;
+        global_cached += block.size;
+    }
+    if (global_cached <= limit) {
+        return;  // Reclaimable (global) cache is within the cap.
+    }
+    const size_t pressure = global_cached - limit;
 
     // First, compute how much of each root's size is in global FREE pool
     std::unordered_map<void*, size_t> global_freed_per_root;
@@ -1100,12 +1054,15 @@ void CPUCachingAllocator::check_memory_pressure() {
     // the operator can raise TENZOR_CACHED_BYTES_MAX or reduce working set.
     // The next allocation will fail naturally with std::bad_alloc — we don't
     // silently bloat past the configured limit.
-    size_t after_total = 0;
-    {
-        std::lock_guard<std::mutex> slock(stats_mutex_);
-        after_total = global_stats_.cached_bytes;
+    // Re-measure only the reachable (global) cache — consistent with the
+    // pressure metric above — so sibling-local blocks we cannot evict do not
+    // trigger a spurious warning.
+    size_t after_global = 0;
+    for (auto& [size, block] : global_free_blocks_) {
+        (void)size;
+        after_global += block.size;
     }
-    if (after_total > limit) {
+    if (after_global > limit) {
         TENZOR_WARN_ONCE(
             "CPUCachingAllocator: cached_bytes still exceeds max_cached_bytes "
             "after fully-coalesced-root eviction and partial-range eviction. "
@@ -1332,16 +1289,6 @@ auto CPUCachingAllocator::get_local_stats() -> LocalStats {
     auto& local = get_local_pool();
     drain_pending_decrements(local);
     return {local.allocated_bytes, local.cached_bytes};
-}
-
-bool CPUCachingAllocator::try_coalesce_and_free(Block& block, ThreadLocalPool& /* local */) {
-    // Use centralized root tracking - caller should already hold global_mutex_
-    auto root_it = global_root_allocations_.find(block.root_ptr);
-    if (root_it == global_root_allocations_.end()) {
-        return false;
-    }
-
-    return is_fully_coalesced(root_it->second);
 }
 
 // ---------------------------------------------------------------------------

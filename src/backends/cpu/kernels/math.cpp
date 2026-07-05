@@ -309,6 +309,31 @@ static bool onednn_matmul_f32(
 #endif // !TENZOR_USE_MKL
 #endif // TENZOR_USE_ONEDNN
 
+#ifdef TENZOR_USE_MKL
+// Guard MKL BLAS calls: cblas_*/gemm_* take MKL_INT (32-bit under the LP64
+// build). Any M/N/K/leading-dimension/batch-stride argument exceeding INT_MAX
+// would be silently truncated when narrowed to MKL_INT, so callers check every
+// such value with this predicate and fall back to an int64-indexed loop when it
+// returns false. Mirrors the guarded path in bmm_kernel.
+inline bool mkl_int_fits(int64_t v) {
+    return v <= static_cast<int64_t>(std::numeric_limits<MKL_INT>::max());
+}
+#endif
+
+// Issue an MKL VML call (signature void(int, const T*, T*)) over a possibly
+// >INT_MAX element count by splitting it into <=INT_MAX chunks and advancing the
+// pointers. A single static_cast<int>(numel) would silently truncate the count
+// for tensors with more than ~2.1e9 elements, computing only a prefix.
+template<typename VmlFn, typename T>
+inline void vml_chunked(VmlFn fn, size_t count, const T* in, T* out) {
+    const size_t max_chunk = static_cast<size_t>(std::numeric_limits<int>::max());
+    for (size_t off = 0; off < count; ) {
+        size_t chunk = std::min(max_chunk, count - off);
+        fn(static_cast<int>(chunk), in + off, out + off);
+        off += chunk;
+    }
+}
+
 // High-performance matrix multiplication (Float32)
 // Uses oneDNN or MKL SGEMM when available (5-10x faster), falls back to optimized GEMM
 static void matmul_blocked_float32(
@@ -319,21 +344,25 @@ static void matmul_blocked_float32(
     // Always use MKL SGEMM - it's the fastest option for CPU matmul
     // MKL is highly optimized for all matrix sizes including small ones
     // Previous threshold (M*N*K > 1M) caused 7x slowdown for small matrices
-    // like 128x128 because it fell back to slower custom GEMM
-    cblas_sgemm(
-        CblasRowMajor,
-        CblasNoTrans,
-        CblasNoTrans,
-        static_cast<MKL_INT>(M),
-        static_cast<MKL_INT>(N),
-        static_cast<MKL_INT>(K),
-        1.0f,
-        A, static_cast<MKL_INT>(K),
-        B, static_cast<MKL_INT>(N),
-        0.0f,
-        C, static_cast<MKL_INT>(N)
-    );
-    return;
+    // like 128x128 because it fell back to slower custom GEMM.
+    // Only when the dims fit MKL_INT — otherwise fall through to the
+    // int64-indexed custom GEMM below (MKL_INT narrowing would truncate).
+    if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K)) {
+        cblas_sgemm(
+            CblasRowMajor,
+            CblasNoTrans,
+            CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0f,
+            A, static_cast<MKL_INT>(K),
+            B, static_cast<MKL_INT>(N),
+            0.0f,
+            C, static_cast<MKL_INT>(N)
+        );
+        return;
+    }
 #endif
 
 #ifdef TENZOR_USE_ONEDNN
@@ -356,21 +385,25 @@ static void matmul_blocked_float64(
     int64_t M, int64_t N, int64_t K) {
 
 #ifdef TENZOR_USE_MKL
-    // Always use MKL DGEMM - optimized for all matrix sizes
-    cblas_dgemm(
-        CblasRowMajor,
-        CblasNoTrans,
-        CblasNoTrans,
-        static_cast<MKL_INT>(M),
-        static_cast<MKL_INT>(N),
-        static_cast<MKL_INT>(K),
-        1.0,
-        A, static_cast<MKL_INT>(K),
-        B, static_cast<MKL_INT>(N),
-        0.0,
-        C, static_cast<MKL_INT>(N)
-    );
-    return;
+    // Always use MKL DGEMM - optimized for all matrix sizes.
+    // Only when the dims fit MKL_INT — otherwise fall through to the blocked
+    // int64-indexed algorithm below (MKL_INT narrowing would truncate).
+    if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K)) {
+        cblas_dgemm(
+            CblasRowMajor,
+            CblasNoTrans,
+            CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0,
+            A, static_cast<MKL_INT>(K),
+            B, static_cast<MKL_INT>(N),
+            0.0,
+            C, static_cast<MKL_INT>(N)
+        );
+        return;
+    }
 #endif
 
     // Zero-initialize output
@@ -1787,7 +1820,10 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             //   row-major C = A * B   ↔   col-major C^T = B^T * A^T
             // So pass B as the first matrix and A as the second, both 'N' (no-transpose),
             // with dimensions m=N, n=M, k=K and leading dims lda=N, ldb=K, ldc=N.
-            {
+            if (!(mkl_int_fits(M) && mkl_int_fits(K) && mkl_int_fits(N))) {
+                // Dims exceed MKL_INT — use the int64-indexed blocked kernel.
+                matmul_blocked_bfloat16(a_data, b_data, c_data, M, K, N);
+            } else {
                 std::vector<float> c_fp32(static_cast<size_t>(M) * K);
                 const char transa = 'N', transb = 'N';
                 MKL_INT im = static_cast<MKL_INT>(M);   // rows of A/C (=1)
@@ -1943,7 +1979,10 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         BFloat16* c_data = result.data<BFloat16>();
 
 #if defined(TENZOR_USE_MKL)
-        {
+        if (!(mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K))) {
+            // Dims exceed MKL_INT — use the int64-indexed blocked kernel.
+            matmul_blocked_bfloat16(a_data, b_data, c_data, M, N, K);
+        } else {
             std::vector<float> c_fp32(static_cast<size_t>(M) * N);
             const char transa = 'N', transb = 'N';
             MKL_INT im = static_cast<MKL_INT>(M);
@@ -1965,56 +2004,68 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #endif
 
     } else if (a_contig.dtype() == DType::Complex64 && b_contig.dtype() == DType::Complex64) {
+        bool used_mkl = false;
 #ifdef TENZOR_USE_MKL
-        MKL_Complex8 alpha = {1.0f, 0.0f};
-        MKL_Complex8 beta = {0.0f, 0.0f};
-        cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
-                    &alpha,
-                    reinterpret_cast<const void*>(a_contig.data<std::complex<float>>()),
-                    static_cast<MKL_INT>(K),
-                    reinterpret_cast<const void*>(b_contig.data<std::complex<float>>()),
-                    static_cast<MKL_INT>(N),
-                    &beta,
-                    reinterpret_cast<void*>(result.data<std::complex<float>>()),
-                    static_cast<MKL_INT>(N));
-#else
-        // Fallback: naive complex matmul
-        const auto* a_data = a_contig.data<std::complex<float>>();
-        const auto* b_data = b_contig.data<std::complex<float>>();
-        auto* c_data = result.data<std::complex<float>>();
-        std::fill_n(c_data, M * N, std::complex<float>(0.0f, 0.0f));
-        for (int64_t i = 0; i < M; ++i)
-            for (int64_t k = 0; k < K; ++k)
-                for (int64_t j = 0; j < N; ++j)
-                    c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
+        if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K)) {
+            MKL_Complex8 alpha = {1.0f, 0.0f};
+            MKL_Complex8 beta = {0.0f, 0.0f};
+            cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                        &alpha,
+                        reinterpret_cast<const void*>(a_contig.data<std::complex<float>>()),
+                        static_cast<MKL_INT>(K),
+                        reinterpret_cast<const void*>(b_contig.data<std::complex<float>>()),
+                        static_cast<MKL_INT>(N),
+                        &beta,
+                        reinterpret_cast<void*>(result.data<std::complex<float>>()),
+                        static_cast<MKL_INT>(N));
+            used_mkl = true;
+        }
 #endif
+        if (!used_mkl) {
+            // Fallback: naive int64-indexed complex matmul (dims exceed MKL_INT
+            // or non-MKL build).
+            const auto* a_data = a_contig.data<std::complex<float>>();
+            const auto* b_data = b_contig.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            std::fill_n(c_data, M * N, std::complex<float>(0.0f, 0.0f));
+            for (int64_t i = 0; i < M; ++i)
+                for (int64_t k = 0; k < K; ++k)
+                    for (int64_t j = 0; j < N; ++j)
+                        c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
+        }
 
     } else if (a_contig.dtype() == DType::Complex128 && b_contig.dtype() == DType::Complex128) {
+        bool used_mkl = false;
 #ifdef TENZOR_USE_MKL
-        MKL_Complex16 alpha = {1.0, 0.0};
-        MKL_Complex16 beta = {0.0, 0.0};
-        cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
-                    &alpha,
-                    reinterpret_cast<const void*>(a_contig.data<std::complex<double>>()),
-                    static_cast<MKL_INT>(K),
-                    reinterpret_cast<const void*>(b_contig.data<std::complex<double>>()),
-                    static_cast<MKL_INT>(N),
-                    &beta,
-                    reinterpret_cast<void*>(result.data<std::complex<double>>()),
-                    static_cast<MKL_INT>(N));
-#else
-        // Fallback: naive complex matmul
-        const auto* a_data = a_contig.data<std::complex<double>>();
-        const auto* b_data = b_contig.data<std::complex<double>>();
-        auto* c_data = result.data<std::complex<double>>();
-        std::fill_n(c_data, M * N, std::complex<double>(0.0, 0.0));
-        for (int64_t i = 0; i < M; ++i)
-            for (int64_t k = 0; k < K; ++k)
-                for (int64_t j = 0; j < N; ++j)
-                    c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
+        if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K)) {
+            MKL_Complex16 alpha = {1.0, 0.0};
+            MKL_Complex16 beta = {0.0, 0.0};
+            cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                        &alpha,
+                        reinterpret_cast<const void*>(a_contig.data<std::complex<double>>()),
+                        static_cast<MKL_INT>(K),
+                        reinterpret_cast<const void*>(b_contig.data<std::complex<double>>()),
+                        static_cast<MKL_INT>(N),
+                        &beta,
+                        reinterpret_cast<void*>(result.data<std::complex<double>>()),
+                        static_cast<MKL_INT>(N));
+            used_mkl = true;
+        }
 #endif
+        if (!used_mkl) {
+            // Fallback: naive int64-indexed complex matmul (dims exceed MKL_INT
+            // or non-MKL build).
+            const auto* a_data = a_contig.data<std::complex<double>>();
+            const auto* b_data = b_contig.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            std::fill_n(c_data, M * N, std::complex<double>(0.0, 0.0));
+            for (int64_t i = 0; i < M; ++i)
+                for (int64_t k = 0; k < K; ++k)
+                    for (int64_t j = 0; j < N; ++j)
+                        c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
+        }
 
     } else if (a_contig.dtype() == DType::Int16 && b_contig.dtype() == DType::Int16) {
         const int16_t* a_data = a_contig.data<int16_t>();
@@ -3246,7 +3297,7 @@ auto log_kernel(const Tensor& input_in) -> Tensor {
 
 #if defined(TENZOR_USE_MKL)
         // MKL VML vsLn: IEEE log, internally vectorized + threaded
-        vsLn(static_cast<int>(n), in_data, out_data);
+        vml_chunked(vsLn, n, in_data, out_data);
 #else
         // Full-exact path (audit C1): route Float32 through libm. The SIMD
         // polynomial log was ~10-20 ULP and returned finite garbage for +Inf /
@@ -3262,7 +3313,7 @@ auto log_kernel(const Tensor& input_in) -> Tensor {
         double* out_data = result.data<double>();
 
 #if defined(TENZOR_USE_MKL)
-        vdLn(static_cast<int>(n), in_data, out_data);
+        vml_chunked(vdLn, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
@@ -3316,7 +3367,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
 
 #if defined(TENZOR_USE_MKL)
         // MKL VML vsExp: internally vectorized + threaded, beats AVX2 polynomial
-        vsExp(static_cast<int>(n), in_data, out_data);
+        vml_chunked(vsExp, n, in_data, out_data);
 #else
         // Full-exact path (audit C1): route Float32 through libm so accuracy
         // and Inf/NaN handling match the Float64 path. The SIMD polynomial in
@@ -3333,7 +3384,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
         double* out_data = result.data<double>();
 
 #if defined(TENZOR_USE_MKL)
-        vdExp(static_cast<int>(n), in_data, out_data);
+        vml_chunked(vdExp, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
@@ -3345,21 +3396,23 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
-        // Use F16C + fast SIMD exp with OpenMP for large arrays
-        // Clamp input to prevent Float16 overflow: exp(11) ≈ 60000 < 65504 (Float16 max)
-        constexpr float fp16_exp_max = 11.0f;
+        // Use F16C + fast SIMD exp with OpenMP for large arrays.
+        // Do NOT clamp the positive side: a valid large Float16 magnitude must
+        // overflow to +inf like std::exp/PyTorch (e.g. exp(15)=3.27e6 > 65504 is
+        // +inf). exp_avx2 and std::exp already saturate to +inf above ~88.72, and
+        // the narrowing Float16(...) turns any float > 65504 into +inf. Only the
+        // negative side is floored (underflow to ~0 is acceptable).
         constexpr float fp16_exp_min = -88.0f;  // exp(-88) ≈ 0, underflow to 0 is acceptable
         if (static_cast<int64_t>(n) < OMP_THRESHOLD_MEDIUM) {
 #ifdef __F16C__
             size_t i = 0;
-            __m256 clamp_max = _mm256_set1_ps(fp16_exp_max);
             __m256 clamp_min = _mm256_set1_ps(fp16_exp_min);
             for (; i + 8 <= n; i += 8) {
                 __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
                 __m256 fp32 = _mm256_cvtph_ps(packed);
-                // Clamp to safe range for Float16
+                // Floor the negative side only; positive overflow -> +inf.
                 __m256 fp16exp_nan = _mm256_cmp_ps(fp32, fp32, _CMP_UNORD_Q);  // preserve NaN across clamp
-                fp32 = _mm256_min_ps(_mm256_max_ps(fp32, clamp_min), clamp_max);
+                fp32 = _mm256_max_ps(fp32, clamp_min);
                 __m256 result_v = fast_math::exp_avx2(fp32);
                 result_v = _mm256_blendv_ps(result_v, _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN()), fp16exp_nan);
                 __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
@@ -3370,7 +3423,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
                 if (std::isnan(val)) {
                     out_data[i] = Float16(val);  // preserve NaN
                 } else {
-                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                    val = std::max(fp16_exp_min, val);
                     out_data[i] = Float16(std::exp(val));
                 }
             }
@@ -3380,7 +3433,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
                 if (std::isnan(val)) {
                     out_data[i] = Float16(val);  // preserve NaN
                 } else {
-                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                    val = std::max(fp16_exp_min, val);
                     out_data[i] = Float16(std::exp(val));
                 }
             }
@@ -3396,15 +3449,14 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
                 size_t end = std::min(start + chunk_size, n);
 
 #ifdef __F16C__
-                __m256 clamp_max = _mm256_set1_ps(fp16_exp_max);
                 __m256 clamp_min = _mm256_set1_ps(fp16_exp_min);
                 size_t i = start;
                 for (; i + 8 <= end; i += 8) {
                     __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
                     __m256 fp32 = _mm256_cvtph_ps(packed);
-                    // Clamp to safe range for Float16
+                    // Floor the negative side only; positive overflow -> +inf.
                     __m256 fp16exp_nan = _mm256_cmp_ps(fp32, fp32, _CMP_UNORD_Q);  // preserve NaN across clamp
-                    fp32 = _mm256_min_ps(_mm256_max_ps(fp32, clamp_min), clamp_max);
+                    fp32 = _mm256_max_ps(fp32, clamp_min);
                     __m256 result_v = fast_math::exp_avx2(fp32);
                     result_v = _mm256_blendv_ps(result_v, _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN()), fp16exp_nan);
                     __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
@@ -3415,7 +3467,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
                     if (std::isnan(val)) {
                         out_data[i] = Float16(val);  // preserve NaN
                     } else {
-                        val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                        val = std::max(fp16_exp_min, val);
                         out_data[i] = Float16(std::exp(val));
                     }
                 }
@@ -3425,7 +3477,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
                     if (std::isnan(val)) {
                         out_data[i] = Float16(val);  // preserve NaN
                     } else {
-                        val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
+                        val = std::max(fp16_exp_min, val);
                         out_data[i] = Float16(std::exp(val));
                     }
                 }
@@ -3459,7 +3511,9 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
 }
 
 // Pow kernel - power function (SIMD + OpenMP optimized)
-auto pow_kernel(const Tensor& input, double exponent) -> Tensor {
+auto pow_kernel(const Tensor& input_in, double exponent) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel / exp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -4548,7 +4602,7 @@ auto sin_kernel(const Tensor& input_in) -> Tensor {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
 #if defined(TENZOR_USE_MKL)
-            vsSin(static_cast<int>(n), in_data, out_data);
+            vml_chunked(vsSin, n, in_data, out_data);
 #else
             // Full-exact path (audit C1): the SIMD polynomial used single-
             // precision range reduction that lost all significance for large
@@ -4564,7 +4618,7 @@ auto sin_kernel(const Tensor& input_in) -> Tensor {
             const double* in_data = input.data<double>();
             double* out_data = output.data<double>();
 #if defined(TENZOR_USE_MKL)
-            vdSin(static_cast<int>(n), in_data, out_data);
+            vml_chunked(vdSin, n, in_data, out_data);
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
@@ -4611,7 +4665,7 @@ auto cos_kernel(const Tensor& input_in) -> Tensor {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
 #if defined(TENZOR_USE_MKL)
-            vsCos(static_cast<int>(n), in_data, out_data);
+            vml_chunked(vsCos, n, in_data, out_data);
 #else
             // Full-exact path (audit C1): libm cos (the SIMD polynomial lost
             // significance for large |x|). Matches the Float64 path.
@@ -4626,7 +4680,7 @@ auto cos_kernel(const Tensor& input_in) -> Tensor {
             const double* in_data = input.data<double>();
             double* out_data = output.data<double>();
 #if defined(TENZOR_USE_MKL)
-            vdCos(static_cast<int>(n), in_data, out_data);
+            vml_chunked(vdCos, n, in_data, out_data);
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
@@ -4855,8 +4909,50 @@ auto reciprocal_kernel(const Tensor& input) -> Tensor {
     });
 }
 
+// Scatter a contiguous (row-major) source into a possibly non-contiguous
+// destination view, honouring dst's element strides. The in-place elementwise
+// kernels write their results flat / with shape-derived strides, which assumes
+// a contiguous destination; when the caller's in-place target is a strided view
+// we compute into a contiguous copy and scatter the result back to the real
+// storage with this helper (data<T>() ignores strides).
+namespace {
+template<typename T>
+void scatter_into_strided_impl(Tensor& dst, const Tensor& src_contig) {
+    auto shape = dst.shape();
+    auto strides = dst.strides();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t n = dst.numel();
+    T* base = dst.data<T>();
+    const T* src = src_contig.data<T>();
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t off = 0, idx = i;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            off += (idx % shape[d]) * strides[d];
+            idx /= shape[d];
+        }
+        base[off] = src[i];
+    }
+}
+
+inline void scatter_into_strided(Tensor& dst, const Tensor& src_contig) {
+    switch (dst.dtype()) {
+        case DType::Float32:  scatter_into_strided_impl<float>(dst, src_contig); break;
+        case DType::Float64:  scatter_into_strided_impl<double>(dst, src_contig); break;
+        case DType::Int32:    scatter_into_strided_impl<int32_t>(dst, src_contig); break;
+        case DType::Int64:    scatter_into_strided_impl<int64_t>(dst, src_contig); break;
+        case DType::Float16:  scatter_into_strided_impl<Float16>(dst, src_contig); break;
+        case DType::BFloat16: scatter_into_strided_impl<BFloat16>(dst, src_contig); break;
+        default:
+            throw std::runtime_error("in-place op: unsupported dtype for strided scatter");
+    }
+}
+} // namespace
+
 // In-place operations
-auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+auto add_inplace_kernel(Tensor& a, const Tensor& b_in) -> Tensor& {
+    // Contiguify the source: data<T>() ignores strides (see clamp_kernel).
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
+
     int64_t n = a.numel();
     bool same_shape = detail::have_same_shape(a, b);
 
@@ -4868,6 +4964,15 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     // Validate that b can be broadcast to a's shape
     if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
         throw std::runtime_error("In-place add: shapes are not compatible for broadcasting");
+    }
+
+    // The writes below assume the in-place destination a is contiguous. For a
+    // non-contiguous view, compute into a contiguous copy then scatter back.
+    if (!a.is_contiguous()) {
+        Tensor a_contig = a.contiguous();
+        add_inplace_kernel(a_contig, b);
+        scatter_into_strided(a, a_contig);
+        return a;
     }
 
     switch (a.dtype()) {
@@ -4963,7 +5068,10 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     return a;
 }
 
-auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+auto sub_inplace_kernel(Tensor& a, const Tensor& b_in) -> Tensor& {
+    // Contiguify the source: data<T>() ignores strides (see clamp_kernel).
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
+
     int64_t n = a.numel();
     bool same_shape = detail::have_same_shape(a, b);
 
@@ -4975,6 +5083,15 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     // Validate that b can be broadcast to a's shape
     if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
         throw std::runtime_error("In-place sub: shapes are not compatible for broadcasting");
+    }
+
+    // The writes below assume the in-place destination a is contiguous. For a
+    // non-contiguous view, compute into a contiguous copy then scatter back.
+    if (!a.is_contiguous()) {
+        Tensor a_contig = a.contiguous();
+        sub_inplace_kernel(a_contig, b);
+        scatter_into_strided(a, a_contig);
+        return a;
     }
 
     switch (a.dtype()) {
@@ -5070,7 +5187,10 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     return a;
 }
 
-auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+auto mul_inplace_kernel(Tensor& a, const Tensor& b_in) -> Tensor& {
+    // Contiguify the source: data<T>() ignores strides (see clamp_kernel).
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
+
     int64_t n = a.numel();
     bool same_shape = detail::have_same_shape(a, b);
 
@@ -5082,6 +5202,15 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     // Validate that b can be broadcast to a's shape
     if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
         throw std::runtime_error("In-place mul: shapes are not compatible for broadcasting");
+    }
+
+    // The writes below assume the in-place destination a is contiguous. For a
+    // non-contiguous view, compute into a contiguous copy then scatter back.
+    if (!a.is_contiguous()) {
+        Tensor a_contig = a.contiguous();
+        mul_inplace_kernel(a_contig, b);
+        scatter_into_strided(a, a_contig);
+        return a;
     }
 
     switch (a.dtype()) {
@@ -5177,7 +5306,10 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     return a;
 }
 
-auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+auto div_inplace_kernel(Tensor& a, const Tensor& b_in) -> Tensor& {
+    // Contiguify the source: data<T>() ignores strides (see clamp_kernel).
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
+
     int64_t n = a.numel();
     bool same_shape = detail::have_same_shape(a, b);
 
@@ -5189,6 +5321,15 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     // Validate that b can be broadcast to a's shape
     if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
         throw std::runtime_error("In-place div: shapes are not compatible for broadcasting");
+    }
+
+    // The writes below assume the in-place destination a is contiguous. For a
+    // non-contiguous view, compute into a contiguous copy then scatter back.
+    if (!a.is_contiguous()) {
+        Tensor a_contig = a.contiguous();
+        div_inplace_kernel(a_contig, b);
+        scatter_into_strided(a, a_contig);
+        return a;
     }
 
     switch (a.dtype()) {
@@ -5305,8 +5446,10 @@ namespace {
 
 // Helper: apply a unary float function element-wise with multi-dtype support
 template<typename F32Fn, typename F64Fn>
-auto unary_math_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
+auto unary_math_kernel(const Tensor& input_in, F32Fn f32_fn, F64Fn f64_fn,
                        const char* op_name) -> Tensor {
+    // Contiguify: data<T>() ignores strides (see clamp_kernel / exp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -5345,10 +5488,13 @@ auto unary_math_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
 // VmlF64Fn: void(*)(int, const double*, double*) — e.g. vdExp
 // ScalarF32/ScalarF64: scalar fallbacks for tail/half types
 template<typename VmlF32Fn, typename VmlF64Fn, typename ScalarF32, typename ScalarF64>
-auto unary_vml_kernel(const Tensor& input,
+auto unary_vml_kernel(const Tensor& input_in,
                       VmlF32Fn vml_f32, VmlF64Fn vml_f64,
                       [[maybe_unused]] ScalarF32 scalar_f32, [[maybe_unused]] ScalarF64 scalar_f64,
                       const char* op_name) -> Tensor {
+    // Contiguify: the flat loop and the MKL VML call read storage in physical
+    // order and ignore strides (see clamp_kernel / exp_kernel).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -5357,7 +5503,7 @@ auto unary_vml_kernel(const Tensor& input,
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 #if defined(TENZOR_USE_MKL)
-        vml_f32(static_cast<int>(n), in_data, out_data);
+        vml_chunked(vml_f32, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f32(in_data[i]);
@@ -5366,7 +5512,7 @@ auto unary_vml_kernel(const Tensor& input,
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 #if defined(TENZOR_USE_MKL)
-        vml_f64(static_cast<int>(n), in_data, out_data);
+        vml_chunked(vml_f64, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f64(in_data[i]);
@@ -5378,7 +5524,7 @@ auto unary_vml_kernel(const Tensor& input,
 #if defined(TENZOR_USE_MKL)
         std::vector<float> tmp_in(n), tmp_out(n);
         for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
-        vml_f32(static_cast<int>(n), tmp_in.data(), tmp_out.data());
+        vml_chunked(vml_f32, n, tmp_in.data(), tmp_out.data());
         for (size_t i = 0; i < n; ++i) out_data[i] = Float16(tmp_out[i]);
 #else
         for (size_t i = 0; i < n; ++i)
@@ -5390,7 +5536,7 @@ auto unary_vml_kernel(const Tensor& input,
 #if defined(TENZOR_USE_MKL)
         std::vector<float> tmp_in(n), tmp_out(n);
         for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
-        vml_f32(static_cast<int>(n), tmp_in.data(), tmp_out.data());
+        vml_chunked(vml_f32, n, tmp_in.data(), tmp_out.data());
         for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(tmp_out[i]);
 #else
         for (size_t i = 0; i < n; ++i)
@@ -5451,8 +5597,13 @@ auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
 // double — and matches the accuracy strategy used by the normalization layers
 // (compute in FP32 for numerical stability).
 template<typename F32Fn, typename F64Fn>
-auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f64_fn,
+auto binary_math_kernel(const Tensor& a_in, const Tensor& b_in, F32Fn f32_fn, F64Fn f64_fn,
                         const char* op_name) -> Tensor {
+    // Contiguify: the same-shape fast path indexes ad[i]/bd[i] flat and the
+    // broadcast path derives operand strides from shape (contiguous assumption);
+    // data<T>() ignores strides (see clamp_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
         auto orig_dtype = a.dtype();
         auto a_f32 = a.to(DType::Float32);
@@ -5959,7 +6110,10 @@ auto imag_kernel(const Tensor& input) -> Tensor {
     return result;
 }
 
-auto angle_kernel(const Tensor& input) -> Tensor {
+auto angle_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify: the loops read storage flat (see imag_kernel), so a
+    // non-contiguous complex input must be materialized in logical order.
+    const Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t n = input.numel();
 
@@ -5992,7 +6146,11 @@ auto angle_kernel(const Tensor& input) -> Tensor {
     });
 }
 
-auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t) -> Tensor {
+auto polar_kernel(const Tensor& abs_in, const Tensor& angle_in) -> Tensor {
+    // Contiguify: the loop reads r[i]/theta[i] flat; data<T>() ignores strides
+    // (see clamp_kernel).
+    Tensor abs_t = abs_in.is_contiguous() ? abs_in : abs_in.contiguous();
+    Tensor angle_t = angle_in.is_contiguous() ? angle_in : angle_in.contiguous();
     auto shape_a = abs_t.shape();
     auto shape_b = angle_t.shape();
     if (!std::equal(shape_a.begin(), shape_a.end(), shape_b.begin(), shape_b.end())) {
@@ -7649,15 +7807,22 @@ auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
         float beta_f = static_cast<float>(beta);
 
 #ifdef TENZOR_USE_MKL
-        cblas_sgemm(
-            CblasRowMajor, CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
-            alpha_f,
-            a_cont.data<float>(), static_cast<MKL_INT>(K),
-            b_cont.data<float>(), static_cast<MKL_INT>(N),
-            beta_f,
-            out_data, static_cast<MKL_INT>(N)
-        );
+        if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K)) {
+            cblas_sgemm(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                alpha_f,
+                a_cont.data<float>(), static_cast<MKL_INT>(K),
+                b_cont.data<float>(), static_cast<MKL_INT>(N),
+                beta_f,
+                out_data, static_cast<MKL_INT>(N)
+            );
+        } else {
+            // Dims exceed MKL_INT — int64-indexed GEMM (out_data pre-filled with
+            // beta*input, so gemm_optimized's beta term reproduces the MKL path).
+            gemm::gemm_optimized(a_cont.data<float>(), b_cont.data<float>(),
+                                 out_data, M, N, K, alpha_f, beta_f);
+        }
 #else
         gemm::gemm_optimized(a_cont.data<float>(), b_cont.data<float>(),
                              out_data, M, N, K, alpha_f, beta_f);
@@ -7687,33 +7852,38 @@ auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
             std::memset(out_data, 0, M * N * sizeof(double));
         }
 
+        bool used_mkl = false;
 #ifdef TENZOR_USE_MKL
-        cblas_dgemm(
-            CblasRowMajor, CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
-            alpha,
-            a_cont.data<double>(), static_cast<MKL_INT>(K),
-            b_cont.data<double>(), static_cast<MKL_INT>(N),
-            beta,
-            out_data, static_cast<MKL_INT>(N)
-        );
-#else
-        // Fallback: manual GEMM for Float64
-        // C = beta * C + alpha * A @ B
-        // beta scaling already handled if we're here; gemm_optimized only supports float
-        if (beta != 1.0 && beta != 0.0) {
-            for (int64_t i = 0; i < M * N; ++i) out_data[i] *= beta;
+        if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K)) {
+            cblas_dgemm(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                alpha,
+                a_cont.data<double>(), static_cast<MKL_INT>(K),
+                b_cont.data<double>(), static_cast<MKL_INT>(N),
+                beta,
+                out_data, static_cast<MKL_INT>(N)
+            );
+            used_mkl = true;
         }
-        // alpha * A @ B + (already scaled) C
-        for (int64_t i = 0; i < M; ++i) {
-            for (int64_t k = 0; k < K; ++k) {
-                double a_val = alpha * a_cont.data<double>()[i * K + k];
-                for (int64_t j = 0; j < N; ++j) {
-                    out_data[i * N + j] += a_val * b_cont.data<double>()[k * N + j];
+#endif
+        if (!used_mkl) {
+            // Fallback: manual int64-indexed GEMM for Float64 (non-MKL build or
+            // dims exceeding MKL_INT). C = beta * C + alpha * A @ B; out_data is
+            // pre-filled with the (broadcast) input.
+            if (beta != 1.0 && beta != 0.0) {
+                for (int64_t i = 0; i < M * N; ++i) out_data[i] *= beta;
+            }
+            // alpha * A @ B + (already scaled) C
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t k = 0; k < K; ++k) {
+                    double a_val = alpha * a_cont.data<double>()[i * K + k];
+                    for (int64_t j = 0; j < N; ++j) {
+                        out_data[i * N + j] += a_val * b_cont.data<double>()[k * N + j];
+                    }
                 }
             }
         }
-#endif
     } else if (mat1.dtype() == DType::Float16 || mat1.dtype() == DType::BFloat16) {
         // Upcast to Float32, compute, downcast
         DType orig = mat1.dtype();
@@ -7762,31 +7932,36 @@ auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
         float alpha_f = static_cast<float>(alpha);
         float beta_f = static_cast<float>(beta);
 
+        bool used_mkl = false;
 #ifdef TENZOR_USE_MKL
-        cblas_sgemv(
-            CblasRowMajor, CblasNoTrans,
-            static_cast<MKL_INT>(M), static_cast<MKL_INT>(K),
-            alpha_f,
-            m_cont.data<float>(), static_cast<MKL_INT>(K),
-            v_cont.data<float>(), 1,
-            beta_f,
-            out_data, 1
-        );
-#else
-        // Fallback: manual GEMV
-        if (beta_f != 1.0f && beta_f != 0.0f) {
-            for (int64_t i = 0; i < M; ++i) out_data[i] *= beta_f;
-        }
-        const float* m_data = m_cont.data<float>();
-        const float* v_data = v_cont.data<float>();
-        for (int64_t i = 0; i < M; ++i) {
-            float sum = 0.0f;
-            for (int64_t j = 0; j < K; ++j) {
-                sum += m_data[i * K + j] * v_data[j];
-            }
-            out_data[i] += alpha_f * sum;
+        if (mkl_int_fits(M) && mkl_int_fits(K)) {
+            cblas_sgemv(
+                CblasRowMajor, CblasNoTrans,
+                static_cast<MKL_INT>(M), static_cast<MKL_INT>(K),
+                alpha_f,
+                m_cont.data<float>(), static_cast<MKL_INT>(K),
+                v_cont.data<float>(), 1,
+                beta_f,
+                out_data, 1
+            );
+            used_mkl = true;
         }
 #endif
+        if (!used_mkl) {
+            // Fallback: manual int64-indexed GEMV (non-MKL build or dims > MKL_INT).
+            if (beta_f != 1.0f && beta_f != 0.0f) {
+                for (int64_t i = 0; i < M; ++i) out_data[i] *= beta_f;
+            }
+            const float* m_data = m_cont.data<float>();
+            const float* v_data = v_cont.data<float>();
+            for (int64_t i = 0; i < M; ++i) {
+                float sum = 0.0f;
+                for (int64_t j = 0; j < K; ++j) {
+                    sum += m_data[i * K + j] * v_data[j];
+                }
+                out_data[i] += alpha_f * sum;
+            }
+        }
     } else if (mat.dtype() == DType::Float64) {
         double* out_data = output.data<double>();
 
@@ -7805,30 +7980,36 @@ auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
             std::memset(out_data, 0, M * sizeof(double));
         }
 
+        bool used_mkl = false;
 #ifdef TENZOR_USE_MKL
-        cblas_dgemv(
-            CblasRowMajor, CblasNoTrans,
-            static_cast<MKL_INT>(M), static_cast<MKL_INT>(K),
-            alpha,
-            m_cont.data<double>(), static_cast<MKL_INT>(K),
-            v_cont.data<double>(), 1,
-            beta,
-            out_data, 1
-        );
-#else
-        if (beta != 1.0 && beta != 0.0) {
-            for (int64_t i = 0; i < M; ++i) out_data[i] *= beta;
-        }
-        const double* m_data = m_cont.data<double>();
-        const double* v_data = v_cont.data<double>();
-        for (int64_t i = 0; i < M; ++i) {
-            double sum = 0.0;
-            for (int64_t j = 0; j < K; ++j) {
-                sum += m_data[i * K + j] * v_data[j];
-            }
-            out_data[i] += alpha * sum;
+        if (mkl_int_fits(M) && mkl_int_fits(K)) {
+            cblas_dgemv(
+                CblasRowMajor, CblasNoTrans,
+                static_cast<MKL_INT>(M), static_cast<MKL_INT>(K),
+                alpha,
+                m_cont.data<double>(), static_cast<MKL_INT>(K),
+                v_cont.data<double>(), 1,
+                beta,
+                out_data, 1
+            );
+            used_mkl = true;
         }
 #endif
+        if (!used_mkl) {
+            // Fallback: manual int64-indexed GEMV (non-MKL build or dims > MKL_INT).
+            if (beta != 1.0 && beta != 0.0) {
+                for (int64_t i = 0; i < M; ++i) out_data[i] *= beta;
+            }
+            const double* m_data = m_cont.data<double>();
+            const double* v_data = v_cont.data<double>();
+            for (int64_t i = 0; i < M; ++i) {
+                double sum = 0.0;
+                for (int64_t j = 0; j < K; ++j) {
+                    sum += m_data[i * K + j] * v_data[j];
+                }
+                out_data[i] += alpha * sum;
+            }
+        }
     } else if (mat.dtype() == DType::Float16 || mat.dtype() == DType::BFloat16) {
         DType orig = mat.dtype();
         auto result = addmv_kernel(input.to(DType::Float32),
@@ -7890,27 +8071,38 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
         float alpha_f = static_cast<float>(alpha);
         float beta_f = static_cast<float>(beta);
 
+        bool used_mkl = false;
 #ifdef TENZOR_USE_MKL
-        cblas_sgemm_batch_strided(
-            CblasRowMajor, CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
-            alpha_f,
-            b1_cont.data<float>(), static_cast<MKL_INT>(K), a_stride,
-            b2_cont.data<float>(), static_cast<MKL_INT>(N), b_stride,
-            beta_f,
-            out_data, static_cast<MKL_INT>(N), c_stride,
-            static_cast<MKL_INT>(B)
-        );
-#else
-        #pragma omp parallel for if(B > 1)
-        for (int64_t batch = 0; batch < B; ++batch) {
-            gemm::gemm_optimized(
-                b1_cont.data<float>() + batch * a_stride,
-                b2_cont.data<float>() + batch * b_stride,
-                out_data + batch * c_stride,
-                M, N, K, alpha_f, beta_f);
+        // The strided batch call narrows M/N/K/B AND the batch strides (a_stride=
+        // M*K, b_stride=K*N, c_stride=M*N) to MKL_INT; the strides overflow before
+        // the single dims, so every value must fit.
+        if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K) && mkl_int_fits(B) &&
+            mkl_int_fits(a_stride) && mkl_int_fits(b_stride) && mkl_int_fits(c_stride)) {
+            cblas_sgemm_batch_strided(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                alpha_f,
+                b1_cont.data<float>(), static_cast<MKL_INT>(K), a_stride,
+                b2_cont.data<float>(), static_cast<MKL_INT>(N), b_stride,
+                beta_f,
+                out_data, static_cast<MKL_INT>(N), c_stride,
+                static_cast<MKL_INT>(B)
+            );
+            used_mkl = true;
         }
 #endif
+        if (!used_mkl) {
+            // Fallback: one int64-indexed GEMM per batch (non-MKL build or dims/
+            // strides exceeding MKL_INT).
+            #pragma omp parallel for if(B > 1)
+            for (int64_t batch = 0; batch < B; ++batch) {
+                gemm::gemm_optimized(
+                    b1_cont.data<float>() + batch * a_stride,
+                    b2_cont.data<float>() + batch * b_stride,
+                    out_data + batch * c_stride,
+                    M, N, K, alpha_f, beta_f);
+            }
+        }
     } else if (batch1.dtype() == DType::Float64) {
         double* out_data = output.data<double>();
 
@@ -7935,38 +8127,46 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
             std::memset(out_data, 0, B * M * N * sizeof(double));
         }
 
+        bool used_mkl = false;
 #ifdef TENZOR_USE_MKL
-        cblas_dgemm_batch_strided(
-            CblasRowMajor, CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
-            alpha,
-            b1_cont.data<double>(), static_cast<MKL_INT>(K), a_stride,
-            b2_cont.data<double>(), static_cast<MKL_INT>(N), b_stride,
-            beta,
-            out_data, static_cast<MKL_INT>(N), c_stride,
-            static_cast<MKL_INT>(B)
-        );
-#else
-        #pragma omp parallel for if(B > 1)
-        for (int64_t batch = 0; batch < B; ++batch) {
-            // Manual DGEMM for each batch element
-            double* c_batch = out_data + batch * c_stride;
-            const double* a_batch = b1_cont.data<double>() + batch * a_stride;
-            const double* b_batch = b2_cont.data<double>() + batch * b_stride;
+        // See the Float32 branch: the batch strides must also fit MKL_INT.
+        if (mkl_int_fits(M) && mkl_int_fits(N) && mkl_int_fits(K) && mkl_int_fits(B) &&
+            mkl_int_fits(a_stride) && mkl_int_fits(b_stride) && mkl_int_fits(c_stride)) {
+            cblas_dgemm_batch_strided(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                alpha,
+                b1_cont.data<double>(), static_cast<MKL_INT>(K), a_stride,
+                b2_cont.data<double>(), static_cast<MKL_INT>(N), b_stride,
+                beta,
+                out_data, static_cast<MKL_INT>(N), c_stride,
+                static_cast<MKL_INT>(B)
+            );
+            used_mkl = true;
+        }
+#endif
+        if (!used_mkl) {
+            // Fallback: manual int64-indexed DGEMM per batch (non-MKL build or
+            // dims/strides exceeding MKL_INT).
+            #pragma omp parallel for if(B > 1)
+            for (int64_t batch = 0; batch < B; ++batch) {
+                double* c_batch = out_data + batch * c_stride;
+                const double* a_batch = b1_cont.data<double>() + batch * a_stride;
+                const double* b_batch = b2_cont.data<double>() + batch * b_stride;
 
-            if (beta != 1.0 && beta != 0.0) {
-                for (int64_t i = 0; i < M * N; ++i) c_batch[i] *= beta;
-            }
-            for (int64_t i = 0; i < M; ++i) {
-                for (int64_t k = 0; k < K; ++k) {
-                    double a_val = alpha * a_batch[i * K + k];
-                    for (int64_t j = 0; j < N; ++j) {
-                        c_batch[i * N + j] += a_val * b_batch[k * N + j];
+                if (beta != 1.0 && beta != 0.0) {
+                    for (int64_t i = 0; i < M * N; ++i) c_batch[i] *= beta;
+                }
+                for (int64_t i = 0; i < M; ++i) {
+                    for (int64_t k = 0; k < K; ++k) {
+                        double a_val = alpha * a_batch[i * K + k];
+                        for (int64_t j = 0; j < N; ++j) {
+                            c_batch[i * N + j] += a_val * b_batch[k * N + j];
+                        }
                     }
                 }
             }
         }
-#endif
     } else if (batch1.dtype() == DType::Float16 || batch1.dtype() == DType::BFloat16) {
         DType orig = batch1.dtype();
         auto result = baddbmm_kernel(input.to(DType::Float32),
@@ -8064,7 +8264,11 @@ auto nextafter_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 // --- Binary integer ops ---
 
-auto gcd_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+auto gcd_kernel(const Tensor& a_in, const Tensor& b_in) -> Tensor {
+    // Contiguify: fast path indexes ad[i]/bd[i] flat and the broadcast path uses
+    // shape-derived strides; data<T>() ignores strides (see clamp_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     detail::validate_elementwise(a, b);
     auto shape_a = a.shape();
     auto shape_b = b.shape();
@@ -8111,7 +8315,11 @@ auto gcd_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return result;
 }
 
-auto lcm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+auto lcm_kernel(const Tensor& a_in, const Tensor& b_in) -> Tensor {
+    // Contiguify: fast path indexes ad[i]/bd[i] flat and the broadcast path uses
+    // shape-derived strides; data<T>() ignores strides (see clamp_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     detail::validate_elementwise(a, b);
     auto shape_a = a.shape();
     auto shape_b = b.shape();

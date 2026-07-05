@@ -193,9 +193,15 @@ static void depthwise_conv3d_avx2_f32(const float* __restrict__ in_data,
                         _mm256_storeu_ps(out_row + ow, v_sum);
                     }
 
-                    // Scalar tail.
+                    // Scalar tail. Accumulate in double: the 8-wide body above
+                    // uses FMA (single rounding per tap), but a plain float
+                    // `sum += a*b` tail rounds twice per tap and, for small
+                    // W_out (< 8) where the ENTIRE row goes through this path,
+                    // drifts from the double-accurate reference conv beyond the
+                    // Float32 parity tolerance. Double accumulation matches the
+                    // body's effective precision.
                     for (; ow < W_out; ++ow) {
-                        float sum = 0.0f;
+                        double sum = 0.0;
                         for (int64_t kd = 0; kd < kD; ++kd) {
                             const int64_t id = od - pad_d + kd;
                             if (id < 0 || id >= D) continue;
@@ -206,13 +212,14 @@ static void depthwise_conv3d_avx2_f32(const float* __restrict__ in_data,
                                 for (int64_t kw = 0; kw < kW; ++kw) {
                                     const int64_t iw = ow - pad_w + kw;
                                     if (iw >= 0 && iw < W) {
-                                        sum += in_row[iw] * filter[kd * kHW + kh * kW + kw];
+                                        sum += static_cast<double>(in_row[iw]) *
+                                               static_cast<double>(filter[kd * kHW + kh * kW + kw]);
                                     }
                                 }
                             }
                         }
                         if (b_data) sum += b_data[c];
-                        out_row[ow] = sum;
+                        out_row[ow] = static_cast<float>(sum);
                     }
                 }
             }
@@ -246,6 +253,19 @@ auto depthwise_conv3d_kernel(const Tensor& input,
     const int64_t kD = w_shape[2];
     const int64_t kH = w_shape[3];
     const int64_t kW = w_shape[4];
+
+    // Effective (dilated) kernel extent must fit within the padded input on
+    // every axis, mirroring PyTorch's explicit size check and depthwise_conv1d.
+    // Validating here avoids relying on the *_out<=0 guard, which misses
+    // numerators in (-stride, 0): C++ integer division truncates toward zero to
+    // a spurious extent of 1 (PyTorch floors and errors).
+    if (dil_d * (kD - 1) + 1 > D + 2 * pad_d ||
+        dil_h * (kH - 1) + 1 > H + 2 * pad_h ||
+        dil_w * (kW - 1) + 1 > W + 2 * pad_w) {
+        throw std::runtime_error(
+            "depthwise_conv3d_kernel: effective kernel size (dilation*(kernel-1)+1) "
+            "exceeds padded input extent (check padding / dilation / kernel size).");
+    }
 
     const int64_t D_out = (D + 2 * pad_d - dil_d * (kD - 1) - 1) / stride_d + 1;
     const int64_t H_out = (H + 2 * pad_h - dil_h * (kH - 1) - 1) / stride_h + 1;

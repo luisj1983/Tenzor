@@ -1101,6 +1101,11 @@ auto conv2d_forward_kernel(
     int64_t dil_w,
     int64_t groups
 ) -> Tensor {
+    // The impl divides out_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv2d: groups must be positive (got " + std::to_string(groups) + ")");
+    }
     // When stride/pad/dilation are isotropic we can hit the oneDNN/Winograd
     // fast paths below; otherwise fall through to the general im2col+GEMM
     // which handles per-axis values.
@@ -1369,6 +1374,12 @@ auto conv2d_backward_input_kernel(
     int64_t dil_h, int64_t dil_w,
     int64_t groups
 ) -> Tensor {
+    // The impl divides out_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv2d_backward_input: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
     // Ensure contiguous layout for pointer-arithmetic kernels
     Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
@@ -1536,6 +1547,12 @@ auto conv2d_backward_weight_kernel(
     int64_t dil_h, int64_t dil_w,
     int64_t groups
 ) -> Tensor {
+    // The impl divides out_channels/groups; a non-positive groups would SIGFPE.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "conv2d_backward_weight: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
     // Ensure contiguous layout for pointer-arithmetic kernels
     Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
@@ -2024,6 +2041,30 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
     int64_t H_out = (H + 2 * padding_h - dilation_h * (kH - 1) - 1) / stride_h + 1;
     int64_t W_out = (W + 2 * padding_w - dilation_w * (kW - 1) - 1) / stride_w + 1;
 
+    // Reject a kernel/dilation that does not fit the padded input before
+    // allocating (a non-positive extent would build a negative-dim tensor).
+    // Mirrors conv2d_forward / depthwise_conv1d / depthwise_conv3d.
+    if (H_out <= 0 || W_out <= 0) {
+        throw std::invalid_argument(
+            "depthwise_conv2d: non-positive output dimensions (H_out=" +
+            std::to_string(H_out) + ", W_out=" + std::to_string(W_out) +
+            "); kernel/dilation too large for the padded input");
+    }
+
+    // data<T>() ignores strides; the impl/AVX2 paths walk input/weight as flat
+    // packed NCHW / [C,1,kH,kW] buffers. A non-contiguous view (channels-last,
+    // permuted, sliced-channel subview) would be read in the wrong order and
+    // silently produce wrong output. Materialize contiguous copies once
+    // (no-op when already packed), mirroring depthwise_conv1d/3d.
+    const Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor w_c  = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c_storage;
+    const Tensor* bias_c = bias;
+    if (bias && !bias->is_contiguous()) {
+        bias_c_storage = bias->contiguous();
+        bias_c = &bias_c_storage;
+    }
+
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -2032,30 +2073,30 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
         // (it walks across the W axis with vectorised loads). Padding may
         // differ per axis without changing the access pattern.
         if (stride_h == 1 && stride_w == 1 && dilation_h == 1 && dilation_w == 1) {
-            depthwise_conv2d_avx2_f32(input.data<float>(), weight.data<float>(),
-                bias ? bias->data<float>() : nullptr, output.data<float>(),
+            depthwise_conv2d_avx2_f32(in_c.data<float>(), w_c.data<float>(),
+                bias_c ? bias_c->data<float>() : nullptr, output.data<float>(),
                 N, C, H, W, kH, kW, H_out, W_out, padding_h, padding_w);
         } else
 #endif
         {
-            depthwise_conv2d_impl<float>(input.data<float>(), weight.data<float>(),
-                bias ? bias->data<float>() : nullptr, output.data<float>(),
+            depthwise_conv2d_impl<float>(in_c.data<float>(), w_c.data<float>(),
+                bias_c ? bias_c->data<float>() : nullptr, output.data<float>(),
                 N, C, H, W, kH, kW, H_out, W_out,
                 stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
         }
     } else if (input.dtype() == DType::Float64) {
-        depthwise_conv2d_impl<double>(input.data<double>(), weight.data<double>(),
-            bias ? bias->data<double>() : nullptr, output.data<double>(),
+        depthwise_conv2d_impl<double>(in_c.data<double>(), w_c.data<double>(),
+            bias_c ? bias_c->data<double>() : nullptr, output.data<double>(),
             N, C, H, W, kH, kW, H_out, W_out,
             stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
     } else if (input.dtype() == DType::Float16) {
-        depthwise_conv2d_impl<Float16>(input.data<Float16>(), weight.data<Float16>(),
-            bias ? bias->data<Float16>() : nullptr, output.data<Float16>(),
+        depthwise_conv2d_impl<Float16>(in_c.data<Float16>(), w_c.data<Float16>(),
+            bias_c ? bias_c->data<Float16>() : nullptr, output.data<Float16>(),
             N, C, H, W, kH, kW, H_out, W_out,
             stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
     } else if (input.dtype() == DType::BFloat16) {
-        depthwise_conv2d_impl<BFloat16>(input.data<BFloat16>(), weight.data<BFloat16>(),
-            bias ? bias->data<BFloat16>() : nullptr, output.data<BFloat16>(),
+        depthwise_conv2d_impl<BFloat16>(in_c.data<BFloat16>(), w_c.data<BFloat16>(),
+            bias_c ? bias_c->data<BFloat16>() : nullptr, output.data<BFloat16>(),
             N, C, H, W, kH, kW, H_out, W_out,
             stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w);
     } else {
@@ -2078,6 +2119,27 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
 // ============================================================================
 
 namespace {
+
+/// Validate group parameters before any C_in/groups, C_out/groups or
+/// C_in/offset_groups division (which would SIGFPE on a zero divisor). The
+/// deformable-conv op-layer only checks ndim==4, so this is the sole guard.
+inline void validate_deformable_groups(int64_t C_in, int64_t C_out,
+                                       int64_t groups, int64_t offset_groups) {
+    if (groups <= 0 || offset_groups <= 0) {
+        throw std::invalid_argument(
+            "deformable_conv2d: groups and offset_groups must be positive (groups=" +
+            std::to_string(groups) + ", offset_groups=" +
+            std::to_string(offset_groups) + ")");
+    }
+    if (C_in % groups != 0 || C_out % groups != 0 || C_in % offset_groups != 0) {
+        throw std::invalid_argument(
+            "deformable_conv2d: in_channels and out_channels must be divisible by "
+            "groups, and in_channels by offset_groups (C_in=" +
+            std::to_string(C_in) + ", C_out=" + std::to_string(C_out) +
+            ", groups=" + std::to_string(groups) + ", offset_groups=" +
+            std::to_string(offset_groups) + ")");
+    }
+}
 
 /// Accumulator type for deformable-conv interpolation: double for the Float64
 /// path so finite-difference gradcheck precision is preserved, float otherwise.
@@ -2479,23 +2541,35 @@ auto deformable_conv2d_forward_kernel(
     int64_t H_out = (H + 2 * pad_h - dil_h * (kH - 1) - 1) / stride_h + 1;
     int64_t W_out = (W + 2 * pad_w - dil_w * (kW - 1) - 1) / stride_w + 1;
 
+    // The impls divide C_in/groups, C_out/groups, C_in/offset_groups; a zero
+    // divisor would SIGFPE. The op-layer only checks ndim==4, so validate here.
+    validate_deformable_groups(C_in, C_out, groups, offset_groups);
+
+    // data<T>() ignores strides — contiguify all raw-pointer operands so a
+    // non-contiguous (channels-last/permuted/sliced) view is read correctly.
+    const Tensor input_c  = input.is_contiguous()  ? input  : input.contiguous();
+    const Tensor offset_c = offset.is_contiguous() ? offset : offset.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor bias_c   = bias.is_contiguous()   ? bias   : bias.contiguous();
+    const Tensor mask_c   = mask.is_contiguous()   ? mask   : mask.contiguous();
+
     bool use_mask = mask.numel() > 0;
     auto output = zeros({N, C_out, H_out, W_out}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         deformable_conv2d_forward_impl<float>(
-            input.data<float>(), offset.data<float>(), weight.data<float>(),
-            bias.numel() > 0 ? bias.data<float>() : nullptr,
-            use_mask ? mask.data<float>() : nullptr,
+            input_c.data<float>(), offset_c.data<float>(), weight_c.data<float>(),
+            bias.numel() > 0 ? bias_c.data<float>() : nullptr,
+            use_mask ? mask_c.data<float>() : nullptr,
             output.data<float>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
             groups, offset_groups, use_mask);
     } else if (input.dtype() == DType::Float64) {
         deformable_conv2d_forward_impl<double>(
-            input.data<double>(), offset.data<double>(), weight.data<double>(),
-            bias.numel() > 0 ? bias.data<double>() : nullptr,
-            use_mask ? mask.data<double>() : nullptr,
+            input_c.data<double>(), offset_c.data<double>(), weight_c.data<double>(),
+            bias.numel() > 0 ? bias_c.data<double>() : nullptr,
+            use_mask ? mask_c.data<double>() : nullptr,
             output.data<double>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
@@ -2538,6 +2612,16 @@ auto deformable_conv2d_backward_input_kernel(
     int64_t C_out = wshape[0], kH = wshape[2], kW = wshape[3];
     int64_t H_out = grad_output.shape()[2], W_out = grad_output.shape()[3];
 
+    // Guard the group divisions inside the impl (SIGFPE on a zero divisor).
+    validate_deformable_groups(C_in, C_out, groups, offset_groups);
+
+    // data<T>() ignores strides — contiguify all raw-pointer operands.
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c  = input.is_contiguous()  ? input  : input.contiguous();
+    const Tensor offset_c = offset.is_contiguous() ? offset : offset.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor mask_c   = mask.is_contiguous()   ? mask   : mask.contiguous();
+
     bool use_mask = mask.numel() > 0;
     auto grad_input = zeros(std::vector<int64_t>(ishape.begin(), ishape.end()), input.dtype(), input.device());
     auto grad_offset = zeros(std::vector<int64_t>(oshape.begin(), oshape.end()), input.dtype(), input.device());
@@ -2549,8 +2633,8 @@ auto deformable_conv2d_backward_input_kernel(
 
     if (input.dtype() == DType::Float32) {
         deformable_conv2d_backward_input_impl<float>(
-            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
-            weight.data<float>(), use_mask ? mask.data<float>() : nullptr,
+            grad_output_c.data<float>(), input_c.data<float>(), offset_c.data<float>(),
+            weight_c.data<float>(), use_mask ? mask_c.data<float>() : nullptr,
             grad_input.data<float>(), grad_offset.data<float>(),
             use_mask ? grad_mask.data<float>() : nullptr,
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
@@ -2558,8 +2642,8 @@ auto deformable_conv2d_backward_input_kernel(
             groups, offset_groups, use_mask);
     } else if (input.dtype() == DType::Float64) {
         deformable_conv2d_backward_input_impl<double>(
-            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
-            weight.data<double>(), use_mask ? mask.data<double>() : nullptr,
+            grad_output_c.data<double>(), input_c.data<double>(), offset_c.data<double>(),
+            weight_c.data<double>(), use_mask ? mask_c.data<double>() : nullptr,
             grad_input.data<double>(), grad_offset.data<double>(),
             use_mask ? grad_mask.data<double>() : nullptr,
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
@@ -2601,21 +2685,30 @@ auto deformable_conv2d_backward_weight_kernel(
     int64_t C_out = weight_shape[0], kH = weight_shape[2], kW = weight_shape[3];
     int64_t H_out = grad_output.shape()[2], W_out = grad_output.shape()[3];
 
+    // Guard the group divisions inside the impl (SIGFPE on a zero divisor).
+    validate_deformable_groups(C_in, C_out, groups, offset_groups);
+
+    // data<T>() ignores strides — contiguify all raw-pointer operands.
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c  = input.is_contiguous()  ? input  : input.contiguous();
+    const Tensor offset_c = offset.is_contiguous() ? offset : offset.contiguous();
+    const Tensor mask_c   = mask.is_contiguous()   ? mask   : mask.contiguous();
+
     bool use_mask = mask.numel() > 0;
     auto grad_weight = zeros(weight_shape, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         deformable_conv2d_backward_weight_impl<float>(
-            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
-            use_mask ? mask.data<float>() : nullptr,
+            grad_output_c.data<float>(), input_c.data<float>(), offset_c.data<float>(),
+            use_mask ? mask_c.data<float>() : nullptr,
             grad_weight.data<float>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
             groups, offset_groups, use_mask);
     } else if (input.dtype() == DType::Float64) {
         deformable_conv2d_backward_weight_impl<double>(
-            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
-            use_mask ? mask.data<double>() : nullptr,
+            grad_output_c.data<double>(), input_c.data<double>(), offset_c.data<double>(),
+            use_mask ? mask_c.data<double>() : nullptr,
             grad_weight.data<double>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,

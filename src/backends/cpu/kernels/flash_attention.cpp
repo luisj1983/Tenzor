@@ -308,6 +308,13 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
     int64_t num_heads = shape[1];
     int64_t seq_len = shape[2];
     int64_t head_dim = shape[3];
+    // F081: K/V carry their own sequence length (kv_len), which differs from Q's
+    // seq_len for cross-attention / KV-cache (seq_q != seq_k). Q and O are indexed
+    // with seq_len; K and V must be indexed and bounded with kv_len, matching the
+    // backward (which uses M = k_shape[2]). Using seq_len for K/V strides/bounds
+    // reads past the K/V buffers when seq_q > seq_k and mis-strides heads when
+    // seq_q < seq_k.
+    const int64_t kv_len = K.shape()[2];
 
     // F021: bottom-right causal alignment (matches the MHA/GQA manual BMM path
     // and PyTorch, per docs/internals/attention-contract.md). A query at row
@@ -392,9 +399,10 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t h = 0; h < num_heads; ++h) {
                 int64_t bh_offset = (b * num_heads + h) * seq_len * head_dim;
+                int64_t kv_bh_offset = (b * num_heads + h) * kv_len * head_dim;
                 const T* q_bh = q_data + bh_offset;
-                const T* k_bh = k_data + bh_offset;
-                const T* v_bh = v_data + bh_offset;
+                const T* k_bh = k_data + kv_bh_offset;
+                const T* v_bh = v_data + kv_bh_offset;
                 T* o_bh = o_data + bh_offset;
 
                 // Per-row running max and sum for online softmax
@@ -406,8 +414,8 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                     int64_t q_end = std::min(q_start + BLOCK_Q, seq_len);
 
                     // Process K/V blocks
-                    for (int64_t kv_start = 0; kv_start < seq_len; kv_start += BLOCK_KV) {
-                        int64_t kv_end = std::min(kv_start + BLOCK_KV, seq_len);
+                    for (int64_t kv_start = 0; kv_start < kv_len; kv_start += BLOCK_KV) {
+                        int64_t kv_end = std::min(kv_start + BLOCK_KV, kv_len);
 
                         // Compute S_block = Q_block @ K_block^T * scale
                         // S_block: [block_q, block_kv]
@@ -700,6 +708,15 @@ static auto flash_attention_backward_typed(
                 }
             }
 
+            // F051: the softmax-normalization term of dS (the `- D_i` factor)
+            // must be multiplied by the UNDROPPED softmax P, not the
+            // dropped/scaled P̃. Step 3b mutates P into P̃ in place, so snapshot
+            // the true softmax here (only needed when dropout actually fires).
+            std::vector<T> P_true;
+            if (apply_dropout) {
+                P_true.assign(P.begin(), P.end());
+            }
+
             // Step 3b: Replay forward dropout via Philox(seed; counter=
             // bh=b*num_heads+h, i, j, 0) — the bh-combined convention shared by
             // the forward kernel and philox_dropout_mask. Must match the
@@ -766,8 +783,12 @@ static auto flash_attention_backward_typed(
             }
 #endif
 
-            // Step 6: dP = dO @ V^T, then dS = P * (dP - D_i) [reuse S storage]
+            // Step 6: dP = dO @ V^T, then dS = P̃ * dP - P * D_i [reuse S storage].
+            // First factor is the dropped/scaled weight (P, which now holds P̃);
+            // the normalization term uses the undropped softmax (P_norm). Without
+            // dropout the two coincide, reducing to the classic P * (dP - D_i).
             std::vector<T>& dS = S;
+            const T* P_norm = apply_dropout ? P_true.data() : P.data();
 
 #ifdef TENZOR_USE_MKL
             if constexpr (std::is_same_v<T, float>) {
@@ -792,7 +813,7 @@ static auto flash_attention_backward_typed(
                 T d_i = D_vec[i];
                 for (int64_t j = 0; j < M; ++j) {
                     int64_t idx = i * M + j;
-                    dS[idx] = P[idx] * (dS[idx] - d_i);
+                    dS[idx] = P[idx] * dS[idx] - P_norm[idx] * d_i;
                 }
             }
 #else
@@ -800,7 +821,7 @@ static auto flash_attention_backward_typed(
                 T d_i = D_vec[i];
                 for (int64_t j = 0; j < M; ++j) {
                     T dp = dot_product(dO_bh + i * D, v_bh + j * D, D);
-                    dS[i * M + j] = P[i * M + j] * (dp - d_i);
+                    dS[i * M + j] = P[i * M + j] * dp - P_norm[i * M + j] * d_i;
                 }
             }
 #endif
@@ -983,6 +1004,13 @@ static auto flash_attention_backward_half(
                 }
             }
 
+            // F051: snapshot the undropped softmax before Step 3b mutates P into
+            // P̃; the dS normalization term below must use the true softmax.
+            std::vector<float> P_true;
+            if (apply_dropout) {
+                P_true.assign(P.begin(), P.end());
+            }
+
             // Step 3b: dropout replay — bh-combined counter
             // (bh=b*num_heads+h, i, j, 0) matching the forward kernel and
             // philox_dropout_mask.
@@ -1026,8 +1054,11 @@ static auto flash_attention_backward_half(
                 }
             }
 
-            // Step 6: dS = P * (dO @ V^T - D_i)   (reuse S as dS)
+            // Step 6: dS = P̃ * (dO @ V^T) - P * D_i   (reuse S as dS). First
+            // factor is the dropped/scaled P; normalization uses the undropped
+            // softmax P_norm (== P without dropout).
             std::vector<float>& dS = S;
+            const float* P_norm = apply_dropout ? P_true.data() : P.data();
             for (int64_t i = 0; i < N; ++i) {
                 float d_i = D_vec[i];
                 for (int64_t j = 0; j < M; ++j) {
@@ -1035,7 +1066,7 @@ static auto flash_attention_backward_half(
                     for (int64_t d = 0; d < D; ++d) {
                         dp += h2f(dO_bh[i * D + d]) * h2f(v_bh[j * D + d]);
                     }
-                    dS[i * M + j] = P[i * M + j] * (dp - d_i);
+                    dS[i * M + j] = P[i * M + j] * dp - P_norm[i * M + j] * d_i;
                 }
             }
             if (causal) {

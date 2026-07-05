@@ -3206,6 +3206,17 @@ static void register_cpu_kernels_advanced(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // The op layer sets AttrKey::Dim only when the user passed an explicit
+        // dim; the CPU unique_consecutive_kernel has no dim-scoped path and
+        // always operates on the flattened tensor. Silently ignoring a requested
+        // dim would return a different result than the dim-scoped API advertises,
+        // so reject it with a clear error instead of flattening behind the
+        // caller's back. (Adding a real dim-scoped kernel is a larger change.)
+        if (attrs.has(AttrKey::Dim)) {
+            throw std::runtime_error(
+                "unique_consecutive with dim is not supported on the CPU backend "
+                "(only the flattened form is implemented); omit dim to flatten.");
+        }
         bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);  // reused for return_inverse
         bool return_counts = true;  // always compute; caller decides whether to use
         auto [unique_vals, inverse, counts] = cpu::unique_consecutive_kernel(inputs[0], return_inverse, return_counts);
@@ -4093,8 +4104,13 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
     // =========================================================================
     table.register_single_output_kernel(OpId::QuantizedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
-        const auto& input = inputs[0];
-        const auto& weight = inputs[1];
+        // Contiguify: the kernels below walk data<int8_t>()/data<float>() as flat
+        // [0,numel) buffers and ignore strides, so a non-contiguous (transposed/
+        // sliced) quantized activation, weight, or param view would be read in
+        // the wrong element order. Mirror the AdvancedIndex/SelectScatter
+        // wrappers which contiguify before dispatch.
+        Tensor input = inputs[0].contiguous();
+        Tensor weight = inputs[1].contiguous();
 
         auto input_shape = input.shape();
         auto weight_shape = weight.shape();
@@ -4113,8 +4129,10 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
         const int8_t* input_data = input.data<int8_t>();
         const int8_t* weight_data = weight.data<int8_t>();
         const float* bias_data = nullptr;
+        Tensor bias_contig;
         if (inputs.size() > 2 && inputs[2].numel() > 0) {
-            bias_data = inputs[2].data<const float>();
+            bias_contig = inputs[2].contiguous();
+            bias_data = bias_contig.data<const float>();
         }
         float* output_data = output.data<float>();
 
@@ -4122,10 +4140,15 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
         //                   inputs[4] = weight_zero_points (Int32, [out_features]) (optional)
         bool per_channel = inputs.size() > 3 && inputs[3].numel() > 1;
 
+        Tensor scales_contig, zps_contig;
         if (per_channel) {
-            const float* weight_scales_data = inputs[3].data<const float>();
-            const int32_t* weight_zps_data = (inputs.size() > 4 && inputs[4].numel() > 0)
-                ? inputs[4].data<int32_t>() : nullptr;
+            scales_contig = inputs[3].contiguous();
+            const float* weight_scales_data = scales_contig.data<const float>();
+            const int32_t* weight_zps_data = nullptr;
+            if (inputs.size() > 4 && inputs[4].numel() > 0) {
+                zps_contig = inputs[4].contiguous();
+                weight_zps_data = zps_contig.data<int32_t>();
+            }
 
             nn::quantization::kernels::quantized_linear_per_channel_kernel(
                 input_data, weight_data, bias_data, output_data,
@@ -4147,8 +4170,13 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::QuantizedConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
-        const auto& input = inputs[0];
-        const auto& weight = inputs[1];
+        // Contiguify: the kernels below walk data<int8_t>()/data<float>() as flat
+        // NCHW/OIHW buffers and ignore strides, so a non-contiguous (channels-
+        // last, permuted, sliced) quantized input, weight, or param view would be
+        // read in the wrong element order. Mirror the AdvancedIndex/SelectScatter
+        // wrappers which contiguify before dispatch.
+        Tensor input = inputs[0].contiguous();
+        Tensor weight = inputs[1].contiguous();
 
         auto input_shape = input.shape();
         int64_t batch = input_shape[0];
@@ -4185,8 +4213,10 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
         const int8_t* input_data = input.data<int8_t>();
         const int8_t* weight_data = weight.data<int8_t>();
         const float* bias_data = nullptr;
+        Tensor bias_contig;
         if (inputs.size() > 2 && inputs[2].numel() > 0) {
-            bias_data = inputs[2].data<const float>();
+            bias_contig = inputs[2].contiguous();
+            bias_data = bias_contig.data<const float>();
         }
         float* output_data = output.data<float>();
 
@@ -4194,10 +4224,15 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
         //                   inputs[4] = weight_zero_points (Int32, [out_channels]) (optional)
         bool per_channel = inputs.size() > 3 && inputs[3].numel() > 1;
 
+        Tensor scales_contig, zps_contig;
         if (per_channel) {
-            const float* weight_scales_data = inputs[3].data<const float>();
-            const int32_t* weight_zps_data = (inputs.size() > 4 && inputs[4].numel() > 0)
-                ? inputs[4].data<int32_t>() : nullptr;
+            scales_contig = inputs[3].contiguous();
+            const float* weight_scales_data = scales_contig.data<const float>();
+            const int32_t* weight_zps_data = nullptr;
+            if (inputs.size() > 4 && inputs[4].numel() > 0) {
+                zps_contig = inputs[4].contiguous();
+                weight_zps_data = zps_contig.data<int32_t>();
+            }
 
             nn::quantization::kernels::quantized_conv2d_per_channel_kernel(
                 input_data, weight_data, bias_data, output_data,

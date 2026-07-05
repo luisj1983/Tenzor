@@ -202,6 +202,35 @@ inline uint64_t compute_weight_fingerprint(const float* W_ih, const float* W_hh,
     return hash;
 }
 
+// Content fingerprint over the bias buffer(s), to be folded into the weight
+// fingerprint at each cache-validation site.
+//
+// The weight-only fingerprint (audit B6) detects in-place WEIGHT mutations but
+// NOT an in-place BIAS mutation with unchanged weights — precisely the BitFit /
+// bias-only fine-tuning pattern (weights frozen, only biases trained). Because
+// bias values are copied into bias_mem ONLY on rebuild, a bias change that
+// leaves the weight fingerprint identical would keep serving the stale bias
+// captured on the first call. Folding this digest into the fingerprint makes a
+// bias-only change trip need_rebuild, matching how weight changes are handled.
+//
+// Reuses the weight hasher over each bias buffer (as a single lane) and mixes in
+// FNV so a zero sub-digest cannot cancel the weight contribution when combined.
+inline uint64_t compute_bias_fingerprint(const float* b0, int64_t n0,
+                                         const float* b1 = nullptr, int64_t n1 = 0) {
+    constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    constexpr uint64_t FNV_PRIME  = 1099511628211ULL;
+    uint64_t hash = FNV_OFFSET;
+    if (b0 != nullptr && n0 > 0) {
+        hash ^= compute_weight_fingerprint(b0, nullptr, n0, 0);
+        hash *= FNV_PRIME;
+    }
+    if (b1 != nullptr && n1 > 0) {
+        hash ^= compute_weight_fingerprint(b1, nullptr, n1, 0);
+        hash *= FNV_PRIME;
+    }
+    return hash;
+}
+
 // Fast single-entry cache - optimal for inference where dimensions don't change
 inline std::shared_ptr<LSTMCachedPrimitive>& get_lstm_cached() {
     static thread_local std::shared_ptr<LSTMCachedPrimitive> cached;
@@ -280,8 +309,14 @@ inline bool lstm_forward_onednn(
         bool has_bias = (bias != nullptr);
 
         // LSTM has 4 gates: W_ih is (4*hidden, input), W_hh is (4*hidden, hidden).
-        const uint64_t weight_fp = compute_weight_fingerprint(
+        uint64_t weight_fp = compute_weight_fingerprint(
             W_ih, W_hh, 4 * hidden_size * input_size, 4 * hidden_size * hidden_size);
+        // Fold the bias VALUES into the fingerprint so a bias-only in-place
+        // update (unchanged weights) still triggers a rebuild and re-copies bias.
+        if (has_bias) {
+            weight_fp = (weight_fp ^ compute_bias_fingerprint(bias, 4 * hidden_size))
+                        * 1099511628211ULL;
+        }
 
         // Reuse the cached primitive only if dims AND weight content match;
         // pointer-only matching would serve stale reordered weights after an
@@ -486,8 +521,13 @@ inline bool lstm_forward_onednn_with_cache(
 
         bool has_bias = (bias != nullptr);
 
-        const uint64_t weight_fp = compute_weight_fingerprint(
+        uint64_t weight_fp = compute_weight_fingerprint(
             W_ih, W_hh, 4 * hidden_size * input_size, 4 * hidden_size * hidden_size);
+        // Fold bias values in so a bias-only in-place update forces a rebuild.
+        if (has_bias) {
+            weight_fp = (weight_fp ^ compute_bias_fingerprint(bias, 4 * hidden_size))
+                        * 1099511628211ULL;
+        }
 
         bool need_rebuild = !cached ||
                            !cached->matches(seq_len, batch, input_size, hidden_size,
@@ -910,8 +950,16 @@ inline bool gru_forward_onednn(
         bool has_bias = (bias_ih != nullptr) || (bias_hh != nullptr);
 
         // GRU has 3 gates: W_ih is (3*hidden, input), W_hh is (3*hidden, hidden).
-        const uint64_t weight_fp = compute_weight_fingerprint(
+        uint64_t weight_fp = compute_weight_fingerprint(
             W_ih, W_hh, 3 * hidden_size * input_size, 3 * hidden_size * hidden_size);
+        // Fold both bias buffers ([r,z,n] input-to-hidden and hidden-to-hidden)
+        // into the fingerprint so a bias-only in-place update forces a rebuild
+        // that re-packs the LBR-GRU bias; otherwise a stale bias would be served.
+        if (has_bias) {
+            weight_fp = (weight_fp ^ compute_bias_fingerprint(bias_ih, 3 * hidden_size,
+                                                              bias_hh, 3 * hidden_size))
+                        * 1099511628211ULL;
+        }
 
         bool need_rebuild = !cached ||
                            !cached->matches(seq_len, batch, input_size, hidden_size,
@@ -1413,8 +1461,23 @@ inline bool gru_multilayer_forward_onednn(
         // Recomputed every call so in-place optimizer updates (stable pointers,
         // mutated values) are detected and trigger a rebuild of the reordered/
         // packed weights — mirrors GRUCachedPrimitive::weight_fp handling.
-        const uint64_t weight_fp = compute_multilayer_fingerprint(
+        uint64_t weight_fp = compute_multilayer_fingerprint(
             W_ih_list, W_hh_list, input_size, hidden_size, /*gates_per_cell=*/3);
+        // Fold every layer's bias VALUES into the fingerprint so a bias-only
+        // in-place update (unchanged weights) still trips need_rebuild and the
+        // packed bias_mem is regenerated; each entry is the [r,z,n] input-to-
+        // hidden bias of length 3*hidden_size. A layer index is rotated in so a
+        // bias moved between layers still changes the digest.
+        if (has_bias) {
+            for (size_t l = 0; l < bias_list.size(); ++l) {
+                if (bias_list[l] != nullptr) {
+                    uint64_t bfp =
+                        compute_bias_fingerprint(bias_list[l], 3 * hidden_size);
+                    weight_fp ^= bfp ^ static_cast<uint64_t>(l);
+                    weight_fp = (weight_fp << 7) | (weight_fp >> 57);
+                }
+            }
+        }
 
         // Check cache validity
         bool need_rebuild = !cached ||

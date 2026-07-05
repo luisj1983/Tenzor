@@ -118,21 +118,37 @@ auto topk_impl(const T* data, [[maybe_unused]] int64_t numel, int64_t dim_size,
                 pairs[d] = {data[idx], d};
             }
 
-            // Partial sort for top-k
+            // Partial sort for top-k. Break value ties by lowest original index
+            // so duplicate values return deterministic, lowest-index-first
+            // indices (matching sort_impl's std::stable_sort and PyTorch);
+            // plain std::partial_sort is not stable and would pick arbitrary
+            // indices among equal values.
             if (largest) {
                 std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
+                    [](const auto& a, const auto& b) {
+                        if (a.first != b.first) return a.first > b.first;
+                        return a.second < b.second;
+                    });
             } else {
                 std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                    [](const auto& a, const auto& b) {
+                        if (a.first != b.first) return a.first < b.first;
+                        return a.second < b.second;
+                    });
             }
 
             if (sorted && largest) {
                 std::sort(pairs.begin(), pairs.begin() + k,
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
+                    [](const auto& a, const auto& b) {
+                        if (a.first != b.first) return a.first > b.first;
+                        return a.second < b.second;
+                    });
             } else if (sorted) {
                 std::sort(pairs.begin(), pairs.begin() + k,
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                    [](const auto& a, const auto& b) {
+                        if (a.first != b.first) return a.first < b.first;
+                        return a.second < b.second;
+                    });
             }
 
             // Write output
@@ -497,8 +513,26 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
         std::iota(sort_idx.begin(), sort_idx.end(), 0);
 
         if (sorted_output) {
+            // NaN-safe comparator: a plain `data[a] < data[b]` is NOT a strict
+            // weak ordering when NaNs are present (all comparisons with NaN are
+            // false, so NaN is neither < nor >= its neighbours), which makes
+            // std::stable_sort undefined behaviour. Order NaN as greater than
+            // every non-NaN value (NaNs sort to the end, all NaNs equivalent)
+            // so the ordering is a valid strict weak ordering. Each NaN still
+            // becomes its own unique below (NaN != NaN), mirroring the unsorted
+            // path's NaN special-casing.
             std::stable_sort(sort_idx.begin(), sort_idx.end(),
-                [data](int64_t a, int64_t b) { return data[a] < data[b]; });
+                [data](int64_t a, int64_t b) {
+                    T va = data[a];
+                    T vb = data[b];
+                    if constexpr (std::is_floating_point_v<T>) {
+                        bool na = std::isnan(va);
+                        bool nb = std::isnan(vb);
+                        // va < vb only when va is a real value and vb is NaN.
+                        if (na || nb) return !na && nb;
+                    }
+                    return va < vb;
+                });
         }
 
         // Find unique elements
@@ -730,6 +764,12 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right)
 template<typename T>
 auto cummax_impl(const T* data, T* out_values, int64_t* out_indices,
                  int64_t dim_size, int64_t outer_size, int64_t inner_size) -> void {
+    // A zero-length reduction axis makes the buffers empty; the element-0 seed
+    // below (data[first_idx]) would then read/write out of bounds. A cumulative
+    // op over a size-0 dim is a valid no-op (empty result), so short-circuit
+    // BEFORE any element access and BEFORE the omp region. (Matches cumsum/
+    // cumprod, whose inner loop simply doesn't execute for dim_size==0.)
+    if (dim_size == 0) return;
     #pragma omp parallel for if(outer_size * inner_size > ::tenzor::OmpThresholds::complex())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
@@ -755,6 +795,9 @@ auto cummax_impl(const T* data, T* out_values, int64_t* out_indices,
 template<typename T>
 auto cummin_impl(const T* data, T* out_values, int64_t* out_indices,
                  int64_t dim_size, int64_t outer_size, int64_t inner_size) -> void {
+    // See cummax_impl: guard the empty reduction axis before the element-0 seed
+    // and before the omp region so a size-0 dim is a valid no-op, not an OOB.
+    if (dim_size == 0) return;
     #pragma omp parallel for if(outer_size * inner_size > ::tenzor::OmpThresholds::complex())
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
@@ -929,9 +972,16 @@ auto kthvalue_impl(const T* data, int64_t dim_size,
                 int64_t idx = (outer * dim_size + d) * inner_size + inner;
                 pairs[d] = {data[idx], d};
             }
-            // Partial sort so that pairs[k-1] is the k-th smallest
+            // Partial sort so that pairs[k-1] is the k-th smallest. Break value
+            // ties by lowest original index so the returned index is
+            // deterministic (lowest-index-first among equal values), matching
+            // sort_impl and PyTorch; plain std::nth_element would return an
+            // arbitrary index on ties.
             std::nth_element(pairs.begin(), pairs.begin() + (k - 1), pairs.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+                [](const auto& a, const auto& b) {
+                    if (a.first != b.first) return a.first < b.first;
+                    return a.second < b.second;
+                });
 
             int64_t out_idx = outer * inner_size + inner;
             out_values[out_idx] = pairs[k - 1].first;
@@ -1364,6 +1414,10 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
             lo = std::numeric_limits<T>::max();
             hi = std::numeric_limits<T>::lowest();
             for (int64_t i = 0; i < n; ++i) {
+                // Skip NaN: the asymmetric `<`/`>` compares are both false for
+                // NaN so it would never become lo/hi anyway, but make it
+                // explicit to match PyTorch (histc ignores NaN entirely).
+                if (std::isnan(data[i])) continue;
                 if (data[i] < lo) lo = data[i];
                 if (data[i] > hi) hi = data[i];
             }
@@ -1382,8 +1436,13 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
         std::vector<int64_t> counts(static_cast<size_t>(bins), 0);
         for (int64_t i = 0; i < n; ++i) {
             T val = data[i];
+            // NaN passes `val<lo || val>hi` (both false for NaN); casting NaN to
+            // int64 is UB and yields an unclamped index -> OOB write. PyTorch's
+            // histc ignores NaN, so skip it explicitly before binning.
+            if (std::isnan(val)) continue;
             if (val < lo || val > hi) continue;
             int64_t bin = static_cast<int64_t>((val - lo) / bin_width);
+            if (bin < 0) bin = 0;             // defensive left-edge clamp
             if (bin >= bins) bin = bins - 1;  // clamp right edge
             ++counts[static_cast<size_t>(bin)];
         }

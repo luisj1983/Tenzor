@@ -28,6 +28,7 @@
 #include "tenzor/backend/omp_thresholds.hpp"
 #include <vector>
 #include <cstring>
+#include <limits>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -408,37 +409,47 @@ inline void winograd_conv2d_f4x3(const float* input_data,
             // ---- Batched GEMM: For each position p, M_p = U_p * V_p ----
             // M_p[C_out, num_tiles] = U_p[C_out, C_in] * V_p[C_in, num_tiles]
 #ifdef TENZOR_USE_MKL
-            for (int p = 0; p < 36; ++p) {
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            static_cast<int>(C_out),      // M
-                            static_cast<int>(num_tiles),   // N
-                            static_cast<int>(C_in),        // K
-                            1.0f,                          // alpha
-                            U_pos.data() + p * (C_out * C_in),  // A
-                            static_cast<int>(C_in),        // lda
-                            V_pos.data() + p * (C_in * num_tiles),  // B
-                            static_cast<int>(num_tiles),   // ldb
-                            0.0f,                          // beta
-                            M_pos.data() + p * (C_out * num_tiles),  // C
-                            static_cast<int>(num_tiles));  // ldc
-            }
-#else
-            // Fallback: naive GEMM for each position
-            for (int p = 0; p < 36; ++p) {
-                const float* u_p = U_pos.data() + p * (C_out * C_in);
-                const float* v_p = V_pos.data() + p * (C_in * num_tiles);
-                float* m_p = M_pos.data() + p * (C_out * num_tiles);
-                std::memset(m_p, 0, C_out * num_tiles * sizeof(float));
-                for (int64_t oc = 0; oc < C_out; ++oc) {
-                    for (int64_t ic = 0; ic < C_in; ++ic) {
-                        float u_val = u_p[oc * C_in + ic];
-                        for (int64_t t = 0; t < num_tiles; ++t) {
-                            m_p[oc * num_tiles + t] += u_val * v_p[ic * num_tiles + t];
+            // cblas_sgemm takes int dims/leading-dims; C_out (M), num_tiles (N)
+            // and C_in (K) — plus the leading dims — would silently truncate
+            // past INT_MAX. num_tiles = batch*ceil(H/4)*ceil(W/4) is an
+            // aggregate that can grow large, so guard and fall back to the
+            // int64-indexed naive GEMM rather than truncate.
+            constexpr int64_t kIntMax = static_cast<int64_t>(std::numeric_limits<int>::max());
+            if (C_out <= kIntMax && num_tiles <= kIntMax && C_in <= kIntMax) {
+                for (int p = 0; p < 36; ++p) {
+                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                                static_cast<int>(C_out),      // M
+                                static_cast<int>(num_tiles),   // N
+                                static_cast<int>(C_in),        // K
+                                1.0f,                          // alpha
+                                U_pos.data() + p * (C_out * C_in),  // A
+                                static_cast<int>(C_in),        // lda
+                                V_pos.data() + p * (C_in * num_tiles),  // B
+                                static_cast<int>(num_tiles),   // ldb
+                                0.0f,                          // beta
+                                M_pos.data() + p * (C_out * num_tiles),  // C
+                                static_cast<int>(num_tiles));  // ldc
+                }
+            } else
+#endif
+            {
+                // Fallback: naive int64-indexed GEMM for each position (also the
+                // >INT_MAX path when MKL is enabled but the dims don't fit int).
+                for (int p = 0; p < 36; ++p) {
+                    const float* u_p = U_pos.data() + p * (C_out * C_in);
+                    const float* v_p = V_pos.data() + p * (C_in * num_tiles);
+                    float* m_p = M_pos.data() + p * (C_out * num_tiles);
+                    std::memset(m_p, 0, C_out * num_tiles * sizeof(float));
+                    for (int64_t oc = 0; oc < C_out; ++oc) {
+                        for (int64_t ic = 0; ic < C_in; ++ic) {
+                            float u_val = u_p[oc * C_in + ic];
+                            for (int64_t t = 0; t < num_tiles; ++t) {
+                                m_p[oc * num_tiles + t] += u_val * v_p[ic * num_tiles + t];
+                            }
                         }
                     }
                 }
             }
-#endif
 
             // ---- Inverse transform: gather from position-major and apply A^T * M * A ----
             for (int64_t th = 0; th < tile_h; ++th) {

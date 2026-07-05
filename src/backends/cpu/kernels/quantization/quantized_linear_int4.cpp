@@ -81,6 +81,13 @@ auto quantized_linear_int4_kernel(
         throw std::invalid_argument(
             "quantized_linear_int4_kernel: in_features must be even");
     }
+    // combined_scale = input_scale * weight_scale / output_scale (see the note
+    // in quantized_linear_kernel; the FP32 bias is added un-scaled in output
+    // units). Guard against a degenerate output_scale (division by zero).
+    if (output_scale <= 0.0f) {
+        throw std::invalid_argument(
+            "quantized_linear_int4_kernel: output_scale must be > 0");
+    }
 
     float combined_scale = input_scale * weight_scale / output_scale;
     int64_t packed_features = in_features / 2;
@@ -113,7 +120,11 @@ auto quantized_linear_int4_kernel(
         }
 
         for (int64_t b = 0; b < batch_size; ++b) {
-            int32_t acc = 0;
+            // int64 accumulator: INT4 weight [-8,7] × INT8 input [-128,127]
+            // products (~1016) sum over in_features can exceed INT32_MAX at
+            // in_features >~ 2.1M, so accumulate in int64 (mirrors the int8
+            // linear kernel).
+            int64_t acc = 0;
             const int8_t* input_row = input + b * in_features;
 
 #if defined(__AVX2__)
@@ -140,20 +151,24 @@ auto quantized_linear_int4_kernel(
                 acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(vi16_hi, vw16_hi));
             }
 
-            // Horizontal sum
+            // Horizontal sum. Fold the two 128-bit halves, then widen the 4
+            // int32 lanes to int64 before summing so the reduction cannot
+            // overflow int32 (matches quantized_linear.cpp's int64 accumulator).
             __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(acc_vec),
                                            _mm256_extracti128_si256(acc_vec, 1));
-            sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1, 0, 3, 2)));
-            sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0, 1, 0, 1)));
-            acc = _mm_cvtsi128_si32(sum128);
+            __m256i sum64 = _mm256_cvtepi32_epi64(sum128);
+            __m128i s64 = _mm_add_epi64(_mm256_castsi256_si128(sum64),
+                                        _mm256_extracti128_si256(sum64, 1));
+            acc = static_cast<int64_t>(_mm_extract_epi64(s64, 0)) +
+                  static_cast<int64_t>(_mm_extract_epi64(s64, 1));
 
             // Scalar tail
             for (; k < in_features; ++k) {
-                acc += static_cast<int32_t>(input_row[k]) * static_cast<int32_t>(unpacked_weights[k]);
+                acc += static_cast<int64_t>(input_row[k]) * static_cast<int64_t>(unpacked_weights[k]);
             }
 #else
             for (int64_t k = 0; k < in_features; ++k) {
-                acc += static_cast<int32_t>(input_row[k]) * static_cast<int32_t>(unpacked_weights[k]);
+                acc += static_cast<int64_t>(input_row[k]) * static_cast<int64_t>(unpacked_weights[k]);
             }
 #endif
             float result = static_cast<float>(acc) * combined_scale;

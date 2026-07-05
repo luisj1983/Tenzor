@@ -455,6 +455,17 @@ auto interpolate_kernel(const Tensor& input_in,
     int64_t out_h = size[0];
     int64_t out_w = size[1];
 
+    // Cannot interpolate FROM an empty spatial extent: the bilinear/bicubic
+    // clamps use hi = in_h - 1 / in_w - 1, which is -1 (< lo) for a size-0 dim
+    // — violating std::clamp's precondition and then reading an empty buffer.
+    // Match PyTorch, which errors on empty spatial input to interpolate. Thrown
+    // here, before any dispatch / OpenMP region.
+    if (in_h <= 0 || in_w <= 0) {
+        throw std::invalid_argument(
+            "interpolate: input spatial dimensions must be > 0, got [" +
+            std::to_string(in_h) + ", " + std::to_string(in_w) + "]");
+    }
+
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
@@ -1563,10 +1574,14 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size,
 }
 
 // Per-axis fold (col2im). Supports asymmetric kernel/stride/padding/dilation.
-auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
+auto fold_kernel(const Tensor& input_in, const std::vector<int64_t>& output_size,
                  int64_t kh, int64_t kw, int64_t sh, int64_t sw,
                  int64_t ph, int64_t pw, int64_t dh, int64_t dw) -> Tensor {
     // input: (N, C * kh * kw, L); output: (N, C, output_size[0], output_size[1])
+    // data<T>() ignores strides; the flat (n*C*cols+col_idx)*(H_col*W_col)
+    // indexing assumes a contiguous row-major layout. Materialize one so
+    // permuted / sliced col views are read correctly (mirrors unfold above).
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     const auto& shape = input.shape();
     int64_t N = shape[0];
     int64_t H_out = output_size[0], W_out = output_size[1];
@@ -1662,7 +1677,15 @@ auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor
     // Output: [num_heads, seq_len, seq_len]
     Tensor output({num_heads, seq_len, seq_len}, bias_table.dtype(), bias_table.device());
 
-    const int64_t* idx_data = rel_pos_index.data<int64_t>();
+    // rel_pos_index is commonly Int32 (and may be a non-contiguous view). Read
+    // it via a contiguous Int64 tensor so both dtypes are handled correctly and
+    // the flat idx_data[pos] indexing below matches logical order. Keep the
+    // owning tensor alive for the duration of the kernel.
+    Tensor idx_src = rel_pos_index.is_contiguous() ? rel_pos_index
+                                                    : rel_pos_index.contiguous();
+    Tensor idx_i64 = (idx_src.dtype() == DType::Int64) ? idx_src
+                                                       : idx_src.to(DType::Int64);
+    const int64_t* idx_data = idx_i64.data<int64_t>();
     int64_t table_stride = bias_table.shape()[1]; // second dim of bias table
 
     // Bounds-check every relative-position index up front (sequentially, so we

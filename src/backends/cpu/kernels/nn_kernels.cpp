@@ -9,6 +9,7 @@
 #include "tenzor/backend/omp_thresholds.hpp"
 #include "tenzor/utils/log.hpp"
 #include <bit>
+#include <limits>
 #include <random>
 #include <cmath>
 #include <iostream>
@@ -299,6 +300,27 @@ static bool linear_mkl_float32(
         return false;  // Let SIMD fallback handle small matrices
     }
 
+    // Guard against int64->MKL_INT truncation in the LP64 cblas interface: if
+    // M/N/K (batch_size / out_features / in_features, which also serve as the
+    // leading dimensions) exceed INT_MAX the static_cast<MKL_INT> below would
+    // silently truncate and drive an out-of-bounds GEMM. Fall back to an
+    // int64-indexed scalar GEMM in that (extreme, multi-GB) case so the result
+    // stays correct (mirrors conv2d.cpp's gemm_cpu<double> kIntMax fallback).
+    constexpr int64_t kIntMax = static_cast<int64_t>(std::numeric_limits<int>::max());
+    if (batch_size > kIntMax || out_features > kIntMax || in_features > kIntMax) {
+        #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                float sum = 0.0f;
+                for (int64_t i = 0; i < in_features; ++i) {
+                    sum += input[b * in_features + i] * weight[o * in_features + i];
+                }
+                output[b * out_features + o] = sum + (bias ? bias[o] : 0.0f);
+            }
+        }
+        return true;
+    }
+
     // C = alpha * A @ B^T + beta * C
     // A = input[batch, in_features], lda = in_features
     // B = weight[out_features, in_features], ldb = in_features (NOT out_features!)
@@ -344,6 +366,24 @@ static bool linear_mkl_float64(
     const int64_t ops = batch_size * in_features * out_features;
     if (ops < 4096) {
         return false;
+    }
+
+    // Guard against int64->MKL_INT truncation in the LP64 cblas interface (see
+    // linear_mkl_float32): fall back to an int64-indexed scalar GEMM when any of
+    // M/N/K exceeds INT_MAX so the result stays correct.
+    constexpr int64_t kIntMax = static_cast<int64_t>(std::numeric_limits<int>::max());
+    if (batch_size > kIntMax || out_features > kIntMax || in_features > kIntMax) {
+        #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                double sum = 0.0;
+                for (int64_t i = 0; i < in_features; ++i) {
+                    sum += input[b * in_features + i] * weight[o * in_features + i];
+                }
+                output[b * out_features + o] = sum + (bias ? bias[o] : 0.0);
+            }
+        }
+        return true;
     }
 
     cblas_dgemm(
@@ -607,8 +647,16 @@ auto linear_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in
     auto grad_bias = zeros({out_features}, grad_output.dtype(), grad_output.device());
 
     const int64_t ops = batch_size * in_features * out_features;
-    // Use MKL for large enough matrices
-    const bool use_mkl = ops > 4096;
+    // Use MKL for large enough matrices, but only when M/N/K fit the LP64
+    // MKL_INT dimensions. Beyond INT_MAX the static_cast<MKL_INT> in the
+    // cblas_?gemm calls below would truncate, producing a wrong-shaped GEMM with
+    // out-of-bounds access; fall back to the int64-indexed scalar
+    // linear_backward_impl in that extreme case so the result stays correct.
+    constexpr int64_t kIntMax = static_cast<int64_t>(std::numeric_limits<int>::max());
+    const bool use_mkl = ops > 4096
+        && batch_size <= kIntMax
+        && in_features <= kIntMax
+        && out_features <= kIntMax;
 
     // Dispatch based on dtype
     if (grad_output.dtype() == DType::Float32) {
@@ -2180,6 +2228,15 @@ auto group_norm_kernel_with_stats(const Tensor& input, int64_t num_groups,
     auto mean = Tensor::empty_uninitialized({N, num_groups}, stats_dtype, input.device());
     auto inv_std = Tensor::empty_uninitialized({N, num_groups}, stats_dtype, input.device());
 
+    // Empty input (or empty spatial extent): nothing to normalize, and the impl
+    // would divide mean/var by a zero group element count (group_size ==
+    // channels_per_group * 0 == 0), writing NaN into the saved mean/inv_std that
+    // feed backward. Return without running the impl so this stats forward agrees
+    // with the sibling group_norm_kernel (which guards the same case at :1962).
+    if (input.numel() == 0 || spatial_size == 0) {
+        return {output, mean, inv_std};
+    }
+
     // group_norm_impl_with_stats indexes a raw contiguous NCHW buffer; a
     // non-contiguous input would corrupt both the output and the saved
     // mean/inv_std feeding the backward. Contiguify (mirrors group_norm_kernel).
@@ -2396,8 +2453,12 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
         #pragma omp parallel if(batch_size > 16)
         {
-            std::vector<float> thread_grad_w(norm_size, 0.0f);
-            std::vector<float> thread_grad_b(norm_size, 0.0f);
+            // Accumulate the per-feature grad_weight/grad_bias reductions in
+            // double to match the file's double-accumulation policy (same as the
+            // group_norm/instance_norm F16/BF16 branches); narrow only on the
+            // final store into the float grad buffers.
+            std::vector<double> thread_grad_w(norm_size, 0.0);
+            std::vector<double> thread_grad_b(norm_size, 0.0);
 
             #pragma omp for
             for (int64_t b = 0; b < batch_size; ++b) {
@@ -2409,8 +2470,8 @@ auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 float r = rstd_data[b];
 
                 // Accumulate ds = sum(dy * w * x_hat) and db = sum(dy * w) over normalized dims
-                float ds = 0.0f;
-                float db = 0.0f;
+                double ds = 0.0;
+                double db = 0.0;
                 for (int64_t i = 0; i < norm_size; ++i) {
                     float dy = grad_out_ptr[i];
                     float x_hat = (in_ptr[i] - m) * r;
@@ -2634,6 +2695,17 @@ auto group_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& inpu
     auto grad_weight = zeros({C}, weight.dtype(), weight.device());
     auto grad_bias = zeros({C}, weight.dtype(), weight.device());
 
+    // Empty input / empty spatial extent: the paired forward
+    // (group_norm_kernel / group_norm_kernel_with_stats) returns cleanly without
+    // normalizing, so mirror it here rather than forming inv_gs = 1/group_size
+    // with group_size == channels_per_group * 0 == 0 (which would be inf and, if
+    // the reduction were ever restructured, write NaN). grad_input is
+    // empty-shaped and grad_weight/grad_bias stay at their zero init. Done before
+    // any OpenMP region.
+    if (input.numel() == 0 || spatial_size == 0) {
+        return {grad_input, grad_weight, grad_bias};
+    }
+
     // audit-2026-05-03 — mean/rstd are stored at input dtype now (was hardcoded
     // Float32, dropping Float64 precision through the autograd path).
     const float* mean_data_f32 = nullptr;
@@ -2658,15 +2730,14 @@ auto group_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& inpu
         float* grad_w_data = grad_weight.data<float>();
         float* grad_b_data = grad_bias.data<float>();
 
-        // Accumulate grad_weight/grad_bias per channel across batch
-        // Use per-channel atomic-free accumulation
-        std::vector<float> gw_accum(C, 0.0f);
-        std::vector<float> gb_accum(C, 0.0f);
-
+        // Accumulate grad_weight/grad_bias per channel across batch using
+        // per-thread buffers reduced under a critical section. Accumulate in
+        // double to match the file's double-accumulation policy (same as the
+        // F16/BF16 branch below); narrow only when writing the float grads.
         #pragma omp parallel if(N * num_groups > 16)
         {
-            std::vector<float> t_gw(C, 0.0f);
-            std::vector<float> t_gb(C, 0.0f);
+            std::vector<double> t_gw(C, 0.0);
+            std::vector<double> t_gb(C, 0.0);
 
             #pragma omp for collapse(2)
             for (int64_t n = 0; n < N; ++n) {
@@ -2676,8 +2747,8 @@ auto group_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& inpu
                     float r = rstd_data[n * num_groups + g];
 
                     // Pass 1: accumulate ds, db
-                    float ds = 0.0f;
-                    float db = 0.0f;
+                    double ds = 0.0;
+                    double db = 0.0;
                     for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                         for (int64_t s = 0; s < spatial_size; ++s) {
                             int64_t idx = (n * C + c) * spatial_size + s;
@@ -2906,6 +2977,13 @@ auto instance_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& i
     for (size_t i = 2; i < shape.size(); ++i) {
         spatial_size *= shape[i];
     }
+    // Match the paired forward (instance_norm_kernel / _with_stats @ :2045/:2290),
+    // which throws on a non-positive spatial size; the reduction below would
+    // otherwise form inv_ss = 1/spatial_size == inf. Done before any OpenMP region.
+    if (spatial_size <= 0) {
+        throw std::invalid_argument(
+            "instance_norm: input must have a positive spatial size");
+    }
 
     auto grad_input = Tensor::empty_uninitialized(
         std::vector<int64_t>(shape.begin(), shape.end()),
@@ -2941,8 +3019,11 @@ auto instance_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& i
 
         #pragma omp parallel if(N * C > 16)
         {
-            std::vector<float> t_gw(C, 0.0f);
-            std::vector<float> t_gb(C, 0.0f);
+            // Accumulate the per-channel grad_weight/grad_bias reductions in
+            // double to match the file's double-accumulation policy (same as the
+            // F16/BF16 branch below); narrow only on the final store.
+            std::vector<double> t_gw(C, 0.0);
+            std::vector<double> t_gb(C, 0.0);
 
             #pragma omp for collapse(2)
             for (int64_t n = 0; n < N; ++n) {
@@ -2951,8 +3032,8 @@ auto instance_norm_backward_kernel(const Tensor& grad_output_in, const Tensor& i
                     float r = rstd_data[n * C + c];
                     float w = w_data ? w_data[c] : 1.0f;
 
-                    float ds = 0.0f;
-                    float db = 0.0f;
+                    double ds = 0.0;
+                    double db = 0.0;
                     for (int64_t s = 0; s < spatial_size; ++s) {
                         int64_t idx = (n * C + c) * spatial_size + s;
                         float dy = grad_out_data[idx];

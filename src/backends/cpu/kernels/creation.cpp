@@ -690,6 +690,13 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replaceme
     if (num_samples <= 0) {
         throw std::runtime_error("multinomial: num_samples must be > 0");
     }
+    // Cannot sample from an empty category set. Validate BEFORE the per-row loop
+    // and any cumsum access: with replacement=true the !replacement guard below
+    // is skipped, so cumsum[0]=row[0] / cumsum[num_categories-1] would OOB
+    // read/write on a shape {0} or {N,0} input (F079).
+    if (num_categories <= 0) {
+        throw std::invalid_argument("multinomial: cannot sample from an empty category set (num_categories == 0)");
+    }
     if (!replacement && num_samples > num_categories) {
         throw std::runtime_error("multinomial: cannot sample more than num_categories without replacement");
     }

@@ -95,36 +95,39 @@ inline void fused_qlinear_dequant(
     // so the int32 accumulator only needs the constant term act_zp*col_sum_w[n]
     // subtracted. Precompute the per-output-column weight sums once. INT4 weights
     // are symmetric (weight_zp == 0) so there is no symmetric weight-side term.
-    std::vector<int32_t> col_sum_w;
+    // int64 to avoid overflow: act_zp (up to 127) * col_sum_w (up to ~8*K) can
+    // exceed INT32_MAX for large K, and the dot accumulator overflows int32 at
+    // K >~ 2.1M (INT4 [-8,7] × INT8 [-128,127]). Mirrors the int8 linear kernel.
+    std::vector<int64_t> col_sum_w;
     if (act_zp != 0) {
         col_sum_w.assign(static_cast<size_t>(N), 0);
         for (int64_t n = 0; n < N; ++n) {
             const int8_t* w_row = w_data + n * K;
-            int32_t s = 0;
+            int64_t s = 0;
             for (int64_t k = 0; k < K; ++k) {
-                s += static_cast<int32_t>(w_row[k]);
+                s += static_cast<int64_t>(w_row[k]);
             }
             col_sum_w[static_cast<size_t>(n)] = s;
         }
     }
-    const int32_t* col_sum_w_ptr = col_sum_w.empty() ? nullptr : col_sum_w.data();
+    const int64_t* col_sum_w_ptr = col_sum_w.empty() ? nullptr : col_sum_w.data();
 
     #pragma omp parallel for schedule(static) if(M * N * K > 4096)
     for (int64_t m = 0; m < M; ++m) {
         const int8_t* act_row = act + m * K;
         for (int64_t n = 0; n < N; ++n) {
-            int32_t acc = 0;
+            int64_t acc = 0;
             // QInt4x2 weights are out-feature-major: channel n's K nibbles are
             // contiguous at w_data + n*K (w_data[n*K + k] == weight[n, k]),
             // matching quantized_linear_int4_kernel's weight_row = packed + o*(K/2).
             const int8_t* w_row = w_data + n * K;
             for (int64_t k = 0; k < K; ++k) {
-                acc += static_cast<int32_t>(act_row[k]) *
-                       static_cast<int32_t>(w_row[k]);
+                acc += static_cast<int64_t>(act_row[k]) *
+                       static_cast<int64_t>(w_row[k]);
             }
 
             if (col_sum_w_ptr) {
-                acc -= act_zp * col_sum_w_ptr[n];
+                acc -= static_cast<int64_t>(act_zp) * col_sum_w_ptr[n];
             }
 
             float result = static_cast<float>(acc) * combined_scale;

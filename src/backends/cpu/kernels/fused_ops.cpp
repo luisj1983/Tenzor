@@ -65,10 +65,15 @@ auto fused_linear_relu_kernel(
             Tensor w_wide = ::tenzor::utils::is_half_precision(weight.dtype())
                                 ? weight.to(DType::Float32)
                                 : weight;
+            // F045: the bias is read below with data<float>()/data<double>()
+            // according to the COMPUTE dtype (in_wide.dtype()). Materialize the
+            // bias in that exact dtype whenever it differs, so a Float64 compute
+            // path never reinterprets a Float32 bias buffer as doubles (OOB read
+            // of ~4*out_features bytes) — and so the half path is still widened.
             Tensor b_wide_storage;
             const Tensor* b_ptr = bias;
-            if (bias != nullptr && ::tenzor::utils::is_half_precision(bias->dtype())) {
-                b_wide_storage = bias->to(DType::Float32);
+            if (bias != nullptr && bias->dtype() != in_wide.dtype()) {
+                b_wide_storage = bias->to(in_wide.dtype());
                 b_ptr = &b_wide_storage;
             }
 
@@ -249,6 +254,16 @@ auto fused_batchnorm_relu_kernel(
                                            running_var, weight, bias, eps);
     }
 
+    // F047: running_mean/running_var/weight/bias are indexed linearly as
+    // data<T>()[c]; a strided 1-D param view would read the wrong per-channel
+    // element. Contiguify them like the input above.
+    const Tensor running_mean_c =
+        running_mean.is_contiguous() ? running_mean : running_mean.contiguous();
+    const Tensor running_var_c =
+        running_var.is_contiguous() ? running_var : running_var.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor bias_c = bias.is_contiguous() ? bias : bias.contiguous();
+
     int64_t num_features = input.shape()[1];
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor output = zeros(shape_vec, input.dtype(), input.device());
@@ -261,10 +276,10 @@ auto fused_batchnorm_relu_kernel(
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
-        const float* mean_data = running_mean.data<float>();
-        const float* var_data = running_var.data<float>();
-        const float* gamma_data = weight.data<float>();
-        const float* beta_data = bias.data<float>();
+        const float* mean_data = running_mean_c.data<float>();
+        const float* var_data = running_var_c.data<float>();
+        const float* gamma_data = weight_c.data<float>();
+        const float* beta_data = bias_c.data<float>();
         float* out_data = output.data<float>();
 
         // Fused batchnorm + ReLU
@@ -287,10 +302,10 @@ auto fused_batchnorm_relu_kernel(
         }
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
-        const double* mean_data = running_mean.data<double>();
-        const double* var_data = running_var.data<double>();
-        const double* gamma_data = weight.data<double>();
-        const double* beta_data = bias.data<double>();
+        const double* mean_data = running_mean_c.data<double>();
+        const double* var_data = running_var_c.data<double>();
+        const double* gamma_data = weight_c.data<double>();
+        const double* beta_data = bias_c.data<double>();
         double* out_data = output.data<double>();
 
         // Fused batchnorm + ReLU
@@ -313,10 +328,10 @@ auto fused_batchnorm_relu_kernel(
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
-        const Float16* mean_data = running_mean.data<Float16>();
-        const Float16* var_data = running_var.data<Float16>();
-        const Float16* gamma_data = weight.data<Float16>();
-        const Float16* beta_data = bias.data<Float16>();
+        const Float16* mean_data = running_mean_c.data<Float16>();
+        const Float16* var_data = running_var_c.data<Float16>();
+        const Float16* gamma_data = weight_c.data<Float16>();
+        const Float16* beta_data = bias_c.data<Float16>();
         Float16* out_data = output.data<Float16>();
 
         // Fused batchnorm + ReLU (compute in float for numerical stability)
@@ -340,10 +355,10 @@ auto fused_batchnorm_relu_kernel(
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
-        const BFloat16* mean_data = running_mean.data<BFloat16>();
-        const BFloat16* var_data = running_var.data<BFloat16>();
-        const BFloat16* gamma_data = weight.data<BFloat16>();
-        const BFloat16* beta_data = bias.data<BFloat16>();
+        const BFloat16* mean_data = running_mean_c.data<BFloat16>();
+        const BFloat16* var_data = running_var_c.data<BFloat16>();
+        const BFloat16* gamma_data = weight_c.data<BFloat16>();
+        const BFloat16* beta_data = bias_c.data<BFloat16>();
         BFloat16* out_data = output.data<BFloat16>();
 
         #pragma omp parallel for collapse(2) if(batch_size * num_features > 64)
@@ -799,6 +814,21 @@ auto fused_layer_norm_kernel(
         norm_size *= dim;
     }
 
+    // F069: norm_size == 0 (normalized_shape containing 0) would make the
+    // division below an integer divide-by-zero (SIGFPE). Reject before any
+    // work / OpenMP region.
+    if (norm_size <= 0) {
+        throw std::invalid_argument(
+            "fused_layer_norm: normalized_shape must have positive size "
+            "(norm_size > 0)");
+    }
+
+    // F046: weight/bias are indexed linearly (weight_data[i]/bias_data[i],
+    // including AVX2 _mm256_loadu_ps); a strided 1-D param view would read the
+    // wrong scale/shift elements. Contiguify them like the input above.
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor bias_c = bias.is_contiguous() ? bias : bias.contiguous();
+
     int64_t batch_size = input.numel() / norm_size;
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
@@ -816,8 +846,8 @@ auto fused_layer_norm_kernel(
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
-        const float* weight_data = weight.data<float>();
-        const float* bias_data = bias.data<float>();
+        const float* weight_data = weight_c.data<float>();
+        const float* bias_data = bias_c.data<float>();
         float* out_data = result.data<float>();
         float* mean_data = mean_out.data<float>();
         float* inv_std_data = inv_std_out.data<float>();
@@ -866,8 +896,8 @@ auto fused_layer_norm_kernel(
         }
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
-        const double* weight_data = weight.data<double>();
-        const double* bias_data = bias.data<double>();
+        const double* weight_data = weight_c.data<double>();
+        const double* bias_data = bias_c.data<double>();
         double* out_data = result.data<double>();
         double* mean_data = mean_out.data<double>();
         double* inv_std_data = inv_std_out.data<double>();
@@ -901,8 +931,8 @@ auto fused_layer_norm_kernel(
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
-        const Float16* weight_data = weight.data<Float16>();
-        const Float16* bias_data = bias.data<Float16>();
+        const Float16* weight_data = weight_c.data<Float16>();
+        const Float16* bias_data = bias_c.data<Float16>();
         Float16* out_data = result.data<Float16>();
         float* mean_data = mean_out.data<float>();
         float* inv_std_data = inv_std_out.data<float>();
@@ -938,8 +968,8 @@ auto fused_layer_norm_kernel(
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
-        const BFloat16* weight_data = weight.data<BFloat16>();
-        const BFloat16* bias_data = bias.data<BFloat16>();
+        const BFloat16* weight_data = weight_c.data<BFloat16>();
+        const BFloat16* bias_data = bias_c.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
         float* mean_data = mean_out.data<float>();
         float* inv_std_data = inv_std_out.data<float>();
@@ -998,6 +1028,12 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
 
     // Normalized shape is the last dimension (weight.shape)
     const int64_t norm_size = weight.numel();
+    // F070: norm_size == 0 (empty weight tensor) would make the division below
+    // an integer divide-by-zero (SIGFPE). Reject before any work / OpenMP.
+    if (norm_size <= 0) {
+        throw std::invalid_argument(
+            "fused_rms_norm: weight must be non-empty (norm_size > 0)");
+    }
     int64_t batch_size = input.numel() / norm_size;
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
@@ -1107,26 +1143,40 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
         std::memset(gw, 0, norm_size * sizeof(float));
 
+        // F035: match the forward's double accumulation. Accumulate the
+        // per-feature grad_weight sum (across the batch) and the per-row dot
+        // reduction in double; narrow to Float32 only on the final store.
+        std::vector<double> gw_acc(static_cast<size_t>(norm_size), 0.0);
+
         for (int64_t b = 0; b < batch_size; ++b) {
             const float* go_b = go + b * norm_size;
             const float* x_b = x + b * norm_size;
             float* gi_b = gi + b * norm_size;
-            float inv_rms = r[b];
+            const double inv_rms = static_cast<double>(r[b]);
 
-            // grad_weight accumulation
+            // grad_weight accumulation (double)
             for (int64_t i = 0; i < norm_size; ++i) {
-                gw[i] += go_b[i] * x_b[i] * inv_rms;
+                gw_acc[i] += static_cast<double>(go_b[i]) *
+                             static_cast<double>(x_b[i]) * inv_rms;
             }
 
             // grad_input: d/dx of (x * rrms * w) with rrms depending on x
-            float dot = 0.0f;
+            double dot = 0.0;
             for (int64_t i = 0; i < norm_size; ++i) {
-                dot += go_b[i] * w[i] * x_b[i];
+                dot += static_cast<double>(go_b[i]) *
+                       static_cast<double>(w[i]) * static_cast<double>(x_b[i]);
             }
-            float coeff = dot * inv_rms * inv_rms / static_cast<float>(norm_size);
+            const double coeff =
+                dot * inv_rms * inv_rms / static_cast<double>(norm_size);
             for (int64_t i = 0; i < norm_size; ++i) {
-                gi_b[i] = (go_b[i] * w[i] - x_b[i] * coeff) * inv_rms;
+                gi_b[i] = static_cast<float>(
+                    (static_cast<double>(go_b[i]) * static_cast<double>(w[i]) -
+                     static_cast<double>(x_b[i]) * coeff) * inv_rms);
             }
+        }
+
+        for (int64_t i = 0; i < norm_size; ++i) {
+            gw[i] = static_cast<float>(gw_acc[i]);
         }
     } else if (input.dtype() == DType::Float64) {
         const double* go = grad_output.data<double>();
@@ -2197,7 +2247,12 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
             float avg;
             if (centered && ga) {
                 ga[i] = alpha * ga[i] + (1.0f - alpha) * grad_val;
-                avg = std::sqrt(sq[i] - ga[i] * ga[i]) + eps;
+                // F040: the variance estimate sq - ga^2 can go slightly negative
+                // under float rounding -> sqrt(NaN). Clamp to >=0. eps is added
+                // OUTSIDE the sqrt to match PyTorch RMSprop (avg.sqrt().add_(eps))
+                // and the non-centered path above.
+                avg = std::sqrt(std::max(0.0f, sq[i] - ga[i] * ga[i])) +
+                      static_cast<float>(eps);
             } else {
                 avg = std::sqrt(sq[i]) + eps;
             }
@@ -2228,7 +2283,9 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
             double avg;
             if (centered && ga) {
                 ga[i] = alpha * ga[i] + (1.0 - alpha) * grad_val;
-                avg = std::sqrt(sq[i] - ga[i] * ga[i]) + eps;
+                // F040: clamp variance estimate to >=0; eps OUTSIDE the sqrt to
+                // match PyTorch RMSprop and the non-centered path.
+                avg = std::sqrt(std::max(0.0, sq[i] - ga[i] * ga[i])) + eps;
             } else {
                 avg = std::sqrt(sq[i]) + eps;
             }
@@ -2381,8 +2438,16 @@ auto fused_conv2d_bn_relu_kernel(
         return out_f32.to(orig_dtype);
     }
 
-    auto in_shape = input.shape();
-    auto w_shape = weight.shape();
+    // F036: the raw-pointer conv routines below walk input/weight as densely
+    // packed NCHW/OIHW buffers. A non-contiguous input (permute/channels-last)
+    // or a non-contiguous training-path weight would be read with wrong strides
+    // (or OOB for a view whose logical extent exceeds its storage). Contiguify
+    // both here, mirroring the inference path's contiguous-weight handling.
+    const Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+
+    auto in_shape = input_c.shape();
+    auto w_shape = weight_c.shape();
     int64_t batch = in_shape[0];
     int64_t in_channels = in_shape[1];
     int64_t height = in_shape[2];
@@ -2400,7 +2465,7 @@ auto fused_conv2d_bn_relu_kernel(
         Tensor rm = bn_running_mean;  // Will be updated in-place
         Tensor rv = bn_running_var;
         fused::conv_bn_relu_training(
-            input.data<float>(), weight.data<float>(),
+            input_c.data<float>(), weight_c.data<float>(),
             conv_bias.numel() > 0 ? conv_bias.data<float>() : nullptr,
             bn_gamma.data<float>(), bn_beta.data<float>(),
             rm.data<float>(), rv.data<float>(),
@@ -2420,7 +2485,7 @@ auto fused_conv2d_bn_relu_kernel(
         Tensor weight_folded({out_channels, in_channels, kernel_h, kernel_w},
                              DType::Float32, input.device());
         {
-            Tensor weight_src = weight.contiguous();
+            Tensor weight_src = weight_c;
             std::memcpy(weight_folded.data<float>(), weight_src.data<float>(),
                         static_cast<size_t>(out_channels) * in_channels *
                             kernel_h * kernel_w * sizeof(float));
@@ -2442,7 +2507,7 @@ auto fused_conv2d_bn_relu_kernel(
             out_channels, in_channels, kernel_h, kernel_w, bn_eps);
 
         fused::conv_bn_relu_folded(
-            input.data<float>(), weight_folded.data<float>(), bias_folded.data<float>(),
+            input_c.data<float>(), weight_folded.data<float>(), bias_folded.data<float>(),
             output.data<float>(),
             batch, in_channels, height, width,
             out_channels, kernel_h, kernel_w,
