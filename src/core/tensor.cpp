@@ -713,8 +713,11 @@ template auto Tensor::data<bool>() const -> const bool*;
 // Additional instantiations for const-qualified template parameters (used by quantization)
 template auto Tensor::data<const float>() -> const float*;
 template auto Tensor::data<const float>() const -> const float*;
+template auto Tensor::data<const unsigned char>() -> const unsigned char*;
 template auto Tensor::data<const unsigned char>() const -> const unsigned char*;
+template auto Tensor::data<const signed char>() -> const signed char*;
 template auto Tensor::data<const signed char>() const -> const signed char*;
+template auto Tensor::data<const int>() -> const int*;
 template auto Tensor::data<const int>() const -> const int*;
 
 // Generic item<T>() implementation — replaces 14 copy-pasted specializations
