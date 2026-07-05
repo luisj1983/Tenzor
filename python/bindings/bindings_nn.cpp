@@ -950,11 +950,12 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::AvgPool2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool2d>>(nn, "AvgPool2d")
-        .def(py::init<int64_t, int64_t, int64_t, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
              py::arg("padding") = 0,
-             py::arg("count_include_pad") = true);
+             py::arg("count_include_pad") = true,
+             py::arg("ceil_mode") = false);
 
     py::class_<tenzor::nn::MaxPool3d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::MaxPool3d>>(nn, "MaxPool3d")
@@ -967,11 +968,12 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::AvgPool3d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool3d>>(nn, "AvgPool3d")
-        .def(py::init<int64_t, int64_t, int64_t, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
              py::arg("padding") = 0,
-             py::arg("count_include_pad") = true);
+             py::arg("count_include_pad") = true,
+             py::arg("ceil_mode") = false);
 
     py::class_<tenzor::nn::AdaptiveAvgPool2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AdaptiveAvgPool2d>>(nn, "AdaptiveAvgPool2d")
@@ -991,11 +993,12 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::AvgPool1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool1d>>(nn, "AvgPool1d")
-        .def(py::init<int64_t, int64_t, int64_t, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
              py::arg("padding") = 0,
-             py::arg("count_include_pad") = true);
+             py::arg("count_include_pad") = true,
+             py::arg("ceil_mode") = false);
 
     py::class_<tenzor::nn::AdaptiveAvgPool1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AdaptiveAvgPool1d>>(nn, "AdaptiveAvgPool1d")
@@ -1360,6 +1363,12 @@ void register_nn(py::module_& m) {
              py::arg("padding_top"), py::arg("padding_bottom"))
         .def(py::init<int64_t>(), py::arg("padding"))
         .def("__repr__", [](const tenzor::nn::ReflectionPad2d&) { return "ReflectionPad2d()"; });
+
+    py::class_<tenzor::nn::ReflectionPad3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ReflectionPad3d>>(nn, "ReflectionPad3d")
+        .def(py::init<std::vector<int64_t>>(), py::arg("padding"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::ReflectionPad3d&) { return "ReflectionPad3d()"; });
 
     py::class_<tenzor::nn::ReplicationPad1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::ReplicationPad1d>>(nn, "ReplicationPad1d")

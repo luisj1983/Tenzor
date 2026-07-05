@@ -39,7 +39,13 @@ auto v_norm_autograd(const Variable& v_var, int64_t dim) -> Variable {
         if (d != dim) norm_dims.push_back(d);
     }
 
-    Variable sq = v_var * v_var;
+    // F064: the squared magnitude of a complex vector is v*conj(v) = |v|^2
+    // (real), not v*v (which squares the complex value). Use the conjugated
+    // product for complex weights so the direction norm is correct; leave the
+    // real path unchanged.
+    Variable sq = v_var.tensor().is_complex()
+                      ? v_var * ::tenzor::conj(v_var)
+                      : v_var * v_var;
     if (norm_dims.empty()) {
         return ::tenzor::sqrt(sq);
     }
@@ -62,7 +68,9 @@ auto v_norm_tensor(const Tensor& v, int64_t dim) -> Tensor {
     if (norm_dims.empty()) {
         return ::tenzor::norm(v);
     }
-    Tensor sq = mul(v, v);
+    // F064: |v|^2 = v*conj(v) for complex weights (v*v squares the complex
+    // value instead). Real path unchanged.
+    Tensor sq = v.is_complex() ? mul(v, ::tenzor::conj(v)) : mul(v, v);
     Tensor acc = sq;
     for (int64_t i = static_cast<int64_t>(norm_dims.size()) - 1; i >= 0; --i) {
         acc = sum(acc, norm_dims[i], /*keepdim=*/true);

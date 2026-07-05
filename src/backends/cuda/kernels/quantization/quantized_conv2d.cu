@@ -39,7 +39,13 @@ __global__ void quantized_conv2d_cuda_kernel(
     int64_t groups,
     float combined_scale,
     int32_t input_zp,
-    int32_t weight_zp
+    int32_t weight_zp,
+    // Per-channel (F045): when weight_scales != nullptr each output channel oc
+    // uses weight_scales[oc] and (weight_zps ? weight_zps[oc] : 0); the dequant
+    // scale is input_scale_pc * weight_scales[oc]. nullptr => per-tensor.
+    const float* __restrict__ weight_scales,
+    const int32_t* __restrict__ weight_zps,
+    float input_scale_pc
 ) {
     // Compute output position
     int64_t ow = blockIdx.x * blockDim.x + threadIdx.x;
@@ -57,6 +63,11 @@ __global__ void quantized_conv2d_cuda_kernel(
     for (int64_t bc = blockIdx.z; bc < bc_total; bc += bc_stride) {
     int64_t oc = bc % out_channels;
     int64_t b = bc / out_channels;
+
+    // Per-channel weight scale / zero-point (each output channel oc).
+    const int32_t w_zp = weight_scales ? (weight_zps ? weight_zps[oc] : 0) : weight_zp;
+    const float out_scale = weight_scales ? (input_scale_pc * weight_scales[oc])
+                                          : combined_scale;
 
     // int64 accumulator: each int8*int8 product fits in int32, but summed over
     // in_channels*kh*kw the running total can exceed INT32_MAX for very wide
@@ -108,12 +119,12 @@ __global__ void quantized_conv2d_cuda_kernel(
     //   sum(q_i*q_w) - zp_w*sum(q_i) - zp_i*sum(q_w) + N*zp_i*zp_w
     int64_t kernel_elements = in_ch_per_group * kh_size * kw_size;
     int64_t corrected = static_cast<int64_t>(acc)
-                      - static_cast<int64_t>(weight_zp) * sum_i
+                      - static_cast<int64_t>(w_zp) * sum_i
                       - static_cast<int64_t>(input_zp) * sum_w
-                      + static_cast<int64_t>(input_zp) * static_cast<int64_t>(weight_zp) * kernel_elements;
+                      + static_cast<int64_t>(input_zp) * static_cast<int64_t>(w_zp) * kernel_elements;
 
     // Dequantize and add bias
-    float result = static_cast<float>(corrected) * combined_scale;
+    float result = static_cast<float>(corrected) * out_scale;
     if (bias != nullptr) {
         result += bias[oc];
     }
@@ -147,7 +158,10 @@ auto quantized_conv2d_cuda(
     float weight_scale,
     int32_t input_zp,
     int32_t weight_zp,
-    cudaStream_t stream
+    cudaStream_t stream,
+    // Per-channel (F045): [out_channels] device arrays; nullptr => per-tensor.
+    const float* weight_scales,
+    const int32_t* weight_zps
 ) -> void {
     if (groups < 1) {
         throw std::runtime_error("quantized_conv2d: groups must be >= 1");
@@ -182,7 +196,8 @@ auto quantized_conv2d_cuda(
         batch, in_channels, out_channels,
         h_in, w_in, h_out, w_out,
         kh_size, kw_size, sH, sW, pH, pW, dH, dW,
-        groups, combined_scale, input_zp, weight_zp
+        groups, combined_scale, input_zp, weight_zp,
+        weight_scales, weight_zps, input_scale
     );
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }

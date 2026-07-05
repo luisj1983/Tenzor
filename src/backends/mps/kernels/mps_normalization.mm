@@ -134,6 +134,20 @@ struct LayerNormBackwardParams {
 std::vector<Tensor> mps_rmsnorm_forward(const Tensor& input, const Tensor& weight, float eps) {
     ensure_norm_initialized();
 
+    // Float16/BFloat16: widen the whole op to Float32, narrow ONLY the normalized
+    // output back to the input dtype, and keep the saved stat (rrms) in Float32.
+    // This fixes F014 (a half rrms = 1/sqrt(mean_sq+eps) can overflow to Inf ->
+    // NaN grads) and F015 (BFloat16 has no _f16 shader). Mirrors CPU/oneAPI. The
+    // matching backward widens identically, so stats stay Float32 end-to-end.
+    // Metal has no double type, so Float64 falls through to norm_shader_for_dtype
+    // and throws a clear "unsupported dtype" (F64 genuinely cannot be supported).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto res = mps_rmsnorm_forward(input.to(DType::Float32),
+                                       weight.to(DType::Float32), eps);
+        res[0] = res[0].to(input.dtype());  // output narrowed; rrms stays Float32
+        return res;
+    }
+
     auto shape = input.shape();
     int64_t num_rows = 1;
     for (size_t i = 0; i < shape.size() - 1; ++i) num_rows *= shape[i];
@@ -189,6 +203,18 @@ std::vector<Tensor> mps_rmsnorm_forward(const Tensor& input, const Tensor& weigh
 std::vector<Tensor> mps_rmsnorm_backward(const Tensor& grad_output, const Tensor& input,
                                            const Tensor& weight, const Tensor& rrms) {
     ensure_norm_initialized();
+
+    // Float16/BFloat16: widen everything to Float32 (rrms is already Float32 from
+    // the widened forward; .to() is a no-op then), compute, and narrow the grads
+    // back to the input dtype. Matches the widened forward (F014/F015).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto res = mps_rmsnorm_backward(grad_output.to(DType::Float32),
+                                        input.to(DType::Float32),
+                                        weight.to(DType::Float32),
+                                        rrms.to(DType::Float32));
+        for (auto& t : res) t = t.to(input.dtype());
+        return res;
+    }
 
     auto shape = input.shape();
     int64_t num_rows = 1;
@@ -276,6 +302,16 @@ std::vector<Tensor> mps_groupnorm_forward(const Tensor& input, int64_t num_group
                                             float eps) {
     ensure_norm_initialized();
 
+    // Float16/BFloat16: widen to Float32, narrow ONLY the output back, keep the
+    // saved stats (mean, rstd) in Float32 (F014/F015). Float64 throws below.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto res = mps_groupnorm_forward(input.to(DType::Float32), num_groups,
+                                         weight.to(DType::Float32),
+                                         bias.to(DType::Float32), eps);
+        res[0] = res[0].to(input.dtype());  // output narrowed; mean/rstd stay Float32
+        return res;
+    }
+
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -337,6 +373,18 @@ std::vector<Tensor> mps_groupnorm_backward(const Tensor& grad_output, const Tens
                                              int64_t num_groups, const Tensor& mean_saved,
                                              const Tensor& rstd_saved, const Tensor& weight) {
     ensure_norm_initialized();
+
+    // Float16/BFloat16: widen everything to Float32 (saved stats already Float32
+    // from the widened forward), compute, narrow grads back (F014/F015).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto res = mps_groupnorm_backward(grad_output.to(DType::Float32),
+                                          input.to(DType::Float32), num_groups,
+                                          mean_saved.to(DType::Float32),
+                                          rstd_saved.to(DType::Float32),
+                                          weight.to(DType::Float32));
+        for (auto& t : res) t = t.to(input.dtype());
+        return res;
+    }
 
     auto shape = input.shape();
     int64_t N = shape[0];
@@ -433,6 +481,16 @@ std::vector<Tensor> mps_instancenorm_forward(const Tensor& input, const Tensor& 
                                                const Tensor& bias, float eps) {
     ensure_norm_initialized();
 
+    // Float16/BFloat16: widen to Float32, narrow ONLY the output back, keep the
+    // saved stats (mean, rstd) in Float32 (F014/F015). Float64 throws below.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto res = mps_instancenorm_forward(input.to(DType::Float32),
+                                            weight.to(DType::Float32),
+                                            bias.to(DType::Float32), eps);
+        res[0] = res[0].to(input.dtype());  // output narrowed; mean/rstd stay Float32
+        return res;
+    }
+
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -493,6 +551,18 @@ std::vector<Tensor> mps_instancenorm_backward(const Tensor& grad_output, const T
                                                 const Tensor& mean_saved, const Tensor& rstd_saved,
                                                 const Tensor& weight) {
     ensure_norm_initialized();
+
+    // Float16/BFloat16: widen everything to Float32 (saved stats already Float32
+    // from the widened forward), compute, narrow grads back (F014/F015).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto res = mps_instancenorm_backward(grad_output.to(DType::Float32),
+                                             input.to(DType::Float32),
+                                             mean_saved.to(DType::Float32),
+                                             rstd_saved.to(DType::Float32),
+                                             weight.to(DType::Float32));
+        for (auto& t : res) t = t.to(input.dtype());
+        return res;
+    }
 
     auto shape = input.shape();
     int64_t N = shape[0];

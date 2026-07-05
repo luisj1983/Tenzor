@@ -1984,7 +1984,10 @@ auto conv_transpose2d_forward_kernel(
         const float* bias_ptr = has_bias ? bias->data<float>() : nullptr;
         float* output_ptr = output.data<float>();
 
-        conv_transpose2d_forward_kernel_impl<float, double><<<grid, block, 0, stream>>>(
+        // Accumulate F32 in float to match the CPU reference and the ROCm/Vulkan
+        // conv_transpose kernels. A double accumulator made CUDA the lone outlier,
+        // drifting O(sqrt(N)) ULPs from the other backends past tolerance (F038).
+        conv_transpose2d_forward_kernel_impl<float, float><<<grid, block, 0, stream>>>(
             input_ptr, weight_ptr, bias_ptr, output_ptr,
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,

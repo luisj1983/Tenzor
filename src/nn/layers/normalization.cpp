@@ -3550,7 +3550,8 @@ LocalResponseNorm::LocalResponseNorm(int64_t size, double alpha, double beta, do
 
 auto LocalResponseNorm::forward_impl(const Variable& input) -> Variable {
     // LRN: y_i = x_i / (k + alpha/size * sum(x_j^2, local_window))^beta
-    // where the window spans `size` channels centered on channel i.
+    // where the window spans exactly `size` channels around channel i
+    // (symmetric for odd size; asymmetric — one extra lower channel — for even).
     //
     // Implementation strategy: compute x^2, then accumulate the sliding
     // channel-window sum by iterating over offsets and using narrow + cat
@@ -3564,7 +3565,16 @@ auto LocalResponseNorm::forward_impl(const Variable& input) -> Variable {
     }
 
     int64_t C = input_shape[1];
-    int64_t half = size_ / 2;
+    // F128: the cross-channel window must span EXACTLY `size` channels to match
+    // PyTorch (F.local_response_norm, an avg_pool1d over squared channels with
+    // kernel=size, front-pad=size/2, back-pad=(size-1)/2, count_include_pad).
+    // For odd `size` the window is symmetric ([-size/2, +size/2]); for even
+    // `size` it is asymmetric — one extra channel on the lower-index side — so
+    // the total is `size`, not `size+1`. Using half=size/2 on both sides summed
+    // size+1 channels for even sizes, diverging from PyTorch and the functional
+    // path. window_lo = size/2 (front pad), window_hi = (size-1)/2 (back pad).
+    int64_t window_lo = size_ / 2;
+    int64_t window_hi = (size_ - 1) / 2;
 
     // Compute the channel-window sum at the Variable level so backward()
     // through LRN actually populates input.grad. The previous implementation
@@ -3578,7 +3588,7 @@ auto LocalResponseNorm::forward_impl(const Variable& input) -> Variable {
     Variable x_sq = input * input;
     Variable sum_sq = x_sq;  // j=0 contribution
 
-    for (int64_t j = -half; j <= half; ++j) {
+    for (int64_t j = -window_lo; j <= window_hi; ++j) {
         if (j == 0) continue;
 
         int64_t src_start = std::max(int64_t(0), j);

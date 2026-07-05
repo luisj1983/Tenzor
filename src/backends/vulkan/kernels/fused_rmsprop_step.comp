@@ -41,9 +41,9 @@ void main() {
         // Centered RMSprop: subtract squared mean gradient
         float ga = params.alpha * grad_avg[gid] + (1.0 - params.alpha) * g;
         grad_avg[gid] = ga;
-        denom = sqrt(sq - ga * ga + params.eps);
+        denom = sqrt(sq - ga * ga) + params.eps;
     } else {
-        denom = sqrt(sq + params.eps);
+        denom = sqrt(sq) + params.eps;
     }
 
     if (params.has_momentum != 0) {

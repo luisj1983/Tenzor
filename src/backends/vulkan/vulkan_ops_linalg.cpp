@@ -1777,7 +1777,8 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
 auto VulkanBackend::dispatchQuantizedLinear(
     const Tensor& input, const Tensor& weight, const Tensor& bias,
     float input_scale, float weight_scale,
-    int32_t input_zp, int32_t weight_zp) -> Tensor
+    int32_t input_zp, int32_t weight_zp,
+    const Tensor* per_channel_scales, const Tensor* per_channel_zps) -> Tensor
 {
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1795,6 +1796,23 @@ auto VulkanBackend::dispatchQuantizedLinear(
 
     auto* pipeline = getPipeline("quantized_linear", device_id);
 
+    // Per-channel (F045): bindings 4/5 must ALWAYS be bound (Vulkan descriptor
+    // set completeness), so use placeholder 1-element buffers in the per-tensor
+    // case. per_channel != 0 selects the buffer path in the shader.
+    const bool per_channel = (per_channel_scales != nullptr) && (per_channel_scales->numel() > 1);
+    Tensor wscale_buf, wzp_buf;
+    if (per_channel) {
+        wscale_buf = (per_channel_scales->is_contiguous() && per_channel_scales->offset() == 0)
+            ? *per_channel_scales : dispatchContiguous(*per_channel_scales);
+        wzp_buf = (per_channel_zps != nullptr && per_channel_zps->numel() > 0)
+            ? ((per_channel_zps->is_contiguous() && per_channel_zps->offset() == 0)
+                ? *per_channel_zps : dispatchContiguous(*per_channel_zps))
+            : dispatchZeros({N}, DType::Int32, input.device());
+    } else {
+        wscale_buf = dispatchFull({1}, static_cast<double>(weight_scale), DType::Float32, input.device());
+        wzp_buf = dispatchFull({1}, static_cast<double>(weight_zp), DType::Int32, input.device());
+    }
+
     struct {
         uint32_t M;
         uint32_t N;
@@ -1803,6 +1821,7 @@ auto VulkanBackend::dispatchQuantizedLinear(
         float weight_scale;
         int32_t input_zero_point;
         int32_t weight_zero_point;
+        uint32_t per_channel;
     } pc;
     pc.M = static_cast<uint32_t>(M);
     pc.N = static_cast<uint32_t>(N);
@@ -1811,19 +1830,25 @@ auto VulkanBackend::dispatchQuantizedLinear(
     pc.weight_scale = weight_scale;
     pc.input_zero_point = input_zp;
     pc.weight_zero_point = weight_zp;
+    pc.per_channel = per_channel ? 1u : 0u;
 
     size_t input_bytes = input_contig.numel() * input_contig.dtype_size();
     size_t weight_bytes = weight_contig.numel() * weight_contig.dtype_size();
     size_t bias_bytes = bias_contig.numel() * bias_contig.dtype_size();
     size_t output_bytes = output.numel() * output.dtype_size();
+    size_t wscale_bytes = wscale_buf.numel() * wscale_buf.dtype_size();
+    size_t wzp_bytes = wzp_buf.numel() * wzp_buf.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, input_contig.data_ptr()},
         {1, weight_contig.data_ptr()},
         {2, bias_contig.data_ptr()},
-        {3, output.data_ptr()}
+        {3, output.data_ptr()},
+        {4, wscale_buf.data_ptr()},
+        {5, wzp_buf.data_ptr()}
     };
-    std::vector<size_t> sizes = {input_bytes, weight_bytes, bias_bytes, output_bytes};
+    std::vector<size_t> sizes = {input_bytes, weight_bytes, bias_bytes, output_bytes,
+                                 wscale_bytes, wzp_bytes};
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
@@ -1848,9 +1873,12 @@ auto VulkanBackend::dispatchQuantizedLinear(
 
 auto VulkanBackend::dispatchQuantizedConv2d(
     const Tensor& input, const Tensor& weight, const Tensor& bias,
-    int64_t stride, int64_t padding,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w, int64_t groups,
     float input_scale, float weight_scale,
-    int32_t input_zp, int32_t weight_zp) -> Tensor
+    int32_t input_zp, int32_t weight_zp,
+    const Tensor* per_channel_scales, const Tensor* per_channel_zps) -> Tensor
 {
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1859,29 +1887,39 @@ auto VulkanBackend::dispatchQuantizedConv2d(
     int64_t h_in = input_shape[2];
     int64_t w_in = input_shape[3];
     int64_t out_channels = weight_shape[0];
-    int64_t kernel_size = weight_shape[2];
+    // Per-axis kernel size (F044: rectangular kernels).
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
 
     // Validate convolution geometry before deriving output dims. Without this a
     // kernel larger than the padded input gives a negative numerator and the
     // integer division yields a non-positive h_out/w_out, which would reach the
     // Tensor constructor below as a negative dimension (and an invalid dispatch).
-    if (stride <= 0) {
-        throw std::runtime_error("QuantizedConv2d: stride must be positive, got " +
-                                 std::to_string(stride));
+    if (stride_h <= 0 || stride_w <= 0) {
+        throw std::runtime_error("QuantizedConv2d: stride must be positive, got (" +
+                                 std::to_string(stride_h) + "," + std::to_string(stride_w) + ")");
     }
-    if (padding < 0) {
-        throw std::runtime_error("QuantizedConv2d: padding must be non-negative, got " +
-                                 std::to_string(padding));
+    if (pad_h < 0 || pad_w < 0) {
+        throw std::runtime_error("QuantizedConv2d: padding must be non-negative, got (" +
+                                 std::to_string(pad_h) + "," + std::to_string(pad_w) + ")");
     }
-    if (kernel_size > h_in + 2 * padding || kernel_size > w_in + 2 * padding) {
+    if (groups < 1 || in_channels % groups != 0 || out_channels % groups != 0) {
         throw std::runtime_error(
-            "QuantizedConv2d: kernel_size (" + std::to_string(kernel_size) +
-            ") exceeds padded input (" + std::to_string(h_in + 2 * padding) + "x" +
-            std::to_string(w_in + 2 * padding) + ")");
+            "QuantizedConv2d: groups must be >= 1 and divide in/out channels; got groups=" +
+            std::to_string(groups));
+    }
+    // Effective (dilated) kernel extent for the geometry check.
+    int64_t eff_kh = dil_h * (kernel_h - 1) + 1;
+    int64_t eff_kw = dil_w * (kernel_w - 1) + 1;
+    if (eff_kh > h_in + 2 * pad_h || eff_kw > w_in + 2 * pad_w) {
+        throw std::runtime_error(
+            "QuantizedConv2d: dilated kernel (" + std::to_string(eff_kh) + "x" +
+            std::to_string(eff_kw) + ") exceeds padded input (" +
+            std::to_string(h_in + 2 * pad_h) + "x" + std::to_string(w_in + 2 * pad_w) + ")");
     }
 
-    int64_t h_out = (h_in + 2 * padding - kernel_size) / stride + 1;
-    int64_t w_out = (w_in + 2 * padding - kernel_size) / stride + 1;
+    int64_t h_out = (h_in + 2 * pad_h - eff_kh) / stride_h + 1;
+    int64_t w_out = (w_in + 2 * pad_w - eff_kw) / stride_w + 1;
 
     int32_t device_id = input.device().index;
 
@@ -1893,6 +1931,21 @@ auto VulkanBackend::dispatchQuantizedConv2d(
 
     auto* pipeline = getPipeline("quantized_conv2d", device_id);
 
+    // Per-channel (F045): bindings 4/5 always bound (placeholder in per-tensor case).
+    const bool per_channel = (per_channel_scales != nullptr) && (per_channel_scales->numel() > 1);
+    Tensor wscale_buf, wzp_buf;
+    if (per_channel) {
+        wscale_buf = (per_channel_scales->is_contiguous() && per_channel_scales->offset() == 0)
+            ? *per_channel_scales : dispatchContiguous(*per_channel_scales);
+        wzp_buf = (per_channel_zps != nullptr && per_channel_zps->numel() > 0)
+            ? ((per_channel_zps->is_contiguous() && per_channel_zps->offset() == 0)
+                ? *per_channel_zps : dispatchContiguous(*per_channel_zps))
+            : dispatchZeros({out_channels}, DType::Int32, input.device());
+    } else {
+        wscale_buf = dispatchFull({1}, static_cast<double>(weight_scale), DType::Float32, input.device());
+        wzp_buf = dispatchFull({1}, static_cast<double>(weight_zp), DType::Int32, input.device());
+    }
+
     struct {
         uint32_t batch;
         uint32_t in_channels;
@@ -1901,13 +1954,20 @@ auto VulkanBackend::dispatchQuantizedConv2d(
         uint32_t w_in;
         uint32_t h_out;
         uint32_t w_out;
-        uint32_t kernel_size;
-        uint32_t stride;
-        uint32_t padding;
+        uint32_t kernel_h;
+        uint32_t kernel_w;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t pad_h;
+        uint32_t pad_w;
+        uint32_t dil_h;
+        uint32_t dil_w;
+        uint32_t groups;
         float input_scale;
         float weight_scale;
         int32_t input_zero_point;
         int32_t weight_zero_point;
+        uint32_t per_channel;
     } pc;
     pc.batch = static_cast<uint32_t>(batch);
     pc.in_channels = static_cast<uint32_t>(in_channels);
@@ -1916,26 +1976,38 @@ auto VulkanBackend::dispatchQuantizedConv2d(
     pc.w_in = static_cast<uint32_t>(w_in);
     pc.h_out = static_cast<uint32_t>(h_out);
     pc.w_out = static_cast<uint32_t>(w_out);
-    pc.kernel_size = static_cast<uint32_t>(kernel_size);
-    pc.stride = static_cast<uint32_t>(stride);
-    pc.padding = static_cast<uint32_t>(padding);
+    pc.kernel_h = static_cast<uint32_t>(kernel_h);
+    pc.kernel_w = static_cast<uint32_t>(kernel_w);
+    pc.stride_h = static_cast<uint32_t>(stride_h);
+    pc.stride_w = static_cast<uint32_t>(stride_w);
+    pc.pad_h = static_cast<uint32_t>(pad_h);
+    pc.pad_w = static_cast<uint32_t>(pad_w);
+    pc.dil_h = static_cast<uint32_t>(dil_h);
+    pc.dil_w = static_cast<uint32_t>(dil_w);
+    pc.groups = static_cast<uint32_t>(groups);
     pc.input_scale = input_scale;
     pc.weight_scale = weight_scale;
     pc.input_zero_point = input_zp;
     pc.weight_zero_point = weight_zp;
+    pc.per_channel = per_channel ? 1u : 0u;
 
     size_t input_bytes = input_contig.numel() * input_contig.dtype_size();
     size_t weight_bytes = weight_contig.numel() * weight_contig.dtype_size();
     size_t bias_bytes = bias_contig.numel() * bias_contig.dtype_size();
     size_t output_bytes = output.numel() * output.dtype_size();
+    size_t wscale_bytes = wscale_buf.numel() * wscale_buf.dtype_size();
+    size_t wzp_bytes = wzp_buf.numel() * wzp_buf.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, input_contig.data_ptr()},
         {1, weight_contig.data_ptr()},
         {2, bias_contig.data_ptr()},
-        {3, output.data_ptr()}
+        {3, output.data_ptr()},
+        {4, wscale_buf.data_ptr()},
+        {5, wzp_buf.data_ptr()}
     };
-    std::vector<size_t> sizes = {input_bytes, weight_bytes, bias_bytes, output_bytes};
+    std::vector<size_t> sizes = {input_bytes, weight_bytes, bias_bytes, output_bytes,
+                                 wscale_bytes, wzp_bytes};
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 

@@ -148,7 +148,7 @@ kernel void maxpool2d_forward_kernel(
             if (iw < 0 || uint(iw) >= p.in_width) continue;
             uint idx = input_base + uint(ih) * p.in_width + uint(iw);
             float val = input[idx];
-            if (val > max_val) {
+            if (isnan(val) || val > max_val) {
                 max_val = val;
                 max_idx = int(idx);
             }
@@ -208,7 +208,7 @@ kernel void maxpool2d_forward_kernel_f16(
             if (iw < 0 || uint(iw) >= p.in_width) continue;
             uint idx = input_base + uint(ih) * p.in_width + uint(iw);
             float val = float(input[idx]);
-            if (val > max_val) {
+            if (isnan(val) || val > max_val) {
                 max_val = val;
                 max_idx = int(idx);
             }
@@ -598,7 +598,7 @@ kernel void adaptive_maxpool2d_forward_kernel(
         for (uint iw = w_start; iw < w_end; ++iw) {
             uint idx = input_base + ih * p.in_width + iw;
             float val = input[idx];
-            if (val > max_val) {
+            if (isnan(val) || val > max_val) {
                 max_val = val;
                 max_idx = int(idx);
             }
@@ -657,7 +657,7 @@ kernel void adaptive_maxpool2d_forward_kernel_f16(
         for (uint iw = w_start; iw < w_end; ++iw) {
             uint idx = input_base + ih * p.in_width + iw;
             float val = float(input[idx]);
-            if (val > max_val) {
+            if (isnan(val) || val > max_val) {
                 max_val = val;
                 max_idx = int(idx);
             }
@@ -710,7 +710,7 @@ kernel void maxpool1d_forward_kernel(
         if (il < 0 || uint(il) >= p.in_length) continue;
         uint idx = input_base + uint(il);
         float val = input[idx];
-        if (val > max_val) {
+        if (isnan(val) || val > max_val) {
             max_val = val;
             max_idx = int(idx);
         }
@@ -763,7 +763,7 @@ kernel void maxpool1d_forward_kernel_f16(
         if (il < 0 || uint(il) >= p.in_length) continue;
         uint idx = input_base + uint(il);
         float val = float(input[idx]);
-        if (val > max_val) {
+        if (isnan(val) || val > max_val) {
             max_val = val;
             max_idx = int(idx);
         }
@@ -1080,7 +1080,7 @@ kernel void adaptive_maxpool1d_forward_kernel(
     for (uint il = l_start; il < l_end; ++il) {
         uint idx = input_base + il;
         float val = input[idx];
-        if (val > max_val) {
+        if (isnan(val) || val > max_val) {
             max_val = val;
             max_idx = int(idx);
         }
@@ -1134,7 +1134,7 @@ kernel void adaptive_maxpool1d_forward_kernel_f16(
     for (uint il = l_start; il < l_end; ++il) {
         uint idx = input_base + il;
         float val = float(input[idx]);
-        if (val > max_val) {
+        if (isnan(val) || val > max_val) {
             max_val = val;
             max_idx = int(idx);
         }

@@ -454,10 +454,12 @@ std::vector<Tensor> mps_topk_kernel(const Tensor& input, int64_t k, int64_t dim,
 std::vector<Tensor> mps_median_kernel(const Tensor& input, int64_t dim);
 std::vector<Tensor> mps_mode_kernel(const Tensor& input, int64_t dim);
 std::vector<Tensor> mps_unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool return_counts);
-Tensor mps_grid_sample_kernel(const Tensor& input, const Tensor& grid, bool align_corners);
+Tensor mps_grid_sample_kernel(const Tensor& input, const Tensor& grid,
+                               const std::string& mode, const std::string& padding_mode,
+                               bool align_corners);
 Tensor mps_interpolate_kernel(const Tensor& input, int64_t out_h, int64_t out_w,
                                const std::string& mode, bool align_corners);
-Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2);
+Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type);
 Tensor mps_nms_kernel(const Tensor& boxes, const Tensor& scores, float iou_threshold);
 std::vector<Tensor> mps_batchnorm_mean_var_kernel(const Tensor& input);
 Tensor mps_batchnorm_forward_training_kernel(const Tensor& input, const Tensor& mean,
@@ -477,7 +479,8 @@ std::vector<Tensor> mps_fused_adam_atan2_step(const Tensor& param, const Tensor&
                                                 const Tensor& exp_avg, const Tensor& exp_avg_sq,
                                                 float lr, float beta1, float beta2,
                                                 float eps, float bc1, float bc2, float wd);
-std::vector<Tensor> mps_fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets);
+std::vector<Tensor> mps_fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets,
+                                                           bool compute_grad, const std::string& reduction);
 std::vector<Tensor> mps_dropout_kernel(const Tensor& input, float p);
 
 auto register_mps_kernels(BackendDispatchTable& table) -> void {
@@ -575,7 +578,17 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             int64_t dh = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
             int64_t dw = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            return {mps_conv2d_kernel(inputs[0], inputs[1], sh, sw, ph, pw, dh, dw, groups)};
+            Tensor out = mps_conv2d_kernel(inputs[0], inputs[1], sh, sw, ph, pw, dh, dw, groups);
+            // nn::Conv2d pushes bias as inputs[2] and relies on the kernel to add
+            // it (mirrors CPU: `bias = inputs.size() > 2 ? &inputs[2] : nullptr`).
+            // The MPSGraph conv omits bias, so add it here as a broadcast over the
+            // channel axis: bias{out_c} -> {1,out_c,1,1} + out{N,out_c,H,W}.
+            if (inputs.size() > 2 && inputs[2].numel() > 0) {
+                int64_t out_c = out.shape()[1];
+                Tensor bias_bc = mps_reshape_kernel(inputs[2], {1, out_c, 1, 1});
+                out = mps_add_kernel(out, bias_bc);
+            }
+            return {out};
         });
 
     // ================================================================
@@ -1169,7 +1182,17 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             int64_t dh = attrs.get_int(AttrKey::DilationH, 1);
             int64_t dw = attrs.get_int(AttrKey::DilationW, 1);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            return {mps_conv3d_forward_kernel(inputs[0], inputs[1], sd, sh, sw, pd, ph, pw, dd, dh, dw, groups)};
+            Tensor out = mps_conv3d_forward_kernel(inputs[0], inputs[1], sd, sh, sw, pd, ph, pw, dd, dh, dw, groups);
+            // nn::Conv3d pushes bias as inputs[2] and relies on the kernel to add
+            // it (mirrors CPU). The native conv omits bias, so add it here as a
+            // broadcast over the channel axis:
+            // bias{out_c} -> {1,out_c,1,1,1} + out{N,out_c,D,H,W}.
+            if (inputs.size() > 2 && inputs[2].numel() > 0) {
+                int64_t out_c = out.shape()[1];
+                Tensor bias_bc = mps_reshape_kernel(inputs[2], {1, out_c, 1, 1, 1});
+                out = mps_add_kernel(out, bias_bc);
+            }
+            return {out};
         });
 
     table.register_kernel(OpId::MaxPool3dForward,
@@ -1278,24 +1301,47 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // ================================================================
     table.register_single_output_kernel(OpId::GridSample,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Honor Mode & PaddingMode like every other backend (CUDA:2781).
+            // Previously MPS read only AlignCorners and hard-coded one sampling
+            // mode + zero padding, so nearest/bicubic and border/reflection were
+            // silently ignored.
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+            std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
             bool align = attrs.get_bool(AttrKey::AlignCorners, false);
-            return mps_grid_sample_kernel(inputs[0], inputs[1], align);
+            return mps_grid_sample_kernel(inputs[0], inputs[1], mode, padding_mode, align);
         });
     table.register_single_output_kernel(OpId::Interpolate,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t oh = attrs.get_int(AttrKey::OutputSizeH, 0);
-            int64_t ow = attrs.get_int(AttrKey::OutputSizeW, 0);
+            // The eager op serializes the target size into AttrKey::OutputSize
+            // (int list) and the interpolation mode into AttrKey::Mode — it never
+            // sets the OutputSizeH/W scalar keys. Reading those (as before) gave
+            // a (N,C,0,0) output and hard-coded "bilinear" ran nearest/bicubic as
+            // bilinear. Read the list + mode like CUDA:2763.
+            auto size = attrs.get_int_list(AttrKey::OutputSize);
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
             bool align = attrs.get_bool(AttrKey::AlignCorners, false);
-            std::string mode = "bilinear"; // default
-            return mps_interpolate_kernel(inputs[0], oh, ow, mode, align);
+            if (size.size() != 2) {
+                throw std::runtime_error(
+                    "MPS Interpolate: only 4D interpolation (2 output sizes) is "
+                    "implemented; got " + std::to_string(size.size()) +
+                    " output dims (1D/5D interpolate unsupported on MPS)");
+            }
+            return mps_interpolate_kernel(inputs[0], size[0], size[1], mode, align);
         });
     table.register_single_output_kernel(OpId::BoxIoU,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-            return mps_box_iou_kernel(inputs[0], inputs[1]);
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Honor IouType (0=IoU,1=GIoU,2=DIoU,3=CIoU) like CPU:2720. Was always
+            // plain IoU.
+            int iou_type = static_cast<int>(attrs.get_int(AttrKey::IouType, 0));
+            return mps_box_iou_kernel(inputs[0], inputs[1], iou_type);
         });
     table.register_kernel(OpId::NMS,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 0.5));
+            // The dispatcher sets AttrKey::IouThreshold; MPS previously read
+            // AttrKey::Threshold (a different key) and so always used the 0.5
+            // default, ignoring the caller's iou_threshold. Read IouThreshold
+            // like CPU:2726.
+            float threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
             return {mps_nms_kernel(inputs[0], inputs[1], threshold)};
         });
 
@@ -1428,8 +1474,15 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
                                               lr, beta1, beta2, eps, bc1, bc2, wd);
         });
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            return mps_fused_softmax_cross_entropy_kernel(inputs[0], inputs[1]);
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Honor Reduction & ComputeGrad like every other backend (CPU:
+            // cpu_kernel_registry FusedSoftmaxCrossEntropy). Previously MPS
+            // dropped both attrs, always returning per-sample {batch} loss and an
+            // unscaled gradient.
+            bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, true);
+            std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
+            return mps_fused_softmax_cross_entropy_kernel(inputs[0], inputs[1],
+                                                          compute_grad, reduction);
         });
 
     // ================================================================
@@ -1600,6 +1653,16 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::AdvancedIndexPut);
     mps_accelerate_single(OpId::AffineGrid);
 
+    // Vision backward ops — previously unregistered on MPS, making
+    // upsample/grid_sample/affine_grid non-differentiable (backward threw
+    // "no kernel registered"). Route through the CPU reference like AffineGrid
+    // forward above so the same graph that trains on every other backend also
+    // trains on MPS. GridSampleBackward returns {grad_input, grad_grid} (multi);
+    // InterpolateBackward and AffineGridBackward are single-output.
+    mps_accelerate_single(OpId::InterpolateBackward);   // F029
+    mps_accelerate_multi(OpId::GridSampleBackward);     // F053
+    mps_accelerate_single(OpId::AffineGridBackward);    // F053
+
     // Conv backward ops (Accelerate/shared memory)
     mps_accelerate_multi(OpId::Conv1dForward);
     mps_accelerate_multi(OpId::Conv1dBackwardInput);
@@ -1617,6 +1680,13 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_multi(OpId::ConvTranspose3dBackwardInput);
     mps_accelerate_multi(OpId::ConvTranspose3dBackwardWeight);
     mps_accelerate_multi(OpId::DepthwiseConv2d);
+    // F040: register the 1d/3d depthwise fast paths too (CPU has real
+    // DepthwiseConv1d/3d kernels). Without these, MPS silently fell back to the
+    // generic grouped-conv path while the other 5 backends took the depthwise
+    // fast path — the two must stay numerically identical, so route MPS to the
+    // same CPU depthwise kernel the fast path uses.
+    mps_accelerate_multi(OpId::DepthwiseConv1d);
+    mps_accelerate_multi(OpId::DepthwiseConv3d);
 
     // Norm variants
     mps_accelerate_multi(OpId::BatchNorm2dBackward);

@@ -958,13 +958,23 @@ public:
     auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values, bool right = false) -> Tensor;
 
     // Quantized operations (native Int8 GPU shaders)
+    // per_channel_scales / per_channel_zps (F045): optional [out_features] /
+    // [out_channels] tensors. When non-null the shader uses per-output-channel
+    // weight scale/zero-point instead of the scalar arguments.
     auto dispatchQuantizedLinear(const Tensor& input, const Tensor& weight, const Tensor& bias,
                                   float input_scale, float weight_scale,
-                                  int32_t input_zp, int32_t weight_zp) -> Tensor;
+                                  int32_t input_zp, int32_t weight_zp,
+                                  const Tensor* per_channel_scales = nullptr,
+                                  const Tensor* per_channel_zps = nullptr) -> Tensor;
+    // Per-axis stride/padding/dilation + groups (F044).
     auto dispatchQuantizedConv2d(const Tensor& input, const Tensor& weight, const Tensor& bias,
-                                  int64_t stride, int64_t padding,
+                                  int64_t stride_h, int64_t stride_w,
+                                  int64_t pad_h, int64_t pad_w,
+                                  int64_t dil_h, int64_t dil_w, int64_t groups,
                                   float input_scale, float weight_scale,
-                                  int32_t input_zp, int32_t weight_zp) -> Tensor;
+                                  int32_t input_zp, int32_t weight_zp,
+                                  const Tensor* per_channel_scales = nullptr,
+                                  const Tensor* per_channel_zps = nullptr) -> Tensor;
 
     // Sparse tensor operations (raw CSR components from kernel registry dispatch)
     // Validate that a one-workgroup-per-row sparse dispatch (X dimension = M)

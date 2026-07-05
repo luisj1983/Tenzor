@@ -1318,13 +1318,27 @@ auto fused_attention(const Variable& Q,
 /**
  * @brief FlexAttention with autograd. score_mod_id selects a built-in score
  *        modification op (0 = none); see attention-contract.md for the registry.
+ *
+ * The parameterized built-ins need extra data that the plain (Q,K,V,scale,id)
+ * signature cannot carry, so they are supplied here as optional trailing args:
+ *   - ScoreModId 2 / 6 (sliding_window / sliding_window_sym): @p window_size
+ *     (full window, must be > 0).
+ *   - ScoreModId 5 (prefix_lm): @p prefix_length (first K positions attend
+ *     bidirectionally). Leaving it 0 makes prefix_lm degrade to plain causal.
+ *   - ScoreModId 3 (relpos_bias): @p relpos_bias, an additive bias tensor
+ *     broadcastable to the attention scores [..., S_q, S_k]. Required for id 3.
+ * These flow through both the forward dispatch and the saved-state backward so
+ * gradients stay consistent. Defaults keep every existing caller working.
  */
 auto flex_attention(const Variable& Q,
                     const Variable& K,
                     const Variable& V,
                     float scale,
                     int64_t score_mod_id = 0,
-                    const Tensor& block_mask = Tensor{}) -> Variable;
+                    const Tensor& block_mask = Tensor{},
+                    int64_t window_size = 0,
+                    int64_t prefix_length = 0,
+                    const Tensor& relpos_bias = Tensor{}) -> Variable;
 
 // ============================================================================
 // Audit E.7 continuation: autograd wrappers for additional OpIds.

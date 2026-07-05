@@ -144,6 +144,31 @@ TEST_P(ConvTranspose1dDilationTest, BackwardFlowsThroughDilation) {
     EXPECT_TRUE(wnz) << "weight grads must be non-zero with dilation=2";
 }
 
+// R11 regression: the 1D->2D lowering must pin OutputPaddingH=0 for the
+// synthetic singleton H axis. With output_padding>0 the earlier code let the
+// 2D kernel apply output_padding to the H axis (H became output_padding+1),
+// so squeeze(2) no-op'd and the result was a wrong-rank 4-D tensor sliced on
+// the wrong axis. Only output_padding>0 exercises this path.
+TEST_P(ConvTranspose1dDilationTest, OutputPaddingGreaterThanZero) {
+    // L_in=8, stride=2, pad=0, k=3, dilation=1, output_padding=1:
+    //   L_out = (8-1)*2 - 0 + 1*(3-1) + 1 + 1 = 14 + 2 + 1 + 1 = 18
+    ConvTranspose1d layer(
+        /*in_channels=*/3, /*out_channels=*/5,
+        /*kernel_size=*/3, /*stride=*/2,
+        /*padding=*/0, /*output_padding=*/1,
+        /*groups=*/1, /*bias=*/true,
+        /*dilation=*/1);
+    layer.to(device);
+
+    auto input = randn({2, 3, 8}, DType::Float32, device);
+    auto output = layer.forward(Variable(input, false));
+    auto out_shape = output.shape();
+    ASSERT_EQ(out_shape.size(), 3u) << "output_padding>0 must stay 3-D (R11)";
+    EXPECT_EQ(out_shape[0], 2);
+    EXPECT_EQ(out_shape[1], 5);
+    EXPECT_EQ(out_shape[2], 18) << "ConvTranspose1d output_padding=1 output length";
+}
+
 INSTANTIATE_BACKEND_TESTS(ConvTranspose1dDilationTest);
 
 }  // namespace

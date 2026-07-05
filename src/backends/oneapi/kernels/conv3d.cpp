@@ -1706,6 +1706,20 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                                const std::vector<int64_t>& output_padding,
                                const std::vector<int64_t>& dilation, int64_t groups,
                                sycl::queue& queue) -> Tensor {
+    // BFloat16: widen to Float32, compute, narrow back (mirroring the Float16
+    // branch below which widens per-element in-kernel, and the backward_weight
+    // kernel which widens F16/BF16). Previously BF16 threw.
+    if (input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        std::optional<Tensor> b32;
+        if (bias != nullptr) b32 = bias->to(DType::Float32);
+        Tensor out = conv_transpose3d_forward(
+            input.to(DType::Float32), weight.to(DType::Float32),
+            b32 ? &*b32 : nullptr,
+            stride, padding, output_padding, dilation, groups, queue);
+        return out.to(orig);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 

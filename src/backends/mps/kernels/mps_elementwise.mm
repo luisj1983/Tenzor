@@ -127,6 +127,14 @@ static std::string shader_name_for_dtype(const std::string& base, DType dtype) {
 // Dispatch a binary element-wise operation
 Tensor dispatch_binary(const std::string& shader_name,
                        const Tensor& a_in, const Tensor& b_in) {
+    // BFloat16 has no dedicated Metal shader variant; widen both operands to
+    // Float32, compute, narrow back. Metal has no double type so Float64 is not
+    // routed here (left to throw explicitly in shader_name_for_dtype).
+    if (a_in.dtype() == DType::BFloat16 || b_in.dtype() == DType::BFloat16) {
+        return dispatch_binary(shader_name, a_in.to(DType::Float32),
+                               b_in.to(DType::Float32))
+            .to(DType::BFloat16);
+    }
     // The element-wise Metal kernels index a[id]/b[id] over the output numel and
     // assume both operands are contiguous with the output shape. So we must
     // broadcast-and-materialize first; otherwise b[id] reads past the end of a
@@ -178,6 +186,13 @@ Tensor dispatch_binary(const std::string& shader_name,
 
 // Dispatch a unary element-wise operation
 Tensor dispatch_unary(const std::string& shader_name, const Tensor& input) {
+    // BFloat16 has no dedicated Metal shader variant; widen to Float32, compute,
+    // narrow back (bit-lossy narrow, matches CPU widen->compute->narrow). Metal
+    // has no double type so Float64 is not routed here (left to throw explicitly).
+    if (input.dtype() == DType::BFloat16) {
+        return dispatch_unary(shader_name, input.to(DType::Float32))
+            .to(DType::BFloat16);
+    }
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -218,6 +233,29 @@ void dispatch_inplace_unary(const std::string& shader_name, Tensor& a,
                             std::optional<float> scalar_param = std::nullopt) {
     size_t numel = a.numel();
     if (numel == 0) return;
+
+    // BFloat16 has no dedicated Metal shader variant; widen to Float32 in a temp
+    // tensor, run the activation in place there, narrow back, and blit the result
+    // bytes into a's own BFloat16 buffer to preserve in-place semantics. Metal
+    // has no double type so Float64 is not routed here.
+    if (a.dtype() == DType::BFloat16) {
+        Tensor tmp = a.to(DType::Float32);
+        dispatch_inplace_unary(shader_name, tmp, scalar_param);
+        Tensor narrowed = tmp.to(DType::BFloat16);
+        size_t nb = numel * static_cast<size_t>(dtype_size(DType::BFloat16));
+        id<MTLBuffer> dst = get_buffer(a);
+        id<MTLBuffer> src = get_buffer(narrowed);
+        id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        [blit copyFromBuffer:src sourceOffset:0
+                    toBuffer:dst destinationOffset:0
+                        size:nb];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
+        return;
+    }
 
     auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
     id<MTLBuffer> buf_in = get_buffer(a);
@@ -496,14 +534,21 @@ Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices) {
     ensure_initialized();
 
     // embedding_kernel is declared `device const float*` only — no _f16 variant
-    // exists. Reading a Float16 weight table through the F32 shader reinterprets
-    // 2-byte storage as 4-byte float (garbage output + a 2x heap over-read), so
-    // reject non-Float32 weights until typed embedding shaders land.
+    // exists. Embedding is a pure gather (index copy, no arithmetic), so a
+    // Float16/BFloat16 table can be widened to Float32 losslessly (every F16/BF16
+    // value is exactly representable in F32), gathered, then narrowed back to the
+    // original dtype with no loss — matching CPU/CUDA which support F16/BF16
+    // tables. Metal has no double type, so Float64 (a genuinely lossy widen) and
+    // other dtypes remain rejected.
+    if (weight.dtype() == DType::Float16 || weight.dtype() == DType::BFloat16) {
+        return mps_embedding_kernel(weight.to(DType::Float32), indices)
+            .to(weight.dtype());
+    }
     if (weight.dtype() != DType::Float32) {
         throw std::runtime_error(
             std::string("MPS embedding: unsupported weight dtype ") +
             std::string(dtype_name(weight.dtype())) +
-            " (only Float32 implemented)");
+            " (only Float32/Float16/BFloat16 implemented; Metal has no double)");
     }
 
     auto weight_shape = weight.shape();
@@ -553,6 +598,14 @@ Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices) {
 
 Tensor mps_softmax_kernel(const Tensor& input, int64_t dim) {
     ensure_initialized();
+
+    // BFloat16 has no dedicated Metal softmax variant; widen to Float32, compute,
+    // narrow back (matches CPU widen->compute->narrow). Metal has no double type
+    // so Float64 is not routed here (shader_name_for_dtype throws for it).
+    if (input.dtype() == DType::BFloat16) {
+        return mps_softmax_kernel(input.to(DType::Float32), dim)
+            .to(DType::BFloat16);
+    }
 
     auto shape = input.shape();
     // Normalize a negative dim before indexing shape[dim] (shape() is an
@@ -715,6 +768,17 @@ Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
                           int64_t dilation_h, int64_t dilation_w,
                           int64_t groups) {
     ensure_initialized();
+
+    // BFloat16 has no MPSGraph datatype; widen input+weight to Float32, run the
+    // conv, narrow the result back (matches CPU which has BF16 conv, and the
+    // widen->compute->narrow used by MPS col2im). Metal has no double type, so
+    // Float64 stays rejected below.
+    if (input.dtype() == DType::BFloat16) {
+        Tensor out32 = mps_conv2d_kernel(
+            input.to(DType::Float32), weight.to(DType::Float32),
+            stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w, groups);
+        return out32.to(DType::BFloat16);
+    }
 
     // Native MPSGraph Conv2d. Uses MPSGraph's convolution2D API directly
     // (NCHW input + OIHW weights), which handles per-axis padding, stride,
@@ -1144,6 +1208,10 @@ Tensor mps_tanh_backward_kernel(const Tensor& grad, const Tensor& tanh_out) {
 // Helper: dispatch a unary-with-one-scalar-param shader
 static Tensor dispatch_unary_scalar1(const std::string& shader_name,
                                       const Tensor& input, float param1) {
+    if (input.dtype() == DType::BFloat16) {
+        return dispatch_unary_scalar1(shader_name, input.to(DType::Float32), param1)
+            .to(DType::BFloat16);
+    }
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -1176,6 +1244,11 @@ static Tensor dispatch_unary_scalar1(const std::string& shader_name,
 static Tensor dispatch_binary_scalar1(const std::string& shader_name,
                                        const Tensor& a, const Tensor& b,
                                        float param1) {
+    if (a.dtype() == DType::BFloat16 || b.dtype() == DType::BFloat16) {
+        return dispatch_binary_scalar1(shader_name, a.to(DType::Float32),
+                                       b.to(DType::Float32), param1)
+            .to(DType::BFloat16);
+    }
     auto shape = a.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, a.dtype(), a.device());
@@ -1210,6 +1283,11 @@ static Tensor dispatch_binary_scalar1(const std::string& shader_name,
 static Tensor dispatch_unary_scalar2(const std::string& shader_name,
                                       const Tensor& input,
                                       float param1, float param2) {
+    if (input.dtype() == DType::BFloat16) {
+        return dispatch_unary_scalar2(shader_name, input.to(DType::Float32),
+                                      param1, param2)
+            .to(DType::BFloat16);
+    }
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -1339,6 +1417,12 @@ Tensor mps_log_sigmoid_backward_kernel(const Tensor& grad, const Tensor& input) 
 Tensor mps_softmax_backward_kernel(const Tensor& grad_output, const Tensor& softmax_out,
                                     int64_t dim) {
     ensure_initialized();
+    // BFloat16 has no dedicated Metal variant; widen to Float32, compute, narrow.
+    if (grad_output.dtype() == DType::BFloat16) {
+        return mps_softmax_backward_kernel(grad_output.to(DType::Float32),
+                                           softmax_out.to(DType::Float32), dim)
+            .to(DType::BFloat16);
+    }
     auto shape = grad_output.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -1404,6 +1488,13 @@ Tensor mps_softmax_backward_kernel(const Tensor& grad_output, const Tensor& soft
 }
 
 Tensor mps_logsoftmax_kernel(const Tensor& input, int64_t dim) {
+    // BFloat16 has no dedicated Metal variant; widen to Float32, compute, narrow.
+    // (The self-recursion below re-enters with Float32, so this guard is a no-op
+    // on those internal calls.)
+    if (input.dtype() == DType::BFloat16) {
+        return mps_logsoftmax_kernel(input.to(DType::Float32), dim)
+            .to(DType::BFloat16);
+    }
     ensure_initialized();
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -1468,6 +1559,12 @@ Tensor mps_logsoftmax_kernel(const Tensor& input, int64_t dim) {
 Tensor mps_logsoftmax_backward_kernel(const Tensor& grad_output, const Tensor& logsoftmax_out,
                                        int64_t dim) {
     ensure_initialized();
+    // BFloat16 has no dedicated Metal variant; widen to Float32, compute, narrow.
+    if (grad_output.dtype() == DType::BFloat16) {
+        return mps_logsoftmax_backward_kernel(grad_output.to(DType::Float32),
+                                              logsoftmax_out.to(DType::Float32), dim)
+            .to(DType::BFloat16);
+    }
     auto shape = grad_output.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;

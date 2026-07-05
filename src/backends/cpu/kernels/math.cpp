@@ -9223,7 +9223,12 @@ auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
                     norm_a += av * av;
                     norm_b += bv * bv;
                 }
-                T denom = std::sqrt(norm_a) * std::sqrt(norm_b) + static_cast<T>(eps);
+                // PyTorch uses a multiplicative floor (clamp_min) on the
+                // denominator, dot / max(||a||*||b||, eps), NOT an additive eps.
+                // The additive form caps similarity below 1 and biases toward 0.
+                T norm_prod = std::sqrt(norm_a) * std::sqrt(norm_b);
+                T eps_t = static_cast<T>(eps);
+                T denom = norm_prod > eps_t ? norm_prod : eps_t;
                 out[o * inner + i] = dot_val / denom;
             }
         }

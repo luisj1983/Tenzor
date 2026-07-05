@@ -1952,6 +1952,19 @@ auto conv_transpose2d_forward(
     int64_t opH, int64_t opW, int64_t dH, int64_t dW, int64_t groups,
     sycl::queue& queue
 ) -> Tensor {
+    // BFloat16: widen to Float32, compute, narrow back (mirroring the Float16
+    // branch below which widens per-element in-kernel). Previously BF16 threw.
+    if (input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        std::optional<Tensor> b32;
+        if (bias != nullptr) b32 = bias->to(DType::Float32);
+        Tensor out = conv_transpose2d_forward(
+            input.to(DType::Float32), weight.to(DType::Float32),
+            b32 ? &*b32 : nullptr,
+            sH, sW, pH, pW, opH, opW, dH, dW, groups, queue);
+        return out.to(orig);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 

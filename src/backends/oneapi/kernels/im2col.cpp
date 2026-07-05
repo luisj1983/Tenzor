@@ -217,9 +217,15 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
     // Shape: [batch, channels * kernel_h * kernel_w, output_h * output_w]
     Tensor output({N, C * K_h * K_w, H_out * W_out}, input.dtype(), input.device());
 
+    // The device kernels index the input as dense NCHW (input_ptr + n*C*H*W and
+    // (c*H + h_in)*W + w_in), so a non-contiguous (permuted/sliced) view would be
+    // read at the wrong offsets. Materialize a contiguous copy first, matching
+    // the CPU/Vulkan im2col.
+    const Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
-        const float* input_ptr = get_data_ptr<const float>(input);
+        const float* input_ptr = get_data_ptr<const float>(input_c);
         float* output_ptr = get_data_ptr<float>(output);
 
         // Process each batch
@@ -233,7 +239,7 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         }
     }
     else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = get_data_ptr<const double>(input);
+        const double* input_ptr = get_data_ptr<const double>(input_c);
         double* output_ptr = get_data_ptr<double>(output);
 
         for (int64_t n = 0; n < N; ++n) {
@@ -249,7 +255,7 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         // Wave F2: native F16 — im2col is a pure data shuffle so no F32 widen
         // is needed; the SYCL half type is opaque to the algorithm.
         const sycl::half* input_ptr =
-            reinterpret_cast<const sycl::half*>(input.data_ptr());
+            reinterpret_cast<const sycl::half*>(input_c.data_ptr());
         sycl::half* output_ptr =
             reinterpret_cast<sycl::half*>(const_cast<void*>(output.data_ptr()));
         for (int64_t n = 0; n < N; ++n) {
@@ -266,7 +272,7 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         // (T(0) = 0 in BF16, same as uint16_t(0)) so we template directly on
         // uint16_t storage. No F32 widen, no tensor-wide cast.
         const uint16_t* input_ptr =
-            reinterpret_cast<const uint16_t*>(input.data_ptr());
+            reinterpret_cast<const uint16_t*>(input_c.data_ptr());
         uint16_t* output_ptr =
             reinterpret_cast<uint16_t*>(const_cast<void*>(output.data_ptr()));
         for (int64_t n = 0; n < N; ++n) {
@@ -361,9 +367,14 @@ auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
     // Shape: [batch, channels, height, width]
     Tensor output({N, C, H, W}, input.dtype(), input.device());
 
+    // The device kernels index the column buffer as dense [N, C*kH*kW, L], so a
+    // non-contiguous (permuted/sliced) view would be read at the wrong offsets.
+    // Materialize a contiguous copy first (mirrors im2col above).
+    const Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
-        const float* input_ptr = get_data_ptr<const float>(input);
+        const float* input_ptr = get_data_ptr<const float>(input_c);
         float* output_ptr = get_data_ptr<float>(output);
 
         // Process each batch
@@ -377,7 +388,7 @@ auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         }
     }
     else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = get_data_ptr<const double>(input);
+        const double* input_ptr = get_data_ptr<const double>(input_c);
         double* output_ptr = get_data_ptr<double>(output);
 
         // Process each batch
@@ -395,7 +406,7 @@ auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         // dtype coverage (and CUDA's col2im_kernel_f16). Used by the no-oneDNN
         // conv-backward fallback for half-precision.
         const DType in_dt = input.dtype();
-        Tensor input_f32 = input.to(DType::Float32);
+        Tensor input_f32 = input_c.to(DType::Float32);
         Tensor output_f32({N, C, H, W}, DType::Float32, input.device());
         const float* input_ptr = get_data_ptr<const float>(input_f32);
         float* output_ptr = get_data_ptr<float>(output_f32);

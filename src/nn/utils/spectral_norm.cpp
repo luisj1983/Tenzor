@@ -99,8 +99,15 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
                            : weight.dtype();
 
     // Initialise u, v with random unit vectors (raw Tensor, no autograd).
-    sn->u_ = randn({h}, iter_dtype, weight.device());
-    sn->v_ = randn({w_dim}, iter_dtype, weight.device());
+    // F061: draw on CPU then copy to the weight's device so the initial
+    // vectors are backend-independent (on-device RNG diverges between
+    // backends), exactly like nn::init.
+    sn->u_ = randn({h}, iter_dtype, Device::cpu());
+    sn->v_ = randn({w_dim}, iter_dtype, Device::cpu());
+    if (weight.device() != Device::cpu()) {
+        sn->u_ = sn->u_.to(weight.device());
+        sn->v_ = sn->v_.to(weight.device());
+    }
 
     auto unit_normalise = [](Tensor& vec) {
         Tensor n = norm(vec);
@@ -174,14 +181,29 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
 }
 
 auto SpectralNorm::power_iteration(const Tensor& weight_2d_in) -> void {
+    // F060: keep the power-iteration state on the same device as the weight.
+    // u_/v_/sigma_ are raw Tensors (not registered module state), so
+    // Module::to(device) moves only weight_orig_ and the u/v buffers and
+    // strands these on the old device => a cross-device matmul below. Re-home
+    // them to the weight's device so the reparameterisation survives
+    // model.to(device).
+    const Device dev = weight_2d_in.device();
+    if (u_.device() != dev)     u_ = u_.to(dev);
+    if (v_.device() != dev)     v_ = v_.to(dev);
+    if (sigma_.device() != dev) sigma_ = sigma_.to(dev);
+
     // Run the iteration in u_'s dtype (Float32 when the weight is half
     // precision, see apply()), widening the incoming weight to match so the
     // matmul/norm/div chain does not lose precision at F16/BF16.
     Tensor weight_2d = (weight_2d_in.dtype() != u_.dtype())
                            ? weight_2d_in.to(u_.dtype())
                            : weight_2d_in;
-    // weight_2d is (h, w)
-    Tensor wt = transpose(weight_2d, 0, 1);  // (w, h)
+    // weight_2d is (h, w). F064: for a complex weight the adjoint (conjugate
+    // transpose) W^H replaces W^T so the iteration estimates the largest
+    // singular value correctly; the real path is unchanged.
+    const bool is_cplx = weight_2d.is_complex();
+    Tensor wt = is_cplx ? ::tenzor::conj(transpose(weight_2d, 0, 1))
+                        : transpose(weight_2d, 0, 1);  // (w, h)
 
     for (int64_t i = 0; i < n_power_iterations_; ++i) {
         // v_new = W^T @ u, reshape from (w,1) -> (w,)
@@ -215,8 +237,10 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d_in) -> void {
         u_ = div(u_div, u_safe);
     }
 
-    // sigma = u^T W v
-    Tensor u_row = reshape(u_, {1, static_cast<int64_t>(u_.shape()[0])});
+    // sigma = u^H W v  (F064: u is conjugated for complex so sigma is the real
+    // spectral norm; identity for real weights).
+    Tensor u_for_sigma = is_cplx ? ::tenzor::conj(u_) : u_;
+    Tensor u_row = reshape(u_for_sigma, {1, static_cast<int64_t>(u_.shape()[0])});
     Tensor v_col = reshape(v_, {static_cast<int64_t>(v_.shape()[0]), 1});
     Tensor wv = matmul(weight_2d, v_col);
     sigma_ = reshape(matmul(u_row, wv), {1});

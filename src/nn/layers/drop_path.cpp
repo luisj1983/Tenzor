@@ -82,7 +82,16 @@ auto DropPath::forward_impl(const Variable& input) -> Variable {
     // reason.
     Device dev = input.tensor().device();
     DType dt = input.tensor().dtype();
-    auto random_tensor = rand(mask_shape, DType::Float32, dev);
+    // Draw the uniforms on CPU, then copy to the input's device. On-device RNG
+    // (rand(..., dev)) yields a backend-divergent mask, so a seeded run would
+    // produce different masks on CPU vs CUDA vs ROCm etc. Generating on CPU and
+    // transferring (like nn::init) makes the mask reproducible across backends
+    // (F095). The inverted-dropout 1/(1-p) scaling and eval no-op above are
+    // unchanged.
+    auto random_tensor = rand(mask_shape, DType::Float32, Device::cpu());
+    if (dev.type != Device::Type::CPU) {
+        random_tensor = random_tensor.to(dev);
+    }
     auto threshold = full(mask_shape, static_cast<float>(p_), DType::Float32, dev);
     auto mask_f32 = gt(random_tensor, threshold).to(DType::Float32);
     auto mask_data = (dt == DType::Float32) ? mask_f32 : mask_f32.to(dt);

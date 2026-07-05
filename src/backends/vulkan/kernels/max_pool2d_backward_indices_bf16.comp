@@ -1,13 +1,15 @@
 #version 450
-#extension GL_EXT_shader_atomic_float : enable
 
-// Max Pooling 2D Backward Pass for BFloat16 using pre-computed indices
-// We work in float32 for the atomic operations, then pack back to bfloat16
+// Max Pooling 2D Backward Pass for BFloat16 using pre-computed indices.
+// grad_input is a PACKED-BF16 buffer (2 bytes/elem). A float32 atomicAdd into it
+// would write 4 bytes per element index — OOB for the upper half and corrupting
+// adjacent packed halves. Accumulate into packed-BF16 via a CAS loop, mirroring
+// max_pool2d_backward_indices_f16.comp::atomicAddF16.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed bfloat16 pairs
 layout(binding = 1) buffer Indices { int indices_data[]; };      // Int32 argmax indices (forward stores Int32)
-layout(binding = 2) buffer GradInput { float grad_input[]; };    // Work in float32 for atomic ops
+layout(binding = 2) buffer GradInput { uint grad_input[]; };     // Packed BF16, CAS-accumulated
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -21,6 +23,32 @@ float bf16_to_float(uint bits) {
     return uintBitsToFloat((bits & 0xFFFFu) << 16);
 }
 
+// Round-to-nearest-even conversion of a float32 to bfloat16 (low 16 bits).
+uint float_to_bf16(float val) {
+    uint b = floatBitsToUint(val);
+    return (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+}
+
+// Atomically add a float value to a packed BF16 buffer element via a CAS loop.
+void atomicAddBF16(uint flat_idx, float add_val) {
+    uint word_idx = flat_idx / 2u;
+    uint half_idx = flat_idx % 2u;
+    uint mask = 0xFFFFu << (half_idx * 16u);
+
+    uint old_val = grad_input[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        uint bits = (expected >> (half_idx * 16u)) & 0xFFFFu;
+        float current = bf16_to_float(bits);
+        float updated = current + add_val;
+        uint new_bits = float_to_bf16(updated) & 0xFFFFu;
+        new_val = (expected & ~mask) | (new_bits << (half_idx * 16u));
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -29,10 +57,10 @@ void main() {
     }
 
     // Read gradient from packed bfloat16
-    uint grad_word_idx = idx / 2;
-    uint grad_half_idx = idx % 2;
+    uint grad_word_idx = idx / 2u;
+    uint grad_half_idx = idx % 2u;
     uint grad_packed = grad_output[grad_word_idx];
-    uint grad_half = (grad_half_idx == 0) ? (grad_packed & 0xFFFFu) : (grad_packed >> 16);
+    uint grad_half = (grad_half_idx == 0u) ? (grad_packed & 0xFFFFu) : (grad_packed >> 16);
     float grad = bf16_to_float(grad_half);
 
     // Plane-local index (in_y*W + in_x) -> global offset via the (n,c) plane base.
@@ -41,6 +69,6 @@ void main() {
     int target_idx = int(nc * params.in_plane) + plane_local;
 
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
-        atomicAdd(grad_input[target_idx], grad);
+        atomicAddBF16(uint(target_idx), grad);
     }
 }

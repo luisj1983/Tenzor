@@ -1095,6 +1095,10 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
         shader_name = "max_pool2d_backward_indices_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "max_pool2d_backward_indices_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        // Packed-BF16 grad_out read + CAS-accumulated packed-BF16 grad_in,
+        // mirroring the F16 path (forward already supports BF16).
+        shader_name = "max_pool2d_backward_indices_bf16";
     } else if (grad_output.dtype() != DType::Float32) {
         throw std::runtime_error("Unsupported dtype for max_pool2d_backward_with_indices");
     }
@@ -1105,15 +1109,16 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
     const void* buffer_indices = const_cast<void*>(indices.data_ptr());
     const void* buffer_grad_in = grad_input.data_ptr();
 
-    // F16 binds packed-F16 buffers (grad_out read, grad_in CAS-accumulated);
+    // F16/BF16 bind packed 16-bit buffers (grad_out read, grad_in CAS-accumulated);
     // round those ranges up to whole 32-bit words so an odd-numel tail word stays
     // in-bounds. Indices are Int32, unaffected.
-    const bool idx_is_f16 = (grad_output.dtype() == DType::Float16);
-    size_t grad_out_size = idx_is_f16
+    const bool idx_is_half = (grad_output.dtype() == DType::Float16 ||
+                              grad_output.dtype() == DType::BFloat16);
+    size_t grad_out_size = idx_is_half
         ? ((static_cast<size_t>(grad_out_numel) + 1) / 2) * sizeof(uint32_t)
         : grad_out_numel * grad_output.dtype_size();
     size_t indices_size = indices.numel() * indices.dtype_size();
-    size_t grad_in_size = idx_is_f16
+    size_t grad_in_size = idx_is_half
         ? ((static_cast<size_t>(grad_in_numel) + 1) / 2) * sizeof(uint32_t)
         : grad_in_numel * grad_input.dtype_size();
 

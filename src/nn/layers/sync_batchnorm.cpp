@@ -117,7 +117,12 @@ public:
             all_reduce_fn_(sum_grad_xnorm);
         }
 
-        const float inv_global_count = 1.0f / static_cast<float>(global_count_);
+        // Divide by the global element count in double: a float divisor rounds
+        // the reciprocal and, worse, static_cast<float>(count) saturates for
+        // counts > 2^24. static_cast<double> is exact to 2^53 and preserves full
+        // precision for F64 stats; for F32 working tensors the double scalar is
+        // simply rounded on multiply, so both dtypes are handled correctly (F097).
+        const double inv_global_count = 1.0 / static_cast<double>(global_count_);
         auto invstd_3d = invstd.unsqueeze(0).unsqueeze(-1).contiguous();
 
         auto term1 = (sum_grad * inv_global_count).contiguous();
@@ -238,8 +243,11 @@ public:
             ? distributed_all_reduce(sum_gxh_local, pg_, distributed::ReduceOp::SUM)
             : sum_gxh_local;
 
-        auto mean_gxh    = sum_g_global   / static_cast<float>(batch);
-        auto mean_gxh_xh = sum_gxh_global / static_cast<float>(batch);
+        // Double divisor: exact integer->float conversion (survives counts >
+        // 2^24) and full precision for F64 stats; F32 tensors just round the
+        // scalar on divide (F097).
+        auto mean_gxh    = sum_g_global   / static_cast<double>(batch);
+        auto mean_gxh_xh = sum_gxh_global / static_cast<double>(batch);
 
         auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
         auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;

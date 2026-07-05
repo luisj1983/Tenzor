@@ -7,6 +7,7 @@
 
 #include "../../autograd/ops.hpp"
 #include "../../ops/creation.hpp"
+#include "../utils/variable_cast.hpp"
 
 namespace tenzor {
 namespace nn {
@@ -61,25 +62,45 @@ public:
         // Compute ||x1 - x2||_p via tensor ops with autograd
         using namespace tenzor;
         auto diff = x1 - x2;
+
+        // Widen Float16/BFloat16 to Float32 for the whole distance computation,
+        // then narrow the result back (F096). In half precision the p==2
+        // squared abs-diff overflows for |diff| > ~255 (F16 max 65504), and the
+        // eps guard (built at the input dtype) rounds to 0. variable_cast is
+        // autograd-aware so gradients flow back through the cast. Float64 is
+        // kept as-is (already more precise than Float32).
+        const DType orig_dtype = diff.tensor().dtype();
+        const bool widen = (orig_dtype == DType::Float16 ||
+                            orig_dtype == DType::BFloat16);
+        if (widen) {
+            diff = nn::variable_cast(diff, DType::Float32);
+        }
+        const DType compute_dtype = diff.tensor().dtype();
+
         // Add eps to the signed difference before taking the norm, matching the
-        // documented formula ||x1 - x2 + eps||_p (PyTorch semantics).
+        // documented formula ||x1 - x2 + eps||_p (PyTorch semantics). eps is
+        // built in the (widened) compute dtype so it doesn't round to 0.
         auto shape = diff.tensor().shape();
         auto eps_var = Variable(tenzor::full({shape.begin(), shape.end()}, static_cast<float>(eps_),
-                                             diff.tensor().dtype(), diff.tensor().device()), false);
+                                             compute_dtype, diff.tensor().device()), false);
         diff = diff + eps_var;
         auto abs_diff = abs(diff);
 
+        Variable result;
         if (p_ == 1.0) {
-            return sum(abs_diff, -1, keepdim_);
+            result = sum(abs_diff, -1, keepdim_);
         } else if (p_ == 2.0) {
             auto sq = abs_diff * abs_diff;
             auto s = sum(sq, -1, keepdim_);
-            return sqrt(s);
+            result = sqrt(s);
         } else {
             auto powered = pow(abs_diff, static_cast<float>(p_));
             auto s = sum(powered, -1, keepdim_);
-            return pow(s, static_cast<float>(1.0 / p_));
+            result = pow(s, static_cast<float>(1.0 / p_));
         }
+
+        // Narrow back to the original half dtype when we widened.
+        return widen ? nn::variable_cast(result, orig_dtype) : result;
     }
 
     auto operator()(const Variable& x1, const Variable& x2) -> Variable {

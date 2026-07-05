@@ -1255,9 +1255,10 @@ auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
     auto norm_a = tenzor::norm(a, 2.0, dim, false);
     auto norm_b = tenzor::norm(b, 2.0, dim, false);
     auto norms = tenzor::mul(norm_a, norm_b);
-    // Add eps to denominator
-    auto eps_tensor = tenzor::full_like(norms, eps);
-    auto denom = tenzor::add(norms, eps_tensor);
+    // PyTorch uses a multiplicative floor (clamp_min) on the denominator:
+    // dot / max(||a||*||b||, eps). The additive eps caps similarity below 1
+    // and biases toward 0, so it must NOT be used here.
+    auto denom = tenzor::clamp_min(norms, eps);
     return tenzor::div(dot, denom);
 }
 

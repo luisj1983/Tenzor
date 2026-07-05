@@ -38,8 +38,22 @@ void load_param_in_place(Tensor& dst, const Tensor& src,
     if (adapted.device() != dst.device()) {
         adapted = adapted.to(dst.device());
     }
-    dst.zero_();
-    add_(dst, adapted);
+    // In-place copy that preserves the live Storage handle (R.18 invariant):
+    // additive reconstruction (``zero_(); add_()``) is only valid for real
+    // floating-point dtypes. For Bool, ``0 + x`` is NOT copy semantics, and
+    // integer/Bool AddInplace kernels are frequently unregistered on
+    // accelerators (and absent even on CPU for Bool), so those must not route
+    // through add_(). Bool masks and the Int64 ``num_batches_tracked`` counter
+    // are never aliased by FSDP2 shards or save_for_backward captures, so
+    // rebinding their Storage via a value copy is safe and correct for every
+    // dtype; the storage-preservation guarantee only matters for the trainable
+    // floating-point parameters, which keep the in-place additive path.
+    if (::tenzor::is_floating_type(dst.dtype())) {
+        dst.zero_();
+        add_(dst, adapted);
+    } else {
+        dst = adapted.clone();
+    }
 }
 } // namespace detail
 
@@ -71,26 +85,40 @@ Module::~Module() {
 auto Module::parameters() -> std::vector<std::shared_ptr<Variable>> {
     std::vector<std::shared_ptr<Variable>> params;
 
+    // De-duplicate by underlying Variable identity so a tied weight (the same
+    // Variable registered under multiple names, or shared across submodules)
+    // is returned exactly once. Otherwise the optimiser would step it twice.
+    // Applied at every recursion level, so a Variable shared between two
+    // submodules collapses to a single entry at the common ancestor.
+    std::unordered_set<const Variable*> seen;
+    auto add = [&](const std::shared_ptr<Variable>& p) {
+        if (p && seen.insert(p.get()).second) {
+            params.push_back(p);
+        }
+    };
+
     // Add own parameters in a consistent order (weight before bias)
     // This ensures tests can rely on params[0] being weight
-    if (parameters_.find("weight") != parameters_.end()) {
-        params.push_back(parameters_["weight"]);
+    if (auto it = parameters_.find("weight"); it != parameters_.end()) {
+        add(it->second);
     }
-    if (parameters_.find("bias") != parameters_.end()) {
-        params.push_back(parameters_["bias"]);
+    if (auto it = parameters_.find("bias"); it != parameters_.end()) {
+        add(it->second);
     }
 
     // Add any other parameters not named "weight" or "bias"
     for (auto& [name, param] : parameters_) {
         if (name != "weight" && name != "bias") {
-            params.push_back(param);
+            add(param);
         }
     }
 
     // Add submodule parameters
     for (auto& [name, module] : submodules_) {
         auto sub_params = module->parameters();
-        params.insert(params.end(), sub_params.begin(), sub_params.end());
+        for (auto& sub : sub_params) {
+            add(sub);
+        }
     }
 
     return params;
@@ -120,19 +148,30 @@ auto Module::own_parameters() -> std::vector<std::shared_ptr<Variable>> {
 auto Module::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
     std::vector<std::pair<std::string, std::shared_ptr<Variable>>> params;
 
-    for (auto& [name, param] : parameters_) {
-        params.emplace_back(name, param);
-    }
+    // De-duplicate by underlying Variable identity (PyTorch's
+    // named_parameters(remove_duplicate=True) default). A Variable tied under
+    // multiple names is emitted once under its first (alphabetically-first
+    // among own names, else first-encountered ancestor prefix) name.
+    std::unordered_set<const Variable*> seen;
 
-    // Sort own parameters by name for deterministic ordering
-    // (parameters_ is an unordered_map — iteration order is non-deterministic)
-    std::sort(params.begin(), params.end(),
+    // Sort own parameters by name FIRST so the retained name for an
+    // intra-module tie is deterministic (parameters_ is an unordered_map).
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> own(
+        parameters_.begin(), parameters_.end());
+    std::sort(own.begin(), own.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (auto& [name, param] : own) {
+        if (param && seen.insert(param.get()).second) {
+            params.emplace_back(name, param);
+        }
+    }
 
     for (auto& [name, module] : submodules_) {
         auto sub_params = module->named_parameters();
         for (auto& [sub_name, sub_param] : sub_params) {
-            params.emplace_back(name + "." + sub_name, sub_param);
+            if (sub_param && seen.insert(sub_param.get()).second) {
+                params.emplace_back(name + "." + sub_name, sub_param);
+            }
         }
     }
 
@@ -159,6 +198,12 @@ auto Module::to(Device device) -> void {
         // std::cerr << "[DEBUG] Transfer parameter '" << name << "' from device "
         //           << static_cast<int>(param->tensor().device().type) << " to " << static_cast<int>(device.type) << std::endl;
         param->tensor() = param->tensor().to(device);
+        // Keep any accumulated gradient co-located with its data. A backward()
+        // before to(device) strands .grad() on the old device; a subsequent
+        // optimiser step (data - lr*grad) would then be a cross-device op.
+        if (auto& g = param->mutable_grad(); g.has_value()) {
+            *g = g->to(device);
+        }
         // std::cerr << "[DEBUG] Parameter '" << name << "' transferred successfully" << std::endl;
     }
 
@@ -166,6 +211,9 @@ auto Module::to(Device device) -> void {
     // std::cerr << "[DEBUG] Transferring " << buffers_.size() << " buffers..." << std::endl;
     for (auto& [_, buffer] : buffers_) {
         buffer->tensor() = buffer->tensor().to(device);
+        if (auto& g = buffer->mutable_grad(); g.has_value()) {
+            *g = g->to(device);
+        }
     }
 
     // Recursively transfer submodules
@@ -186,23 +234,38 @@ auto Module::to(Device device) -> void {
 auto Module::to(DType dtype) -> void {
     // Only convert floating-point tensors (matches PyTorch behavior).
     // Integer buffers (e.g. num_batches_tracked) are preserved.
-    auto is_floating = [](DType dt) {
-        return dt == DType::Float32 || dt == DType::Float64 ||
-               dt == DType::Float16 || dt == DType::BFloat16 ||
-               dt == DType::Complex64 || dt == DType::Complex128;
+    //
+    // Complex tensors are NOT floating for the purpose of this auto-cast:
+    // model.to(Float16) must keep a complex param complex (dropping the
+    // imaginary part is silent data loss), matching PyTorch .half()/.float().
+    // A complex param is only re-cast when the target dtype is itself complex
+    // (Complex64<->Complex128).
+    const bool target_complex = ::tenzor::is_complex_type(dtype);
+    auto should_cast = [target_complex](DType src) {
+        if (::tenzor::is_complex_type(src)) {
+            return target_complex;
+        }
+        return ::tenzor::is_floating_type(src);
     };
 
-    // Convert floating-point parameters to target dtype
+    // Convert floating-point parameters (and their grads) to target dtype
     for (auto& [name, param] : parameters_) {
-        if (is_floating(param->tensor().dtype())) {
+        if (should_cast(param->tensor().dtype())) {
             param->tensor() = param->tensor().to(dtype);
+            // Keep any accumulated gradient in the same dtype as its data.
+            if (auto& g = param->mutable_grad(); g.has_value()) {
+                *g = g->to(dtype);
+            }
         }
     }
 
     // Convert floating-point buffers to target dtype
     for (auto& [_, buffer] : buffers_) {
-        if (is_floating(buffer->tensor().dtype())) {
+        if (should_cast(buffer->tensor().dtype())) {
             buffer->tensor() = buffer->tensor().to(dtype);
+            if (auto& g = buffer->mutable_grad(); g.has_value()) {
+                *g = g->to(dtype);
+            }
         }
     }
 
@@ -592,16 +655,13 @@ auto ModuleList::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto ModuleList::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
-    for (size_t i = 0; i < modules_.size(); ++i) {
-        std::string prefix = std::to_string(i) + ".";
-        std::unordered_map<std::string, Tensor> sub_state;
-        for (const auto& [key, tensor] : state) {
-            if (key.rfind(prefix, 0) == 0) {
-                sub_state[key.substr(prefix.length())] = tensor;
-            }
-        }
-        modules_[i]->load_state_dict(sub_state);
-    }
+    // Delegate to the base implementation, which dispatches child state by the
+    // registered submodule prefixes ("0", "1", ...) AND tracks missing/
+    // unexpected keys under the base Module contract (strict by default; a
+    // container-level key matching no child is surfaced, not silently dropped).
+    // The (state, strict) and (state, strict, missing, unexpected) overloads
+    // are non-virtual base methods that also flow through this same path.
+    Module::load_state_dict(state);
 }
 
 // ============================================================================
@@ -699,16 +759,10 @@ auto ModuleDict::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto ModuleDict::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
-    for (const auto& key : order_) {
-        std::string prefix = key + ".";
-        std::unordered_map<std::string, Tensor> sub_state;
-        for (const auto& [k, tensor] : state) {
-            if (k.rfind(prefix, 0) == 0) {
-                sub_state[k.substr(prefix.length())] = tensor;
-            }
-        }
-        modules_.at(key)->load_state_dict(sub_state);
-    }
+    // Delegate to the base implementation so child dispatch by key prefix and
+    // container-level missing/unexpected-key tracking follow the base Module
+    // contract (strict by default). See ModuleList::load_state_dict.
+    Module::load_state_dict(state);
 }
 
 // Sequential implementation
@@ -781,23 +835,13 @@ auto Sequential::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto Sequential::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
-    // Load state for each module in order
-    for (size_t i = 0; i < modules_.size(); ++i) {
-        std::string prefix = "module_" + std::to_string(i) + ".";
-
-        // Extract submodule state with matching prefix
-        std::unordered_map<std::string, Tensor> sub_state;
-        for (const auto& [key, tensor] : state) {
-            if (key.rfind(prefix, 0) == 0) {
-                // Key starts with prefix
-                std::string sub_key = key.substr(prefix.length());
-                sub_state[sub_key] = tensor;
-            }
-        }
-
-        // Load state into this module
-        modules_[i]->load_state_dict(sub_state);
-    }
+    // Delegate to the base implementation. Children are registered as
+    // submodules under "module_0", "module_1", ... (matching state_dict()),
+    // so the base dispatches by prefix AND tracks container-level missing/
+    // unexpected keys per the base Module contract (strict by default), instead
+    // of silently dropping keys that match no child. See
+    // ModuleList::load_state_dict.
+    Module::load_state_dict(state);
 }
 
 // ============================================================================

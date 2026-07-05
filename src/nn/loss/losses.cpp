@@ -25,26 +25,48 @@ namespace {
 MSELoss::MSELoss(Reduction reduction) : reduction_(reduction) {}
 
 auto MSELoss::forward(const Variable& input, const Variable& target) -> Variable {
-    auto diff = input - target;
+    // F16/BF16 widen: the squared error diff^2 can overflow half precision for
+    // large residuals. Compute in Float32 and cast the loss back to the input
+    // dtype. `variable_cast` wires a TypeCastBackward node so gradients flow.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
+    auto diff = input_f32 - target_f32;
     auto squared = diff * diff;
 
+    Variable reduced;
     switch (reduction_) {
         case Reduction::None:
-            return squared;
+            reduced = squared;
+            break;
         case Reduction::Mean:
-            return mean(squared);
+            reduced = mean(squared);
+            break;
         case Reduction::Sum:
-            return sum(squared);
+            reduced = sum(squared);
+            break;
         case Reduction::BatchMean: {
             const auto& shp = squared.tensor().shape();
             int64_t bs = (!shp.empty()) ? shp[0] : 0;
-            if (bs > 0) {
-                return sum(squared) / static_cast<float>(bs);
-            }
-            return mean(squared);
+            reduced = (bs > 0) ? (sum(squared) / static_cast<float>(bs))
+                               : mean(squared);
+            break;
         }
+        default:
+            reduced = squared;
+            break;
     }
-    return squared;
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 // BCELoss implementation
@@ -572,26 +594,48 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
 L1Loss::L1Loss(Reduction reduction) : reduction_(reduction) {}
 
 auto L1Loss::forward(const Variable& input, const Variable& target) -> Variable {
-    auto diff = input - target;
+    // F16/BF16 widen: compute the absolute error in Float32 and cast the loss
+    // back so half-precision inputs match the F32/F64 path. `variable_cast`
+    // wires a TypeCastBackward node so gradients flow through the cast.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
+    auto diff = input_f32 - target_f32;
     auto abs_diff = abs(diff);
 
+    Variable reduced;
     switch (reduction_) {
         case Reduction::None:
-            return abs_diff;
+            reduced = abs_diff;
+            break;
         case Reduction::Mean:
-            return mean(abs_diff);
+            reduced = mean(abs_diff);
+            break;
         case Reduction::Sum:
-            return sum(abs_diff);
+            reduced = sum(abs_diff);
+            break;
         case Reduction::BatchMean: {
             const auto& shp = abs_diff.tensor().shape();
             int64_t bs = (!shp.empty()) ? shp[0] : 0;
-            if (bs > 0) {
-                return sum(abs_diff) / static_cast<float>(bs);
-            }
-            return mean(abs_diff);
+            reduced = (bs > 0) ? (sum(abs_diff) / static_cast<float>(bs))
+                               : mean(abs_diff);
+            break;
         }
+        default:
+            reduced = abs_diff;
+            break;
     }
-    return abs_diff;
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 // SmoothL1Loss implementation
@@ -607,7 +651,21 @@ SmoothL1Loss::SmoothL1Loss(Reduction reduction, double beta)
 }
 
 auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Variable {
-    auto diff = input - target;
+    // F16/BF16 widen: for small beta the Huber branch 0.5*|diff|^2/beta
+    // underflows in half precision (and |diff|^2 can overflow). Compute in
+    // Float32 and cast the loss back. `variable_cast` wires a TypeCastBackward
+    // node so gradients flow through the cast.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
+    auto diff = input_f32 - target_f32;
     auto abs_diff = abs(diff);
 
     // Smooth L1 Loss (Huber Loss):
@@ -630,23 +688,32 @@ auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Var
         return (clamped_abs * clamped_abs * 0.5f) / static_cast<float>(beta_) + excess;
     }();
 
+    Variable reduced;
     switch (reduction_) {
         case Reduction::None:
-            return loss_unreduced;
+            reduced = loss_unreduced;
+            break;
         case Reduction::Mean:
-            return mean(loss_unreduced);
+            reduced = mean(loss_unreduced);
+            break;
         case Reduction::Sum:
-            return sum(loss_unreduced);
+            reduced = sum(loss_unreduced);
+            break;
         case Reduction::BatchMean: {
             const auto& shp = loss_unreduced.tensor().shape();
             int64_t bs = (!shp.empty()) ? shp[0] : 0;
-            if (bs > 0) {
-                return sum(loss_unreduced) / static_cast<float>(bs);
-            }
-            return mean(loss_unreduced);
+            reduced = (bs > 0) ? (sum(loss_unreduced) / static_cast<float>(bs))
+                               : mean(loss_unreduced);
+            break;
         }
+        default:
+            reduced = loss_unreduced;
+            break;
     }
-    return loss_unreduced;
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 // Functional implementations

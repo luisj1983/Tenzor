@@ -20,6 +20,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/indexing.hpp"  // tenzor::where for NaN-safe attention masking
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
@@ -759,9 +760,9 @@ namespace cuda {
     auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
 
     // Fractional Max Pool operations
-    auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w, const Tensor* random_samples, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w, int64_t kernel_h, int64_t kernel_w, const Tensor* random_samples, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
-    auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w, const Tensor* random_samples, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w, int64_t kernel_d, int64_t kernel_h, int64_t kernel_w, const Tensor* random_samples, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
 
     // Max Unpool operations
@@ -1098,7 +1099,8 @@ namespace nn::quantization::kernels {
         const int8_t* input, const int8_t* weight, const float* bias,
         float* output, int64_t batch_size, int64_t in_features, int64_t out_features,
         float input_scale, float weight_scale, float output_scale,
-        int32_t input_zp, int32_t weight_zp, cudaStream_t stream
+        int32_t input_zp, int32_t weight_zp, cudaStream_t stream,
+        const float* weight_scales = nullptr, const int32_t* weight_zps = nullptr
     ) -> void;
 
     auto quantized_conv2d_cuda(
@@ -1108,7 +1110,8 @@ namespace nn::quantization::kernels {
         int64_t kh_size, int64_t kw_size, int64_t sH, int64_t sW,
         int64_t pH, int64_t pW, int64_t dH, int64_t dW, int64_t groups,
         float input_scale, float weight_scale,
-        int32_t input_zp, int32_t weight_zp, cudaStream_t stream
+        int32_t input_zp, int32_t weight_zp, cudaStream_t stream,
+        const float* weight_scales = nullptr, const int32_t* weight_zps = nullptr
     ) -> void;
 } // namespace nn::quantization::kernels
 
@@ -1928,7 +1931,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 Tensor mask = tenzor::gt(cols.to(DType::Float64), rows.to(DType::Float64));
                 Tensor neg_inf = tenzor::full(ssh, -std::numeric_limits<double>::infinity(),
                                               DType::Float64, scores.device());
-                scores = tenzor::add(scores, tenzor::mul(mask.to(DType::Float64), neg_inf));
+                // where(mask, -inf, scores): apply the -inf sentinel ONLY at masked
+                // positions. The old `scores + mask*(-inf)` computed 0 * -inf = NaN at
+                // every unmasked position, poisoning the whole softmax row (F020).
+                // Matches CPU/OneAPI/ROCm.
+                scores = tenzor::where(mask.to(DType::Bool), neg_inf, scores);
             }
             NewOpAttributes sm_attrs;
             sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
@@ -2132,8 +2139,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                     Tensor neg_inf = tenzor::full(scores_shape,
                         -std::numeric_limits<double>::infinity(),
                         scores.dtype(), scores.device());
-                    scores = tenzor::add(scores,
-                                          tenzor::mul(mask.to(scores.dtype()), neg_inf));
+                    // where(mask, -inf, scores): -inf only at masked positions.
+                    // `scores + mask*(-inf)` gave 0 * -inf = NaN at unmasked
+                    // positions, poisoning the softmax row (F020). Matches
+                    // CPU/OneAPI/ROCm.
+                    scores = tenzor::where(mask.to(DType::Bool), neg_inf, scores);
                 }
                 NewOpAttributes sm_attrs;
                 sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
@@ -2286,7 +2296,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 Tensor neg_inf = tenzor::full(scores_shape,
                                               -std::numeric_limits<float>::infinity(),
                                               scores.dtype(), scores.device());
-                scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
+                // where(mask, -inf, scores): apply -inf ONLY at masked positions.
+                // `scores + mask*(-inf)` computed 0 * -inf = NaN at every unmasked
+                // position, poisoning the softmax row and gradient (F020). Matches
+                // CPU/OneAPI/ROCm.
+                scores = tenzor::where(causal_mask.to(DType::Bool), neg_inf, scores);
             }
 
             NewOpAttributes sm_attrs;
@@ -2387,102 +2401,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return std::vector<Tensor>{output, lse};
         }
 
-        // ScoreModId 2 (sliding_window) — composed-ops via tenzor:: tensor API.
-        // Per docs/internals/attention-contract.md: mask (i,j) where
-        // |i-j| > WindowSize/2 with -INFINITY. tenzor:: ops dispatch to the
-        // CUDA backend automatically since Q/K/V live on CUDA.
-        if (score_mod_id == 2) {
-            int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-            if (window_size <= 0) {
-                throw std::invalid_argument(
-                    "FlexAttention CUDA: ScoreModId=2 (sliding_window) requires "
-                    "AttrKey::WindowSize > 0.");
-            }
-            const Tensor& Q = inputs[0];
-            const Tensor& K = inputs[1];
-            const Tensor& V = inputs[2];
-            int64_t S_q = Q.shape()[Q.shape().size() - 2];
-            int64_t S_k = K.shape()[K.shape().size() - 2];
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
-            int64_t half = window_size / 2;
-            Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-            Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-            Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
-            Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
-            Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-            Tensor half_t = tenzor::full({1}, static_cast<double>(half),
-                                          abs_diff.dtype(), abs_diff.device());
-            Tensor outside = tenzor::gt(abs_diff, half_t);
-            Tensor neg_inf = tenzor::full(scores_shape,
-                -std::numeric_limits<float>::infinity(),
-                scores.dtype(), scores.device());
-            scores = scores + (outside.to(scores.dtype()) * neg_inf);
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {scores};
-            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-            Tensor output = tenzor::bmm(probs, V);
-            // LSE (Float32 per attention_contract.hpp) — composed from
-            // the same scores softmax just normalised so the saved
-            // tensor matches what FlexAttentionBackward needs.
-            NewOpAttributes lse_attrs;
-            lse_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            lse_attrs.set(AttrKey::Keepdim, false);
-            Tensor scores_f32 = (scores.dtype() == DType::Float32)
-                                ? scores : scores.to(DType::Float32);
-            std::vector<Tensor> lse_in = {scores_f32};
-            Tensor lse = tenzor::dispatch(OpId::LogSumExp, lse_in, lse_attrs)[0];
-            return std::vector<Tensor>{output, lse};
-        }
-
-                // F6: ScoreModId >= 3 routes through the process-wide score_mod
-        // registry populated by `tenzor::nn::register_score_mod` — same
-        // mechanism the CPU and OneAPI backends use. Forward composes
-        // Q@K^T → user functor → softmax → @V via tenzor:: ops (which
-        // dispatch to CUDA automatically).
-        if (score_mod_id >= 3) {
-            auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-            if (!fn) {
-                throw std::runtime_error(
-                    "FlexAttention CUDA: no user score_mod registered for ScoreModId=" +
-                    std::to_string(score_mod_id) +
-                    ". Register via tenzor::nn::register_score_mod(id, fn) before dispatch.");
-            }
-            const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
-            Tensor modified = fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {modified};
-            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-            Tensor output = tenzor::bmm(probs, V);
-            // LSE (Float32 per attention_contract.hpp) — composed from
-            // the same scores softmax just normalised so the saved
-            // tensor matches what FlexAttentionBackward needs.
-            NewOpAttributes lse_attrs;
-            lse_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            lse_attrs.set(AttrKey::Keepdim, false);
-            Tensor scores_f32 = (scores.dtype() == DType::Float32)
-                                ? scores : scores.to(DType::Float32);
-            std::vector<Tensor> lse_in = {scores_f32};
-            Tensor lse = tenzor::dispatch(OpId::LogSumExp, lse_in, lse_attrs)[0];
-            return std::vector<Tensor>{output, lse};
+        // ScoreModId 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
+        // sliding_window_sym, user_lambda) and user-registered functors (>= 8)
+        // go through the shared, device-agnostic composed-ops forward. The
+        // tenzor:: ops inside dispatch to CUDA automatically (Q/K/V live on
+        // CUDA), so CUDA runs bit-for-bit the same math as the CPU reference
+        // and every other backend (F018/F019/F023/F024).
+        if (score_mod_id >= 2) {
+            return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
         }
 
         throw std::runtime_error(
             "FlexAttention CUDA: ScoreModId=" + std::to_string(score_mod_id) +
-            " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window; "
-            "register user IDs >= 3 via tenzor::nn::register_score_mod).");
+            " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window, "
+            "3=relpos_bias, 4=alibi, 5=prefix_lm, 6=sliding_window_sym, "
+            "7=user_lambda; user IDs >= 8 via tenzor::nn::register_score_mod).");
     });
 
     table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -2508,84 +2441,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         }
 
-        if (score_mod_id == 2 || score_mod_id >= 3) {
-            // Composed backward replaying the forward to recover masked scores
-            // (inputs: [dO, Q, K, V, O, (L)]).
-            const Tensor& dO = inputs[0];
-            const Tensor& Q = inputs[1];
-            const Tensor& K = inputs[2];
-            const Tensor& V = inputs[3];
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
-
-            if (score_mod_id == 2) {
-                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-                if (window_size <= 0) {
-                    throw std::invalid_argument(
-                        "FlexAttentionBackward CUDA: ScoreModId=2 requires AttrKey::WindowSize > 0.");
-                }
-                int64_t S_q = Q.shape()[Q.shape().size() - 2];
-                int64_t S_k = K.shape()[K.shape().size() - 2];
-                int64_t half = window_size / 2;
-                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
-                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
-                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
-                                              abs_diff.dtype(), abs_diff.device());
-                Tensor outside = tenzor::gt(abs_diff, half_t);
-                Tensor neg_inf = tenzor::full(scores_shape,
-                    -std::numeric_limits<float>::infinity(),
-                    scores.dtype(), scores.device());
-                scores = scores + (outside.to(scores.dtype()) * neg_inf);
-            } else {
-                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-                if (!fn) {
-                    throw std::runtime_error(
-                        "FlexAttentionBackward CUDA: no user score_mod registered for ScoreModId=" +
-                        std::to_string(score_mod_id));
-                }
-                scores = fn(scores, 0, 0, 0, 0);
-            }
-
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {scores};
-            Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-
-            // dV = attn^T @ dO
-            Tensor attn_t = tenzor::transpose(attn, -1, -2);
-            Tensor dV = tenzor::bmm(attn_t, dO);
-
-            // dAttn = dO @ V^T
-            Tensor Vt = tenzor::transpose(V, -1, -2);
-            Tensor dAttn = tenzor::bmm(dO, Vt);
-
-            // dScores = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
-            Tensor ad = tenzor::mul(attn, dAttn);
-            NewOpAttributes sum_attrs;
-            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            sum_attrs.set(AttrKey::Keepdim, true);
-            std::vector<Tensor> sum_inputs = {ad};
-            Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
-            Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
-
-            // Apply scale to grad.
-            Tensor scale_t2 = tenzor::full(
-                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
-                static_cast<double>(scale), dScores.dtype(), dScores.device());
-            dScores = tenzor::mul(dScores, scale_t2);
-
-            Tensor dQ = tenzor::bmm(dScores, K);
-            Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
-            Tensor dK = tenzor::bmm(dScores_t, Q);
-
-            return {dQ, dK, dV};
+        if (score_mod_id >= 2) {
+            // ScoreModId 2-7 and user functors (>= 8): shared, device-agnostic
+            // composed backward (replays forward, softmax-attention chain rule).
+            // Same helper as the CPU reference and every other backend, so
+            // forward/backward stay mutually consistent (F018/F023/F024).
+            return tenzor::nn::flex_attention_score_mod_backward(inputs, attrs);
         }
 
         throw std::runtime_error(
@@ -4742,14 +4603,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Quantized Operations
     // =========================================================================
     table.register_single_output_kernel(OpId::QuantizedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        if (inputs.size() >= 4) {
-            throw std::invalid_argument(
-                "QuantizedLinear (GPU): per-channel weight scale/zero-point "
-                "(inputs[3]/[4]) is not supported by this backend kernel; use "
-                "per-tensor quantization (scalar WeightScaleQ/WeightZeroPoint) — "
-                "JIT-041.");
-        }
         // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
+        // Optional per-channel (F045): inputs[3] = weight_scales [out_features],
+        //                             inputs[4] = weight_zero_points [out_features].
         const auto& input = inputs[0];
         const auto& weight = inputs[1];
 
@@ -4776,11 +4632,26 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         }
         float* output_data = output.data<float>();
 
+        // Per-channel weight scale/zero-point device pointers (must be contiguous
+        // device tensors; the layer path already stores them per-channel).
+        const float* wscale_data = nullptr;
+        const int32_t* wzp_data = nullptr;
+        Tensor wscale_c, wzp_c;
+        if (inputs.size() > 3 && inputs[3].numel() > 1) {
+            wscale_c = inputs[3].is_contiguous() ? inputs[3] : inputs[3].contiguous();
+            wscale_data = wscale_c.data<const float>();
+            if (inputs.size() > 4 && inputs[4].numel() > 0) {
+                wzp_c = inputs[4].is_contiguous() ? inputs[4] : inputs[4].contiguous();
+                wzp_data = wzp_c.data<const int32_t>();
+            }
+        }
+
         nn::quantization::kernels::quantized_linear_cuda(
             input_data, weight_data, bias_data, output_data,
             batch_size, in_features, out_features,
             input_scale, weight_scale, output_scale,
-            input_zp, weight_zp, stream
+            input_zp, weight_zp, stream,
+            wscale_data, wzp_data
         );
 
         return output;
@@ -4840,13 +4711,27 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         }
         float* output_data = output.data<float>();
 
+        // Per-channel weight scale/zero-point (F045): inputs[3]/[4] = [out_channels].
+        const float* wscale_data = nullptr;
+        const int32_t* wzp_data = nullptr;
+        Tensor wscale_c, wzp_c;
+        if (inputs.size() > 3 && inputs[3].numel() > 1) {
+            wscale_c = inputs[3].is_contiguous() ? inputs[3] : inputs[3].contiguous();
+            wscale_data = wscale_c.data<const float>();
+            if (inputs.size() > 4 && inputs[4].numel() > 0) {
+                wzp_c = inputs[4].is_contiguous() ? inputs[4] : inputs[4].contiguous();
+                wzp_data = wzp_c.data<const int32_t>();
+            }
+        }
+
         nn::quantization::kernels::quantized_conv2d_cuda(
             input_data, weight_data, bias_data, output_data,
             batch, in_channels, out_channels,
             h_in, w_in, h_out, w_out,
             kh_size, kw_size, sH, sW, pH, pW, dH, dW, groups,
             input_scale, weight_scale,
-            input_zp, weight_zp, stream
+            input_zp, weight_zp, stream,
+            wscale_data, wzp_data
         );
 
         return output;
@@ -5638,8 +5523,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
+        // F109: PyTorch uses kernel_size-wide (overlapping) windows. Read per-axis
+        // kernel sizes (scalar KernelSize as fallback for square pools).
+        const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        auto [output, indices] = cuda::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples, get_cuda_stream(attrs));
+        auto [output, indices] = cuda::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, kernel_h, kernel_w, samples, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 
@@ -5674,8 +5563,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
+        // F109: PyTorch uses kernel_size-wide (overlapping) windows.
+        const int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        auto [output, indices] = cuda::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples, get_cuda_stream(attrs));
+        auto [output, indices] = cuda::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 

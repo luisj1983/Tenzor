@@ -13,6 +13,8 @@
 #include <random>
 #include <numeric>
 #include <cstring>
+#include <atomic>
+#include <complex>
 
 namespace tenzor::nn::init {
 
@@ -126,6 +128,43 @@ void fill_tensor(Tensor& tensor, Generator gen) {
         for (int64_t i = 0; i < numel; ++i) {
             data[i] = static_cast<int64_t>(gen());
         }
+    } else if (work_tensor.dtype() == DType::Int8) {
+        int8_t* data = work_tensor.data<int8_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            data[i] = static_cast<int8_t>(gen());
+        }
+    } else if (work_tensor.dtype() == DType::Int16) {
+        int16_t* data = work_tensor.data<int16_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            data[i] = static_cast<int16_t>(gen());
+        }
+    } else if (work_tensor.dtype() == DType::UInt8) {
+        uint8_t* data = work_tensor.data<uint8_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            data[i] = static_cast<uint8_t>(gen());
+        }
+    } else if (work_tensor.dtype() == DType::UInt16) {
+        uint16_t* data = work_tensor.data<uint16_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            data[i] = static_cast<uint16_t>(gen());
+        }
+    } else if (work_tensor.dtype() == DType::Complex64) {
+        // Complex init: draw the real and imaginary parts independently from
+        // the same real-valued generator (matches PyTorch's complex init,
+        // which initializes both components).
+        auto* data = work_tensor.data<std::complex<float>>();
+        for (int64_t i = 0; i < numel; ++i) {
+            float re = static_cast<float>(gen());
+            float im = static_cast<float>(gen());
+            data[i] = std::complex<float>(re, im);
+        }
+    } else if (work_tensor.dtype() == DType::Complex128) {
+        auto* data = work_tensor.data<std::complex<double>>();
+        for (int64_t i = 0; i < numel; ++i) {
+            double re = gen();
+            double im = gen();
+            data[i] = std::complex<double>(re, im);
+        }
     } else {
         throw std::runtime_error("fill_tensor: unsupported dtype " +
             std::string(dtype_name(work_tensor.dtype())));
@@ -150,13 +189,41 @@ void fill_tensor(Tensor& tensor, Generator gen) {
     }
 }
 
-// Thread-local RNG for initialization
+// Process-global manual seed hook for reproducible initialization. Unset by
+// default (g_init_seed_active == false) so the RNG is nondeterministically
+// seeded from random_device, preserving prior behavior. When manual_seed() sets
+// a seed, every init RNG re-seeds deterministically from it, making a seeded run
+// reproducible. All initializers generate on CPU via get_rng(), so the seed is
+// backend-independent.
+std::atomic<uint64_t> g_init_seed{0};
+std::atomic<bool>     g_init_seed_active{false};
+
+// Thread-local RNG for initialization.
 auto get_rng() -> std::mt19937& {
     static thread_local std::mt19937 rng{std::random_device{}()};
+    static thread_local bool     applied = false;
+    static thread_local uint64_t applied_seed = 0;
+    if (g_init_seed_active.load(std::memory_order_acquire)) {
+        const uint64_t desired = g_init_seed.load(std::memory_order_acquire);
+        // (Re)seed this thread's generator whenever the manual seed changes so
+        // that repeated draws after a single manual_seed() call are stable.
+        if (!applied || applied_seed != desired) {
+            rng.seed(static_cast<std::mt19937::result_type>(desired));
+            applied = true;
+            applied_seed = desired;
+        }
+    }
     return rng;
 }
 
 } // anonymous namespace
+
+auto manual_seed(uint64_t seed) -> void {
+    // Make init reproducible: subsequent get_rng() draws (used by every
+    // initializer, including orthogonal_) re-seed deterministically from this.
+    g_init_seed.store(seed, std::memory_order_release);
+    g_init_seed_active.store(true, std::memory_order_release);
+}
 
 // ============================================================================
 // Xavier Initialization
@@ -263,8 +330,19 @@ auto orthogonal_(Tensor& tensor, double gain) -> Tensor& {
     int64_t wrows = transposed ? cols : rows;
     int64_t wcols = transposed ? rows : cols;
 
-    Tensor flat = tenzor::randn({wrows, wcols}, DType::Float64, Device::cpu());
+    // Draw the random matrix from the SAME get_rng() stream every other
+    // initializer uses (rather than tenzor::randn, a separate RNG stream), so a
+    // manual_seed() makes orthogonal_ reproducible too. Generated on CPU in
+    // Float64, matching the modified-Gram-Schmidt math below.
+    Tensor flat({wrows, wcols}, DType::Float64, Device::cpu());
     auto* data = flat.data<double>();
+    {
+        std::normal_distribution<double> dist(0.0, 1.0);
+        const int64_t n = wrows * wcols;
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = dist(get_rng());
+        }
+    }
 
     for (int64_t j = 0; j < wcols; ++j) {
         // Orthogonalize column j against all previous columns

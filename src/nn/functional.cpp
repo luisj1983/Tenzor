@@ -12,6 +12,8 @@
 #include "tenzor/nn/layers/embedding.hpp"      // for internal::make_embedding_backward
 #include "tenzor/nn/layers/pooling.hpp"        // J7: delegate pool functional to Module
 #include "tenzor/nn/activations/activations.hpp" // U.13: nn::relu for prelu composition
+#include "tenzor/nn/loss/losses.hpp"           // F055: delegate nll_loss to nn::NLLLoss
+#include "tenzor/nn/utils/variable_cast.hpp"   // F124: autograd-aware F16/BF16 widen-narrow
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -349,21 +351,16 @@ auto conv3d(const Variable& input, const Variable& weight,
                          (bias.has_value() && bias->requires_grad());
     Variable output(result[0], requires_grad);
 
-    // Wire autograd using the existing Conv3dBackward from the nn::Conv3d
-    // module. That class takes isotropic stride/padding/dilation (it was
-    // built for the module API), so F::conv3d autograd here also requires
-    // isotropic parameters. Anisotropic conv3d backward support requires
-    // extending Conv3dBackward to per-axis params and is tracked separately.
+    // Wire autograd using Conv3dBackward from the nn::Conv3d module. F127: that
+    // class stores and uses per-axis (D/H/W) stride/padding/dilation in its
+    // backward math, so F::conv3d wires the true anisotropic parameters via the
+    // per-axis factory overload — no isotropic-only restriction.
     if (requires_grad && ::tenzor::is_grad_enabled()) {
-        if (sd != sh || sd != sw || pd != ph || pd != pw || dd != dh || dd != dw) {
-            throw std::runtime_error(
-                "F::conv3d autograd currently requires isotropic "
-                "stride/padding/dilation (got asymmetric values). "
-                "Use nn::Conv3d module or file an issue for anisotropic support.");
-        }
         std::vector<Tensor> tensors_to_save = {input.tensor(), weight.tensor()};
         if (bias.has_value()) tensors_to_save.push_back(bias->tensor());
-        auto grad_fn = internal::make_conv3d_backward(sd, pd, dd, groups, std::move(tensors_to_save));
+        auto grad_fn = internal::make_conv3d_backward(
+            sd, sh, sw, pd, ph, pw, dd, dh, dw, groups,
+            std::move(tensors_to_save));
         std::vector<Variable> input_vars = {input, weight};
         if (bias.has_value()) input_vars.push_back(*bias);
         grad_fn->set_input_variables(input_vars);
@@ -454,19 +451,18 @@ auto conv_transpose2d(const Variable& input, const Variable& weight,
     // Wire autograd via the ConvTranspose2dBackward class already living in
     // nn::Conv2dTranspose. Previously F::conv_transpose2d returned a
     // Variable with no grad_fn, so any backward through it silently dropped
-    // gradients. ConvTranspose2dBackward is isotropic; we enforce that here.
+    // gradients. F127: ConvTranspose2dBackward stores and uses per-axis (H/W)
+    // stride/padding/output_padding/dilation in its backward math, so we wire
+    // the true anisotropic parameters via the per-axis factory overload — no
+    // isotropic-only restriction.
     if (requires_grad && ::tenzor::is_grad_enabled()) {
-        if (stride.first != stride.second || padding.first != padding.second ||
-            dilation.first != dilation.second) {
-            throw std::runtime_error(
-                "F::conv_transpose2d autograd currently requires isotropic "
-                "stride/padding/dilation (got asymmetric values).");
-        }
         std::vector<Tensor> tensors_to_save = {input.tensor(), weight.tensor()};
         if (bias.has_value()) tensors_to_save.push_back(bias->tensor());
         auto grad_fn = internal::make_conv_transpose2d_backward(
-            stride.first, padding.first, /*output_padding=*/output_padding.first,
-            dilation.first, groups, std::move(tensors_to_save));
+            stride.first, stride.second, padding.first, padding.second,
+            output_padding.first, output_padding.second,
+            dilation.first, dilation.second, groups,
+            std::move(tensors_to_save));
         std::vector<Variable> input_vars = {input, weight};
         if (bias.has_value()) input_vars.push_back(*bias);
         grad_fn->set_input_variables(input_vars);
@@ -532,16 +528,16 @@ auto conv_transpose3d(const Variable& input, const Variable& weight,
     // audit-2026-05-03 — wire autograd grad_fn so backward through F::
     // conv_transpose3d propagates gradients (previously this returned a
     // Variable with no grad_fn → silent zero gradients).
+    // F127: ConvTranspose3dBackward stores and uses per-axis (D/H/W)
+    // stride/padding/output_padding/dilation in its backward math, so wire the
+    // true anisotropic parameters via the per-axis factory overload — no
+    // isotropic-only restriction.
     if (requires_grad && ::tenzor::is_grad_enabled()) {
-        if (sd != sh || sd != sw || pd != ph || pd != pw || dd != dh || dd != dw) {
-            throw std::runtime_error(
-                "F::conv_transpose3d autograd currently requires isotropic "
-                "stride/padding/dilation (got asymmetric values).");
-        }
         std::vector<Tensor> tensors_to_save = {input.tensor(), weight.tensor()};
         if (bias.has_value()) tensors_to_save.push_back(bias->tensor());
         auto grad_fn = internal::make_conv_transpose3d_backward(
-            sd, pd, /*output_padding=*/opd, dd, groups, std::move(tensors_to_save));
+            sd, sh, sw, pd, ph, pw, opd, oph, opw, dd, dh, dw, groups,
+            std::move(tensors_to_save));
         std::vector<Variable> input_vars = {input, weight};
         if (bias.has_value()) input_vars.push_back(*bias);
         grad_fn->set_input_variables(input_vars);
@@ -573,16 +569,13 @@ auto max_pool2d(const Variable& input,
     if (stride.second < 0) stride.second = kernel_size.second;
 
     // J7: Delegate to the Module so the backward (MaxPool2dBackward) is
-    // wired up. The previous direct-dispatch path built a leaf Variable
-    // without a grad_fn and silently produced zero gradients.
-    //
-    // MaxPool2d Module supports square pooling; this functional signature
-    // takes pairs but the previous code already ignored `.second`, so the
-    // behavior is preserved — non-square pooling was never actually
-    // supported here despite the API shape.
-    ::tenzor::nn::MaxPool2d pool(kernel_size.first,
-                                 stride.first,
-                                 padding.first,
+    // wired up. Use the per-axis (std::array) ctor so a rectangular
+    // kernel/stride/padding passed via the pair API is honored on both axes
+    // (matches PyTorch's MaxPool2d(kernel_size=(2, 3))) rather than silently
+    // dropping the width component.
+    ::tenzor::nn::MaxPool2d pool({kernel_size.first, kernel_size.second},
+                                 {stride.first, stride.second},
+                                 {padding.first, padding.second},
                                  /*ceil_mode=*/false,
                                  /*return_indices=*/false);
     return pool.forward(input);
@@ -604,9 +597,11 @@ auto avg_pool2d(const Variable& input,
 
     // J7: Delegate to the Module (same rationale as max_pool2d above).
     // S22: forward ``count_include_pad`` through to the AvgPool2d ctor.
-    ::tenzor::nn::AvgPool2d pool(kernel_size.first,
-                                 stride.first,
-                                 padding.first,
+    // Use the per-axis (std::array) ctor so a rectangular kernel/stride/
+    // padding is honored on both axes instead of dropping the width component.
+    ::tenzor::nn::AvgPool2d pool({kernel_size.first, kernel_size.second},
+                                 {stride.first, stride.second},
+                                 {padding.first, padding.second},
                                  count_include_pad);
     return pool.forward(input);
 }
@@ -713,16 +708,34 @@ auto adaptive_avg_pool3d(const Variable& input,
 
 // ============================================================================
 // Normalization
-// ============================================================================
-
-auto batch_norm(const Variable& input,
+auto batch_norm(const Variable& input_arg,
                 const Tensor& running_mean,
                 const Tensor& running_var,
-                const std::optional<Variable>& weight,
-                const std::optional<Variable>& bias,
+                const std::optional<Variable>& weight_arg,
+                const std::optional<Variable>& bias_arg,
                 bool training,
-                [[maybe_unused]] double momentum,
+                double momentum,
                 double eps) -> Variable {
+    // F124: F16/BF16 widen-narrow. The BatchNorm reductions must run in Float32
+    // to match nn::BatchNorm2d (batchnorm.cpp:502-508); dispatching at a half
+    // input dtype gives worse/half-precision stats or a hard-throw on backends
+    // without a half kernel. Upcast input/weight/bias via autograd-aware
+    // variable_cast so the compute + backward wiring stay identical, then narrow
+    // the returned Variable (variable_cast narrows grads back to caller dtype).
+    const DType orig_dtype = input_arg.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    const Variable input = needs_upcast
+        ? nn::variable_cast(input_arg, DType::Float32) : input_arg;
+    std::optional<Variable> weight = weight_arg;
+    std::optional<Variable> bias = bias_arg;
+    if (needs_upcast) {
+        if (weight_arg.has_value())
+            weight = nn::variable_cast(*weight_arg, DType::Float32);
+        if (bias_arg.has_value())
+            bias = nn::variable_cast(*bias_arg, DType::Float32);
+    }
+
     if (training) {
         // Training mode: compute batch statistics using dispatch
         auto input_t = input.tensor();
@@ -743,11 +756,56 @@ auto batch_norm(const Variable& input,
         fwd_attrs.set(AttrKey::Eps, eps);
         auto output = dispatch(OpId::BatchNorm2dForwardAffine, fwd_inputs, fwd_attrs);
 
+        // F125: update the passed running stats IN PLACE, matching PyTorch
+        // F.batch_norm(training=true) and nn::BatchNorm2d:
+        //   running_mean = (1-momentum)*running_mean + momentum*batch_mean
+        //   running_var  = (1-momentum)*running_var  + momentum*unbiased_var
+        // The previous functional path ignored `momentum` and never wrote back.
+        // running_mean/running_var share storage with the caller; the
+        // BatchNorm2dUpdateRunningStats kernel mutates that storage through the
+        // dispatched (shallow-copied) tensors, so the caller observes the
+        // update. Use the UNBIASED batch variance (N/(N-1)) per PyTorch and
+        // guard N>=2 to avoid poisoning running_var with a divide-by-zero for
+        // a single sample (mirrors the layer's running_stats_batch_size>=2).
+        {
+            const auto in_shape = input_t.shape();
+            int64_t stat_count = 1;  // per-channel sample count = numel / C
+            for (size_t i = 0; i < in_shape.size(); ++i) {
+                if (i != 1) stat_count *= in_shape[i];
+            }
+            if (stat_count >= 2) {
+                Tensor unbiased_var = tenzor::mul(
+                    batch_var,
+                    static_cast<double>(stat_count) /
+                        static_cast<double>(stat_count - 1));
+                // The update kernel reads all four tensors at running_mean's
+                // dtype/device; convert the batch stats to match so the write
+                // lands in the caller's storage (no dtype reallocation).
+                Tensor bmean = batch_mean;
+                Tensor bvar = unbiased_var;
+                if (bmean.device() != running_mean.device())
+                    bmean = bmean.to(running_mean.device());
+                if (bvar.device() != running_var.device())
+                    bvar = bvar.to(running_var.device());
+                if (bmean.dtype() != running_mean.dtype())
+                    bmean = bmean.to(running_mean.dtype());
+                if (bvar.dtype() != running_var.dtype())
+                    bvar = bvar.to(running_var.dtype());
+
+                NewOpAttributes upd_attrs;
+                upd_attrs.set(AttrKey::Momentum, momentum);
+                std::vector<Tensor> upd_inputs = {
+                    running_mean, running_var, bmean, bvar};
+                dispatch(OpId::BatchNorm2dUpdateRunningStats, upd_inputs, upd_attrs);
+            }
+        }
+
         const bool needs_grad = input.requires_grad()
             || (weight.has_value() && weight->requires_grad())
             || (bias.has_value() && bias->requires_grad());
         if (!needs_grad) {
-            return Variable(output[0], false);
+            return needs_upcast ? Variable(output[0].to(orig_dtype), false)
+                                : Variable(output[0], false);
         }
 
         // Wire the BatchNorm2d backward so gradients flow. Previously this
@@ -775,10 +833,15 @@ auto batch_norm(const Variable& input,
         if (weight.has_value()) { if (auto fn = weight->grad_fn()) next_funcs.push_back(fn); }
         if (bias.has_value()) { if (auto fn = bias->grad_fn()) next_funcs.push_back(fn); }
         grad_fn->set_next_functions(std::move(next_funcs));
-        return result;
+        // F124: narrow back to the caller's dtype (no-op when not upcast).
+        return needs_upcast ? nn::variable_cast(result, orig_dtype) : result;
     } else {
-        // Eval mode: use running statistics
-        std::vector<Tensor> inputs_vec = {input.tensor(), running_mean, running_var};
+        // Eval mode: use running statistics. Upcast the running stats to the
+        // Float32 compute dtype when the input was half so the forward matches
+        // nn::BatchNorm2d's precision.
+        Tensor rmean = needs_upcast ? running_mean.to(DType::Float32) : running_mean;
+        Tensor rvar  = needs_upcast ? running_var.to(DType::Float32) : running_var;
+        std::vector<Tensor> inputs_vec = {input.tensor(), rmean, rvar};
         if (weight.has_value()) inputs_vec.push_back(weight->tensor());
         if (bias.has_value()) inputs_vec.push_back(bias->tensor());
 
@@ -789,15 +852,38 @@ auto batch_norm(const Variable& input,
         // Eval mode uses fixed running statistics; mirror the BatchNorm layer,
         // which treats this as a non-differentiable inference path rather than
         // returning a grad_fn-less Variable that falsely claims requires_grad.
-        return Variable(output[0], false);
+        // F124: narrow the output back to the caller's dtype.
+        return needs_upcast ? Variable(output[0].to(orig_dtype), false)
+                            : Variable(output[0], false);
     }
 }
 
-auto layer_norm(const Variable& input,
+auto layer_norm(const Variable& input_arg,
                 std::vector<int64_t> normalized_shape,
-                const std::optional<Variable>& weight,
-                const std::optional<Variable>& bias,
+                const std::optional<Variable>& weight_arg,
+                const std::optional<Variable>& bias_arg,
                 double eps) -> Variable {
+    // F124: F16/BF16 widen-narrow. The dispatched FusedLayerNorm reduction
+    // must run in Float32 to match nn::LayerNorm (worse/half-precision
+    // reductions otherwise, or a hard-throw on backends without a half
+    // kernel). Upcast input/weight/bias via variable_cast so the compute +
+    // backward wiring below stay identical, then narrow the returned Variable.
+    // variable_cast is autograd-aware (its TypeCastBackward narrows grads back
+    // to the original parameter dtype), so all grad_fn hookups are preserved.
+    const DType orig_dtype = input_arg.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    const Variable input = needs_upcast
+        ? nn::variable_cast(input_arg, DType::Float32) : input_arg;
+    std::optional<Variable> weight = weight_arg;
+    std::optional<Variable> bias = bias_arg;
+    if (needs_upcast) {
+        if (weight_arg.has_value())
+            weight = nn::variable_cast(*weight_arg, DType::Float32);
+        if (bias_arg.has_value())
+            bias = nn::variable_cast(*bias_arg, DType::Float32);
+    }
+
     // Backend FusedLayerNorm kernels (CPU/CUDA/ROCm/Vulkan/OneAPI) all read
     // inputs[1] (weight) and inputs[2] (bias) unconditionally. Synthesize an
     // identity affine here when weight/bias are absent so the inputs span
@@ -912,7 +998,8 @@ auto layer_norm(const Variable& input,
         if (bias.has_value()) input_vars.push_back(*bias);
         grad_fn->set_input_variables(std::move(input_vars));
     }
-    return output;
+    // F124: narrow back to the caller's dtype (no-op when not upcast).
+    return needs_upcast ? nn::variable_cast(output, orig_dtype) : output;
 }
 
 // ============================================================================
@@ -964,10 +1051,28 @@ auto dropout(const Variable& input, double p, bool training) -> Variable {
 // Group Normalization
 // ============================================================================
 
-auto group_norm(const Variable& input, int64_t num_groups,
-                const std::optional<Variable>& weight,
-                const std::optional<Variable>& bias,
+auto group_norm(const Variable& input_arg, int64_t num_groups,
+                const std::optional<Variable>& weight_arg,
+                const std::optional<Variable>& bias_arg,
                 double eps) -> Variable {
+    // F124: F16/BF16 widen-narrow. Compute in Float32 (upcast input/weight/
+    // bias via autograd-aware variable_cast) so the GroupNorm reduction matches
+    // nn::GroupNorm, then narrow the returned Variable. All grad_fn wiring below
+    // is unchanged; variable_cast narrows gradients back to the caller dtype.
+    const DType orig_dtype = input_arg.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    const Variable input = needs_upcast
+        ? nn::variable_cast(input_arg, DType::Float32) : input_arg;
+    std::optional<Variable> weight = weight_arg;
+    std::optional<Variable> bias = bias_arg;
+    if (needs_upcast) {
+        if (weight_arg.has_value())
+            weight = nn::variable_cast(*weight_arg, DType::Float32);
+        if (bias_arg.has_value())
+            bias = nn::variable_cast(*bias_arg, DType::Float32);
+    }
+
     // The dispatch path expects a [C]-shaped weight and bias tensor in all
     // cases. Synthesize ones/zeros when the caller didn't supply them so the
     // dispatch shape contract stays consistent with nn::GroupNorm and the
@@ -1008,7 +1113,9 @@ auto group_norm(const Variable& input, int64_t num_groups,
         (bias.has_value() && bias->requires_grad());
 
     if (!needs_grad) {
-        return Variable(output_t, false);
+        // F124: narrow the non-grad inference output back to caller dtype.
+        return needs_upcast ? Variable(output_t.to(orig_dtype), false)
+                            : Variable(output_t, false);
     }
 
     Variable output(output_t, true);
@@ -1038,21 +1145,40 @@ auto group_norm(const Variable& input, int64_t num_groups,
     if (bias.has_value()) input_vars.push_back(*bias);
     grad_fn->set_input_variables(std::move(input_vars));
 
-    return output;
+    // F124: narrow back to the caller's dtype (no-op when not upcast).
+    return needs_upcast ? nn::variable_cast(output, orig_dtype) : output;
 }
 
 // ============================================================================
 // Instance Normalization
 // ============================================================================
 
-auto instance_norm(const Variable& input,
+auto instance_norm(const Variable& input_arg,
                    [[maybe_unused]] const std::optional<Tensor>& running_mean,
                    [[maybe_unused]] const std::optional<Tensor>& running_var,
-                   const std::optional<Variable>& weight,
-                   const std::optional<Variable>& bias,
+                   const std::optional<Variable>& weight_arg,
+                   const std::optional<Variable>& bias_arg,
                    [[maybe_unused]] bool training,
                    [[maybe_unused]] double momentum,
                    double eps) -> Variable {
+    // F124: F16/BF16 widen-narrow. InstanceNorm always computes per-instance
+    // stats (running stats are unused here), so only input/weight/bias need
+    // upcasting to Float32 to match nn::InstanceNorm's reduction precision;
+    // narrow the returned Variable. variable_cast keeps autograd intact.
+    const DType orig_dtype = input_arg.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    const Variable input = needs_upcast
+        ? nn::variable_cast(input_arg, DType::Float32) : input_arg;
+    std::optional<Variable> weight = weight_arg;
+    std::optional<Variable> bias = bias_arg;
+    if (needs_upcast) {
+        if (weight_arg.has_value())
+            weight = nn::variable_cast(*weight_arg, DType::Float32);
+        if (bias_arg.has_value())
+            bias = nn::variable_cast(*bias_arg, DType::Float32);
+    }
+
     auto in_shape = input.tensor().shape();
     if (in_shape.size() < 2) {
         throw std::runtime_error("F::instance_norm: input must have at least 2 dims");
@@ -1088,7 +1214,9 @@ auto instance_norm(const Variable& input,
         (bias.has_value() && bias->requires_grad());
 
     if (!needs_grad) {
-        return Variable(output_t, false);
+        // F124: narrow the non-grad inference output back to caller dtype.
+        return needs_upcast ? Variable(output_t.to(orig_dtype), false)
+                            : Variable(output_t, false);
     }
 
     Variable output(output_t, true);
@@ -1116,7 +1244,8 @@ auto instance_norm(const Variable& input,
     if (bias.has_value()) input_vars.push_back(*bias);
     grad_fn->set_input_variables(std::move(input_vars));
 
-    return output;
+    // F124: narrow back to the caller's dtype (no-op when not upcast).
+    return needs_upcast ? nn::variable_cast(output, orig_dtype) : output;
 }
 
 // ============================================================================
@@ -1254,74 +1383,18 @@ auto interpolate(const Variable& input,
 
 auto nll_loss(const Variable& input, const Tensor& target,
               Reduction reduction, int64_t ignore_index) -> Variable {
-    // NLL loss: -sum(input[i, target[i]]) / N
-    //
-    // Use Variable-level ops throughout so backward propagates through the
-    // gather/neg/reduce chain. The previous implementation called the
-    // raw-Tensor overloads of gather/mean/sum/reshape and wrapped the
-    // result in a Variable with no grad_fn — silently zeroing input.grad()
-    // on backward (raw-tensor-op breaks autograd graph pattern). The
-    // bound Python helper functional_nll_loss exposes this directly.
-    //
-    // J.5: honour ignore_index. Targets equal to ignore_index are clamped to
-    // 0 *before* gather so it never throws / reads garbage, then the
-    // per-sample loss is multiplied by a (target != ignore_index) mask so
-    // those samples contribute zero. For Reduction::Mean we divide by the
-    // unmasked count (= mask.sum()) instead of N — matching PyTorch.
-    auto shape = input.tensor().shape();
-    int64_t N = shape[0];
-
-    // Ensure target lives on the input's device for gather + comparisons.
-    Tensor target_dev = (target.device() == input.tensor().device())
-                            ? target
-                            : target.to(input.tensor().device());
-
-    // Build the keep/drop mask on the input's device.
-    Tensor ignore_t   = tenzor::full_like(target_dev,
-                                          static_cast<double>(ignore_index));
-    Tensor is_ignored = tenzor::eq(target_dev, ignore_t);  // bool, shape [N]
-    Tensor keep_mask  = tenzor::ne(target_dev, ignore_t);  // bool, shape [N]
-
-    // Clamp out-of-range / sentinel targets to 0 so gather succeeds even
-    // when ignore_index is negative or >= num_classes.
-    Tensor zero_t = tenzor::full_like(target_dev, 0.0);
-    Tensor safe_target = tenzor::where(is_ignored, zero_t, target_dev);
-
-    // Reshape safe target to [N, 1] for column gather. The index is plain
-    // index data (Int64) — keep as a Tensor; Variable gather takes
-    // (Variable, dim, Tensor index).
-    Tensor target_2d = tenzor::reshape(safe_target, {N, 1});
-
-    // Variable gather → Variable reshape → Variable neg.
-    Variable gathered = tenzor::gather(input, /*dim=*/1, target_2d);
-    Variable loss_per_sample =
-        tenzor::neg(tenzor::reshape(gathered, std::vector<int64_t>{N}));
-
-    // Mask out ignored samples in input dtype (already on input device).
-    Tensor mask_in_dtype = keep_mask.to(input.tensor().dtype());
-    Variable mask_var(mask_in_dtype, /*requires_grad=*/false);
-    Variable masked_loss = loss_per_sample * mask_var;
-
-    if (reduction == Reduction::Mean) {
-        // Denominator is the number of non-ignored samples.  Clamp to >= 1
-        // so an all-ignored batch yields 0 rather than NaN (matches
-        // PyTorch's behaviour for the common-sense edge case).  Sum
-        // through Float32 because clamp_min lacks BF16 dispatch; the
-        // count is a tiny scalar so no precision concern.
-        const DType out_dtype = input.tensor().dtype();
-        Tensor mask_f32 = mask_in_dtype.dtype() == DType::Float32
-                              ? mask_in_dtype
-                              : mask_in_dtype.to(DType::Float32);
-        Tensor denom_f32 = tenzor::clamp_min(tenzor::sum(mask_f32), 1.0);
-        Tensor denom = (denom_f32.dtype() == out_dtype)
-                           ? denom_f32
-                           : denom_f32.to(out_dtype);
-        Variable denom_var(denom, /*requires_grad=*/false);
-        Variable total = tenzor::sum(masked_loss);
-        return total / denom_var;
-    }
-    if (reduction == Reduction::Sum) return tenzor::sum(masked_loss);
-    return masked_loss;
+    // Delegate to nn::NLLLoss so the functional form matches the layer's full
+    // contract for ALL inputs, not just 2-D [N,C] with integer class indices:
+    //   - class-index targets [N] or [N,1] (Int32/Int64)
+    //   - one-hot / soft float targets [N,C] (or >2D)
+    //   - >2D segmentation inputs [N,C,d1,...]
+    // plus F16/BF16 widen-narrow and ignore_index masking. nn::NLLLoss::forward
+    // is built entirely from Variable-level ops, so backward propagates into
+    // `input` exactly as the previous hand-rolled path did. The functional
+    // signature exposes only reduction + ignore_index (no weight), which maps
+    // directly onto the NLLLoss ctor.
+    tenzor::nn::NLLLoss loss(reduction, ignore_index);
+    return loss.forward(input, target);
 }
 
 // ============================================================================
@@ -1341,16 +1414,41 @@ auto smooth_l1_loss(const Variable& input, const Variable& target,
     //
     // All operations below are Variable ops with registered grad_fns, so
     // backward() propagates correctly into both input and target.
-    auto diff = input - target;
+    //
+    // F056: F16/BF16 widen. For small beta the 0.5*|diff|^2/beta term underflows
+    // in half precision (and |diff|^2 can overflow). Compute in Float32 and cast
+    // the loss back to the input dtype; nn::variable_cast is autograd-aware (its
+    // TypeCastBackward narrows gradients back to the caller dtype).
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast
+        ? nn::variable_cast(input, DType::Float32) : input;
+    Variable target_c = needs_upcast
+        ? nn::variable_cast(target, DType::Float32) : target;
+
+    auto narrow = [&](const Variable& v) -> Variable {
+        return needs_upcast ? nn::variable_cast(v, orig_dtype) : v;
+    };
+
+    auto diff = input_c - target_c;
     auto abs_diff = tenzor::abs(diff);
+    // PyTorch: beta == 0 degenerates Smooth-L1 to plain L1 (the 0.5*d^2/beta
+    // term is 0/0 -> NaN otherwise). Match nn::SmoothL1Loss, which special-
+    // cases beta == 0 and returns |diff|.
+    if (beta == 0.0) {
+        if (reduction == Reduction::Mean) return narrow(tenzor::mean(abs_diff));
+        if (reduction == Reduction::Sum) return narrow(tenzor::sum(abs_diff));
+        return narrow(abs_diff);
+    }
     auto clamped_abs = tenzor::clamp(abs_diff, 0.0f, static_cast<float>(beta));
     auto excess = abs_diff - clamped_abs;
     auto loss_unreduced =
         (clamped_abs * clamped_abs * 0.5f) / static_cast<float>(beta) + excess;
 
-    if (reduction == Reduction::Mean) return tenzor::mean(loss_unreduced);
-    if (reduction == Reduction::Sum) return tenzor::sum(loss_unreduced);
-    return loss_unreduced;
+    if (reduction == Reduction::Mean) return narrow(tenzor::mean(loss_unreduced));
+    if (reduction == Reduction::Sum) return narrow(tenzor::sum(loss_unreduced));
+    return narrow(loss_unreduced);
 }
 
 // ============================================================================
@@ -1475,16 +1573,23 @@ auto scaled_dot_product_attention(
     auto scaled = scores * scale_var;
 
     // Causal mask: use triu to build mask on-device (no CPU fallback).
-    // Always use Float32 for the mask to avoid overflow in half-precision
-    // types (Float16 max ~65504, -1e9 would overflow).
+    // Build the additive sentinel with a large-negative value that is
+    // REPRESENTABLE in the query dtype. -1e9 overflows Float16 (max ~65504)
+    // to -inf, which reintroduces the 0*-inf = NaN softmax hazard and turns a
+    // fully-masked row into softmax 0/0 = NaN. For F16/BF16 use -1e4 (matches
+    // contrastive.cpp's kMaskNeg, chosen to fit F16); F32/F64 keep -1e9.
+    // (F057)
     if (opts.is_causal) {
         auto L = query.shape()[query.shape().size() - 2];
         auto S = key.shape()[key.shape().size() - 2];
+        const DType q_dtype = query.tensor().dtype();
+        const float mask_neg = (q_dtype == DType::Float16 ||
+                                q_dtype == DType::BFloat16) ? -1e4f : -1e9f;
         auto mask = tenzor::triu(
             tenzor::ones({L, S}, DType::Float32, query.tensor().device()),
-            /*diagonal=*/1) * -1e9f;
-        if (query.tensor().dtype() != DType::Float32) {
-            mask = mask.to(query.tensor().dtype());
+            /*diagonal=*/1) * mask_neg;
+        if (q_dtype != DType::Float32) {
+            mask = mask.to(q_dtype);
         }
         Variable mask_var(mask, false);
         scaled = scaled + mask_var;
@@ -1699,18 +1804,14 @@ auto lp_pool1d(const Variable& input, double norm_type, int64_t kernel_size,
 
     if (stride <= 0) stride = kernel_size;
 
-    // |input|^p — Variable-aware so autograd chain is preserved.
-    auto abs_pow = tenzor::pow(tenzor::abs(input), static_cast<float>(norm_type));
-
-    // B4b: Delegate to nn::AvgPool1d so the AvgPool1dBackward grad_fn is
-    // wired. The previous direct-dispatch path built a leaf Variable that
-    // silently dropped autograd for the entire lp_pool1d chain (mirror of
-    // the J7 bug in functional::avg_pool2d, fixed the same way).
-    ::tenzor::nn::AvgPool1d pool(kernel_size, stride, /*padding=*/0);
-    auto pooled = pool.forward(abs_pow);
-
-    // (mean)^(1/p)
-    return tenzor::pow(pooled, static_cast<float>(1.0 / norm_type));
+    // Delegate to nn::LPPool1d so the functional and layer paths compute the
+    // identical Lp norm. PyTorch raises the RAW input to the p-th power (no
+    // abs — which matters for odd p with negative inputs) and returns
+    // (sum |window|^p)^(1/p), i.e. it multiplies the pooled mean back by the
+    // window size rather than returning the mean-normalized value. Delegating
+    // keeps F::lp_pool1d bit-identical to nn::LPPool1d.
+    ::tenzor::nn::LPPool1d pool(static_cast<int64_t>(norm_type), kernel_size, stride);
+    return pool.forward(input);
 }
 
 auto lp_pool2d(const Variable& input, double norm_type,
@@ -1725,16 +1826,10 @@ auto lp_pool2d(const Variable& input, double norm_type,
     if (stride.first <= 0) stride.first = kernel_size.first;
     if (stride.second <= 0) stride.second = kernel_size.second;
 
-    // |input|^p — Variable-aware so autograd chain is preserved end-to-end.
-    auto abs_pow = tenzor::pow(tenzor::abs(input), static_cast<float>(norm_type));
-
-    // avg_pool2d on the powered values; pass the Variable directly so its
-    // grad_fn is retained. The previous code wrapped abs_pow.tensor() in a
-    // fresh Variable(t, false) which discarded the graph and zeroed grads.
-    auto pooled = avg_pool2d(abs_pow, kernel_size, stride, {0, 0});
-
-    // (mean)^(1/p) — pooled is already a Variable with the correct grad_fn.
-    return tenzor::pow(pooled, static_cast<float>(1.0 / norm_type));
+    // Delegate to nn::LPPool2d for identical Lp-norm semantics to the layer
+    // (raw power, no abs; (sum |window|^p)^(1/p) — see lp_pool1d).
+    ::tenzor::nn::LPPool2d pool(static_cast<int64_t>(norm_type), kernel_size, stride);
+    return pool.forward(input);
 }
 
 // ============================================================================
@@ -1812,6 +1907,11 @@ auto fractional_max_pool2d(const Variable& input,
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::KernelSize, kernel_size.first);
+    // F109: pass per-axis pool sizes so rectangular kernels use the correct
+    // (kernel_w) window width; the backends read these to build overlapping
+    // PyTorch-style windows.
+    attrs.set(AttrKey::KernelSizeH, kernel_size.first);
+    attrs.set(AttrKey::KernelSizeW, kernel_size.second);
     attrs.set(AttrKey::OutputSizeH, output_size.first);
     attrs.set(AttrKey::OutputSizeW, output_size.second);
 
@@ -1853,6 +1953,9 @@ auto fractional_max_pool2d(const Variable& input,
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::KernelSize, kernel_size.first);
+    // F109: per-axis pool sizes for rectangular kernels (overlapping windows).
+    attrs.set(AttrKey::KernelSizeH, kernel_size.first);
+    attrs.set(AttrKey::KernelSizeW, kernel_size.second);
     attrs.set(AttrKey::OutputRatioH, output_ratio.first);
     attrs.set(AttrKey::OutputRatioW, output_ratio.second);
 
@@ -1888,6 +1991,10 @@ auto fractional_max_pool3d(const Variable& input,
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::KernelSize, std::get<0>(kernel_size));
+    // F109: per-axis pool sizes for anisotropic kernels (overlapping windows).
+    attrs.set(AttrKey::KernelSizeD, std::get<0>(kernel_size));
+    attrs.set(AttrKey::KernelSizeH, std::get<1>(kernel_size));
+    attrs.set(AttrKey::KernelSizeW, std::get<2>(kernel_size));
     attrs.set(AttrKey::OutputSizeD, std::get<0>(output_size));
     attrs.set(AttrKey::OutputSizeH, std::get<1>(output_size));
     attrs.set(AttrKey::OutputSizeW, std::get<2>(output_size));
@@ -1932,6 +2039,10 @@ auto fractional_max_pool3d(const Variable& input,
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::KernelSize, std::get<0>(kernel_size));
+    // F109: per-axis pool sizes for anisotropic kernels (overlapping windows).
+    attrs.set(AttrKey::KernelSizeD, std::get<0>(kernel_size));
+    attrs.set(AttrKey::KernelSizeH, std::get<1>(kernel_size));
+    attrs.set(AttrKey::KernelSizeW, std::get<2>(kernel_size));
     attrs.set(AttrKey::OutputRatioD, rd);
     attrs.set(AttrKey::OutputRatioH, rh);
     attrs.set(AttrKey::OutputRatioW, rw);

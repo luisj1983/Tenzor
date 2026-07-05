@@ -15,6 +15,7 @@
 #include "../mps_backend.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include <cstdint>
 #include <cstring>
@@ -154,6 +155,21 @@ Tensor mps_maxpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
                                      int64_t dd, int64_t dh, int64_t dw,
                                      Tensor& indices_out) {
     ensure_initialized();
+    // maxpool3d_forward_kernel is float32-only (device const float*). Widen
+    // Float16/BFloat16 to Float32, compute, narrow the values back (indices are
+    // Int32 regardless, populated by the recursive call). Metal has no double
+    // type, so Float64 cannot be represented — reject it explicitly instead of
+    // silently misbinding a 2/8-byte buffer to a 4-byte-float shader.
+    if (input.dtype() == DType::Float64) {
+        throw std::runtime_error(
+            "MPS MaxPool3d: Float64 not supported (Metal has no double type)");
+    }
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        Tensor out32 = mps_maxpool3d_forward_kernel(
+            input.to(DType::Float32), kd, kh, kw, sd, sh, sw,
+            pd, ph, pw, dd, dh, dw, indices_out);
+        return out32.to(input.dtype());
+    }
     auto s = input.shape();
     int64_t batch = s[0], channels = s[1];
     int64_t in_d = s[2], in_h = s[3], in_w = s[4];
@@ -205,6 +221,20 @@ Tensor mps_avgpool3d_forward_kernel(const Tensor& input, int64_t kd, int64_t kh,
                                      int64_t dd, int64_t dh, int64_t dw,
                                      bool count_include_pad) {
     ensure_initialized();
+    // avgpool3d_forward_kernel is float32-only (device const float*). Widen
+    // Float16/BFloat16 to Float32, compute, narrow back. Metal has no double
+    // type, so Float64 cannot be represented — reject it explicitly instead of
+    // silently misbinding a 2/8-byte buffer to a 4-byte-float shader.
+    if (input.dtype() == DType::Float64) {
+        throw std::runtime_error(
+            "MPS AvgPool3d: Float64 not supported (Metal has no double type)");
+    }
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return mps_avgpool3d_forward_kernel(
+                   input.to(DType::Float32), kd, kh, kw, sd, sh, sw,
+                   pd, ph, pw, dd, dh, dw, count_include_pad)
+            .to(input.dtype());
+    }
     auto s = input.shape();
     int64_t batch = s[0], channels = s[1];
     int64_t in_d = s[2], in_h = s[3], in_w = s[4];
@@ -643,12 +673,44 @@ std::vector<Tensor> mps_unique_kernel(const Tensor& input, bool sorted, bool ret
 // Vision ops: GridSample, Interpolate, AffineGrid, BoxIoU, ROIAlign
 // ============================================================================
 
-Tensor mps_grid_sample_kernel(const Tensor& input, const Tensor& grid, bool align_corners) {
+Tensor mps_grid_sample_kernel(const Tensor& input, const Tensor& grid,
+                               const std::string& mode, const std::string& padding_mode,
+                               bool align_corners) {
     ensure_initialized();
+    // grid_sample_kernel is float32-only (device const float* for both input and
+    // grid). Widen Float16/BFloat16 input AND grid (grid holds float sampling
+    // coordinates read as float) to Float32, compute, narrow the output back.
+    // Metal has no double type, so Float64 cannot be represented — reject it
+    // explicitly instead of misbinding a 2/8-byte buffer to a 4-byte-float shader.
+    if (input.dtype() == DType::Float64) {
+        throw std::runtime_error(
+            "MPS grid_sample: Float64 not supported (Metal has no double type)");
+    }
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        Tensor out32 = mps_grid_sample_kernel(
+            input.to(DType::Float32), grid.to(DType::Float32),
+            mode, padding_mode, align_corners);
+        return out32.to(input.dtype());
+    }
     auto s = input.shape();
     auto gs = grid.shape();
     int64_t batch = s[0], channels = s[1], in_h = s[2], in_w = s[3];
     int64_t out_h = gs[1], out_w = gs[2];
+
+    // Map mode / padding_mode strings to the shader's uint codes (matching CPU/
+    // CUDA). Fail loud on an unknown value rather than silently defaulting.
+    uint32_t mode_code;
+    if (mode == "bilinear") mode_code = 0;
+    else if (mode == "nearest") mode_code = 1;
+    else if (mode == "bicubic") mode_code = 2;
+    else throw std::runtime_error("MPS grid_sample: unknown mode '" + mode +
+                                  "' (expected bilinear/nearest/bicubic)");
+    uint32_t pad_code;
+    if (padding_mode == "zeros") pad_code = 0;
+    else if (padding_mode == "border") pad_code = 1;
+    else if (padding_mode == "reflection") pad_code = 2;
+    else throw std::runtime_error("MPS grid_sample: unknown padding_mode '" + padding_mode +
+                                  "' (expected zeros/border/reflection)");
 
     Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
@@ -669,6 +731,8 @@ Tensor mps_grid_sample_kernel(const Tensor& input, const Tensor& grid, bool alig
     [enc setBuffer:buf_grid offset:0 atIndex:1];
     [enc setBuffer:buf_out offset:0 atIndex:2];
     for (int i = 0; i < 7; ++i) [enc setBytes:&p[i] length:sizeof(uint32_t) atIndex:i+3];
+    [enc setBytes:&mode_code length:sizeof(uint32_t) atIndex:10];
+    [enc setBytes:&pad_code length:sizeof(uint32_t) atIndex:11];
 
     size_t total = output.numel();
     MTLSize gridsz = MTLSizeMake(total, 1, 1);
@@ -682,6 +746,28 @@ Tensor mps_grid_sample_kernel(const Tensor& input, const Tensor& grid, bool alig
 Tensor mps_interpolate_kernel(const Tensor& input, int64_t out_h, int64_t out_w,
                                const std::string& mode, bool align_corners) {
     ensure_initialized();
+    // Only nearest/bilinear shaders exist. Reject any other mode (e.g. bicubic)
+    // instead of silently running bilinear — the registry no longer hard-codes
+    // "bilinear", so an unsupported mode must fail loud (matches the honest
+    // behaviour of the other backends).
+    if (mode != "nearest" && mode != "bilinear") {
+        throw std::runtime_error(
+            "MPS Interpolate: mode '" + mode +
+            "' not supported (only nearest/bilinear implemented on MPS)");
+    }
+    // interpolate_{nearest,bilinear}_kernel are float32-only (device const
+    // float*). Widen Float16/BFloat16 to Float32, compute, narrow back. Metal has
+    // no double type, so reject Float64 rather than misbinding a 2/8-byte buffer
+    // to a 4-byte-float shader.
+    if (input.dtype() == DType::Float64) {
+        throw std::runtime_error(
+            "MPS Interpolate: Float64 not supported (Metal has no double type)");
+    }
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        Tensor out32 = mps_interpolate_kernel(
+            input.to(DType::Float32), out_h, out_w, mode, align_corners);
+        return out32.to(input.dtype());
+    }
     auto s = input.shape();
     int64_t batch = s[0], channels = s[1], in_h = s[2], in_w = s[3];
 
@@ -714,8 +800,26 @@ Tensor mps_interpolate_kernel(const Tensor& input, int64_t out_h, int64_t out_w,
     return output;
 }
 
-Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2) {
+Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) {
     ensure_initialized();
+    if (iou_type < 0 || iou_type > 3) {
+        throw std::runtime_error(
+            "MPS box_iou: unsupported iou_type " + std::to_string(iou_type) +
+            " (expected 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU)");
+    }
+    // box_iou_kernel is float32-only (device const float* for both boxes1 and
+    // boxes2). Widen Float16/BFloat16 inputs to Float32, compute, narrow the
+    // output back. Metal has no double type, so reject Float64 rather than
+    // misbinding a 2/8-byte buffer to a 4-byte-float shader.
+    if (boxes1.dtype() == DType::Float64) {
+        throw std::runtime_error(
+            "MPS box_iou: Float64 not supported (Metal has no double type)");
+    }
+    if (boxes1.dtype() == DType::Float16 || boxes1.dtype() == DType::BFloat16) {
+        Tensor out32 = mps_box_iou_kernel(
+            boxes1.to(DType::Float32), boxes2.to(DType::Float32), iou_type);
+        return out32.to(boxes1.dtype());
+    }
     int64_t N = boxes1.shape()[0], M = boxes2.shape()[0];
     Tensor output({N, M}, boxes1.dtype(), boxes1.device());
 
@@ -724,6 +828,7 @@ Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2) {
     id<MTLBuffer> buf2 = get_buffer(boxes2);
     id<MTLBuffer> buf_out = get_buffer(output);
     uint32_t uN = (uint32_t)N, uM = (uint32_t)M;
+    uint32_t uType = (uint32_t)iou_type;
 
     id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
@@ -733,6 +838,7 @@ Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2) {
     [enc setBuffer:buf_out offset:0 atIndex:2];
     [enc setBytes:&uN length:sizeof(uN) atIndex:3];
     [enc setBytes:&uM length:sizeof(uM) atIndex:4];
+    [enc setBytes:&uType length:sizeof(uType) atIndex:5];
 
     size_t total = N * M;
     MTLSize grid = MTLSizeMake(total, 1, 1);
@@ -752,8 +858,14 @@ Tensor mps_nms_kernel(const Tensor& boxes, const Tensor& scores, float iou_thres
     // Sort by score descending
     std::vector<int32_t> order(N);
     std::iota(order.begin(), order.end(), 0);
+    // Descending by score, breaking ties by ascending original index so the
+    // keep set is deterministic and matches CPU/CUDA/ROCm (std::sort is not
+    // stable, so the tie-break must be explicit).
     std::sort(order.begin(), order.end(),
-              [&](int32_t a, int32_t b) { return score_ptr[a] > score_ptr[b]; });
+              [&](int32_t a, int32_t b) {
+                  if (score_ptr[a] != score_ptr[b]) return score_ptr[a] > score_ptr[b];
+                  return a < b;
+              });
 
     std::vector<bool> suppressed(N, false);
     std::vector<int32_t> keep;
@@ -912,16 +1024,27 @@ Tensor mps_sparse_spmv_kernel(const Tensor& crow, const Tensor& col, const Tenso
 
 std::vector<Tensor> mps_batchnorm_mean_var_kernel(const Tensor& input) {
     ensure_initialized();
-    auto s = input.shape();
+    // batchnorm_mean_var_kernel is float32-only (device const float*). Widen
+    // Float16/BFloat16 to Float32 and compute the statistics in Float32; the
+    // saved stats are returned in Float32 so a half input cannot overflow the
+    // mean/variance/recip-std to Inf (mirrors CPU/oneAPI — F014/F114). Metal has
+    // no double type, so Float64 is rejected explicitly.
+    if (input.dtype() == DType::Float64) {
+        throw std::runtime_error(
+            "MPS BatchNorm2d: Float64 not supported (Metal has no double type)");
+    }
+    Tensor in_use = (input.dtype() == DType::Float32)
+                        ? input : input.to(DType::Float32);
+    auto s = in_use.shape();
     int64_t batch = s[0], channels = s[1];
     int64_t spatial = 1;
     for (size_t d = 2; d < s.size(); ++d) spatial *= s[d];
 
-    Tensor mean({channels}, input.dtype(), input.device());
-    Tensor var({channels}, input.dtype(), input.device());
+    Tensor mean({channels}, DType::Float32, in_use.device());
+    Tensor var({channels}, DType::Float32, in_use.device());
 
     auto pipeline = get_pipeline("batchnorm_mean_var_kernel");
-    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_in = get_buffer(in_use);
     id<MTLBuffer> buf_mean = get_buffer(mean);
     id<MTLBuffer> buf_var = get_buffer(var);
     uint32_t p[3] = {(uint32_t)batch, (uint32_t)channels, (uint32_t)spatial};
@@ -946,6 +1069,22 @@ Tensor mps_batchnorm_forward_training_kernel(const Tensor& input, const Tensor& 
                                                const Tensor& var, const Tensor& weight,
                                                const Tensor& bias, float eps) {
     ensure_initialized();
+    // batchnorm_forward_kernel is float32-only (device const float*). Widen a
+    // Float16/BFloat16 input (and any half stats/params) to Float32, compute,
+    // and narrow the output back to the input dtype. Metal has no double type,
+    // so Float64 is rejected explicitly. Stats may already be Float32 (the
+    // mean_var kernel now returns Float32) — .to() is then a no-op.
+    const DType out_dtype = input.dtype();
+    if (out_dtype == DType::Float64) {
+        throw std::runtime_error(
+            "MPS BatchNorm2d: Float64 not supported (Metal has no double type)");
+    }
+    if (out_dtype == DType::Float16 || out_dtype == DType::BFloat16) {
+        Tensor out32 = mps_batchnorm_forward_training_kernel(
+            input.to(DType::Float32), mean.to(DType::Float32), var.to(DType::Float32),
+            weight.to(DType::Float32), bias.to(DType::Float32), eps);
+        return out32.to(out_dtype);
+    }
     auto s = input.shape();
     int64_t channels = s[1];
     int64_t spatial = 1;
@@ -1152,16 +1291,32 @@ std::vector<Tensor> mps_fused_adam_atan2_step(const Tensor& param, const Tensor&
 }
 
 // Fused softmax cross entropy
-std::vector<Tensor> mps_fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets) {
+std::vector<Tensor> mps_fused_softmax_cross_entropy_kernel(
+        const Tensor& logits, const Tensor& targets,
+        bool compute_grad, const std::string& reduction) {
     ensure_initialized();
-    auto s = logits.shape();
+
+    // The fused_softmax_cross_entropy_kernel shader is float32-only
+    // (device const float*). Widen Float16/BFloat16 logits to Float32, compute,
+    // and narrow the gradient back to the original dtype at the end. The loss
+    // stays Float32 (matching CPU, where the half path keeps loss in Float32).
+    // Metal has no double type, so Float64 is rejected explicitly.
+    const DType orig_dtype = logits.dtype();
+    if (orig_dtype == DType::Float64) {
+        throw std::runtime_error(
+            "MPS FusedSoftmaxCrossEntropy: Float64 not supported (Metal has no double type)");
+    }
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor logits_use = widen ? logits.to(DType::Float32) : logits;
+
+    auto s = logits_use.shape();
     int64_t batch = s[0], num_classes = s[1];
 
-    Tensor loss({batch}, logits.dtype(), logits.device());
-    Tensor grad({batch, num_classes}, logits.dtype(), logits.device());
+    Tensor loss({batch}, DType::Float32, logits_use.device());
+    Tensor grad({batch, num_classes}, DType::Float32, logits_use.device());
 
     auto pipeline = get_pipeline("fused_softmax_cross_entropy_kernel");
-    id<MTLBuffer> buf_logits = get_buffer(logits);
+    id<MTLBuffer> buf_logits = get_buffer(logits_use);
     id<MTLBuffer> buf_targets = get_buffer(targets);
     id<MTLBuffer> buf_loss = get_buffer(loss);
     id<MTLBuffer> buf_grad = get_buffer(grad);
@@ -1181,7 +1336,40 @@ std::vector<Tensor> mps_fused_softmax_cross_entropy_kernel(const Tensor& logits,
                              static_cast<NSUInteger>(batch));
     [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
     [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
-    return {loss, grad};
+
+    // The native kernel emits the per-sample loss {batch} (reduction="none") and
+    // the UNREDUCED gradient (softmax - onehot). Apply the caller's reduction &
+    // gradient scaling to match CPU (cpu_kernel_registry FusedSoftmaxCrossEntropy
+    // -> cpu::fused_softmax_cross_entropy_kernel):
+    //   "mean": loss = mean(per-sample); grad *= 1/batch
+    //   "sum":  loss = sum(per-sample);  grad unscaled
+    //   "none": loss = per-sample;       grad unscaled
+    Tensor reduced_loss;
+    if (reduction == "mean") {
+        reduced_loss = ::tenzor::mean(loss);
+    } else if (reduction == "sum") {
+        reduced_loss = ::tenzor::sum(loss);
+    } else if (reduction == "none") {
+        reduced_loss = loss;
+    } else {
+        throw std::runtime_error(
+            "MPS FusedSoftmaxCrossEntropy: unknown reduction '" + reduction + "'");
+    }
+
+    std::vector<Tensor> out;
+    out.push_back(reduced_loss);
+    if (compute_grad) {
+        if (reduction == "mean" && batch > 0) {
+            // Scale the gradient by 1/batch on the host (shared-storage buffer),
+            // mirroring the CPU per-row `grad_row[j] *= 1/batch_size`.
+            float scale = 1.0f / static_cast<float>(batch);
+            float* grad_ptr = static_cast<float*>(const_cast<void*>(grad.data_ptr()));
+            int64_t gn = batch * num_classes;
+            for (int64_t i = 0; i < gn; ++i) grad_ptr[i] *= scale;
+        }
+        out.push_back(widen ? grad.to(orig_dtype) : grad);
+    }
+    return out;
 }
 
 // ============================================================================

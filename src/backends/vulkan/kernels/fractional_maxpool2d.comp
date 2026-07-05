@@ -22,6 +22,24 @@ layout(push_constant) uniform PushConstants {
     uint kernel_w;       // pool window width
 } params;
 
+// PyTorch FractionalMaxPool window start for output index `i` along one axis.
+// Windows are `pool`-wide (== kernel_size) and OVERLAP when pool > alpha
+// (torch.nn.FractionalMaxPool, ATen generate_intervals, Graham arXiv:1412.6071):
+//   alpha    = (in - pool) / (out - 1)                     [out > 1]
+//   start(i) = floor((i + u) * alpha) - floor(u * alpha)   [i < out-1]
+//   start(out-1) = in - pool
+// int() truncation == floor here since all operands are non-negative.
+int frac_pool_start(int i, int in_size, int out_size, int pool, float u) {
+    int start;
+    if (out_size <= 1 || i == out_size - 1) {
+        start = in_size - pool;
+    } else {
+        float alpha = float(in_size - pool) / float(out_size - 1);
+        start = int((float(i) + u) * alpha) - int(u * alpha);
+    }
+    return clamp(start, 0, in_size - pool);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.total_output) return;
@@ -43,32 +61,15 @@ void main() {
         sample_w = samples_data[sample_idx + 1];
     }
 
-    // Pool region: start derived from sample/ratio (PyTorch FractionalMaxPool
-    // pseudo-random offset), but the window is always kernel_h x kernel_w.
-    // Earlier versions used `out * ratio` as the window size, which made the
-    // pool region track output stride instead of the user-supplied kernel.
-    // Graham's disjoint-subsequence method (arXiv:1412.6071), matching the
-    // CPU reference kernel (cpu/kernels/pooling.cpp fractional_maxpool2d_impl):
-    //   start_i = floor((i + u) * (in/out) - u)
-    //   end_i   = floor((i + 1 + u) * (in/out) - u)
-    float h_alpha = float(params.H) / float(params.out_h);
-    float w_alpha = float(params.W) / float(params.out_w);
+    // PyTorch overlapping windows of width == kernel_h x kernel_w, positioned
+    // by the pseudo-random sample offset (see frac_pool_start above). Earlier
+    // versions ignored kernel_h/kernel_w and derived a disjoint window from the
+    // input/output ratio (adaptive-style), diverging from torch.nn.
+    int h_start = frac_pool_start(int(oh), int(params.H), int(params.out_h), int(params.kernel_h), sample_h);
+    int w_start = frac_pool_start(int(ow), int(params.W), int(params.out_w), int(params.kernel_w), sample_w);
 
-    int h_start = int(floor((float(oh) + sample_h) * h_alpha - sample_h));
-    int w_start = int(floor((float(ow) + sample_w) * w_alpha - sample_w));
-
-    int h_end = int(floor((float(oh) + 1.0 + sample_h) * h_alpha - sample_h));
-    int w_end = int(floor((float(ow) + 1.0 + sample_w) * w_alpha - sample_w));
-
-    // Clamp to valid range
-    h_start = max(h_start, 0);
-    w_start = max(w_start, 0);
-    h_end   = min(h_end, int(params.H));
-    w_end   = min(w_end, int(params.W));
-    if (h_end <= h_start) h_end = h_start + 1;
-    if (w_end <= w_start) w_end = w_start + 1;
-    h_end = min(h_end, int(params.H));
-    w_end = min(w_end, int(params.W));
+    int h_end = min(h_start + int(params.kernel_h), int(params.H));
+    int w_end = min(w_start + int(params.kernel_w), int(params.W));
 
     // Find max in pool region
     float max_val = -1.0 / 0.0; // -inf

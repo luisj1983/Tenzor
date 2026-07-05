@@ -10528,7 +10528,10 @@ __global__ void cosine_similarity_hip_kernel(
         norm_a += av * av;
         norm_b += bv * bv;
     }
-    out[idx] = dot / (sqrt(norm_a) * sqrt(norm_b) + eps);
+    // PyTorch clamps the denominator: dot / max(||a||*||b||, eps) (NOT an
+    // additive eps, which would cap similarity below 1 and bias toward 0).
+    T norm_prod = sqrt(norm_a) * sqrt(norm_b);
+    out[idx] = dot / (norm_prod > eps ? norm_prod : eps);
 }
 
 auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,

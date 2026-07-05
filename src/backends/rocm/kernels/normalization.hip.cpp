@@ -70,7 +70,11 @@ __device__ T block_reduce_sum(T val, T* shared) {
 // Layer Normalization Forward
 // ==============================================================================
 
-template<typename T>
+// `Acc` is the reduction accumulator type: for a Float32 input it is `double`,
+// so mean and variance are accumulated/divided in double — matching the CPU
+// reference and the CUDA sibling (fused_ops.cu forces Acc=double for F32). A
+// float accumulator over a large normalized_size drifts.
+template<typename T, typename Acc = T>
 __global__ void layer_norm_forward_kernel(
     const T* input,
     const T* weight,  // gamma, can be nullptr
@@ -83,7 +87,7 @@ __global__ void layer_norm_forward_kernel(
     double eps
 ) {
     extern __shared__ unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
@@ -91,37 +95,37 @@ __global__ void layer_norm_forward_kernel(
     const T* input_row = input + batch_idx * normalized_size;
     T* output_row = output + batch_idx * normalized_size;
 
-    // Compute mean
-    T sum = T(0);
+    // Compute mean (in the wide accumulator type)
+    Acc sum = Acc(0);
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        sum += input_row[i];
+        sum += static_cast<Acc>(input_row[i]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
 
-    T mean = sum / T(normalized_size);
+    Acc mean = sum / Acc(normalized_size);
     if (threadIdx.x == 0 && mean_out) {
-        mean_out[batch_idx] = mean;
+        mean_out[batch_idx] = static_cast<T>(mean);
     }
 
-    // Compute variance
-    T var_sum = T(0);
+    // Compute variance (in the wide accumulator type)
+    Acc var_sum = Acc(0);
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        T diff = input_row[i] - mean;
+        Acc diff = static_cast<Acc>(input_row[i]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
 
-    T variance = var_sum / T(normalized_size);
-    T rstd = rsqrt(variance + T(eps));
+    Acc variance = var_sum / Acc(normalized_size);
+    Acc rstd = rsqrt(variance + static_cast<Acc>(eps));
     if (threadIdx.x == 0 && rstd_out) {
-        rstd_out[batch_idx] = rstd;
+        rstd_out[batch_idx] = static_cast<T>(rstd);
     }
 
     // Normalize and apply affine transform
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        T normalized = (input_row[i] - mean) * rstd;
+        T normalized = static_cast<T>((static_cast<Acc>(input_row[i]) - mean) * rstd);
         if (weight && bias) {
             output_row[i] = normalized * weight[i] + bias[i];
         } else if (weight) {
@@ -171,7 +175,26 @@ auto layer_norm_kernel_with_stats(
         return {out_f32.to(DType::BFloat16), mean_f32, rstd_f32};
     }
 
-    auto input_shape = input.shape();
+    // The forward kernel indexes storage with flat per-row offsets
+    // (input + batch_idx * normalized_size), which assumes a contiguous
+    // layout. A transposed/sliced/permuted input would read the wrong
+    // storage, so materialize a contiguous copy first (matches the CUDA
+    // sibling fused_layer_norm_cuda and ROCm RMSNorm). weight/bias are
+    // indexed by the normalized position and are contiguified too.
+    Tensor input_contig = input.is_contiguous() ? input : input.contiguous();
+    Tensor weight_contig, bias_contig;
+    const Tensor* weight_c = weight;
+    const Tensor* bias_c   = bias;
+    if (weight && !weight->is_contiguous()) {
+        weight_contig = weight->contiguous();
+        weight_c = &weight_contig;
+    }
+    if (bias && !bias->is_contiguous()) {
+        bias_contig = bias->contiguous();
+        bias_c = &bias_contig;
+    }
+
+    auto input_shape = input_contig.shape();
     int64_t ndim = input_shape.size();
     int64_t norm_ndim = normalized_shape.size();
 
@@ -185,34 +208,36 @@ auto layer_norm_kernel_with_stats(
     }
 
     Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-                  input.dtype(), input.device());
+                  input_contig.dtype(), input_contig.device());
 
     // Saved stats shape is the leading (ndim - norm_ndim) batch dims.
     std::vector<int64_t> stats_shape(input_shape.begin(),
                                      input_shape.begin() + (ndim - norm_ndim));
     if (stats_shape.empty()) stats_shape.push_back(1);
-    Tensor mean(stats_shape, input.dtype(), input.device());
-    Tensor rstd(stats_shape, input.dtype(), input.device());
+    Tensor mean(stats_shape, input_contig.dtype(), input_contig.device());
+    Tensor rstd(stats_shape, input_contig.dtype(), input_contig.device());
 
     int threads = BLOCK_SIZE;
     int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
-    if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(layer_norm_forward_kernel<float>,
-            dim3(batch_size), dim3(threads), shared_mem_size, stream,
-            input.data<float>(),
-            weight ? weight->data<float>() : nullptr,
-            bias ? bias->data<float>() : nullptr,
+    if (input_contig.dtype() == DType::Float32) {
+        // Accumulate mean/variance in double (Acc=double); shared memory sized
+        // for the wider accumulator (matches the F64 launch size).
+        hipLaunchKernelGGL((layer_norm_forward_kernel<float, double>),
+            dim3(batch_size), dim3(threads), shared_mem_size * 2, stream,
+            input_contig.data<float>(),
+            weight_c ? weight_c->data<float>() : nullptr,
+            bias_c ? bias_c->data<float>() : nullptr,
             output.data<float>(),
             mean.data<float>(), rstd.data<float>(),
             batch_size, normalized_size, eps);
         HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float64) {
+    } else if (input_contig.dtype() == DType::Float64) {
         hipLaunchKernelGGL(layer_norm_forward_kernel<double>,
             dim3(batch_size), dim3(threads), shared_mem_size * 2, stream,
-            input.data<double>(),
-            weight ? weight->data<double>() : nullptr,
-            bias ? bias->data<double>() : nullptr,
+            input_contig.data<double>(),
+            weight_c ? weight_c->data<double>() : nullptr,
+            bias_c ? bias_c->data<double>() : nullptr,
             output.data<double>(),
             mean.data<double>(), rstd.data<double>(),
             batch_size, normalized_size, eps);
@@ -243,7 +268,9 @@ auto layer_norm_kernel(
 // Layer Normalization Backward
 // ==============================================================================
 
-template<typename T>
+// `Acc` is the reduction accumulator type: for a Float32 input it is `double`,
+// so the ds/db dot-products accumulate in double — matching the CUDA sibling.
+template<typename T, typename Acc = T>
 __global__ void layer_norm_backward_kernel(
     const T* grad_output,
     const T* input,
@@ -257,7 +284,7 @@ __global__ void layer_norm_backward_kernel(
     int64_t normalized_size
 ) {
     extern __shared__ unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
@@ -266,17 +293,18 @@ __global__ void layer_norm_backward_kernel(
     const T* input_row = input + batch_idx * normalized_size;
     T* grad_in_row = grad_input + batch_idx * normalized_size;
 
-    T m = mean[batch_idx];
-    T rs = rstd[batch_idx];
+    Acc m = static_cast<Acc>(mean[batch_idx]);
+    Acc rs = static_cast<Acc>(rstd[batch_idx]);
 
-    // Compute ds and db (dot products)
-    T ds = T(0);
-    T db = T(0);
+    // Compute ds and db (dot products) in the wide accumulator type
+    Acc ds = Acc(0);
+    Acc db = Acc(0);
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        T x_hat = (input_row[i] - m) * rs;
-        T w = weight ? weight[i] : T(1);
-        ds += grad_out_row[i] * w * x_hat;
-        db += grad_out_row[i] * w;
+        Acc x_hat = (static_cast<Acc>(input_row[i]) - m) * rs;
+        Acc w = weight ? static_cast<Acc>(weight[i]) : Acc(1);
+        Acc go = static_cast<Acc>(grad_out_row[i]);
+        ds += go * w * x_hat;
+        db += go * w;
     }
 
     ds = block_reduce_sum(ds, shared);
@@ -285,15 +313,15 @@ __global__ void layer_norm_backward_kernel(
     __syncthreads();
 
     // Compute gradient for input
-    T scale = T(1) / T(normalized_size);
+    Acc scale = Acc(1) / Acc(normalized_size);
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
-        T x_hat = (input_row[i] - m) * rs;
-        T w = weight ? weight[i] : T(1);
-        grad_in_row[i] = rs * w * (grad_out_row[i] - scale * (db + x_hat * ds));
+        Acc x_hat = (static_cast<Acc>(input_row[i]) - m) * rs;
+        Acc w = weight ? static_cast<Acc>(weight[i]) : Acc(1);
+        grad_in_row[i] = static_cast<T>(rs * w * (static_cast<Acc>(grad_out_row[i]) - scale * (db + x_hat * ds)));
 
         // Accumulate gradients for weight and bias
         if (grad_weight) {
-            atomicAdd(&grad_weight[i], grad_out_row[i] * x_hat);
+            atomicAdd(&grad_weight[i], static_cast<T>(static_cast<Acc>(grad_out_row[i]) * x_hat));
         }
         if (grad_bias) {
             atomicAdd(&grad_bias[i], grad_out_row[i]);
@@ -351,8 +379,9 @@ auto layer_norm_backward_kernel(
     int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(layer_norm_backward_kernel<float>,
-            dim3(batch_size), dim3(threads), shared_mem_size, stream,
+        // Accumulate ds/db in double (Acc=double); shared mem sized for double.
+        hipLaunchKernelGGL((layer_norm_backward_kernel<float, double>),
+            dim3(batch_size), dim3(threads), shared_mem_size * 2, stream,
             grad_output.data<float>(),
             input.data<float>(),
             weight ? weight->data<float>() : nullptr,
@@ -399,7 +428,10 @@ auto layer_norm_backward_kernel(
 // Group Normalization Forward
 // ==============================================================================
 
-template<typename T>
+// `Acc` is the reduction accumulator type: for a Float32 input it is `double`,
+// so per-group mean and variance accumulate in double — matching the CUDA
+// sibling. (The dedicated FP16 kernel below already uses a float accumulator.)
+template<typename T, typename Acc = T>
 __global__ void group_norm_forward_kernel(
     const T* input,
     const T* weight,
@@ -415,7 +447,7 @@ __global__ void group_norm_forward_kernel(
     float* saved_rstd = nullptr
 ) {
     extern __shared__ unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     // Each block handles one (batch, group) pair
     int64_t idx = blockIdx.x;
@@ -427,33 +459,33 @@ __global__ void group_norm_forward_kernel(
     int64_t group_size = channels_per_group * HW;
     int64_t group_offset = n * C * HW + g * channels_per_group * HW;
 
-    // Compute mean
-    T sum = T(0);
+    // Compute mean (in the wide accumulator type)
+    Acc sum = Acc(0);
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
         int64_t c_local = i / HW;
         int64_t hw = i % HW;
         int64_t c = g * channels_per_group + c_local;
-        sum += input[n * C * HW + c * HW + hw];
+        sum += static_cast<Acc>(input[n * C * HW + c * HW + hw]);
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
 
-    T mean = sum / T(group_size);
+    Acc mean = sum / Acc(group_size);
 
-    // Compute variance
-    T var_sum = T(0);
+    // Compute variance (in the wide accumulator type)
+    Acc var_sum = Acc(0);
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
         int64_t c_local = i / HW;
         int64_t hw = i % HW;
         int64_t c = g * channels_per_group + c_local;
-        T diff = input[n * C * HW + c * HW + hw] - mean;
+        Acc diff = static_cast<Acc>(input[n * C * HW + c * HW + hw]) - mean;
         var_sum += diff * diff;
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
 
-    T variance = var_sum / T(group_size);
-    T rstd = rsqrt(variance + T(eps));
+    Acc variance = var_sum / Acc(group_size);
+    Acc rstd = rsqrt(variance + static_cast<Acc>(eps));
 
     // Optionally save stats for backward pass
     if (threadIdx.x == 0 && saved_mean) {
@@ -468,7 +500,7 @@ __global__ void group_norm_forward_kernel(
         int64_t c = g * channels_per_group + c_local;
         int64_t in_idx = n * C * HW + c * HW + hw;
 
-        T normalized = (input[in_idx] - mean) * rstd;
+        T normalized = static_cast<T>((static_cast<Acc>(input[in_idx]) - mean) * rstd);
         if (weight && bias) {
             output[in_idx] = normalized * weight[c] + bias[c];
         } else if (weight) {
@@ -596,8 +628,9 @@ auto group_norm_kernel(
     int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(group_norm_forward_kernel<float>,
-            dim3(blocks), dim3(threads), shared_mem_size, stream,
+        // Accumulate mean/variance in double (Acc=double); shared mem doubled.
+        hipLaunchKernelGGL((group_norm_forward_kernel<float, double>),
+            dim3(blocks), dim3(threads), shared_mem_size * 2, stream,
             input.data<float>(),
             weight ? weight->data<float>() : nullptr,
             bias ? bias->data<float>() : nullptr,
@@ -675,8 +708,9 @@ auto group_norm_forward_with_stats(
     int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(group_norm_forward_kernel<float>,
-            dim3(blocks), dim3(threads), shared_mem_size, stream,
+        // Accumulate mean/variance in double (Acc=double); shared mem doubled.
+        hipLaunchKernelGGL((group_norm_forward_kernel<float, double>),
+            dim3(blocks), dim3(threads), shared_mem_size * 2, stream,
             input.data<float>(),
             weight ? weight->data<float>() : nullptr,
             bias ? bias->data<float>() : nullptr,

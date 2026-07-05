@@ -429,7 +429,17 @@ auto DataParallel::register_grad_hooks() -> void {
                     case ::tenzor::distributed::ReduceOp::SUM:
                         return g;
                     case ::tenzor::distributed::ReduceOp::AVG:
-                        return g * (1.0 / static_cast<double>(num_devices));
+                        // Single-graph shared-module design: scatter(narrow) ->
+                        // per-replica forward -> gather(cat) form ONE autograd
+                        // graph over the shared master parameters, so backward
+                        // already accumulates each sample's contribution exactly
+                        // once and `g` is the correct full-batch gradient. There
+                        // are no N independent replica gradients left to average;
+                        // dividing by num_devices here would under-scale every
+                        // gradient by N. AVG is therefore a no-op relative to the
+                        // already-reduced gradient (identical to SUM).
+                        (void)num_devices;
+                        return g;
                     case ::tenzor::distributed::ReduceOp::MAX:
                     case ::tenzor::distributed::ReduceOp::MIN:
                         // Without a real PG, we can't take a true elementwise
@@ -491,8 +501,15 @@ auto DataParallel::scatter(const Variable& input) -> std::vector<Variable> {
         Variable chunk = ::tenzor::narrow(input, norm_dim, start, current_chunk_size);
 
         // Move chunk to target device, preserving grad_fn/requires_grad/hooks.
+        // This must happen for EVERY device, including the master slot
+        // (device_id == output_device_): a CPU input against a GPU-resident
+        // master module would otherwise leave the master chunk on the CPU,
+        // producing a device mismatch in the replica forward. Mirror gather()'s
+        // device check so we only pay for a transfer when actually needed
+        // (like PyTorch, which relocates the first chunk too).
         int device_id = device_ids_[i];
-        if (device_id != output_device_) {
+        const auto& chunk_dev = chunk.tensor().device();
+        if (chunk_dev.type != Device::Type::CUDA || chunk_dev.index != device_id) {
             utils::wrap_preserving_grad(chunk, chunk.tensor().cuda(device_id));
         }
 
@@ -668,7 +685,13 @@ auto DataParallel::synchronize_gradients() -> void {
                 master->set_grad(*summed);
                 break;
             case ::tenzor::distributed::ReduceOp::AVG:
-                master->set_grad(*summed * (1.0 / num_devices));
+                // Single-graph design: `summed` already holds the full-batch
+                // gradient (each replica contributed the gradient for its own
+                // scatter chunk, i.e. each sample exactly once). Dividing by
+                // num_devices would under-scale by N, so AVG is a no-op relative
+                // to the summed gradient (identical to SUM here).
+                (void)num_devices;
+                master->set_grad(*summed);
                 break;
             default:
                 // validate_reduce_op() already rejects everything but SUM/AVG on

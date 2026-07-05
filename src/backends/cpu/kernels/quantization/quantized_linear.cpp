@@ -31,7 +31,12 @@ namespace kernels {
 // in quantized_linear_int4.cpp. Throughput is lower than VNNI but
 // correctness on negative activations is non-negotiable.
 #if defined(__AVX512BW__)
-static inline int32_t dot_int8_signed_avx512(const int8_t* a, const int8_t* b, int64_t len) {
+// Returns the full int8xint8 dot product in int64 to match the CUDA kernel
+// (quantized_linear.cu), which accumulates in int64 to avoid silent int32
+// wraparound for very wide layers (in_features >~ 131072). Per-lane int32
+// madd accumulation is safe (the row sum is spread across 16 lanes); the
+// final horizontal reduction is widened to int64.
+static inline int64_t dot_int8_signed_avx512(const int8_t* a, const int8_t* b, int64_t len) {
     __m512i acc_vec = _mm512_setzero_si512();
     int64_t i = 0;
 
@@ -45,11 +50,19 @@ static inline int32_t dot_int8_signed_avx512(const int8_t* a, const int8_t* b, i
         acc_vec = _mm512_add_epi32(acc_vec, _mm512_madd_epi16(va16, vb16));
     }
 
-    int32_t acc = _mm512_reduce_add_epi32(acc_vec);
+    // Widen the 16 int32 lanes to int64 before summing so the horizontal
+    // reduction cannot overflow int32. Use AVX512F-only extracts (castsi512_si256
+    // + extracti64x4) rather than extracti32x8 (which needs AVX512DQ) so this
+    // stays within the __AVX512BW__ guard's feature set.
+    __m256i lo32 = _mm512_castsi512_si256(acc_vec);
+    __m256i hi32 = _mm512_extracti64x4_epi64(acc_vec, 1);
+    __m512i lo64 = _mm512_cvtepi32_epi64(lo32);
+    __m512i hi64 = _mm512_cvtepi32_epi64(hi32);
+    int64_t acc = _mm512_reduce_add_epi64(_mm512_add_epi64(lo64, hi64));
 
     // Handle remainder
     for (; i < len; ++i) {
-        acc += static_cast<int32_t>(a[i]) * static_cast<int32_t>(b[i]);
+        acc += static_cast<int64_t>(a[i]) * static_cast<int64_t>(b[i]);
     }
     return acc;
 }
@@ -106,20 +119,20 @@ auto quantized_linear_kernel(
     // The dequantized dot product is sum_k (q_x - input_zp)(q_w - weight_zp)
     //   = raw_dot - input_zp*sum_w[o] - weight_zp*sum_x[b] + input_zp*weight_zp*K
     // so we need the per-output-row weight sum and per-batch-row input sum.
-    std::vector<int32_t> sum_w(out_features, 0);
-    std::vector<int32_t> sum_x(batch_size, 0);
+    std::vector<int64_t> sum_w(out_features, 0);
+    std::vector<int64_t> sum_x(batch_size, 0);
     #pragma omp parallel for
     for (int64_t o = 0; o < out_features; ++o) {
-        int32_t s = 0;
+        int64_t s = 0;
         const int8_t* wrow = weight + o * in_features;
-        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(wrow[k]);
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(wrow[k]);
         sum_w[o] = s;
     }
     #pragma omp parallel for
     for (int64_t b = 0; b < batch_size; ++b) {
-        int32_t s = 0;
+        int64_t s = 0;
         const int8_t* xrow = input + b * in_features;
-        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(xrow[k]);
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(xrow[k]);
         sum_x[b] = s;
     }
 
@@ -127,7 +140,10 @@ auto quantized_linear_kernel(
     #pragma omp parallel for collapse(2)
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t o = 0; o < out_features; ++o) {
-            int32_t acc = 0;
+            // int64 accumulator matches the CUDA kernel: each int8*int8 product
+            // fits in int32 but the row sum can exceed INT32_MAX for very wide
+            // layers, so accumulate in int64 to avoid silent wraparound.
+            int64_t acc = 0;
 
             // Inner product with INT8 accumulation to INT32
             const int8_t* input_row = input + b * in_features;
@@ -178,9 +194,15 @@ auto quantized_linear_kernel(
                 _mm256_castsi256_si128(acc_vec),
                 _mm256_extracti128_si256(acc_vec, 1)
             );
-            sum128 = _mm_hadd_epi32(sum128, sum128);
-            sum128 = _mm_hadd_epi32(sum128, sum128);
-            acc = _mm_cvtsi128_si32(sum128);
+            // Widen the 4 int32 lanes to int64 before summing so the horizontal
+            // reduction cannot overflow int32 (matches the CUDA int64 accumulator).
+            __m256i sum64 = _mm256_cvtepi32_epi64(sum128);
+            __m128i s64 = _mm_add_epi64(
+                _mm256_castsi256_si128(sum64),
+                _mm256_extracti128_si256(sum64, 1)
+            );
+            acc = static_cast<int64_t>(_mm_extract_epi64(s64, 0)) +
+                  static_cast<int64_t>(_mm_extract_epi64(s64, 1));
 
             // Process remaining elements
             for (; i < in_features; ++i) {
@@ -193,10 +215,10 @@ auto quantized_linear_kernel(
             }
 #endif
 
-            // Asymmetric zero-point correction (full expansion).
-            acc -= input_zp * sum_w[o];
-            acc -= weight_zp * sum_x[b];
-            acc += input_zp * weight_zp * static_cast<int32_t>(in_features);
+            // Asymmetric zero-point correction (full expansion, int64 to match CUDA).
+            acc -= static_cast<int64_t>(input_zp) * sum_w[o];
+            acc -= static_cast<int64_t>(weight_zp) * sum_x[b];
+            acc += static_cast<int64_t>(input_zp) * static_cast<int64_t>(weight_zp) * in_features;
 
             // Dequantize and add bias
             float result = static_cast<float>(acc) * combined_scale;
@@ -234,27 +256,30 @@ auto quantized_linear_per_channel_kernel(
 
     // Per-row sums for the asymmetric zero-point correction (see notes in
     // quantized_linear_kernel above).
-    std::vector<int32_t> sum_w(out_features, 0);
-    std::vector<int32_t> sum_x(batch_size, 0);
+    std::vector<int64_t> sum_w(out_features, 0);
+    std::vector<int64_t> sum_x(batch_size, 0);
     #pragma omp parallel for
     for (int64_t o = 0; o < out_features; ++o) {
-        int32_t s = 0;
+        int64_t s = 0;
         const int8_t* wrow = weight + o * in_features;
-        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(wrow[k]);
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(wrow[k]);
         sum_w[o] = s;
     }
     #pragma omp parallel for
     for (int64_t b = 0; b < batch_size; ++b) {
-        int32_t s = 0;
+        int64_t s = 0;
         const int8_t* xrow = input + b * in_features;
-        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(xrow[k]);
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(xrow[k]);
         sum_x[b] = s;
     }
 
     #pragma omp parallel for collapse(2)
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t o = 0; o < out_features; ++o) {
-            int32_t acc = 0;
+            // int64 accumulator matches the CUDA kernel: each int8*int8 product
+            // fits in int32 but the row sum can exceed INT32_MAX for very wide
+            // layers, so accumulate in int64 to avoid silent wraparound.
+            int64_t acc = 0;
 
             const int8_t* input_row = input + b * in_features;
             const int8_t* weight_row = weight + o * in_features;
@@ -292,9 +317,15 @@ auto quantized_linear_per_channel_kernel(
                 _mm256_castsi256_si128(acc_vec),
                 _mm256_extracti128_si256(acc_vec, 1)
             );
-            sum128 = _mm_hadd_epi32(sum128, sum128);
-            sum128 = _mm_hadd_epi32(sum128, sum128);
-            acc = _mm_cvtsi128_si32(sum128);
+            // Widen the 4 int32 lanes to int64 before summing so the horizontal
+            // reduction cannot overflow int32 (matches the CUDA int64 accumulator).
+            __m256i sum64 = _mm256_cvtepi32_epi64(sum128);
+            __m128i s64 = _mm_add_epi64(
+                _mm256_castsi256_si128(sum64),
+                _mm256_extracti128_si256(sum64, 1)
+            );
+            acc = static_cast<int64_t>(_mm_extract_epi64(s64, 0)) +
+                  static_cast<int64_t>(_mm_extract_epi64(s64, 1));
 
             for (; i < in_features; ++i) {
                 acc += static_cast<int32_t>(input_row[i]) * static_cast<int32_t>(weight_row[i]);
@@ -305,11 +336,11 @@ auto quantized_linear_per_channel_kernel(
             }
 #endif
 
-            // Per-channel asymmetric zero-point correction (full expansion).
+            // Per-channel asymmetric zero-point correction (full expansion, int64 to match CUDA).
             int32_t w_zp = weight_zps ? weight_zps[o] : 0;
-            acc -= input_zp * sum_w[o];
-            acc -= w_zp * sum_x[b];
-            acc += input_zp * w_zp * static_cast<int32_t>(in_features);
+            acc -= static_cast<int64_t>(input_zp) * sum_w[o];
+            acc -= static_cast<int64_t>(w_zp) * sum_x[b];
+            acc += static_cast<int64_t>(input_zp) * static_cast<int64_t>(w_zp) * in_features;
 
             float combined_scale = input_scale * weight_scales[o] / output_scale;
             float result = static_cast<float>(acc) * combined_scale;

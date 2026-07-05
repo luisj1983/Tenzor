@@ -108,19 +108,36 @@ auto LAMB::step_impl() -> void {
 
         // Compute trust ratio (LAMB scaling)
         // param_norm = ||param||_2, update_norm = ||update||_2
+        //
+        // F090: param_hi and update are already in state_dt (>= Float32; Float64
+        // for Float64 params, Float32 for Float16/BFloat16), so the on-device
+        // sum-of-squares reduction accumulates at the widened precision. This
+        // keeps the norms — and therefore the trust ratio — from being computed
+        // at a half-precision accumulator width, which otherwise amplifies
+        // cross-backend divergence.
         auto param_norm_t = sqrt(sum(param_hi * param_hi));
         auto update_norm_t = sqrt(sum(update * update));
 
         double param_norm = 0.0;
         double update_norm = 0.0;
-        // Read scalar values (move to CPU and upcast to Float32 so the read
-        // works uniformly for Float16 / BFloat16 parameters too — the reduced
-        // norms are small tensors so the conversion cost is negligible).
+        // F089: read the scalar norms at the state dtype. Force-casting to
+        // Float32 first would discard precision for Float64 parameters. Only
+        // Float16/BFloat16 states (already widened to Float32 above) need the
+        // Float32 read; Float64 states are read directly as double.
         {
-            auto pn = param_norm_t.to(Device::cpu()).to(DType::Float32);
-            auto un = update_norm_t.to(Device::cpu()).to(DType::Float32);
-            param_norm = static_cast<double>(pn.data<float>()[0]);
-            update_norm = static_cast<double>(un.data<float>()[0]);
+            auto pn = param_norm_t.to(Device::cpu());
+            auto un = update_norm_t.to(Device::cpu());
+            if (state_dt == DType::Float64) {
+                param_norm  = pn.data<double>()[0];
+                update_norm = un.data<double>()[0];
+            } else {
+                // state_dt is Float32 here (the widened dtype for halves too);
+                // the .to(Float32) is a no-op for genuine Float32 params.
+                auto pnf = pn.to(DType::Float32);
+                auto unf = un.to(DType::Float32);
+                param_norm  = static_cast<double>(pnf.data<float>()[0]);
+                update_norm = static_cast<double>(unf.data<float>()[0]);
+            }
         }
 
         // QQ.12: clamp trust_ratio to [trust_min, trust_max].  Without this,

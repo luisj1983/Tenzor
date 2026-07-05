@@ -586,12 +586,15 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                     int64_t r  = idx[2];
                     const float* a_b = a_ptr + bi * P * M;
                     const float* b_b = b_ptr + bi * R * M;
-                    float sum = 0.0f;
+                    // F130: accumulate squared diffs in double even for float
+                    // input so cdist(p=2) matches the CPU reference. Clamp to
+                    // >=0 before sqrt like CPU.
+                    double sum = 0.0;
                     for (int64_t m = 0; m < M; ++m) {
-                        float diff = a_b[p_idx * M + m] - b_b[r * M + m];
+                        double diff = static_cast<double>(a_b[p_idx * M + m]) - static_cast<double>(b_b[r * M + m]);
                         sum += diff * diff;
                     }
-                    out_ptr[(bi * P + p_idx) * R + r] = sycl::sqrt(sum);
+                    out_ptr[(bi * P + p_idx) * R + r] = static_cast<float>(sycl::sqrt(sum > 0.0 ? sum : 0.0));
                 });
         } else if (p == 1.0) {
             queue.parallel_for<CDistL1Tag>(sycl::range<3>(B, P, R),

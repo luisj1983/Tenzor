@@ -50,6 +50,16 @@ enum class FanMode {
 auto calculate_fan_in_and_fan_out(const Tensor& tensor) -> std::pair<int64_t, int64_t>;
 
 /**
+ * @brief Set the manual seed for the initializer RNG (get_rng()).
+ *
+ * Makes all init routines (xavier/kaiming/uniform/normal/trunc_normal/
+ * orthogonal/sparse) reproducible run-to-run. All randomness is generated on
+ * CPU then copied to the target device, so results are backend-independent.
+ * Leaving the seed unset preserves the previous std::random_device behavior.
+ */
+auto manual_seed(uint64_t seed) -> void;
+
+/**
  * @brief Calculate the recommended gain for a given nonlinearity.
  *
  * Returns the gain value to use with Xavier/Kaiming initialization

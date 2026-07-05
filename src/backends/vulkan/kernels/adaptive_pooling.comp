@@ -24,10 +24,10 @@ int start_index(int a, int b, int c) {
 
 // Helper to compute end index for adaptive pooling
 int end_index(int a, int b, int c) {
-    // Floor end-index (integer division) to match the CPU adaptive-pooling
-    // convention and Vulkan's floor-based backward; ceil-end diverged for
-    // non-divisible shapes.
-    return int((a + 1) * c) / int(b);
+    // Ceil end-index: ceil((a+1)*c / b), matching the CPU/PyTorch adaptive-
+    // pooling convention. a=out index, b=out size, c=in size. Using floor here
+    // diverged for non-divisible shapes (different window size/overlap).
+    return int(((a + 1) * c + b - 1) / b);
 }
 
 void main() {
@@ -76,7 +76,7 @@ void main() {
 
             if (params.pool_type == 0) {
                 // MaxPool
-                if (value > result) {
+                if (isnan(value) || value > result) {
                     result = value;
                     max_idx = int(input_idx);
                 }

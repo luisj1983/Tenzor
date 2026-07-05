@@ -3808,8 +3808,12 @@ private:
  */
 class FlexAttentionBackward : public Function {
 public:
-    FlexAttentionBackward(double scale, int64_t score_mod_id, bool has_block_mask)
-        : scale_(scale), score_mod_id_(score_mod_id), has_block_mask_(has_block_mask) {}
+    FlexAttentionBackward(double scale, int64_t score_mod_id, bool has_block_mask,
+                          int64_t window_size = 0, int64_t prefix_length = 0,
+                          Tensor relpos_bias = Tensor{})
+        : scale_(scale), score_mod_id_(score_mod_id), has_block_mask_(has_block_mask),
+          window_size_(window_size), prefix_length_(prefix_length),
+          relpos_bias_(std::move(relpos_bias)) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     // Audit B.3: real Variable-level higher-order backward.
@@ -3826,6 +3830,12 @@ private:
     double scale_;
     int64_t score_mod_id_;
     bool has_block_mask_;
+    // Built-in score-mod parameters carried from the forward so backward can
+    // reconstruct the exact modified scores (WindowSize for ids 2/6,
+    // PrefixLength for id 5, additive bias for id 3). See flex_attention().
+    int64_t window_size_;
+    int64_t prefix_length_;
+    Tensor relpos_bias_;
 };
 
 // ============================================================================

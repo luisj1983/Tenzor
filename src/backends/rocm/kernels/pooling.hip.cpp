@@ -1175,9 +1175,9 @@ __global__ void adaptive_avgpool2d_kernel(
         int64_t n = idx / (output_w * output_h * channels);
 
         int64_t h_start = (oh * input_h) / output_h;
-        int64_t h_end = ((oh + 1) * input_h) / output_h;
+        int64_t h_end = ((oh + 1) * input_h + output_h - 1) / output_h;
         int64_t w_start = (ow * input_w) / output_w;
-        int64_t w_end = ((ow + 1) * input_w) / output_w;
+        int64_t w_end = ((ow + 1) * input_w + output_w - 1) / output_w;
 
         T sum = 0;
         int64_t count = 0;
@@ -1213,9 +1213,9 @@ __global__ void adaptive_avgpool2d_kernel_fp16(
         int64_t n = idx / (output_w * output_h * channels);
 
         int64_t h_start = (oh * input_h) / output_h;
-        int64_t h_end = ((oh + 1) * input_h) / output_h;
+        int64_t h_end = ((oh + 1) * input_h + output_h - 1) / output_h;
         int64_t w_start = (ow * input_w) / output_w;
-        int64_t w_end = ((ow + 1) * input_w) / output_w;
+        int64_t w_end = ((ow + 1) * input_w + output_w - 1) / output_w;
 
         float sum = 0.0f;
         int64_t count = 0;
@@ -1322,9 +1322,9 @@ __global__ void adaptive_maxpool2d_kernel(
         int64_t n = idx / (output_w * output_h * channels);
 
         int64_t h_start = (oh * input_h) / output_h;
-        int64_t h_end = ((oh + 1) * input_h) / output_h;
+        int64_t h_end = ((oh + 1) * input_h + output_h - 1) / output_h;
         int64_t w_start = (ow * input_w) / output_w;
-        int64_t w_end = ((ow + 1) * input_w) / output_w;
+        int64_t w_end = ((ow + 1) * input_w + output_w - 1) / output_w;
 
         T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = -1;
@@ -2257,7 +2257,7 @@ __global__ void adaptive_maxpool1d_forward_kernel(
         int64_t n  = idx / (L_out * C);
 
         int64_t l_start = (ol * L_in) / L_out;
-        int64_t l_end   = ((ol + 1) * L_in) / L_out;
+        int64_t l_end   = ((ol + 1) * L_in + L_out - 1) / L_out;
 
         T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = l_start;
@@ -2290,7 +2290,7 @@ __global__ void adaptive_maxpool1d_forward_kernel_fp16(
         int64_t n  = idx / (L_out * C);
 
         int64_t l_start = (ol * L_in) / L_out;
-        int64_t l_end   = ((ol + 1) * L_in) / L_out;
+        int64_t l_end   = ((ol + 1) * L_in + L_out - 1) / L_out;
 
         float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = l_start;
@@ -2388,7 +2388,7 @@ __global__ void adaptive_avgpool1d_forward_kernel(
         int64_t n  = idx / (L_out * C);
 
         int64_t l_start = (ol * L_in) / L_out;
-        int64_t l_end   = ((ol + 1) * L_in) / L_out;
+        int64_t l_end   = ((ol + 1) * L_in + L_out - 1) / L_out;
 
         T sum = T(0);
         for (int64_t l = l_start; l < l_end; ++l) {
@@ -2413,7 +2413,7 @@ __global__ void adaptive_avgpool1d_forward_kernel_fp16(
         int64_t n  = idx / (L_out * C);
 
         int64_t l_start = (ol * L_in) / L_out;
-        int64_t l_end   = ((ol + 1) * L_in) / L_out;
+        int64_t l_end   = ((ol + 1) * L_in + L_out - 1) / L_out;
 
         float sum = 0.0f;
         for (int64_t l = l_start; l < l_end; ++l) {
@@ -2489,7 +2489,7 @@ __global__ void adaptive_avgpool1d_backward_kernel(
         int64_t n  = idx / (L_out * C);
 
         int64_t l_start = (ol * L_in) / L_out;
-        int64_t l_end   = ((ol + 1) * L_in) / L_out;
+        int64_t l_end   = ((ol + 1) * L_in + L_out - 1) / L_out;
 
         T grad_val = grad_output[idx] / static_cast<T>(l_end - l_start);
 
@@ -2513,7 +2513,7 @@ __global__ void adaptive_avgpool1d_backward_kernel_fp16(
         int64_t n  = idx / (L_out * C);
 
         int64_t l_start = (ol * L_in) / L_out;
-        int64_t l_end   = ((ol + 1) * L_in) / L_out;
+        int64_t l_end   = ((ol + 1) * L_in + L_out - 1) / L_out;
 
         float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(l_end - l_start);
 
@@ -3249,11 +3249,11 @@ __global__ void adaptive_maxpool3d_forward_kernel(
         int64_t n  = idx / (W_out * H_out * D_out * C);
 
         int64_t d_start = (od * D_in) / D_out;
-        int64_t d_end   = ((od + 1) * D_in) / D_out;
+        int64_t d_end   = ((od + 1) * D_in + D_out - 1) / D_out;
         int64_t h_start = (oh * H_in) / H_out;
-        int64_t h_end   = ((oh + 1) * H_in) / H_out;
+        int64_t h_end   = ((oh + 1) * H_in + H_out - 1) / H_out;
         int64_t w_start = (ow * W_in) / W_out;
-        int64_t w_end   = ((ow + 1) * W_in) / W_out;
+        int64_t w_end   = ((ow + 1) * W_in + W_out - 1) / W_out;
 
         T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = d_start * H_in * W_in + h_start * W_in + w_start;
@@ -3294,11 +3294,11 @@ __global__ void adaptive_maxpool3d_forward_kernel_fp16(
         int64_t n  = idx / (W_out * H_out * D_out * C);
 
         int64_t d_start = (od * D_in) / D_out;
-        int64_t d_end   = ((od + 1) * D_in) / D_out;
+        int64_t d_end   = ((od + 1) * D_in + D_out - 1) / D_out;
         int64_t h_start = (oh * H_in) / H_out;
-        int64_t h_end   = ((oh + 1) * H_in) / H_out;
+        int64_t h_end   = ((oh + 1) * H_in + H_out - 1) / H_out;
         int64_t w_start = (ow * W_in) / W_out;
-        int64_t w_end   = ((ow + 1) * W_in) / W_out;
+        int64_t w_end   = ((ow + 1) * W_in + W_out - 1) / W_out;
 
         float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = d_start * H_in * W_in + h_start * W_in + w_start;
@@ -3405,11 +3405,11 @@ __global__ void adaptive_avgpool3d_forward_kernel(
         int64_t n  = idx / (W_out * H_out * D_out * C);
 
         int64_t d_start = (od * D_in) / D_out;
-        int64_t d_end   = ((od + 1) * D_in) / D_out;
+        int64_t d_end   = ((od + 1) * D_in + D_out - 1) / D_out;
         int64_t h_start = (oh * H_in) / H_out;
-        int64_t h_end   = ((oh + 1) * H_in) / H_out;
+        int64_t h_end   = ((oh + 1) * H_in + H_out - 1) / H_out;
         int64_t w_start = (ow * W_in) / W_out;
-        int64_t w_end   = ((ow + 1) * W_in) / W_out;
+        int64_t w_end   = ((ow + 1) * W_in + W_out - 1) / W_out;
 
         T sum = T(0);
         int64_t count = 0;
@@ -3444,11 +3444,11 @@ __global__ void adaptive_avgpool3d_forward_kernel_fp16(
         int64_t n  = idx / (W_out * H_out * D_out * C);
 
         int64_t d_start = (od * D_in) / D_out;
-        int64_t d_end   = ((od + 1) * D_in) / D_out;
+        int64_t d_end   = ((od + 1) * D_in + D_out - 1) / D_out;
         int64_t h_start = (oh * H_in) / H_out;
-        int64_t h_end   = ((oh + 1) * H_in) / H_out;
+        int64_t h_end   = ((oh + 1) * H_in + H_out - 1) / H_out;
         int64_t w_start = (ow * W_in) / W_out;
-        int64_t w_end   = ((ow + 1) * W_in) / W_out;
+        int64_t w_end   = ((ow + 1) * W_in + W_out - 1) / W_out;
 
         float sum = 0.0f;
         int64_t count = 0;
@@ -3535,11 +3535,11 @@ __global__ void adaptive_avgpool3d_backward_kernel(
         int64_t n  = idx / (W_out * H_out * D_out * C);
 
         int64_t d_start = (od * D_in) / D_out;
-        int64_t d_end   = ((od + 1) * D_in) / D_out;
+        int64_t d_end   = ((od + 1) * D_in + D_out - 1) / D_out;
         int64_t h_start = (oh * H_in) / H_out;
-        int64_t h_end   = ((oh + 1) * H_in) / H_out;
+        int64_t h_end   = ((oh + 1) * H_in + H_out - 1) / H_out;
         int64_t w_start = (ow * W_in) / W_out;
-        int64_t w_end   = ((ow + 1) * W_in) / W_out;
+        int64_t w_end   = ((ow + 1) * W_in + W_out - 1) / W_out;
 
         int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
         T grad_val = grad_output[idx] / static_cast<T>(count);
@@ -3572,11 +3572,11 @@ __global__ void adaptive_avgpool3d_backward_kernel_fp16(
         int64_t n  = idx / (W_out * H_out * D_out * C);
 
         int64_t d_start = (od * D_in) / D_out;
-        int64_t d_end   = ((od + 1) * D_in) / D_out;
+        int64_t d_end   = ((od + 1) * D_in + D_out - 1) / D_out;
         int64_t h_start = (oh * H_in) / H_out;
-        int64_t h_end   = ((oh + 1) * H_in) / H_out;
+        int64_t h_end   = ((oh + 1) * H_in + H_out - 1) / H_out;
         int64_t w_start = (ow * W_in) / W_out;
-        int64_t w_end   = ((ow + 1) * W_in) / W_out;
+        int64_t w_end   = ((ow + 1) * W_in + W_out - 1) / W_out;
 
         int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
         float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(count);
@@ -3664,13 +3664,39 @@ auto adaptive_avgpool3d_backward_hip(
 // Fractional Max Pool 2D Forward
 // ============================================================================
 
+// F109: PyTorch FractionalMaxPool window start for output index `i` along one
+// axis. Windows are `pool`-wide (== kernel_size) and OVERLAP when pool > alpha,
+// matching torch ATen generate_intervals:
+//   alpha = (in - pool) / (out - 1)                     [out > 1]
+//   start(i) = floor((i + u) * alpha) - floor(u * alpha)   [i < out-1]
+//   start(out-1) = in - pool
+// The earlier code derived each window from an adaptive-style DISJOINT ratio
+// partition (in/out) and never used the pool size, so kernel_size was a no-op.
+__device__ __forceinline__ int64_t frac_pool_start(
+    int64_t i, int64_t in_size, int64_t out_size, int64_t pool, float sample)
+{
+    int64_t start;
+    if (out_size <= 1 || i == out_size - 1) {
+        start = in_size - pool;
+    } else {
+        float alpha = static_cast<float>(in_size - pool) /
+                      static_cast<float>(out_size - 1);
+        start = static_cast<int64_t>((static_cast<float>(i) + sample) * alpha) -
+                static_cast<int64_t>(sample * alpha);
+    }
+    if (start < 0) start = 0;
+    if (start > in_size - pool) start = in_size - pool;
+    return start;
+}
+
 __global__ void fractional_maxpool2d_forward_kernel_f32(
     const float* __restrict__ input,
     float* __restrict__ output,
     int64_t* __restrict__ indices,
     const float* __restrict__ samples,
     int64_t N, int64_t C, int64_t H, int64_t W,
-    int64_t out_h, int64_t out_w
+    int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w
 ) {
     int64_t total = N * C * out_h * out_w;
     HIP_KERNEL_LOOP(idx, total) {
@@ -3682,21 +3708,11 @@ __global__ void fractional_maxpool2d_forward_kernel_f32(
         float sample_h = samples ? samples[(n * C + c) * 2 + 0] : 0.5f;
         float sample_w = samples ? samples[(n * C + c) * 2 + 1] : 0.5f;
 
-        int64_t h_start = static_cast<int64_t>(floorf(
-            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t h_end = static_cast<int64_t>(floorf(
-            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t w_start = static_cast<int64_t>(floorf(
-            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-        int64_t w_end = static_cast<int64_t>(floorf(
-            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-
-        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
-        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
-        if (h_end <= h_start) h_end = h_start + 1;
-        if (w_end <= w_start) w_end = w_start + 1;
-        h_end = min(h_end, H);
-        w_end = min(w_end, W);
+        // PyTorch overlapping windows of width == kernel_size.
+        int64_t h_start = frac_pool_start(oh, H, out_h, kernel_h, sample_h);
+        int64_t h_end   = min(h_start + kernel_h, H);
+        int64_t w_start = frac_pool_start(ow, W, out_w, kernel_w, sample_w);
+        int64_t w_end   = min(w_start + kernel_w, W);
 
         float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = h_start * W + w_start;
@@ -3723,7 +3739,8 @@ __global__ void fractional_maxpool2d_forward_kernel_f64(
     int64_t* __restrict__ indices,
     const float* __restrict__ samples,
     int64_t N, int64_t C, int64_t H, int64_t W,
-    int64_t out_h, int64_t out_w
+    int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w
 ) {
     int64_t total = N * C * out_h * out_w;
     HIP_KERNEL_LOOP(idx, total) {
@@ -3735,21 +3752,11 @@ __global__ void fractional_maxpool2d_forward_kernel_f64(
         float sample_h = samples ? samples[(n * C + c) * 2 + 0] : 0.5f;
         float sample_w = samples ? samples[(n * C + c) * 2 + 1] : 0.5f;
 
-        int64_t h_start = static_cast<int64_t>(floorf(
-            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t h_end = static_cast<int64_t>(floorf(
-            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t w_start = static_cast<int64_t>(floorf(
-            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-        int64_t w_end = static_cast<int64_t>(floorf(
-            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-
-        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
-        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
-        if (h_end <= h_start) h_end = h_start + 1;
-        if (w_end <= w_start) w_end = w_start + 1;
-        h_end = min(h_end, H);
-        w_end = min(w_end, W);
+        // PyTorch overlapping windows of width == kernel_size.
+        int64_t h_start = frac_pool_start(oh, H, out_h, kernel_h, sample_h);
+        int64_t h_end   = min(h_start + kernel_h, H);
+        int64_t w_start = frac_pool_start(ow, W, out_w, kernel_w, sample_w);
+        int64_t w_end   = min(w_start + kernel_w, W);
 
         double max_val = std::numeric_limits<double>::lowest();
         int64_t max_idx = h_start * W + w_start;
@@ -3773,6 +3780,7 @@ __global__ void fractional_maxpool2d_forward_kernel_f64(
 auto fractional_maxpool2d_forward_hip(
     const Tensor& input,
     int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
     const Tensor* random_samples,
     hipStream_t stream
 ) -> std::pair<Tensor, Tensor> {
@@ -3795,21 +3803,21 @@ auto fractional_maxpool2d_forward_hip(
         hipLaunchKernelGGL(fractional_maxpool2d_forward_kernel_f32,
             dim3(blocks), dim3(threads), 0, stream,
             input.data<float>(), output.data<float>(), indices.data<int64_t>(),
-            samples_ptr, N, C, H, W, out_h, out_w);
+            samples_ptr, N, C, H, W, out_h, out_w, kernel_h, kernel_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(fractional_maxpool2d_forward_kernel_f64,
             dim3(blocks), dim3(threads), 0, stream,
             input.data<double>(), output.data<double>(), indices.data<int64_t>(),
-            samples_ptr, N, C, H, W, out_h, out_w);
+            samples_ptr, N, C, H, W, out_h, out_w, kernel_h, kernel_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
-        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, random_samples, stream);
+        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, kernel_h, kernel_w, random_samples, stream);
         return {out_f32.to(DType::Float16), idx};
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
-        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, random_samples, stream);
+        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, kernel_h, kernel_w, random_samples, stream);
         return {out_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("fractional_maxpool2d_forward_hip: unsupported dtype");
@@ -3932,7 +3940,8 @@ __global__ void fractional_maxpool3d_forward_kernel_f64(
     int64_t* __restrict__ indices,
     const float* __restrict__ samples,
     int64_t N, int64_t C, int64_t D, int64_t H, int64_t W,
-    int64_t out_d, int64_t out_h, int64_t out_w
+    int64_t out_d, int64_t out_h, int64_t out_w,
+    int64_t kernel_d, int64_t kernel_h, int64_t kernel_w
 ) {
     int64_t total = N * C * out_d * out_h * out_w;
     HIP_KERNEL_LOOP(idx, total) {
@@ -3946,28 +3955,13 @@ __global__ void fractional_maxpool3d_forward_kernel_f64(
         float sample_h = samples ? samples[(n * C + c) * 3 + 1] : 0.5f;
         float sample_w = samples ? samples[(n * C + c) * 3 + 2] : 0.5f;
 
-        int64_t d_start = static_cast<int64_t>(floorf(
-            (od + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
-        int64_t d_end = static_cast<int64_t>(floorf(
-            (od + 1 + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
-        int64_t h_start = static_cast<int64_t>(floorf(
-            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t h_end = static_cast<int64_t>(floorf(
-            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t w_start = static_cast<int64_t>(floorf(
-            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-        int64_t w_end = static_cast<int64_t>(floorf(
-            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-
-        d_start = max(d_start, int64_t{0}); d_end = min(d_end, D);
-        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
-        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
-        if (d_end <= d_start) d_end = d_start + 1;
-        if (h_end <= h_start) h_end = h_start + 1;
-        if (w_end <= w_start) w_end = w_start + 1;
-        d_end = min(d_end, D);
-        h_end = min(h_end, H);
-        w_end = min(w_end, W);
+        // PyTorch overlapping windows of width == kernel_size.
+        int64_t d_start = frac_pool_start(od, D, out_d, kernel_d, sample_d);
+        int64_t d_end   = min(d_start + kernel_d, D);
+        int64_t h_start = frac_pool_start(oh, H, out_h, kernel_h, sample_h);
+        int64_t h_end   = min(h_start + kernel_h, H);
+        int64_t w_start = frac_pool_start(ow, W, out_w, kernel_w, sample_w);
+        int64_t w_end   = min(w_start + kernel_w, W);
 
         double max_val = std::numeric_limits<double>::lowest();
         int64_t max_idx = (d_start * H + h_start) * W + w_start;
@@ -3996,7 +3990,8 @@ __global__ void fractional_maxpool3d_forward_kernel_f32(
     int64_t* __restrict__ indices,
     const float* __restrict__ samples,
     int64_t N, int64_t C, int64_t D, int64_t H, int64_t W,
-    int64_t out_d, int64_t out_h, int64_t out_w
+    int64_t out_d, int64_t out_h, int64_t out_w,
+    int64_t kernel_d, int64_t kernel_h, int64_t kernel_w
 ) {
     int64_t total = N * C * out_d * out_h * out_w;
     HIP_KERNEL_LOOP(idx, total) {
@@ -4010,28 +4005,13 @@ __global__ void fractional_maxpool3d_forward_kernel_f32(
         float sample_h = samples ? samples[(n * C + c) * 3 + 1] : 0.5f;
         float sample_w = samples ? samples[(n * C + c) * 3 + 2] : 0.5f;
 
-        int64_t d_start = static_cast<int64_t>(floorf(
-            (od + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
-        int64_t d_end = static_cast<int64_t>(floorf(
-            (od + 1 + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
-        int64_t h_start = static_cast<int64_t>(floorf(
-            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t h_end = static_cast<int64_t>(floorf(
-            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-        int64_t w_start = static_cast<int64_t>(floorf(
-            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-        int64_t w_end = static_cast<int64_t>(floorf(
-            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-
-        d_start = max(d_start, int64_t{0}); d_end = min(d_end, D);
-        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
-        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
-        if (d_end <= d_start) d_end = d_start + 1;
-        if (h_end <= h_start) h_end = h_start + 1;
-        if (w_end <= w_start) w_end = w_start + 1;
-        d_end = min(d_end, D);
-        h_end = min(h_end, H);
-        w_end = min(w_end, W);
+        // PyTorch overlapping windows of width == kernel_size.
+        int64_t d_start = frac_pool_start(od, D, out_d, kernel_d, sample_d);
+        int64_t d_end   = min(d_start + kernel_d, D);
+        int64_t h_start = frac_pool_start(oh, H, out_h, kernel_h, sample_h);
+        int64_t h_end   = min(h_start + kernel_h, H);
+        int64_t w_start = frac_pool_start(ow, W, out_w, kernel_w, sample_w);
+        int64_t w_end   = min(w_start + kernel_w, W);
 
         float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = (d_start * H + h_start) * W + w_start;
@@ -4057,6 +4037,7 @@ __global__ void fractional_maxpool3d_forward_kernel_f32(
 auto fractional_maxpool3d_forward_hip(
     const Tensor& input,
     int64_t out_d, int64_t out_h, int64_t out_w,
+    int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
     const Tensor* random_samples,
     hipStream_t stream
 ) -> std::pair<Tensor, Tensor> {
@@ -4079,21 +4060,21 @@ auto fractional_maxpool3d_forward_hip(
         hipLaunchKernelGGL(fractional_maxpool3d_forward_kernel_f32,
             dim3(blocks), dim3(threads), 0, stream,
             input.data<float>(), output.data<float>(), indices.data<int64_t>(),
-            samples_ptr, N, C, D, H, W, out_d, out_h, out_w);
+            samples_ptr, N, C, D, H, W, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(fractional_maxpool3d_forward_kernel_f64,
             dim3(blocks), dim3(threads), 0, stream,
             input.data<double>(), output.data<double>(), indices.data<int64_t>(),
-            samples_ptr, N, C, D, H, W, out_d, out_h, out_w);
+            samples_ptr, N, C, D, H, W, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
-        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, random_samples, stream);
+        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, random_samples, stream);
         return {out_f32.to(DType::Float16), idx};
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
-        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, random_samples, stream);
+        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, random_samples, stream);
         return {out_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("fractional_maxpool3d_forward_hip: unsupported dtype");

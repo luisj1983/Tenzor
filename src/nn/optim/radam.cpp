@@ -108,8 +108,13 @@ auto RAdam::step_impl() -> void {
             );
             double step_size = hp.lr * rect / bias_correction1;
 
-            auto denom = sqrt(exp_avg_sq_[i]) * scalar(1.0 / std::sqrt(bias_correction2))
-                        + scalar(hp.eps);
+            // PyTorch adds eps to sqrt(v) BEFORE dividing by sqrt(bias_correction2):
+            //   adaptive_lr = sqrt(bias_correction2) / (sqrt(v) + eps)
+            // i.e. denom = (sqrt(v) + eps) / sqrt(bias_correction2). Folding eps
+            // inside the sqrt keeps parity with the reference (eps effectively
+            // scaled by 1/sqrt(bias_correction2)).
+            auto denom = (sqrt(exp_avg_sq_[i]) + scalar(hp.eps))
+                        * scalar(1.0 / std::sqrt(bias_correction2));
             updated = param_hi - div(exp_avg_[i], denom) * scalar(step_size);
         } else {
             // Variance is intractable — use SGD with momentum

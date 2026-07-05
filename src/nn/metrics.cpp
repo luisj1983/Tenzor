@@ -27,11 +27,17 @@ static auto to_class_indices(const Tensor& preds, [[maybe_unused]] int64_t num_c
         // Multiclass logits/probabilities: shape (N, C, ...)
         return argmax(preds, /*dim=*/1);
     }
-    // Binary: threshold at 0.5 -> cast to int64
-    // preds >= 0.5 gives boolean-like tensor
+    // Binary: threshold at 0.5 -> cast to int64.
+    // The threshold (and the comparison) MUST run in a floating dtype: for
+    // integer preds a 0.5 threshold built in preds.dtype() truncates to 0, so
+    // ge(preds, 0) marks every non-negative element as class 1 (F059). Use the
+    // preds dtype when it is already floating, otherwise compare in Float32.
+    const DType cmp_dtype = is_floating_type(preds.dtype()) ? preds.dtype()
+                                                            : DType::Float32;
+    Tensor preds_f = (preds.dtype() == cmp_dtype) ? preds : preds.to(cmp_dtype);
     auto threshold = full(std::vector<int64_t>(shape.begin(), shape.end()),
-                          0.5f, preds.dtype(), preds.device());
-    return ge(preds, threshold).to(DType::Int64);
+                          0.5, cmp_dtype, preds.device());
+    return ge(preds_f, threshold).to(DType::Int64);
 }
 
 /// Update per-class TP, FP, FN counts given predicted and true class indices.

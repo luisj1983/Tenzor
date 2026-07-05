@@ -897,7 +897,7 @@ __all__ = [
     "AdaptiveAvgPool1d", "AdaptiveAvgPool2d", "AdaptiveAvgPool3d",
     "AdaptiveMaxPool1d", "AdaptiveMaxPool2d", "AdaptiveMaxPool3d",
     "ConstantPad1d", "ConstantPad2d", "ConstantPad3d",
-    "ReflectionPad1d", "ReflectionPad2d",
+    "ReflectionPad1d", "ReflectionPad2d", "ReflectionPad3d",
     "ReplicationPad1d", "ReplicationPad2d", "ReplicationPad3d",
     "CircularPad1d", "CircularPad2d", "CircularPad3d",
     "ZeroPad2d",

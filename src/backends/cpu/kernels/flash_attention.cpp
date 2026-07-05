@@ -309,6 +309,14 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
     int64_t seq_len = shape[2];
     int64_t head_dim = shape[3];
 
+    // F021: bottom-right causal alignment (matches the MHA/GQA manual BMM path
+    // and PyTorch, per docs/internals/attention-contract.md). A query at row
+    // qi attends to keys ki <= qi + (seq_k - seq_q). For self-attention
+    // (seq_q == seq_k) the offset is 0 and this reduces to ki <= qi; for
+    // KV-cache cross-attention (seq_q < seq_k) it lets the query see the keys
+    // that precede it in the full sequence instead of only key 0.
+    const int64_t causal_offset = K.shape()[2] - seq_len;
+
     // Multi-dtype dispatch (audit A.11):
     //   Float32 → native float typed kernel.
     //   Float64 → native double typed kernel (no Float32 round-trip — keeps
@@ -406,13 +414,14 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                         for (int64_t qi = q_start; qi < q_end; ++qi) {
                             // Causal: skip this qi's contribution from this KV block
                             // if all K positions in this block are after qi
-                            if (causal && kv_start > qi) continue;
+                            // (bottom-right aligned — see causal_offset, F021).
+                            if (causal && kv_start > qi + causal_offset) continue;
 
                             const T* q_row = q_bh + qi * head_dim;
 
                             for (int64_t ki = kv_start; ki < kv_end; ++ki) {
-                                // Causal mask
-                                if (causal && ki > qi) {
+                                // Causal mask (bottom-right aligned, F021).
+                                if (causal && ki > qi + causal_offset) {
                                     continue;
                                 }
 

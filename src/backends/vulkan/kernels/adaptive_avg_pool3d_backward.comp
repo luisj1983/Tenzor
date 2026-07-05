@@ -3,7 +3,8 @@
 
 // Adaptive Average Pool 3D Backward (Float32).
 // Distributes each output gradient over its adaptive input window:
-//   start = o * in / out, end = (o + 1) * in / out (per spatial axis).
+//   start = floor(o * in / out), end = ceil((o + 1) * in / out) (per spatial axis),
+//   matching the CPU/PyTorch adaptive-pool convention.
 // Uses atomic float add to accumulate into overlapping input positions, so it
 // iterates over OUTPUT elements (one thread per output gradient).
 layout(local_size_x_id = 0) in;
@@ -36,11 +37,11 @@ void main() {
 
     // Adaptive window boundaries
     uint d_start = (d_out * params.D_in) / params.D_out;
-    uint d_end = ((d_out + 1) * params.D_in) / params.D_out;
+    uint d_end = ((d_out + 1) * params.D_in + params.D_out - 1) / params.D_out;
     uint h_start = (h_out * params.H_in) / params.H_out;
-    uint h_end = ((h_out + 1) * params.H_in) / params.H_out;
+    uint h_end = ((h_out + 1) * params.H_in + params.H_out - 1) / params.H_out;
     uint w_start = (w_out * params.W_in) / params.W_out;
-    uint w_end = ((w_out + 1) * params.W_in) / params.W_out;
+    uint w_end = ((w_out + 1) * params.W_in + params.W_out - 1) / params.W_out;
 
     uint count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
     if (count == 0u) return;

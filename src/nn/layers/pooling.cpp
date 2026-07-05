@@ -319,16 +319,16 @@ private:
 };
 
 AvgPool2d::AvgPool2d(int64_t kernel_size, int64_t stride, int64_t padding,
-                     bool count_include_pad)
+                     bool count_include_pad, bool ceil_mode)
     : AvgPool2d(std::array<int64_t, 2>{kernel_size, kernel_size},
                 std::array<int64_t, 2>{stride, stride},
                 std::array<int64_t, 2>{padding, padding},
-                count_include_pad) {}
+                count_include_pad, ceil_mode) {}
 
 AvgPool2d::AvgPool2d(std::array<int64_t, 2> kernel_size,
                      std::array<int64_t, 2> stride,
                      std::array<int64_t, 2> padding,
-                     bool count_include_pad)
+                     bool count_include_pad, bool ceil_mode)
     : kernel_size_h_(kernel_size[0]), kernel_size_w_(kernel_size[1]),
       stride_h_(stride[0] < 0 ? kernel_size[0] : stride[0]),
       stride_w_(stride[1] < 0 ? kernel_size[1] : stride[1]),
@@ -336,7 +336,8 @@ AvgPool2d::AvgPool2d(std::array<int64_t, 2> kernel_size,
       kernel_size_(kernel_size[0]),
       stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
       padding_(padding[0]),
-      count_include_pad_(count_include_pad) {
+      count_include_pad_(count_include_pad),
+      ceil_mode_(ceil_mode) {
     for (int i = 0; i < 2; ++i) {
         if (kernel_size[i] <= 0) {
             throw std::runtime_error("AvgPool2d: kernel_size must be positive (axis " +
@@ -378,6 +379,17 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::PaddingW, padding_w_);
     // S22: route count_include_pad through to the kernel.
     fwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
+    // ceil_mode: propagate the attr for symmetry with MaxPool, but no avgpool
+    // kernel implements the ceil output-size formula yet, so reject ceil_mode=
+    // true consistently on every backend rather than silently producing a
+    // floor-sized output (matches MaxPool's throw-on-unsupported contract and
+    // keeps all backends in agreement).
+    fwd_attrs.set(AttrKey::CeilMode, ceil_mode_ ? int64_t{1} : int64_t{0});
+    if (ceil_mode_) {
+        throw std::runtime_error(
+            "AvgPool2d: ceil_mode=true is not yet supported by the average-"
+            "pooling kernels on any backend; use ceil_mode=false");
+    }
 
     auto dispatch_result = dispatch_to_device(OpId::AvgPool2dForward,
         contig_input.tensor().device().type, inputs, fwd_attrs);
@@ -1126,16 +1138,16 @@ auto MaxPool3d::forward_impl(const Variable& input) -> Variable {
 // ============================================================================
 
 AvgPool3d::AvgPool3d(int64_t kernel_size, int64_t stride, int64_t padding,
-                     bool count_include_pad)
+                     bool count_include_pad, bool ceil_mode)
     : AvgPool3d(std::array<int64_t, 3>{kernel_size, kernel_size, kernel_size},
                 std::array<int64_t, 3>{stride, stride, stride},
                 std::array<int64_t, 3>{padding, padding, padding},
-                count_include_pad) {}
+                count_include_pad, ceil_mode) {}
 
 AvgPool3d::AvgPool3d(std::array<int64_t, 3> kernel_size,
                      std::array<int64_t, 3> stride,
                      std::array<int64_t, 3> padding,
-                     bool count_include_pad)
+                     bool count_include_pad, bool ceil_mode)
     : kernel_size_d_(kernel_size[0]), kernel_size_h_(kernel_size[1]), kernel_size_w_(kernel_size[2]),
       stride_d_(stride[0] < 0 ? kernel_size[0] : stride[0]),
       stride_h_(stride[1] < 0 ? kernel_size[1] : stride[1]),
@@ -1144,7 +1156,8 @@ AvgPool3d::AvgPool3d(std::array<int64_t, 3> kernel_size,
       kernel_size_(kernel_size[0]),
       stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
       padding_(padding[0]),
-      count_include_pad_(count_include_pad) {
+      count_include_pad_(count_include_pad),
+      ceil_mode_(ceil_mode) {
     for (int i = 0; i < 3; ++i) {
         if (kernel_size[i] <= 0) {
             throw std::runtime_error("AvgPool3d: kernel_size must be positive (axis " +
@@ -1181,6 +1194,15 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::PaddingW, padding_w_);
     // S22: route count_include_pad through to the kernel.
     fwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
+    // ceil_mode: propagate for symmetry with MaxPool but reject when true — no
+    // avgpool kernel implements the ceil output-size formula, so throw
+    // consistently on every backend instead of silently flooring.
+    fwd_attrs.set(AttrKey::CeilMode, ceil_mode_ ? int64_t{1} : int64_t{0});
+    if (ceil_mode_) {
+        throw std::runtime_error(
+            "AvgPool3d: ceil_mode=true is not yet supported by the average-"
+            "pooling kernels on any backend; use ceil_mode=false");
+    }
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::AvgPool3dForward, device.type, inputs, fwd_attrs);
@@ -1259,10 +1281,11 @@ auto MaxPool1d::forward_impl(const Variable& input) -> Variable {
 // ============================================================================
 
 AvgPool1d::AvgPool1d(int64_t kernel_size, int64_t stride, int64_t padding,
-                     bool count_include_pad)
+                     bool count_include_pad, bool ceil_mode)
     : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
       padding_(padding),
-      count_include_pad_(count_include_pad) {
+      count_include_pad_(count_include_pad),
+      ceil_mode_(ceil_mode) {
     if (kernel_size <= 0) throw std::runtime_error("AvgPool1d: kernel_size must be positive");
     if (padding < 0) throw std::runtime_error("AvgPool1d: padding must be non-negative");
 }
@@ -1282,6 +1305,15 @@ auto AvgPool1d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::Padding, padding_);
     // S22: route count_include_pad through to the kernel.
     fwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
+    // ceil_mode: propagate for symmetry with MaxPool but reject when true — no
+    // avgpool kernel implements the ceil output-size formula, so throw
+    // consistently on every backend instead of silently flooring.
+    fwd_attrs.set(AttrKey::CeilMode, ceil_mode_ ? int64_t{1} : int64_t{0});
+    if (ceil_mode_) {
+        throw std::runtime_error(
+            "AvgPool1d: ceil_mode=true is not yet supported by the average-"
+            "pooling kernels on any backend; use ceil_mode=false");
+    }
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::AvgPool1dForward, device.type, inputs, fwd_attrs);

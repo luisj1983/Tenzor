@@ -1,57 +1,85 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#extension GL_EXT_shader_atomic_float : enable
 
-// Batch Normalization 2D - Compute Mean and Variance for Float16 input
-// Input is packed F16; accumulation and output (mean/var) are Float32
+// Batch Normalization 2D - Compute Mean and Variance for Float16 input.
+// Input is packed F16; accumulation and output (mean/var) are Float32.
 //
-// Each thread processes one input element and atomically accumulates
-// into per-channel global buffers. This handles any number of channels.
+// DETERMINISTIC one-workgroup-per-channel tree reduction, matching
+// batchnorm2d_mean_var.comp (F32) exactly. The previous version did one global
+// atomicAdd per element; float atomic addition is order-nondeterministic, so
+// two identical forward passes produced results differing by ~1 ulp — which
+// breaks run-to-run consistency tests and adds noise to finite-difference
+// gradchecks. Here each thread accumulates a fixed strided slice of its
+// channel (widened to float), then a fixed-order shared-memory tree combines
+// the partials: bitwise reproducible for a given workgroup size. The
+// per-channel-workgroup layout is also immune to the old shared-memory
+// (c % WG) aliasing bug for C > workgroup size.
 layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { uint input_data[]; };       // Packed F16 (N, C, H, W)
-layout(binding = 1) buffer Mean { float mean_data[]; };        // (C) Float32
-layout(binding = 2) buffer Variance { float var_data[]; };     // (C) Float32
-layout(binding = 3) buffer TempSum { float temp_sum[]; };      // (C) Float32
+layout(binding = 1) buffer Mean { float mean_data[]; };        // (C) Float32 - input in pass 1
+layout(binding = 2) buffer Variance { float var_data[]; };     // (C) Float32 - output (pass 1)
+layout(binding = 3) buffer TempSum { float temp_sum[]; };      // (C) Float32 - output (pass 0)
 
 layout(push_constant) uniform PushConstants {
-    uint n_elements;
-    uint batch;
-    uint channels;
-    uint spatial_size;
-    uint pass_id;        // 0 = compute mean, 1 = compute variance
+    uint n_elements;     // Total elements (N * C * H * W)
+    uint batch;          // N
+    uint channels;       // C
+    uint spatial_size;   // H * W
+    uint pass_id;        // 0 = accumulate sum, 1 = accumulate squared diff
 } params;
 
+shared float partial_sum[WORKGROUP_SIZE];
+
 float readF16AsFloat(uint flat_idx) {
-    uint word_idx = flat_idx / 2;
-    uint half_idx = flat_idx % 2;
+    uint word_idx = flat_idx / 2u;
+    uint half_idx = flat_idx % 2u;
     uint packed = input_data[word_idx];
-    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    uint bits = (packed >> (half_idx * 16u)) & 0xFFFFu;
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
+    const uint c = gl_WorkGroupID.x;          // one workgroup per channel
+    const uint tid = gl_LocalInvocationID.x;
+    if (c >= params.channels) return;
 
-    if (idx >= params.n_elements) {
-        return;
+    const uint per_channel = params.batch * params.spatial_size;
+
+    float acc = 0.0;
+    if (params.pass_id == 0) {
+        for (uint i = tid; i < per_channel; i += WORKGROUP_SIZE) {
+            const uint b = i / params.spatial_size;
+            const uint s = i % params.spatial_size;
+            const uint idx = (b * params.channels + c) * params.spatial_size + s;
+            acc += readF16AsFloat(idx);
+        }
+    } else {
+        const float mean = mean_data[c];
+        for (uint i = tid; i < per_channel; i += WORKGROUP_SIZE) {
+            const uint b = i / params.spatial_size;
+            const uint s = i % params.spatial_size;
+            const uint idx = (b * params.channels + c) * params.spatial_size + s;
+            const float diff = readF16AsFloat(idx) - mean;
+            acc += diff * diff;
+        }
     }
 
-    // Compute channel index from flat index
-    uint temp = idx;
-    uint w = temp % params.spatial_size;
-    temp /= params.spatial_size;
-    uint c = temp % params.channels;
+    partial_sum[tid] = acc;
+    barrier();
 
-    float value = readF16AsFloat(idx);
+    for (uint stride = WORKGROUP_SIZE / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            partial_sum[tid] += partial_sum[tid + stride];
+        }
+        barrier();
+    }
 
-    if (params.pass_id == 0) {
-        // Pass 0: accumulate sum for mean computation
-        atomicAdd(temp_sum[c], value);
-    } else {
-        // Pass 1: accumulate squared differences for variance
-        float mean = mean_data[c];
-        float diff = value - mean;
-        atomicAdd(var_data[c], diff * diff);
+    if (tid == 0u) {
+        if (params.pass_id == 0) {
+            temp_sum[c] = partial_sum[0];
+        } else {
+            var_data[c] = partial_sum[0];
+        }
     }
 }

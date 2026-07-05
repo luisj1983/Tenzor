@@ -119,7 +119,12 @@ __device__ T block_reduce_sum(T val, T* shared) {
 // other).
 
 // Optimized version using two-pass algorithm (more parallel but requires two passes)
-template<typename T>
+// `Acc` is the accumulator type: for a Float32 input it is `double`, so the
+// per-channel sum and sum-of-squared-deviations are accumulated in double —
+// matching the CPU reference (Welford in double) and the CUDA sibling
+// (batchnorm.cu, templated <float,double>). A `float` accumulator over N*H*W
+// elements drifts for large spatial sizes.
+template<typename T, typename Acc = T>
 __global__ void batchnorm_mean_kernel(const T* input,
                                       T* mean,
                                       int64_t N,
@@ -127,7 +132,7 @@ __global__ void batchnorm_mean_kernel(const T* input,
                                       int64_t H,
                                       int64_t W) {
     HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
@@ -136,27 +141,27 @@ __global__ void batchnorm_mean_kernel(const T* input,
     int64_t c = blockIdx.x;
     if (c >= C) return;
 
-    // Compute sum
-    T sum = T(0);
+    // Compute sum in the wide accumulator type
+    Acc sum = Acc(0);
     for (int64_t n = 0; n < N; n++) {
         for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
             int64_t h = idx / W;
             int64_t w = idx % W;
             int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-            sum += input[tensor_idx];
+            sum += static_cast<Acc>(input[tensor_idx]);
         }
     }
 
-    // Reduce sum across threads
+    // Reduce sum across threads (in Acc)
     sum = block_reduce_sum(sum, shared);
 
     // Thread 0 writes mean
     if (threadIdx.x == 0) {
-        mean[c] = sum / T(total_elements);
+        mean[c] = static_cast<T>(sum / Acc(total_elements));
     }
 }
 
-template<typename T>
+template<typename T, typename Acc = T>
 __global__ void batchnorm_variance_kernel(const T* input,
                                           const T* mean,
                                           T* variance,
@@ -165,7 +170,7 @@ __global__ void batchnorm_variance_kernel(const T* input,
                                           int64_t H,
                                           int64_t W) {
     HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    Acc* shared = reinterpret_cast<Acc*>(shared_mem);
 
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
@@ -174,26 +179,26 @@ __global__ void batchnorm_variance_kernel(const T* input,
     int64_t c = blockIdx.x;
     if (c >= C) return;
 
-    T channel_mean = mean[c];
+    Acc channel_mean = static_cast<Acc>(mean[c]);
 
-    // Compute sum of squared differences
-    T sum_sq_diff = T(0);
+    // Compute sum of squared differences in the wide accumulator type
+    Acc sum_sq_diff = Acc(0);
     for (int64_t n = 0; n < N; n++) {
         for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
             int64_t h = idx / W;
             int64_t w = idx % W;
             int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-            T diff = input[tensor_idx] - channel_mean;
+            Acc diff = static_cast<Acc>(input[tensor_idx]) - channel_mean;
             sum_sq_diff += diff * diff;
         }
     }
 
-    // Reduce sum across threads
+    // Reduce sum across threads (in Acc)
     sum_sq_diff = block_reduce_sum(sum_sq_diff, shared);
 
     // Thread 0 writes variance
     if (threadIdx.x == 0) {
-        variance[c] = sum_sq_diff / T(total_elements);
+        variance[c] = static_cast<T>(sum_sq_diff / Acc(total_elements));
     }
 }
 
@@ -642,13 +647,16 @@ auto batchnorm2d_mean_var(const Tensor& input,
     }
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
-        hipLaunchKernelGGL(batchnorm_mean_kernel<float>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
+        // Float32 statistics accumulate in DOUBLE (Acc=double) to match the CPU
+        // reference (Welford in double) and the CUDA sibling; shared memory is
+        // sized for the wider accumulator.
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
+        hipLaunchKernelGGL((batchnorm_mean_kernel<float, double>), dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<float>(), mean.data<float>(), N, C, H, W);
         HIP_CHECK(hipGetLastError());
 
-        hipLaunchKernelGGL(batchnorm_variance_kernel<float>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
+        hipLaunchKernelGGL((batchnorm_variance_kernel<float, double>), dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<float>(), mean.data<float>(), variance.data<float>(), N, C, H, W);
         HIP_CHECK(hipGetLastError());

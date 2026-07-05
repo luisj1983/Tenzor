@@ -1351,6 +1351,10 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_float16 = (input.dtype() == DType::Float16);
+    bool is_bfloat16 = (input.dtype() == DType::BFloat16);
+    // Both F16 and BF16 pack 2 elements per uint32 word (masked atomicCompSwap
+    // in the shaders), so they share the same packed buffer sizing / dispatch.
+    bool is_half = (is_float16 || is_bfloat16);
 
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
     if (is_float64) {
@@ -1368,11 +1372,13 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
         // was widened to F32 above). Matches the bicubic backward kernel.
         shader_name = "bicubic_interpolate";
     } else if (mode == "bilinear") {
-        shader_name = is_float64 ? "bilinear_interpolate_f64" :
-                      is_float16 ? "bilinear_interpolate_f16" : "bilinear_interpolate";
+        shader_name = is_float64  ? "bilinear_interpolate_f64" :
+                      is_float16  ? "bilinear_interpolate_f16" :
+                      is_bfloat16 ? "bilinear_interpolate_bf16" : "bilinear_interpolate";
     } else {
-        shader_name = is_float64 ? "nearest_interpolate_f64" :
-                      is_float16 ? "nearest_interpolate_f16" : "nearest_interpolate";
+        shader_name = is_float64  ? "nearest_interpolate_f64" :
+                      is_float16  ? "nearest_interpolate_f16" :
+                      is_bfloat16 ? "nearest_interpolate_bf16" : "nearest_interpolate";
     }
 
     auto* pipeline = getPipeline(shader_name, device_id);
@@ -1390,12 +1396,12 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     const void* buffer_input = input_c.data_ptr();
     const void* buffer_output = output.data_ptr();
 
-    // Calculate buffer sizes. The F16 shaders bind packed 32-bit words (2 halves
-    // each) and read/CAS whole words, so round both ranges up to ((numel+1)/2)*4
-    // for an odd-numel input/output tail word.
+    // Calculate buffer sizes. The F16/BF16 shaders bind packed 32-bit words
+    // (2 halves each) and read/CAS whole words, so round both ranges up to
+    // ((numel+1)/2)*4 for an odd-numel input/output tail word.
     size_t buffer_size_input = input_c.numel() * input_c.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
-    if (is_float16) {
+    if (is_half) {
         buffer_size_input = ((static_cast<size_t>(input_c.numel()) + 1) / 2) * sizeof(uint32_t);
         buffer_size_output = ((static_cast<size_t>(output.numel()) + 1) / 2) * sizeof(uint32_t);
     }
@@ -2831,11 +2837,27 @@ auto VulkanBackend::dispatchFusedRMSPropStep(
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
-    bool is_f64 = (inputs[0].dtype() == DType::Float64);
-    std::string shader = is_f64 ? "fused_rmsprop_step_f64" : "fused_rmsprop_step";
+    DType dt = inputs[0].dtype();
+    // Mirror the sibling SGD/Adam/Adadelta dispatchers: select a dtype-specific
+    // shader. Without an F16/BF16 branch a half-precision param/grad buffer would
+    // misbind to the F32 shader (garbage/OOB).
+    std::string shader =
+        (dt == DType::Float64)  ? "fused_rmsprop_step_f64" :
+        (dt == DType::Float16)  ? "fused_rmsprop_step_f16" :
+        (dt == DType::BFloat16) ? "fused_rmsprop_step_bf16" :
+                                  "fused_rmsprop_step";
     auto* pipeline = getPipeline(shader, device_id);
 
-    size_t buf_size = numel * inputs[0].dtype_size();
+    // Half-precision params/grads are packed 2 elements per uint32; the state
+    // buffers (square_avg/grad_avg/momentum) are Float32 master weights. Size
+    // each binding from its own tensor's actual dtype so the packed half buffers
+    // and the full Float32 state buffers each get the correct descriptor range.
+    const bool is_half = (dt == DType::Float16 || dt == DType::BFloat16);
+    auto bind_size = [](const Tensor& t) -> size_t {
+        const bool h = (t.dtype() == DType::Float16 || t.dtype() == DType::BFloat16);
+        return h ? ((static_cast<size_t>(t.numel()) + 1) / 2) * sizeof(uint32_t)
+                 : static_cast<size_t>(t.numel()) * t.dtype_size();
+    };
 
     // grad_avg and momentum_buffer are optional. If the caller didn't
     // provide them but centered/has_momentum is on, bail with a clear
@@ -2866,7 +2888,13 @@ auto VulkanBackend::dispatchFusedRMSPropStep(
         {3, momentum_src->data_ptr()},   // momentum_buffer (or placeholder)
         {4, gradavg_src->data_ptr()},    // grad_avg (or placeholder)
     };
-    std::vector<size_t> sizes = {buf_size, buf_size, buf_size, buf_size, buf_size};
+    std::vector<size_t> sizes = {
+        bind_size(inputs[1]),      // grad
+        bind_size(inputs[0]),      // param
+        bind_size(inputs[2]),      // square_avg (F32)
+        bind_size(*momentum_src),  // momentum_buffer / placeholder (F32)
+        bind_size(*gradavg_src),   // grad_avg / placeholder (F32)
+    };
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
@@ -2890,7 +2918,10 @@ auto VulkanBackend::dispatchFusedRMSPropStep(
     pc.centered = centered ? 1u : 0u;
     pc.has_momentum = has_momentum ? 1u : 0u;
 
-    uint32_t workgroups = div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+    // Half shaders process 2 elements per invocation (packed uint32 words);
+    // scale the dispatch count to cover (numel+1)/2 words.
+    int64_t dispatch_count = is_half ? (numel + 1) / 2 : numel;
+    uint32_t workgroups = div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2997,18 +3028,36 @@ auto VulkanBackend::dispatchFusedAdagradStep(
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
-    bool is_f64 = (inputs[0].dtype() == DType::Float64);
-    std::string shader = is_f64 ? "fused_adagrad_step_f64" : "fused_adagrad_step";
+    DType dt = inputs[0].dtype();
+    // Mirror the sibling Adadelta/SGD/Adam dispatchers: select a dtype-specific
+    // shader. Without an F16/BF16 branch a half-precision param/grad buffer would
+    // misbind to the F32 shader (garbage/OOB).
+    std::string shader =
+        (dt == DType::Float64)  ? "fused_adagrad_step_f64" :
+        (dt == DType::Float16)  ? "fused_adagrad_step_f16" :
+        (dt == DType::BFloat16) ? "fused_adagrad_step_bf16" :
+                                  "fused_adagrad_step";
     auto* pipeline = getPipeline(shader, device_id);
 
-    size_t buf_size = numel * inputs[0].dtype_size();
+    // Half-precision param/grad are packed 2 elements per uint32; sum_sq is a
+    // Float32 master-weights buffer. Size each binding from its own tensor.
+    const bool is_half = (dt == DType::Float16 || dt == DType::BFloat16);
+    auto bind_size = [](const Tensor& t) -> size_t {
+        const bool h = (t.dtype() == DType::Float16 || t.dtype() == DType::BFloat16);
+        return h ? ((static_cast<size_t>(t.numel()) + 1) / 2) * sizeof(uint32_t)
+                 : static_cast<size_t>(t.numel()) * t.dtype_size();
+    };
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, inputs[1].data_ptr()},   // grad
         {1, inputs[0].data_ptr()},   // param
         {2, inputs[2].data_ptr()},   // sum_sq
     };
-    std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
+    std::vector<size_t> sizes = {
+        bind_size(inputs[1]),   // grad
+        bind_size(inputs[0]),   // param
+        bind_size(inputs[2]),   // sum_sq (F32)
+    };
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
@@ -3024,7 +3073,10 @@ auto VulkanBackend::dispatchFusedAdagradStep(
     pc.eps = static_cast<float>(eps);
     pc.weight_decay = static_cast<float>(weight_decay);
 
-    uint32_t workgroups = div_wg_checked(numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+    // Half shaders process 2 elements per invocation (packed uint32 words);
+    // scale the dispatch count to cover (numel+1)/2 words.
+    int64_t dispatch_count = is_half ? (numel + 1) / 2 : numel;
+    uint32_t workgroups = div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,

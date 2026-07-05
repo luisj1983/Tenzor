@@ -37,18 +37,21 @@ auto count_below_eps(const Tensor& t) -> int64_t {
     Tensor f32 = (t.dtype() == DType::Float32) ? t : t.to(DType::Float32);
     Tensor mag = abs(f32);
     Tensor below = lt(mag, full_like(mag, kSparsityEps));
-    // `below` is a Bool mask; count_nonzero rejects Bool, so sum the mask as
-    // Float32 (each true contributes 1) to get the count.
-    Tensor count = sum(below.to(DType::Float32));
-    // Bring the single scalar result back to the host as Float32 and round.
+    // `below` is a Bool mask; count_nonzero rejects Bool, so sum the mask to
+    // get the count. Accumulate in Float64, NOT Float32: an F32 sum is exact
+    // only up to 2^24 (~16.7M) and saturates for larger tensors (and rounds
+    // differently on CPU vs GPU). Float64 is exact to 2^53, far beyond any
+    // realistic element count (F083).
+    Tensor count = sum(below.to(DType::Float64));
+    // Bring the single scalar result back to the host as Float64 and round.
     Tensor count_cpu = count;
     if (count_cpu.device() != Device::cpu()) {
         count_cpu = count_cpu.to(Device::cpu());
     }
-    if (count_cpu.dtype() != DType::Float32) {
-        count_cpu = count_cpu.to(DType::Float32);
+    if (count_cpu.dtype() != DType::Float64) {
+        count_cpu = count_cpu.to(DType::Float64);
     }
-    return static_cast<int64_t>(std::llround(count_cpu.data<float>()[0]));
+    return static_cast<int64_t>(std::llround(count_cpu.data<double>()[0]));
 }
 
 } // namespace
@@ -123,8 +126,13 @@ auto compute_importance(const Tensor& weights, ImportanceCriterion criterion) ->
         }
 
         case ImportanceCriterion::L2: {
-            // L2 norm: squared values
-            return weights * weights;
+            // L2 norm: squared values. Widen F16/BF16 to F32 BEFORE squaring:
+            // for |w| > ~255 an F16 square overflows to +inf, which ranks the
+            // weight as maximally important and it never gets pruned (F082).
+            const bool low_prec = (weights.dtype() == DType::Float16 ||
+                                   weights.dtype() == DType::BFloat16);
+            Tensor w = low_prec ? weights.to(DType::Float32) : weights;
+            return w * w;
         }
 
         case ImportanceCriterion::L1Norm: {
@@ -134,8 +142,12 @@ auto compute_importance(const Tensor& weights, ImportanceCriterion criterion) ->
         }
 
         case ImportanceCriterion::L2Norm: {
-            // L2 normalized by count: w^2 / numel()
-            auto squared = weights * weights;
+            // L2 normalized by count: w^2 / numel(). Widen F16/BF16 to F32
+            // BEFORE squaring to avoid the +inf overflow described above (F082).
+            const bool low_prec = (weights.dtype() == DType::Float16 ||
+                                   weights.dtype() == DType::BFloat16);
+            Tensor w = low_prec ? weights.to(DType::Float32) : weights;
+            auto squared = w * w;
             return squared / static_cast<float>(weights.numel());
         }
 

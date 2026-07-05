@@ -418,9 +418,9 @@ namespace cpu {
     auto adaptive_avgpool3d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape) -> Tensor;
 
     // Phase 9 Pooling: Fractional Max Pool + Max Unpool
-    auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w, const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w, int64_t kernel_h, int64_t kernel_w, const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
     auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
-    auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w, const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w, int64_t kernel_d, int64_t kernel_h, int64_t kernel_w, const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
     auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
     auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices, int64_t out_h, int64_t out_w) -> Tensor;
     auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
@@ -519,11 +519,11 @@ namespace cpu {
                                       const std::string& mode, bool align_corners) -> Tensor;
     auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
                                    int64_t output_h, int64_t output_w,
-                                   float spatial_scale, int64_t sampling_ratio,
+                                   double spatial_scale, int64_t sampling_ratio,
                                    bool aligned) -> Tensor;
     auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
                                     int64_t batch_size, int64_t feat_height, int64_t feat_width,
-                                    float spatial_scale, int64_t sampling_ratio,
+                                    double spatial_scale, int64_t sampling_ratio,
                                     bool aligned) -> Tensor;
     auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
     auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor& rel_pos_index,
@@ -659,8 +659,8 @@ namespace cpu {
 
     // Fused optimizer steps
     auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
-                               float lr, float momentum, float weight_decay,
-                               float dampening, bool nesterov) -> void;
+                               double lr, double momentum, double weight_decay,
+                               double dampening, bool nesterov) -> void;
     auto fused_adam_step_kernel(Tensor& param, const Tensor& grad,
                                Tensor& exp_avg, Tensor& exp_avg_sq,
                                double lr, double beta1, double beta2,
@@ -670,22 +670,22 @@ namespace cpu {
     auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
                                       Tensor& exp_avg, Tensor& exp_avg_sq,
                                       Tensor* max_exp_avg_sq,
-                                      float lr, float beta1, float beta2,
-                                      float eps, float weight_decay,
+                                      double lr, double beta1, double beta2,
+                                      double eps, double weight_decay,
                                       int64_t step, bool amsgrad) -> void;
     auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
                                     Tensor& square_avg, Tensor* grad_avg,
                                     Tensor* momentum_buffer,
-                                    float lr, float alpha, float eps,
-                                    float weight_decay, float momentum,
+                                    double lr, double alpha, double eps,
+                                    double weight_decay, double momentum,
                                     bool centered) -> void;
     auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
                                      Tensor& square_avg, Tensor& acc_delta,
-                                     float rho, float eps, float lr,
-                                     float weight_decay) -> void;
+                                     double rho, double eps, double lr,
+                                     double weight_decay) -> void;
     auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
-                                    Tensor& sum_sq, float lr, float lr_decay,
-                                    float eps, float weight_decay,
+                                    Tensor& sum_sq, double lr, double lr_decay,
+                                    double eps, double weight_decay,
                                     int64_t step) -> void;
 
     // FFT operations (MKL DFTI)
@@ -2697,7 +2697,7 @@ static void register_cpu_kernels_vision_pool_misc(BackendDispatchTable& table) {
     table.register_kernel(OpId::ROIAlignForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 7);
         int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 7);
-        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
         int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
         bool aligned = attrs.get_bool(AttrKey::Aligned, true);
         return {cpu::roi_align_forward_kernel(inputs[0], inputs[1], output_h, output_w,
@@ -2708,7 +2708,7 @@ static void register_cpu_kernels_vision_pool_misc(BackendDispatchTable& table) {
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 1);
         int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
         int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
-        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
         int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
         bool aligned = attrs.get_bool(AttrKey::Aligned, true);
         return {cpu::roi_align_backward_kernel(inputs[0], inputs[1], batch_size,
@@ -3323,165 +3323,11 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
                                                 /*is_training=*/false, /*seed_in=*/0);
         }
 
-        // -----------------------------------------------------------------
-        // Composed-ops path for IDs 2-7. Same scaffolding for every mode:
-        //   scores = Q @ K^T * scale
-        //   scores += mask_or_bias
-        //   probs  = softmax(scores, dim=-1)
-        //   output = probs @ V
-        // Uses tenzor::matmul (handles 3D/4D batched) instead of bmm.
-        // -----------------------------------------------------------------
-        const Tensor& Q = inputs[0];
-        const Tensor& K = inputs[1];
-        const Tensor& V = inputs[2];
-        const int64_t S_q = Q.shape()[Q.shape().size() - 2];
-        const int64_t S_k = K.shape()[K.shape().size() - 2];
-
-        Tensor Kt = tenzor::transpose(K, -1, -2);
-        Tensor scores = tenzor::matmul(Q, Kt);
-        const auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-        Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                       scores.dtype(), scores.device());
-        scores = scores * scale_t;
-
-        // Build (S_q, S_k) row/col index grids for any positional mask.
-        auto build_index_grids = [&]() -> std::pair<Tensor, Tensor> {
-            Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device()).to(DType::Float32);
-            Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device()).to(DType::Float32);
-            Tensor rows_2d = tenzor::reshape(rows, std::vector<int64_t>{S_q, 1});
-            Tensor cols_2d = tenzor::reshape(cols, std::vector<int64_t>{1, S_k});
-            return {rows_2d, cols_2d};
-        };
-
-        // Apply a positional Bool mask (true → -inf), broadcasted over batch/head.
-        auto apply_neg_inf_mask = [&](const Tensor& mask_2d) {
-            // where(mask, -inf, scores): set -inf ONLY at masked positions.
-            // The old `scores + mask.to(float)*(-inf)` form computed 0 * -inf
-            // = NaN at every *unmasked* position (mask is 0 there), which then
-            // poisons the whole row through softmax. where() keeps the IEEE
-            // -inf contract at masked positions without any 0*inf product.
-            Tensor neg_inf = tenzor::full(scores_shape,
-                -std::numeric_limits<float>::infinity(),
-                scores.dtype(), scores.device());
-            scores = tenzor::where(mask_2d.to(DType::Bool), neg_inf, scores);
-        };
-
-        if (score_mod_id == 2 || score_mod_id == 6) {
-            // Sliding window: mask positions where |i - j| > window/2.
-            int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-            if (window_size <= 0) {
-                throw std::invalid_argument(
-                    "FlexAttention CPU: ScoreModId=" + std::to_string(score_mod_id) +
-                    " (sliding_window) requires AttrKey::WindowSize > 0.");
-            }
-            auto [rows_2d, cols_2d] = build_index_grids();
-            Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-            Tensor half_t = tenzor::full({1}, static_cast<double>(window_size / 2),
-                                          abs_diff.dtype(), abs_diff.device());
-            Tensor outside = tenzor::gt(abs_diff, half_t);
-            apply_neg_inf_mask(outside);
-        } else if (score_mod_id == 3) {
-            // RelPosBias: additive bias tensor as the last input (after Q,K,V
-            // and an optional block_mask). When only inputs[3] is present we
-            // treat it as the bias; otherwise the bias is the trailing input.
-            Tensor bias;
-            if (inputs.size() == 4) {
-                bias = inputs[3];
-            } else if (inputs.size() >= 5) {
-                bias = inputs.back();
-            } else {
-                throw std::invalid_argument(
-                    "FlexAttention CPU: ScoreModId=3 (relpos_bias) requires a "
-                    "bias tensor as the last input (shape broadcastable to "
-                    "scores [..., S_q, S_k]).");
-            }
-            scores = scores + bias.to(scores.dtype());
-        } else if (score_mod_id == 4) {
-            // ALiBi: -slope_h * (q_idx - k_idx). Canonical slopes from
-            // Press et al. 2022: slope_h = 2^(-8*(h+1)/H). Requires Q to be
-            // [..., H, S_q, D] so we can infer H.
-            const auto& q_shape = Q.shape();
-            if (q_shape.size() < 3) {
-                throw std::invalid_argument(
-                    "FlexAttention CPU: ScoreModId=4 (alibi) requires Q rank >= 3 "
-                    "([..., H, S_q, D]) to infer head count.");
-            }
-            const int64_t H = q_shape[q_shape.size() - 3];
-            std::vector<float> slope_vals(static_cast<std::size_t>(H));
-            for (int64_t h = 0; h < H; ++h) {
-                slope_vals[static_cast<std::size_t>(h)] =
-                    std::pow(2.0f, -8.0f * static_cast<float>(h + 1) / static_cast<float>(H));
-            }
-            Tensor slopes = Tensor::from_blob(slope_vals.data(),
-                std::vector<int64_t>{H}, DType::Float32, Device::cpu()).clone().to(Q.device()).to(scores.dtype());
-            // scores shape is (..., H, S_q, S_k). H sits at axis = -3.
-            std::vector<int64_t> slope_shape(scores_shape.size(), 1);
-            slope_shape[slope_shape.size() - 3] = H;
-            slopes = tenzor::reshape(slopes, slope_shape);
-
-            // Build positional bias (S_q, S_k) = -(q_idx - k_idx) = (k_idx - q_idx).
-            auto [rows_2d, cols_2d] = build_index_grids();
-            Tensor pos_bias = tenzor::sub(cols_2d, rows_2d).to(scores.dtype());
-            std::vector<int64_t> pb_shape(scores_shape.size(), 1);
-            pb_shape[pb_shape.size() - 2] = S_q;
-            pb_shape[pb_shape.size() - 1] = S_k;
-            pos_bias = tenzor::reshape(pos_bias, pb_shape);
-            // alibi_bias = slope * (k - q). Per-head slope broadcasts.
-            scores = scores + (slopes * pos_bias);
-        } else if (score_mod_id == 5) {
-            // PrefixLM: first PrefixLength positions in each row see all PrefixLength
-            // columns bidirectionally; for q >= PrefixLength, mask k > q (causal).
-            // mask[i, j] = (i >= PrefixLength) AND (j > i).
-            int64_t prefix_len = attrs.get_int(AttrKey::PrefixLength, 0);
-            if (prefix_len < 0) {
-                throw std::invalid_argument(
-                    "FlexAttention CPU: ScoreModId=5 (prefix_lm) requires "
-                    "AttrKey::PrefixLength >= 0.");
-            }
-            auto [rows_2d, cols_2d] = build_index_grids();
-            Tensor prefix_t = tenzor::full({1}, static_cast<double>(prefix_len),
-                                            rows_2d.dtype(), rows_2d.device());
-            Tensor q_after_prefix = tenzor::ge(rows_2d, prefix_t).to(DType::Float32);
-            Tensor causal = tenzor::gt(cols_2d, rows_2d).to(DType::Float32);
-            // Logical AND via product on 0/1 floats. Both broadcast to (S_q, S_k).
-            Tensor mask_f = q_after_prefix * causal;
-            apply_neg_inf_mask(mask_f);
-        } else if (score_mod_id == 7) {
-            auto user_fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-            if (!user_fn) {
-                throw std::invalid_argument(
-                    "FlexAttention CPU: ScoreModId=7 (user_lambda) but no "
-                    "functor is registered. Call "
-                    "tenzor::nn::register_score_mod(7, fn) before dispatch.");
-            }
-            scores = user_fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
-        } else if (score_mod_id >= 8) {
-            // IDs >= 8 are reserved for user functors registered by integer ID.
-            auto user_fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-            if (!user_fn) {
-                throw std::runtime_error(
-                    "FlexAttention CPU: ScoreModId=" + std::to_string(score_mod_id) +
-                    " is not a built-in and no user functor is registered. "
-                    "Built-ins: 0=identity, 1=causal, 2=sliding_window, "
-                    "3=relpos_bias, 4=alibi, 5=prefix_lm, 6=sliding_window_sym, "
-                    "7=user_lambda. Register custom IDs via "
-                    "tenzor::nn::register_score_mod(id, fn).");
-            }
-            scores = user_fn(scores, 0, 0, 0, 0);
-        } else {
-            throw std::runtime_error(
-                "FlexAttention CPU: unrecognised ScoreModId=" + std::to_string(score_mod_id));
-        }
-
-        NewOpAttributes sm_attrs;
-        sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-        std::vector<Tensor> sm_in = {scores};
-        Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-        Tensor output = tenzor::matmul(probs, V);
-        // LSE = logsumexp over the key axis, matching the fused-path contract
-        // (previously the composed path returned an empty second output).
-        Tensor lse = tenzor::logsumexp(scores, static_cast<int64_t>(-1), /*keepdim=*/false);
-        return {output, lse};
+        // IDs 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
+        // sliding_window_sym, user_lambda) and user-registered functors
+        // (>= 8) go through the shared device-agnostic composed-ops forward
+        // so CPU and every GPU backend run identical math (F018/F019/F024).
+        return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
     };
     table.register_kernel(OpId::FlexAttention, flex_attention_dispatch);
 
@@ -3504,155 +3350,12 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
                                                  /*philox_seed=*/0, /*philox_offset=*/0);
         }
 
-        // Composed backward for IDs 2-7+ (replays forward to recover masked
-        // scores, applies softmax-attention chain rule). Uses matmul for
-        // 3D/4D batched safety. inputs: [dO, Q, K, V, O, (LSE optional), (extra...)].
+        // Composed backward for IDs 2-7 and user functors (>= 8): shared,
+        // device-agnostic path (replays forward to recover masked scores,
+        // applies the softmax-attention chain rule). Same helper used by every
+        // GPU backend so forward/backward stay mutually consistent (F018/F023).
         if (score_mod_id >= 2) {
-            const Tensor& dO = inputs[0];
-            const Tensor& Q  = inputs[1];
-            const Tensor& K  = inputs[2];
-            const Tensor& V  = inputs[3];
-            const int64_t S_q = Q.shape()[Q.shape().size() - 2];
-            const int64_t S_k = K.shape()[K.shape().size() - 2];
-
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::matmul(Q, Kt);
-            const auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
-
-            auto build_index_grids = [&]() -> std::pair<Tensor, Tensor> {
-                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device()).to(DType::Float32);
-                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device()).to(DType::Float32);
-                Tensor rows_2d = tenzor::reshape(rows, std::vector<int64_t>{S_q, 1});
-                Tensor cols_2d = tenzor::reshape(cols, std::vector<int64_t>{1, S_k});
-                return {rows_2d, cols_2d};
-            };
-            auto apply_neg_inf_mask = [&](const Tensor& mask_2d) {
-                // where(mask, -inf, scores): apply the -INFINITY attention mask
-                // ONLY at masked positions. The old `scores + mask*(-inf)` form
-                // computed 0 * -inf = NaN at every *unmasked* position (mask is
-                // 0 there), so the replayed scores were all-NaN and every
-                // gradient came back NaN (CPU↔Vulkan sliding-window backward
-                // parity). where() keeps the -inf contract with no 0*inf product;
-                // softmax then drives `attn` to 0 at the masked positions.
-                Tensor neg_inf = tenzor::full(scores_shape,
-                    -std::numeric_limits<float>::infinity(),
-                    scores.dtype(), scores.device());
-                scores = tenzor::where(mask_2d.to(DType::Bool), neg_inf, scores);
-            };
-
-            if (score_mod_id == 2 || score_mod_id == 6) {
-                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-                if (window_size <= 0) {
-                    throw std::invalid_argument(
-                        "FlexAttentionBackward CPU: ScoreModId=" +
-                        std::to_string(score_mod_id) +
-                        " requires AttrKey::WindowSize > 0.");
-                }
-                auto [rows_2d, cols_2d] = build_index_grids();
-                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-                Tensor half_t = tenzor::full({1}, static_cast<double>(window_size / 2),
-                                              abs_diff.dtype(), abs_diff.device());
-                Tensor outside = tenzor::gt(abs_diff, half_t);
-                apply_neg_inf_mask(outside);
-            } else if (score_mod_id == 3) {
-                // Backward replays bias. Inputs layout:
-                // [dO, Q, K, V, O, (LSE)?, (bias)]. Bias is the last input.
-                if (inputs.size() < 6) {
-                    throw std::invalid_argument(
-                        "FlexAttentionBackward CPU: ScoreModId=3 (relpos_bias) "
-                        "requires the bias tensor saved as the last input.");
-                }
-                const Tensor& bias = inputs.back();
-                scores = scores + bias.to(scores.dtype());
-            } else if (score_mod_id == 4) {
-                const auto& q_shape = Q.shape();
-                if (q_shape.size() < 3) {
-                    throw std::invalid_argument(
-                        "FlexAttentionBackward CPU: ScoreModId=4 (alibi) requires "
-                        "Q rank >= 3 to infer head count.");
-                }
-                const int64_t H = q_shape[q_shape.size() - 3];
-                std::vector<float> slope_vals(static_cast<std::size_t>(H));
-                for (int64_t h = 0; h < H; ++h) {
-                    slope_vals[static_cast<std::size_t>(h)] =
-                        std::pow(2.0f, -8.0f * static_cast<float>(h + 1) / static_cast<float>(H));
-                }
-                Tensor slopes = Tensor::from_blob(slope_vals.data(),
-                    std::vector<int64_t>{H}, DType::Float32, Device::cpu()).clone().to(Q.device()).to(scores.dtype());
-                std::vector<int64_t> slope_shape(scores_shape.size(), 1);
-                slope_shape[slope_shape.size() - 3] = H;
-                slopes = tenzor::reshape(slopes, slope_shape);
-                auto [rows_2d, cols_2d] = build_index_grids();
-                Tensor pos_bias = tenzor::sub(cols_2d, rows_2d).to(scores.dtype());
-                std::vector<int64_t> pb_shape(scores_shape.size(), 1);
-                pb_shape[pb_shape.size() - 2] = S_q;
-                pb_shape[pb_shape.size() - 1] = S_k;
-                pos_bias = tenzor::reshape(pos_bias, pb_shape);
-                scores = scores + (slopes * pos_bias);
-            } else if (score_mod_id == 5) {
-                int64_t prefix_len = attrs.get_int(AttrKey::PrefixLength, 0);
-                if (prefix_len < 0) {
-                    throw std::invalid_argument(
-                        "FlexAttentionBackward CPU: ScoreModId=5 (prefix_lm) "
-                        "requires AttrKey::PrefixLength >= 0.");
-                }
-                auto [rows_2d, cols_2d] = build_index_grids();
-                Tensor prefix_t = tenzor::full({1}, static_cast<double>(prefix_len),
-                                                rows_2d.dtype(), rows_2d.device());
-                Tensor q_after_prefix = tenzor::ge(rows_2d, prefix_t).to(DType::Float32);
-                Tensor causal = tenzor::gt(cols_2d, rows_2d).to(DType::Float32);
-                Tensor mask_f = q_after_prefix * causal;
-                apply_neg_inf_mask(mask_f);
-            } else if (score_mod_id == 7 || score_mod_id >= 8) {
-                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-                if (!fn) {
-                    throw std::runtime_error(
-                        "FlexAttentionBackward CPU: no user score_mod registered for ScoreModId=" +
-                        std::to_string(score_mod_id));
-                }
-                scores = fn(scores, 0, 0, 0, 0);
-            } else {
-                throw std::runtime_error(
-                    "FlexAttentionBackward CPU: unrecognised ScoreModId=" +
-                    std::to_string(score_mod_id));
-            }
-
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {scores};
-            Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-
-            // dV = attn^T @ dO
-            Tensor attn_t = tenzor::transpose(attn, -1, -2);
-            Tensor dV = tenzor::matmul(attn_t, dO);
-
-            // dAttn = dO @ V^T
-            Tensor Vt = tenzor::transpose(V, -1, -2);
-            Tensor dAttn = tenzor::matmul(dO, Vt);
-
-            // dScores = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
-            Tensor ad = tenzor::mul(attn, dAttn);
-            NewOpAttributes sum_attrs;
-            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            sum_attrs.set(AttrKey::Keepdim, true);
-            std::vector<Tensor> sum_inputs = {ad};
-            Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
-            Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
-
-            // Apply scale to grad.
-            Tensor scale_t2 = tenzor::full(
-                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
-                static_cast<double>(scale), dScores.dtype(), dScores.device());
-            dScores = tenzor::mul(dScores, scale_t2);
-
-            Tensor dQ = tenzor::matmul(dScores, K);
-            Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
-            Tensor dK = tenzor::matmul(dScores_t, Q);
-
-            return {dQ, dK, dV};
+            return tenzor::nn::flex_attention_score_mod_backward(inputs, attrs);
         }
 
         throw std::runtime_error(
@@ -3739,14 +3442,14 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     // Fused Optimizer Steps
     // =========================================================================
     table.register_kernel(OpId::FusedSGDStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
-        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
-        float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.01);
+        double momentum = attrs.get_float(AttrKey::Momentum, 0.0);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+        double dampening = attrs.get_float(AttrKey::Dampening, 0.0);
         bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
-        Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0f)
+        Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0)
             ? &const_cast<Tensor&>(inputs[2]) : nullptr;
 
         cpu::fused_sgd_step_kernel(param, inputs[1], momentum_buffer,
@@ -3777,11 +3480,11 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::FusedAdamAtan2Step, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.001));
-        float beta1 = static_cast<float>(attrs.get_float(AttrKey::Beta1, 0.9));
-        float beta2 = static_cast<float>(attrs.get_float(AttrKey::Beta2, 0.999));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.001);
+        double beta1 = attrs.get_float(AttrKey::Beta1, 0.9);
+        double beta2 = attrs.get_float(AttrKey::Beta2, 0.999);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
         int64_t step = attrs.get_int(AttrKey::Step, 1);
         bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
 
@@ -3797,17 +3500,17 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::FusedRMSPropStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.99));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
-        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.01);
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.99);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+        double momentum = attrs.get_float(AttrKey::Momentum, 0.0);
         bool centered = attrs.get_bool(AttrKey::Centered, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
         Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
-        Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+        Tensor* momentum_buffer = (momentum > 0.0 && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
 
         cpu::fused_rmsprop_step_kernel(param, inputs[1], square_avg, grad_avg, momentum_buffer,
             lr, alpha, eps, weight_decay, momentum, centered);
@@ -3815,10 +3518,10 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::FusedAdadeltaStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float rho = static_cast<float>(attrs.get_float(AttrKey::Rho, 0.9));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-6));
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 1.0));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        double rho = attrs.get_float(AttrKey::Rho, 0.9);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-6);
+        double lr = attrs.get_float(AttrKey::Lr, 1.0);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
@@ -3830,10 +3533,10 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::FusedAdagradStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
-        float lr_decay = static_cast<float>(attrs.get_float(AttrKey::LrDecay, 0.0));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-10));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.01);
+        double lr_decay = attrs.get_float(AttrKey::LrDecay, 0.0);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-10);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
         int64_t step = attrs.get_int(AttrKey::Step, 1);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
@@ -4935,8 +4638,12 @@ static void register_cpu_kernels_fused_gemm(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
+        // F109: PyTorch uses kernel_size-wide (overlapping) windows. Read per-axis
+        // kernel sizes (scalar KernelSize as fallback for square pools).
+        const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        auto [output, indices] = cpu::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples);
+        auto [output, indices] = cpu::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, kernel_h, kernel_w, samples);
         return std::vector<Tensor>{output, indices};
     });
 
@@ -4965,8 +4672,12 @@ static void register_cpu_kernels_fused_gemm(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
+        // F109: PyTorch uses kernel_size-wide (overlapping) windows.
+        const int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        auto [output, indices] = cpu::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples);
+        auto [output, indices] = cpu::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples);
         return std::vector<Tensor>{output, indices};
     });
 

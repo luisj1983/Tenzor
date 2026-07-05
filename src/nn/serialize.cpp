@@ -6,10 +6,65 @@
 #include <cstring>
 #include <cstdint>
 #include <limits>
+#include <bit>
+#include <vector>
 
 namespace tenzor::nn {
 
 namespace {
+
+// ============================================================================
+// Endianness helpers
+//
+// The native Tenzor checkpoint format is little-endian on disk. On little-endian
+// hosts (the common case) every conversion below is a no-op; on big-endian hosts
+// scalar header fields and each tensor element component are byte-swapped so
+// files round-trip identically regardless of host endianness.
+// ============================================================================
+
+constexpr bool kHostIsBigEndian = (std::endian::native == std::endian::big);
+
+// Byte width of the scalar component to swap. Complex values are two real
+// components stored back-to-back and are swapped per-half so each scalar stays
+// little-endian.
+inline size_t endian_component_width(DType dtype) {
+    switch (dtype) {
+        case DType::Complex64:  return 4;  // two float32
+        case DType::Complex128: return 8;  // two float64
+        default:                return dtype_size(dtype);
+    }
+}
+
+// In-place host<->little-endian conversion of a raw tensor element buffer.
+// Symmetric (its own inverse). No-op on LE hosts / 1-byte components.
+inline void convert_tensor_endianness(void* data, size_t nbytes, DType dtype) {
+    if constexpr (!kHostIsBigEndian) {
+        (void)data; (void)nbytes; (void)dtype;
+        return;
+    } else {
+        const size_t w = endian_component_width(dtype);
+        if (w <= 1) return;
+        auto* p = static_cast<uint8_t*>(data);
+        for (size_t off = 0; off + w <= nbytes; off += w) {
+            for (size_t i = 0; i < w / 2; ++i) {
+                std::swap(p[off + i], p[off + w - 1 - i]);
+            }
+        }
+    }
+}
+
+// Convert a trivially-copyable scalar between host order and little-endian
+// (symmetric). No-op on LE hosts / 1-byte scalars.
+template<typename T>
+inline T to_le_scalar(T value) {
+    if constexpr (kHostIsBigEndian && sizeof(T) > 1) {
+        auto* p = reinterpret_cast<uint8_t*>(&value);
+        for (size_t i = 0; i < sizeof(T) / 2; ++i) {
+            std::swap(p[i], p[sizeof(T) - 1 - i]);
+        }
+    }
+    return value;
+}
 
 // Returns the number of bytes remaining between the current get position and the
 // end of the stream. Used to bound untrusted length/size fields read from a
@@ -146,48 +201,25 @@ void Serializer::write_tensor(std::ofstream& file, const std::string& name, cons
         write_value(file, static_cast<int64_t>(dim));
     }
 
-    // Write data
+    // Write data. Every DType has a well-defined byte width via dtype_size(), so
+    // the raw element buffer is written generically — this covers Complex64/128,
+    // the FP8 variants, quantized (QInt8/QUInt8/QInt4x2) and the wide unsigned
+    // integer types (UInt16/32/64) in addition to the base float/int dtypes.
     size_t num_bytes = cpu_tensor.numel() * dtype_size(cpu_tensor.dtype());
-    const void* data_ptr = nullptr;
+    const void* data_ptr = cpu_tensor.data_ptr();
 
-    // Get data pointer based on dtype
-    switch (cpu_tensor.dtype()) {
-        case DType::Float32:
-            data_ptr = cpu_tensor.data<float>();
-            break;
-        case DType::Float64:
-            data_ptr = cpu_tensor.data<double>();
-            break;
-        case DType::Int32:
-            data_ptr = cpu_tensor.data<int32_t>();
-            break;
-        case DType::Int64:
-            data_ptr = cpu_tensor.data<int64_t>();
-            break;
-        case DType::UInt8:
-            data_ptr = cpu_tensor.data<uint8_t>();
-            break;
-        case DType::Bool:
-            data_ptr = cpu_tensor.data<bool>();
-            break;
-        case DType::Float16:
-            data_ptr = cpu_tensor.data<Float16>();
-            break;
-        case DType::BFloat16:
-            data_ptr = cpu_tensor.data<BFloat16>();
-            break;
-        case DType::Int8:
-            data_ptr = cpu_tensor.data<int8_t>();
-            break;
-        case DType::Int16:
-            data_ptr = cpu_tensor.data<int16_t>();
-            break;
-        default:
-            throw std::runtime_error("Unsupported dtype for serialization: " +
-                std::string(dtype_name(cpu_tensor.dtype())));
+    if constexpr (kHostIsBigEndian) {
+        // Big-endian host: emit a little-endian copy without mutating the
+        // tensor's storage.
+        const auto* src = static_cast<const uint8_t*>(data_ptr);
+        std::vector<uint8_t> le(src, src + num_bytes);
+        convert_tensor_endianness(le.data(), num_bytes, cpu_tensor.dtype());
+        file.write(reinterpret_cast<const char*>(le.data()),
+                   static_cast<std::streamsize>(num_bytes));
+    } else {
+        file.write(static_cast<const char*>(data_ptr),
+                   static_cast<std::streamsize>(num_bytes));
     }
-
-    file.write(static_cast<const char*>(data_ptr), num_bytes);
 }
 
 // Read tensor from file
@@ -204,6 +236,11 @@ auto Serializer::read_tensor(std::ifstream& file) -> std::pair<std::string, Tens
         case DType::UInt8:   case DType::Bool:
         case DType::Float16: case DType::BFloat16:
         case DType::Int8:    case DType::Int16:
+        case DType::UInt16:  case DType::UInt32:  case DType::UInt64:
+        case DType::Complex64: case DType::Complex128:
+        case DType::FP8_E4M3:  case DType::FP8_E5M2:
+        case DType::FP8_E4M3FNUZ: case DType::FP8_E5M2FNUZ:
+        case DType::QInt8:   case DType::QUInt8:  case DType::QInt4x2:
             break;
         default:
             throw std::runtime_error("Serializer: unknown dtype in file: " +
@@ -242,60 +279,30 @@ auto Serializer::read_tensor(std::ifstream& file) -> std::pair<std::string, Tens
         throw std::runtime_error(
             "Serializer: tensor data exceeds remaining file size");
     }
-    void* data_ptr = nullptr;
-
-    switch (dtype) {
-        case DType::Float32:
-            data_ptr = tensor.data<float>();
-            break;
-        case DType::Float64:
-            data_ptr = tensor.data<double>();
-            break;
-        case DType::Int32:
-            data_ptr = tensor.data<int32_t>();
-            break;
-        case DType::Int64:
-            data_ptr = tensor.data<int64_t>();
-            break;
-        case DType::UInt8:
-            data_ptr = tensor.data<uint8_t>();
-            break;
-        case DType::Bool:
-            data_ptr = tensor.data<bool>();
-            break;
-        case DType::Float16:
-            data_ptr = tensor.data<Float16>();
-            break;
-        case DType::BFloat16:
-            data_ptr = tensor.data<BFloat16>();
-            break;
-        case DType::Int8:
-            data_ptr = tensor.data<int8_t>();
-            break;
-        case DType::Int16:
-            data_ptr = tensor.data<int16_t>();
-            break;
-        default:
-            throw std::runtime_error("Unsupported dtype for deserialization: " +
-                std::string(dtype_name(dtype)));
-    }
+    // The raw element buffer is read generically (dtype already validated above),
+    // covering complex, FP8, quantized and wide-unsigned dtypes alongside the
+    // base float/int types.
+    void* data_ptr = tensor.data_ptr();
 
     file.read(static_cast<char*>(data_ptr), num_bytes);
     if (!file) {
         throw std::runtime_error(
             "Serializer: unexpected end of file while reading tensor data");
     }
+    // On-disk bytes are little-endian; normalize to host order (no-op on LE).
+    convert_tensor_endianness(data_ptr, num_bytes, dtype);
 
     return {name, tensor};
 }
 
-// Write primitive value with proper byte order
+// Write primitive value in little-endian byte order (byte-swapped on BE hosts).
 template<typename T>
 void Serializer::write_value(std::ofstream& file, T value) {
-    file.write(reinterpret_cast<const char*>(&value), sizeof(T));
+    T le = to_le_scalar(value);
+    file.write(reinterpret_cast<const char*>(&le), sizeof(T));
 }
 
-// Read primitive value with proper byte order
+// Read primitive value stored little-endian (byte-swapped back on BE hosts).
 template<typename T>
 auto Serializer::read_value(std::ifstream& file) -> T {
     T value;
@@ -303,7 +310,7 @@ auto Serializer::read_value(std::ifstream& file) -> T {
     if (!file) {
         throw std::runtime_error("Unexpected end of file");
     }
-    return value;
+    return to_le_scalar(value);
 }
 
 // Write string

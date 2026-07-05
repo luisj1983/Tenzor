@@ -34,7 +34,11 @@ auto pad_dim_constant(const Variable& input, int64_t dim, int64_t pad_before,
     if (pad_before > 0) {
         auto pad_shape = std::vector<int64_t>(shape.begin(), shape.end());
         pad_shape[dim] = pad_before;
-        auto pad_tensor = full(std::move(pad_shape), static_cast<float>(value), dtype, device);
+        // Pass the pad value through as double (full() fills at `dtype`); the
+        // previous static_cast<float> narrowed the value, so a Float64 tensor
+        // padded with a value not exactly representable in float got float-
+        // rounded pad cells while the interior stayed double.
+        auto pad_tensor = full(std::move(pad_shape), value, dtype, device);
         parts.push_back(Variable(pad_tensor, false));
     }
 
@@ -43,7 +47,11 @@ auto pad_dim_constant(const Variable& input, int64_t dim, int64_t pad_before,
     if (pad_after > 0) {
         auto pad_shape = std::vector<int64_t>(shape.begin(), shape.end());
         pad_shape[dim] = pad_after;
-        auto pad_tensor = full(std::move(pad_shape), static_cast<float>(value), dtype, device);
+        // Pass the pad value through as double (full() fills at `dtype`); the
+        // previous static_cast<float> narrowed the value, so a Float64 tensor
+        // padded with a value not exactly representable in float got float-
+        // rounded pad cells while the interior stayed double.
+        auto pad_tensor = full(std::move(pad_shape), value, dtype, device);
         parts.push_back(Variable(pad_tensor, false));
     }
 
@@ -293,6 +301,36 @@ auto ReflectionPad2d::forward_impl(const Variable& input) -> Variable {
     auto ndim = static_cast<int64_t>(input.tensor().shape().size());
     auto result = pad_dim_reflect(input, ndim - 1, padding_left_, padding_right_);
     result = pad_dim_reflect(result, ndim - 2, padding_top_, padding_bottom_);
+    return result;
+}
+
+// ============================================================================
+// ReflectionPad3d
+// ============================================================================
+
+ReflectionPad3d::ReflectionPad3d(std::vector<int64_t> padding)
+    : padding_(std::move(padding)) {
+    if (padding_.size() != 6) {
+        throw std::invalid_argument(
+            "ReflectionPad3d: padding must have 6 elements "
+            "(left, right, top, bottom, front, back), got " +
+            std::to_string(padding_.size()));
+    }
+}
+
+ReflectionPad3d::ReflectionPad3d(int64_t padding)
+    : padding_({padding, padding, padding, padding, padding, padding}) {}
+
+auto ReflectionPad3d::forward_impl(const Variable& input) -> Variable {
+    if (input.tensor().shape().size() < 4) {
+        throw std::invalid_argument("ReflectionPad3d: input must have at least 4 dimensions");
+    }
+    auto ndim = static_cast<int64_t>(input.tensor().shape().size());
+    // Reflect W (last), then H, then D — mirrors ReplicationPad3d's axis order
+    // and reuses the verified pad_dim_reflect mirror formula per axis.
+    auto result = pad_dim_reflect(input, ndim - 1, padding_[0], padding_[1]);
+    result = pad_dim_reflect(result, ndim - 2, padding_[2], padding_[3]);
+    result = pad_dim_reflect(result, ndim - 3, padding_[4], padding_[5]);
     return result;
 }
 

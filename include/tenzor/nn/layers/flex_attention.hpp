@@ -14,9 +14,12 @@
 
 #include <cstdint>
 #include <functional>
+#include <span>
+#include <vector>
 #include "../../core/tensor.hpp"
 #include "../../core/device.hpp"
 #include "../../core/dtype.hpp"
+#include "../../backend/op_attributes.hpp"  // OpAttributes for shared score-mod fwd
 
 namespace tenzor {
 namespace nn {
@@ -216,17 +219,21 @@ auto causal_score_mod() -> ScoreModFn;
  * ScoreModId path (audit J12).
  *
  * The backend dispatch uses `AttrKey::ScoreModId` to select a score
- * modification. IDs 0-2 are built-ins (identity, causal, sliding-window).
- * IDs >= 3 are reserved for user-registered functors. Register a functor
- * here so the backend's `OpId::FlexAttention` lambda can locate it by ID.
+ * modification. IDs 0-7 are fixed built-ins on EVERY backend (0=identity,
+ * 1=causal, 2=sliding_window, 3=relpos_bias, 4=alibi, 5=prefix_lm,
+ * 6=sliding_window_sym, 7=user_lambda). IDs >= 8 are reserved for
+ * user-registered functors. Register a functor here so the backend's
+ * `OpId::FlexAttention` lambda can locate it by ID.
  *
- * Functor signature: takes the raw scores tensor (shape (B, H, S_q, S_kv))
- * and the BHQK indices, returns the modified scores tensor.
+ * Functor signature: takes a 2D scores block (shape (S_q, S_kv)) and the
+ * (b, h, q_start, kv_start) indices, returns the modified block. The dispatch
+ * path invokes the functor once per (batch, head) slice so batch/head/position
+ * indexing is correct.
  *
- * @param id  Score-mod ID to register under (≥ 3).
+ * @param id  Score-mod ID to register under (≥ 8).
  * @param fn  Score-mod functor.
  *
- * @throws std::invalid_argument if `id < 3`.
+ * @throws std::invalid_argument if `id < 8`.
  */
 auto register_score_mod(int64_t id, ScoreModFn fn) -> void;
 
@@ -235,6 +242,39 @@ auto register_score_mod(int64_t id, ScoreModFn fn) -> void;
  * (audit J12). Returns nullptr if no such functor is registered.
  */
 auto find_registered_score_mod(int64_t id) -> ScoreModFn;
+
+/**
+ * @brief Shared, device-agnostic forward for FlexAttention built-in score
+ * modifications (ScoreModIds 2-7) and user-registered functors (IDs >= 8).
+ *
+ * Composed entirely from `tenzor::` tensor ops (Q@K^T → mask/bias → softmax →
+ * @V), which dispatch to whatever backend Q/K/V live on, so the CPU reference
+ * and every GPU backend produce identical results. Callers handle the fused
+ * fast path for ScoreModId 0 (identity) / 1 (causal) and delegate all other
+ * IDs here. `inputs` is [Q, K, V, (optional block_mask / bias)]; `attrs`
+ * carries Scale, ScoreModId, WindowSize, PrefixLength.
+ *
+ * @return {output, lse} where lse = logsumexp(scores, dim=-1).
+ */
+auto flex_attention_score_mod_forward(std::span<const Tensor> inputs,
+                                      const OpAttributes& attrs)
+    -> std::vector<Tensor>;
+
+/**
+ * @brief Shared, device-agnostic backward for FlexAttention built-in score
+ * modifications (ScoreModIds 2-7) and user-registered functors (IDs >= 8).
+ *
+ * Replays Q@K^T*scale, reapplies the same score modification as the forward
+ * (so forward/backward stay mutually consistent, incl. canonical ALiBi slopes),
+ * then runs the softmax-attention chain rule. Callers handle ScoreModId 0/1 via
+ * the fused FlashAttention backward and delegate all other IDs here. `inputs`
+ * is [dO, Q, K, V, O, (LSE optional), (relpos bias for id 3 as last input)].
+ *
+ * @return {dQ, dK, dV}.
+ */
+auto flex_attention_score_mod_backward(std::span<const Tensor> inputs,
+                                       const OpAttributes& attrs)
+    -> std::vector<Tensor>;
 
 /**
  * @brief Create an ALiBi (Attention with Linear Biases) score modification.

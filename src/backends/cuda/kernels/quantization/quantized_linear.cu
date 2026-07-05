@@ -35,13 +35,25 @@ __global__ void quantized_linear_cuda_kernel(
     float combined_scale,
     int32_t input_zp,
     int32_t weight_zp,
-    bool use_vectorized
+    bool use_vectorized,
+    // Per-channel (F045): when weight_scales != nullptr each output channel o
+    // uses weight_scales[o] and (weight_zps ? weight_zps[o] : 0); the dequant
+    // scale is then input_over_output * weight_scales[o]. nullptr => per-tensor
+    // (uses combined_scale / weight_zp).
+    const float* __restrict__ weight_scales,
+    const int32_t* __restrict__ weight_zps,
+    float input_over_output
 ) {
     // Thread block computes one output element
     int64_t b = blockIdx.y;
     int64_t o = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (b >= batch_size || o >= out_features) return;
+
+    // Per-channel weight scale / zero-point (each output channel o).
+    const int32_t w_zp = weight_scales ? (weight_zps ? weight_zps[o] : 0) : weight_zp;
+    const float out_scale = weight_scales ? (input_over_output * weight_scales[o])
+                                          : combined_scale;
 
     // int64 accumulator: each int8*int8 product fits in int32, but summed over
     // in_features the running total can exceed INT32_MAX for very wide layers
@@ -102,12 +114,12 @@ __global__ void quantized_linear_cuda_kernel(
     // Asymmetric zero-point correction (computed in int64 to avoid overflow):
     //   sum(q_i*q_w) - zp_w*sum(q_i) - zp_i*sum(q_w) + N*zp_i*zp_w
     int64_t corrected = static_cast<int64_t>(acc)
-                      - static_cast<int64_t>(weight_zp) * sum_i
+                      - static_cast<int64_t>(w_zp) * sum_i
                       - static_cast<int64_t>(input_zp) * sum_w
-                      + static_cast<int64_t>(input_zp) * static_cast<int64_t>(weight_zp) * in_features;
+                      + static_cast<int64_t>(input_zp) * static_cast<int64_t>(w_zp) * in_features;
 
     // Dequantize and add bias
-    float result = static_cast<float>(corrected) * combined_scale;
+    float result = static_cast<float>(corrected) * out_scale;
     if (bias != nullptr) {
         result += bias[o];
     }
@@ -131,9 +143,14 @@ auto quantized_linear_cuda(
     float output_scale,
     int32_t input_zp,
     int32_t weight_zp,
-    cudaStream_t stream
+    cudaStream_t stream,
+    // Per-channel (F045): [out_features] device arrays; nullptr => per-tensor.
+    const float* weight_scales,
+    const int32_t* weight_zps
 ) -> void {
-    float combined_scale = input_scale * weight_scale / output_scale;
+    float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
+    float combined_scale = input_scale * weight_scale / safe_output_scale;
+    float input_over_output = input_scale / safe_output_scale;
 
     // Precondition for the int4 (16-byte) vectorized load path. Each row
     // pointer is `base + r * in_features`. A 16-byte int4 load requires every
@@ -159,7 +176,8 @@ auto quantized_linear_cuda(
     quantized_linear_cuda_kernel<<<blocks, threads, 0, stream>>>(
         input, weight, bias, output,
         batch_size, in_features, out_features,
-        combined_scale, input_zp, weight_zp, use_vectorized
+        combined_scale, input_zp, weight_zp, use_vectorized,
+        weight_scales, weight_zps, input_over_output
     );
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }

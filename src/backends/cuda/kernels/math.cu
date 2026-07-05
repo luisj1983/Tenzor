@@ -4831,9 +4831,9 @@ __global__ void adaptive_avg_pool2d_forward_kernel(
 
     // Calculate adaptive pooling window
     int64_t h_start = (h_out * H_in) / H_out;
-    int64_t h_end = ((h_out + 1) * H_in) / H_out;
+    int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
     int64_t w_start = (w_out * W_in) / W_out;
-    int64_t w_end = ((w_out + 1) * W_in) / W_out;
+    int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
     // Compute average. Accumulate in float for half/bfloat16 storage so a large
     // pooling window (e.g. global average pool over H*W) does not overflow the
@@ -4876,9 +4876,9 @@ __global__ void adaptive_avg_pool2d_backward_kernel(
 
     // Calculate adaptive pooling window
     int64_t h_start = (h_out * H_in) / H_out;
-    int64_t h_end = ((h_out + 1) * H_in) / H_out;
+    int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
     int64_t w_start = (w_out * W_in) / W_out;
-    int64_t w_end = ((w_out + 1) * W_in) / W_out;
+    int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
     int64_t count = (h_end - h_start) * (w_end - w_start);
     T grad_val = grad_output[idx] / T(count);
@@ -4987,6 +4987,12 @@ auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64
 // Adaptive Max Pooling 2D
 // ============================================================================
 
+// NaN detection for the adaptive max-pool selection (F032 parity: propagate NaN).
+// Primary template covers float/double; specializations widen half types.
+template<typename T> __device__ inline bool adaptive_maxpool2d_is_nan(T v) { return isnan(v); }
+template<> __device__ inline bool adaptive_maxpool2d_is_nan<__half>(__half v) { return __hisnan(v); }
+template<> __device__ inline bool adaptive_maxpool2d_is_nan<__nv_bfloat16>(__nv_bfloat16 v) { return isnan(__bfloat162float(v)); }
+
 template<typename T>
 __global__ void adaptive_max_pool2d_forward_kernel(
     const T* input, T* output, int64_t* indices,
@@ -5003,9 +5009,9 @@ __global__ void adaptive_max_pool2d_forward_kernel(
     int64_t n = idx / (W_out * H_out * C);
 
     int64_t h_start = (h_out * H_in) / H_out;
-    int64_t h_end = ((h_out + 1) * H_in) / H_out;
+    int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
     int64_t w_start = (w_out * W_in) / W_out;
-    int64_t w_end = ((w_out + 1) * W_in) / W_out;
+    int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
     T max_val = input[((n * C + c) * H_in + h_start) * W_in + w_start];
     int64_t max_idx = ((n * C + c) * H_in + h_start) * W_in + w_start;
@@ -5013,7 +5019,7 @@ __global__ void adaptive_max_pool2d_forward_kernel(
     for (int64_t h = h_start; h < h_end; ++h) {
         for (int64_t w = w_start; w < w_end; ++w) {
             int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-            if (input[input_idx] > max_val) {
+            if (adaptive_maxpool2d_is_nan(input[input_idx]) || input[input_idx] > max_val) {
                 max_val = input[input_idx];
                 max_idx = input_idx;
             }
@@ -5553,6 +5559,19 @@ auto gather_relative_position_bias(const Tensor& table, const Tensor& indices,
             reinterpret_cast<__half*>(output.data_ptr()),
             num_positions, num_heads, num_heads);
         CUDA_CHECK(cudaGetLastError());
+    } else if (table.dtype() == DType::BFloat16) {
+        // gather_2d_kernel has no BFloat16 specialization. Mirror the CPU (and
+        // ROCm) path: widen the table to Float32, gather, narrow back to BF16.
+        // The gather is a pure index-scatter, so widen/narrow is exact (F104).
+        Tensor table_f32 = table.to(DType::Float32);
+        Tensor out_f32({num_positions, num_positions, num_heads},
+                       DType::Float32, table.device());
+        gather_2d_kernel<<<grid, block, 0, stream>>>(
+            table_f32.data<float>(), indices_device.data<int64_t>(),
+            out_f32.data<float>(),
+            num_positions, num_heads, num_heads);
+        CUDA_CHECK(cudaGetLastError());
+        output = out_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("gather_relative_position_bias: unsupported dtype");
     }

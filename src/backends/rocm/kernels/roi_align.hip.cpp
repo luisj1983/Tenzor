@@ -116,6 +116,13 @@ __global__ void roi_align_forward_kernel(
     // ROI dimensions
     T roi_width = roi_x2 - roi_x1;
     T roi_height = roi_y2 - roi_y1;
+    // torchvision clamp: for non-aligned ROIs, floor the extent to 1 so a
+    // degenerate/negative ROI still samples a real pixel. Matches CPU
+    // vision.cpp and CUDA roi_align.cu.
+    if (!aligned) {
+        roi_width = fmax(roi_width, T(1));
+        roi_height = fmax(roi_height, T(1));
+    }
 
     // Bin dimensions
     T bin_size_h = roi_height / static_cast<T>(output_h);
@@ -126,6 +133,9 @@ __global__ void roi_align_forward_kernel(
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(bin_size_h));
     int64_t roi_bin_grid_w =
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(bin_size_w));
+    // torchvision clamp: sampling grid is at least 1x1.
+    roi_bin_grid_h = max(roi_bin_grid_h, int64_t(1));
+    roi_bin_grid_w = max(roi_bin_grid_w, int64_t(1));
 
     const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
 
@@ -199,6 +209,11 @@ __global__ void roi_align_backward_kernel(
 
     T roi_width = roi_x2 - roi_x1;
     T roi_height = roi_y2 - roi_y1;
+    // torchvision clamp (must match forward): non-aligned ROI extent floor to 1.
+    if (!aligned) {
+        roi_width = fmax(roi_width, T(1));
+        roi_height = fmax(roi_height, T(1));
+    }
 
     T bin_size_h = roi_height / static_cast<T>(output_h);
     T bin_size_w = roi_width / static_cast<T>(output_w);
@@ -207,6 +222,9 @@ __global__ void roi_align_backward_kernel(
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(bin_size_h));
     int64_t roi_bin_grid_w =
         (sampling_ratio > 0) ? sampling_ratio : static_cast<int64_t>(ceil(bin_size_w));
+    // torchvision clamp: sampling grid is at least 1x1.
+    roi_bin_grid_h = max(roi_bin_grid_h, int64_t(1));
+    roi_bin_grid_w = max(roi_bin_grid_w, int64_t(1));
 
     const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
     if (count <= 0) return;

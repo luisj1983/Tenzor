@@ -109,6 +109,13 @@ auto SparseAdam::step_impl() -> void {
                     sg_opt.value().is_coalesced() ? sg_opt.value()
                                                   : sg_opt.value().coalesce();
                 const auto& sg = sg_coalesced;
+                if (sg.nnz() == 0) {
+                    // F091 / PyTorch parity: a valid sparse grad that coalesces
+                    // to zero nonzero rows contributes no update. Skip outright
+                    // (do not fall through to the dense scan, which would just
+                    // re-derive the same empty result at extra cost).
+                    continue;
+                }
                 if (sg.nnz() > 0) {
                     const int64_t sparse_dim = sg.sparse_dim();
                     const auto& sg_shape = sg.shape();
@@ -233,14 +240,20 @@ auto SparseAdam::step_impl() -> void {
                     }
                 }
             }
-            // Z.8: when the producer asserted a sparse grad — even an empty one
-            // (nnz == 0) — PyTorch semantics are "no update". Fall through to the
-            // dense-rows scan below would scan zero non-zero rows but still incur
-            // index/scatter allocations; worse, if `sparse_grad().has_value()` is
-            // false but `has_sparse_grad()` is true (producer set the flag without
-            // attaching the sparse tensor), the dense path would silently apply a
-            // dense update. Honour the producer's intent and skip outright.
-            continue;
+            // F091: reaching this point means a sparse grad WAS asserted
+            // (has_sparse_grad() <=> sparse_grad_.has_value(), so the value is
+            // always present) but the fast path could not apply it — the only
+            // way to fall out here is a structurally-degenerate sparse tensor
+            // whose stored shape has fewer axes than sparse_dim (the empty
+            // nnz == 0 case already `continue`d above with PyTorch's no-update
+            // semantics). The previous code `continue`d here, silently DROPPING
+            // a genuine update. Instead we deliberately fall through to the
+            // dense-rows scan path below: the always-on dense .grad() slot (R.20)
+            // mirrors exactly the same nonzero rows, so it reconstructs the
+            // identical update and applies it on the parameter's OWN device
+            // (no CPU fallback, portable across all backends). If no dense
+            // mirror exists either, the `if (!param.has_grad()) continue;`
+            // guard below skips safely rather than crashing.
         }
 
         if (!param.has_grad()) continue;

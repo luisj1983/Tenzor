@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/offload.hpp"
+#include "tenzor/backend/loader.hpp"    // try_get_backend (F076: multi-backend gating)
 #include "tenzor/ops/math.hpp"          // for clamp, abs, round, gt, div, mul (G3)
 #include "tenzor/ops/reduction.hpp"     // for tenzor::max (G3)
 #include "tenzor/ops/creation.hpp"      // for zeros_like, ones_like (G3)
@@ -20,6 +21,36 @@ namespace nn {
 // Global offload context (for offload_param function)
 namespace {
     OffloadContext* g_offload_context = nullptr;
+
+    // A device is a compute accelerator if it is anything other than the CPU
+    // host. Offload / eviction / memory-pressure logic must apply to EVERY
+    // accelerator backend (CUDA, ROCm, OneAPI, Vulkan, MPS), not just CUDA —
+    // otherwise the offload paths silently no-op on non-CUDA hardware while
+    // reporting success (F076).
+    inline bool is_accelerator_device(const Device& d) {
+        return d.type != Device::Type::CPU;
+    }
+
+    // Pick the accelerator device a ComputeContext should stage CPU tensors
+    // onto. Prefer the device of whichever managed tensor is already
+    // accelerator-resident (the "actual" device of the workload); otherwise
+    // fall back to the first available accelerator backend. Never introduces a
+    // CPU compute fallback — ComputeContext exists to run on an accelerator.
+    inline Device pick_compute_device(const std::vector<Tensor*>& tensors) {
+        for (auto* t : tensors) {
+            if (t && is_accelerator_device(t->device())) {
+                return t->device();
+            }
+        }
+        for (auto type : {Device::Type::CUDA, Device::Type::ROCm,
+                          Device::Type::OneAPI, Device::Type::Vulkan,
+                          Device::Type::MPS}) {
+            if (auto* b = ::tenzor::try_get_backend(type); b && b->is_available()) {
+                return Device{type, 0};
+            }
+        }
+        return Device::cuda(0);  // last-resort default (e.g. CUDA-only build)
+    }
 }
 
 // ============================================================================
@@ -143,8 +174,9 @@ auto OffloadContext::enable() -> void {
             if (param_ptr) {
                 Tensor* tensor_ptr = &(param_ptr->tensor());
 
-                // Only offload if on GPU
-                if (tensor_ptr->device().type == Device::Type::CUDA) {
+                // Only offload if resident on an accelerator (any non-CPU
+                // backend: CUDA/ROCm/OneAPI/Vulkan/MPS).
+                if (is_accelerator_device(tensor_ptr->device())) {
                     // Add to tensor map if not already there
                     {
                         std::lock_guard<std::mutex> lock(tensor_map_mutex_);
@@ -242,7 +274,8 @@ auto OffloadContext::reset_stats() -> void {
 }
 
 auto OffloadContext::get_gpu_memory_usage() const -> size_t {
-    return memory_manager_->get_memory_usage(Device::Type::CUDA);
+    // Query the accelerator the model actually lives on, not a hardcoded CUDA.
+    return memory_manager_->get_memory_usage(config_.target_device.type);
 }
 
 auto OffloadContext::get_cpu_memory_usage() const -> size_t {
@@ -346,7 +379,7 @@ auto OffloadContext::register_param_grad_hooks() -> void {
                 // engine still owns (the engine keeps its own grad handle), so
                 // there is no aliasing with the post-hook accumulation.
                 if (self->config_.offload_gradients &&
-                    grad.device().type == Device::Type::CUDA) {
+                    is_accelerator_device(grad.device())) {
                     self->record_gradient_offload(param.get(), grad);
                 }
 
@@ -681,8 +714,14 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr,
         // may be sensitive). Everything else honors Config::offload_dtype.
         DType cast_dtype = info.original_dtype;
         bool use_int8_quant = false;
+        // Gradients are offloaded at LOW priority, but they must NEVER be
+        // lossy-quantized by default: a Half/BF16/Int8 round-trip of an F32
+        // gradient degrades every optimizer step. Exclude gradients from
+        // quantization so they round-trip losslessly (F077). (There is no
+        // per-config opt-in for grad quantization; grads are always exact.)
         const bool may_quant = !info.is_pinned
-                            && info.priority != OffloadPriority::HIGH;
+                            && info.priority != OffloadPriority::HIGH
+                            && !info.is_gradient;
         if (may_quant && info.original_dtype == DType::Float32) {
             switch (config_.offload_dtype) {
                 case Config::OffloadDType::Same:
@@ -1025,8 +1064,8 @@ auto OffloadContext::backward_post_hook(Module* layer) -> void {
         if (config_.offload_gradients && param_ptr->grad().has_value()) {
             Tensor* grad_tensor_ptr = &(param_ptr->mutable_grad().value());
 
-            // Skip if not on GPU
-            if (grad_tensor_ptr->device().type != Device::Type::CUDA) continue;
+            // Skip if not resident on an accelerator (any non-CPU backend).
+            if (!is_accelerator_device(grad_tensor_ptr->device())) continue;
 
             // Track gradient if not already tracked
             {
@@ -1057,8 +1096,9 @@ auto OffloadContext::backward_post_hook(Module* layer) -> void {
 // ============================================================================
 
 auto OffloadContext::update_stats() -> void {
-    // Update peak GPU memory
-    size_t current_gpu = memory_manager_->get_memory_usage(Device::Type::CUDA);
+    // Update peak accelerator memory (the backend the model is offloading
+    // against, not a hardcoded CUDA).
+    size_t current_gpu = memory_manager_->get_memory_usage(config_.target_device.type);
     size_t peak = stats_.peak_gpu_memory.load(std::memory_order_relaxed);
 
     while (current_gpu > peak) {
@@ -1070,8 +1110,9 @@ auto OffloadContext::update_stats() -> void {
 }
 
 auto OffloadContext::check_memory_pressure() -> void {
-    // Check GPU memory pressure
-    float gpu_pressure = memory_manager_->get_memory_pressure(Device::Type::CUDA);
+    // Check accelerator memory pressure (the backend the model lives on).
+    const Device::Type accel_type = config_.target_device.type;
+    float gpu_pressure = memory_manager_->get_memory_pressure(accel_type);
 
     if (gpu_pressure > 0.85f) {  // High memory pressure
         // Capture (sort_key, tensor_ptr) pairs UNDER the lock. Previously this
@@ -1115,7 +1156,7 @@ auto OffloadContext::check_memory_pressure() -> void {
             offload_tensor(c.tensor_ptr);
 
             // Recheck pressure
-            gpu_pressure = memory_manager_->get_memory_pressure(Device::Type::CUDA);
+            gpu_pressure = memory_manager_->get_memory_pressure(accel_type);
             if (gpu_pressure < 0.75f) break;  // Target 75% usage
         }
     }
@@ -1134,6 +1175,11 @@ ComputeContext::ComputeContext(const std::vector<Tensor*>& tensors)
     config.use_pinned_memory = true;
     transfer_engine_ = std::make_shared<core::TransferEngine>(config);
 
+    // Stage CPU tensors onto the accelerator the workload actually uses rather
+    // than a hardcoded Device::cuda(0). Prefer the device of an already-resident
+    // tensor; otherwise the first available accelerator backend (F076).
+    const Device compute_device = pick_compute_device(tensors_);
+
     // Save original devices and transfer to GPU if needed
     for (auto* tensor_ptr : tensors_) {
         if (!tensor_ptr) continue;
@@ -1149,7 +1195,7 @@ ComputeContext::ComputeContext(const std::vector<Tensor*>& tensors)
             cpu_copies_.push_back(*tensor_ptr);  // Save CPU copy
 
             try {
-                Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(*tensor_ptr, Device::cuda(0));
+                Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(*tensor_ptr, compute_device);
                 *tensor_ptr = gpu_tensor;
             } catch (const std::exception& e) {
                 // Transfer failed — tensor_ptr still points at the CPU

@@ -3,6 +3,28 @@
 
 namespace tenzor::nn::utils {
 
+namespace {
+
+// Scale every accumulated gradient by 1/divisor in-place before the optimizer
+// step. Micro-batch backward() calls SUM their gradients into param->grad();
+// PyTorch's standard convention treats the effective batch as the mean over the
+// accumulated micro-batches, so we divide the summed gradients by the number of
+// micro-batches actually accumulated. Without this the effective gradient (and
+// hence the effective learning rate) is `divisor`x too large (F066).
+auto scale_accumulated_grads(optim::Optimizer& optimizer, int64_t divisor) -> void {
+    if (divisor <= 1) {
+        return;  // nothing to scale for a single micro-batch
+    }
+    const double scale = static_cast<double>(divisor);
+    for (const auto& param : optimizer.parameters()) {
+        if (param && param->has_grad() && param->grad().has_value()) {
+            param->set_grad(*param->grad() / scale);
+        }
+    }
+}
+
+}  // namespace
+
 GradientAccumulator::GradientAccumulator(optim::Optimizer& optimizer, int64_t accumulation_steps)
     : optimizer_(optimizer)
     , accumulation_steps_(accumulation_steps) {
@@ -16,6 +38,9 @@ GradientAccumulator::GradientAccumulator(optim::Optimizer& optimizer, int64_t ac
 auto GradientAccumulator::step() -> bool {
     ++current_step_;
     if (current_step_ >= accumulation_steps_) {
+        // Mean convention: divide the summed grads by the number of accumulated
+        // micro-batches so the effective learning rate is correct (F066).
+        scale_accumulated_grads(optimizer_, accumulation_steps_);
         optimizer_.step();
         optimizer_.zero_grad();
         current_step_ = 0;
@@ -26,6 +51,9 @@ auto GradientAccumulator::step() -> bool {
 
 auto GradientAccumulator::flush() -> bool {
     if (current_step_ > 0) {
+        // Partial flush: only `current_step_` micro-batches were accumulated, so
+        // scale by that count (not accumulation_steps_) to keep the mean correct.
+        scale_accumulated_grads(optimizer_, current_step_);
         optimizer_.step();
         optimizer_.zero_grad();
         current_step_ = 0;

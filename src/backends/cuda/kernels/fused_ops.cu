@@ -2204,7 +2204,13 @@ __global__ void flash_attention_v2_kernel(
         for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
             int kv_pos = k_start + j;
             float score;
-            if (causal && kv_pos > query_idx) {
+            // F021: bottom-right causal alignment (matches the MHA/GQA manual
+            // BMM path and PyTorch). A query at absolute position query_idx
+            // attends to keys kv_pos <= query_idx + (seq_len_k - seq_len_q).
+            // For self-attention the offset is 0 (kv_pos <= query_idx); for
+            // KV-cache cross-attention (seq_len_q < seq_len_k) the single query
+            // correctly sees all preceding keys instead of only key 0.
+            if (causal && kv_pos > query_idx + (seq_len_k - seq_len_q)) {
                 score = -INFINITY;
             } else {
                 score = 0.0f;
@@ -3906,9 +3912,13 @@ __global__ void fused_rmsprop_step_kernel(
         T ga = grad_avg[idx];
         ga = T(alpha) * ga + T(1.0 - alpha) * g;
         grad_avg[idx] = ga;
-        avg = sqrt(sq - ga * ga + T(eps));
+        // eps OUTSIDE sqrt (PyTorch-correct): sqrt(v - m^2) + eps. The eager
+        // path (rmsprop.hpp) and CPU/ROCm/oneAPI/MPS all add eps after the sqrt;
+        // the old sqrt(v - m^2 + eps) diverged on CUDA (F092).
+        avg = sqrt(sq - ga * ga) + T(eps);
     } else {
-        avg = sqrt(sq + T(eps));
+        // eps OUTSIDE sqrt (PyTorch-correct): sqrt(v) + eps. See note above (F092).
+        avg = sqrt(sq) + T(eps);
     }
 
     if (momentum > 0.0 && momentum_buffer) {

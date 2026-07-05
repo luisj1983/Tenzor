@@ -1510,11 +1510,23 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
     double* mean_ptr_d = (stats_dtype == DType::Float64) ? get_data_ptr<double>(mean_out) : nullptr;
     double* inv_std_ptr_d = (stats_dtype == DType::Float64) ? get_data_ptr<double>(inv_std_out) : nullptr;
 
+    // The kernels below index input/weight/bias via flat shape-derived offsets
+    // ((n*C + c)*spatial + s, and w_ptr[c]/b_ptr[c]), so they must be contiguous;
+    // a channels-last/transposed/sliced view would be read with the wrong layout,
+    // corrupting the output and the saved mean/inv_std. Materialize contiguous
+    // copies first (mirroring CPU nn_kernels and OneAPI instance_norm).
+    const Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    std::optional<Tensor> weight_c, bias_c;
+    const Tensor* w_use = weight;
+    const Tensor* b_use = bias;
+    if (weight && !weight->is_contiguous()) { weight_c = weight->contiguous(); w_use = &*weight_c; }
+    if (bias && !bias->is_contiguous())     { bias_c = bias->contiguous();     b_use = &*bias_c; }
+
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = get_data_ptr<const float>(input_c);
         float* out_ptr = get_data_ptr<float>(output);
-        const float* w_ptr = weight ? get_data_ptr<const float>(*weight) : nullptr;
-        const float* b_ptr = bias ? get_data_ptr<const float>(*bias) : nullptr;
+        const float* w_ptr = w_use ? get_data_ptr<const float>(*w_use) : nullptr;
+        const float* b_ptr = b_use ? get_data_ptr<const float>(*b_use) : nullptr;
 
         // Pass 1: compute per-group mean
         queue.parallel_for<GroupNormMeanKernelFloat32>(
@@ -1577,10 +1589,10 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
         );
     }
     else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = get_data_ptr<const double>(input_c);
         double* out_ptr = get_data_ptr<double>(output);
-        const double* w_ptr = weight ? get_data_ptr<const double>(*weight) : nullptr;
-        const double* b_ptr = bias ? get_data_ptr<const double>(*bias) : nullptr;
+        const double* w_ptr = w_use ? get_data_ptr<const double>(*w_use) : nullptr;
+        const double* b_ptr = b_use ? get_data_ptr<const double>(*b_use) : nullptr;
         const double eps_d = static_cast<double>(eps);
 
         // audit-2026-05-03 — stats stored as double (matches Float64 input).
@@ -1645,10 +1657,10 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
         );
     }
     else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input_c);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-        const sycl::half* w_ptr = weight ? get_data_ptr<const sycl::half>(*weight) : nullptr;
-        const sycl::half* b_ptr = bias ? get_data_ptr<const sycl::half>(*bias) : nullptr;
+        const sycl::half* w_ptr = w_use ? get_data_ptr<const sycl::half>(*w_use) : nullptr;
+        const sycl::half* b_ptr = b_use ? get_data_ptr<const sycl::half>(*b_use) : nullptr;
 
         // Use float accumulation for numerical stability
         queue.parallel_for<GroupNormMeanKernelFloat16>(
@@ -1710,10 +1722,10 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
         );
     }
     else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input_c);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-        const uint16_t* w_ptr = weight ? get_data_ptr<const uint16_t>(*weight) : nullptr;
-        const uint16_t* b_ptr = bias ? get_data_ptr<const uint16_t>(*bias) : nullptr;
+        const uint16_t* w_ptr = w_use ? get_data_ptr<const uint16_t>(*w_use) : nullptr;
+        const uint16_t* b_ptr = b_use ? get_data_ptr<const uint16_t>(*b_use) : nullptr;
 
         // Use float accumulation for numerical stability
         queue.parallel_for<GroupNormMeanKernelBFloat16>(
@@ -1817,16 +1829,27 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     Tensor grad_weight({C}, weight.dtype(), weight.device());
     Tensor grad_bias({C}, weight.dtype(), weight.device());
 
+    // The kernels below index grad_output/input via flat shape-derived offsets
+    // ((n*C + c)*spatial + s) and weight/mean/rstd per-channel/per-group, so all
+    // read tensors must be contiguous; a channels-last/transposed/sliced view
+    // would be read with the wrong layout, corrupting every gradient. Materialize
+    // contiguous copies first (mirroring the forward and CPU nn_kernels).
+    const Tensor go_c   = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor in_c   = input.is_contiguous() ? input : input.contiguous();
+    const Tensor w_c    = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor mean_c = mean.is_contiguous() ? mean : mean.contiguous();
+    const Tensor rstd_c = rstd.is_contiguous() ? rstd : rstd.contiguous();
+
     // audit-2026-05-03 — mean/rstd dtype now follows input dtype.
-    const float* mean_ptr = (mean.dtype() == DType::Float32) ? get_data_ptr<const float>(mean) : nullptr;
-    const float* rstd_ptr = (rstd.dtype() == DType::Float32) ? get_data_ptr<const float>(rstd) : nullptr;
-    const double* mean_ptr_d = (mean.dtype() == DType::Float64) ? get_data_ptr<const double>(mean) : nullptr;
-    const double* rstd_ptr_d = (rstd.dtype() == DType::Float64) ? get_data_ptr<const double>(rstd) : nullptr;
+    const float* mean_ptr = (mean.dtype() == DType::Float32) ? get_data_ptr<const float>(mean_c) : nullptr;
+    const float* rstd_ptr = (rstd.dtype() == DType::Float32) ? get_data_ptr<const float>(rstd_c) : nullptr;
+    const double* mean_ptr_d = (mean.dtype() == DType::Float64) ? get_data_ptr<const double>(mean_c) : nullptr;
+    const double* rstd_ptr_d = (rstd.dtype() == DType::Float64) ? get_data_ptr<const double>(rstd_c) : nullptr;
 
     if (input.dtype() == DType::Float32) {
-        const float* go_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
-        const float* w_ptr = get_data_ptr<const float>(weight);
+        const float* go_ptr = get_data_ptr<const float>(go_c);
+        const float* in_ptr = get_data_ptr<const float>(in_c);
+        const float* w_ptr = get_data_ptr<const float>(w_c);
         float* gi_ptr = get_data_ptr<float>(grad_input);
         float* gw_ptr = get_data_ptr<float>(grad_weight);
         float* gb_ptr = get_data_ptr<float>(grad_bias);
@@ -1917,9 +1940,9 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
         );
     }
     else if (input.dtype() == DType::Float64) {
-        const double* go_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
-        const double* w_ptr = get_data_ptr<const double>(weight);
+        const double* go_ptr = get_data_ptr<const double>(go_c);
+        const double* in_ptr = get_data_ptr<const double>(in_c);
+        const double* w_ptr = get_data_ptr<const double>(w_c);
         double* gi_ptr = get_data_ptr<double>(grad_input);
         double* gw_ptr = get_data_ptr<double>(grad_weight);
         double* gb_ptr = get_data_ptr<double>(grad_bias);
@@ -2010,9 +2033,9 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
         );
     }
     else if (input.dtype() == DType::Float16) {
-        const sycl::half* go_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        const sycl::half* w_ptr = get_data_ptr<const sycl::half>(weight);
+        const sycl::half* go_ptr = get_data_ptr<const sycl::half>(go_c);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_c);
+        const sycl::half* w_ptr = get_data_ptr<const sycl::half>(w_c);
         sycl::half* gi_ptr = get_data_ptr<sycl::half>(grad_input);
         sycl::half* gw_ptr = get_data_ptr<sycl::half>(grad_weight);
         sycl::half* gb_ptr = get_data_ptr<sycl::half>(grad_bias);
@@ -2097,9 +2120,9 @@ auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
         );
     }
     else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* go_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
-        const uint16_t* w_ptr = get_data_ptr<const uint16_t>(weight);
+        const uint16_t* go_ptr = get_data_ptr<const uint16_t>(go_c);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_c);
+        const uint16_t* w_ptr = get_data_ptr<const uint16_t>(w_c);
         uint16_t* gi_ptr = get_data_ptr<uint16_t>(grad_input);
         uint16_t* gw_ptr = get_data_ptr<uint16_t>(grad_weight);
         uint16_t* gb_ptr = get_data_ptr<uint16_t>(grad_bias);

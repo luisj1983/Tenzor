@@ -795,12 +795,19 @@ __global__ void fused_layer_norm_kernel(
     const T* batch_in = input + b * norm_size;
     T* batch_out = output + b * norm_size;
 
-    __shared__ T shared_data[BLOCK_SIZE];
+    // Accumulate mean/variance stats in double to avoid catastrophic
+    // cancellation, matching the CPU reference and the CUDA sibling
+    // (fused_ops.cu forces Acc=double). The F16/BF16 paths widen to Float32 at
+    // host level and instantiate this kernel with T=float, so a double
+    // accumulator here covers them too; the T=double instantiation is exact.
+    // Only the final mean/inv_std and the normalization are narrowed back to T.
+    using Acc = double;
+    __shared__ Acc shared_data[BLOCK_SIZE];
 
-    // Compute mean
-    T sum = 0;
+    // Compute mean (in double)
+    Acc sum = 0;
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        sum += batch_in[i];
+        sum += static_cast<Acc>(batch_in[i]);
     }
 
     shared_data[threadIdx.x] = sum;
@@ -813,13 +820,13 @@ __global__ void fused_layer_norm_kernel(
         __syncthreads();
     }
 
-    T mean = shared_data[0] / norm_size;
+    Acc mean = shared_data[0] / static_cast<Acc>(norm_size);
     __syncthreads();
 
-    // Compute variance
-    T var_sum = 0;
+    // Compute variance (in double)
+    Acc var_sum = 0;
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        T diff = batch_in[i] - mean;
+        Acc diff = static_cast<Acc>(batch_in[i]) - mean;
         var_sum += diff * diff;
     }
 
@@ -833,16 +840,14 @@ __global__ void fused_layer_norm_kernel(
         __syncthreads();
     }
 
-    T variance = shared_data[0] / norm_size;
-    // Use the type-overloaded `rsqrt` — `rsqrtf` is Float32-only and would
-    // silently downcast variance+eps to Float32 when T=double, dropping
-    // ~7 decimal digits of precision and breaking Float64 parity.
-    T inv_std = rsqrt(variance + eps);
+    Acc variance = shared_data[0] / static_cast<Acc>(norm_size);
+    Acc inv_std = rsqrt(variance + static_cast<Acc>(eps));
 
-    // Normalize and scale
+    // Normalize and scale (compute in double, narrow to T on store)
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        T normalized = (batch_in[i] - mean) * inv_std;
-        batch_out[i] = normalized * weight[i] + bias[i];
+        Acc normalized = (static_cast<Acc>(batch_in[i]) - mean) * inv_std;
+        batch_out[i] = static_cast<T>(normalized * static_cast<Acc>(weight[i])
+                                      + static_cast<Acc>(bias[i]));
     }
 }
 
@@ -1350,7 +1355,12 @@ __global__ void flash_attention_v2_kernel_hip(
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
             float score;
             int kv_pos = kv_start + j;
-            if (j < kv_end_actual && !(causal && kv_pos > q_row)) {
+            // F021: bottom-right causal alignment (matches the MHA/GQA manual
+            // BMM path and PyTorch). Query at absolute position q_row attends to
+            // keys kv_pos <= q_row + (seq_len_k - seq_len_q). Self-attention =>
+            // offset 0; KV-cache cross-attention (seq_len_q < seq_len_k) lets the
+            // query see all preceding keys instead of only key 0.
+            if (j < kv_end_actual && !(causal && kv_pos > q_row + (seq_len_k - seq_len_q))) {
                 score = 0.0f;
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     score += Q_shared[d] * K_tile[j * K_STRIDE + d];
@@ -1988,11 +1998,17 @@ auto fused_attention_hip(
             Tensor cols_f = cols_2d.to(DType::Float32);
             std::vector<Tensor> gt_in = {cols_f, rows_f};
             Tensor cmask = tenzor::dispatch(OpId::Gt, gt_in, empty)[0];
-            Tensor neg_inf = tenzor::full(sshape,
-                -std::numeric_limits<float>::infinity(),
+            // Use a FINITE large-negative sentinel (-1e30) rather than -inf: the
+            // additive mask is built as cmask * sentinel, so at KEPT positions
+            // (cmask==0) the product is 0*(-1e30)=0 — a plain -inf would give
+            // 0*-inf=NaN and poison the whole softmax row. -1e30 still drives
+            // softmax to ~0 at masked positions. Mirrors the ROCm Flash/Flex
+            // registry paths and the CPU/OneAPI where()-based masking.
+            Tensor neg_big = tenzor::full(sshape,
+                -1e30,
                 scores.dtype(), scores.device());
             Tensor cmask_t = cmask.to(scores.dtype());
-            std::vector<Tensor> mul2_in = {cmask_t, neg_inf};
+            std::vector<Tensor> mul2_in = {cmask_t, neg_big};
             Tensor mask_v = tenzor::dispatch(OpId::Mul, mul2_in, empty)[0];
             std::vector<Tensor> add_in = {scores, mask_v};
             scores = tenzor::dispatch(OpId::Add, add_in, empty)[0];
@@ -2034,12 +2050,15 @@ __global__ void fused_rms_norm_kernel(
     const T* batch_in = input + b * norm_size;
     T* batch_out = output + b * norm_size;
 
-    __shared__ T shared_data[BLOCK_SIZE];
+    // Accumulate sum-of-squares in double for T=float (matching the CUDA
+    // sibling, which uses `double sum_sq`); a float accumulator over norm_size
+    // drifts. For T=double this is exact anyway.
+    __shared__ double shared_data[BLOCK_SIZE];
 
-    // Compute sum of squares
-    T sum_sq = 0;
+    // Compute sum of squares (in double)
+    double sum_sq = 0.0;
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        T val = batch_in[i];
+        double val = static_cast<double>(batch_in[i]);
         sum_sq += val * val;
     }
 
@@ -2053,17 +2072,13 @@ __global__ void fused_rms_norm_kernel(
         __syncthreads();
     }
 
-    // Compute reciprocal RMS
+    // Compute reciprocal RMS. Use the double-precision reciprocal-sqrt for both
+    // T=float and T=double (rsqrtf would truncate the reciprocal-RMS to single
+    // precision and diverge from the CPU/CUDA reference), then narrow to T.
     __shared__ T shared_rrms;
     if (threadIdx.x == 0) {
-        T mean_sq = shared_data[0] / norm_size;
-        // Use the double-precision rsqrt for T=double; rsqrtf would truncate the
-        // reciprocal-RMS to single precision and diverge from CPU/CUDA Float64.
-        if constexpr (std::is_same_v<T, double>) {
-            shared_rrms = rsqrt(mean_sq + static_cast<T>(eps));
-        } else {
-            shared_rrms = rsqrtf(mean_sq + static_cast<T>(eps));
-        }
+        double mean_sq = shared_data[0] / static_cast<double>(norm_size);
+        shared_rrms = static_cast<T>(rsqrt(mean_sq + static_cast<double>(eps)));
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();
@@ -3123,19 +3138,21 @@ __global__ void fused_layer_norm_backward_kernel_hip(
     T batch_mean = mean[b];
     T batch_inv_std = inv_std[b];
 
-    __shared__ T shared_sum1[BLOCK_SZ];  // For sum(grad_out * weight)
-    __shared__ T shared_sum2[BLOCK_SZ];  // For sum(grad_out * weight * normalized)
+    // Accumulate the two grad dot-products in double (the forward stats are in
+    // double), matching the CUDA sibling — shared buffers and locals are double.
+    __shared__ double shared_sum1[BLOCK_SZ];  // For sum(grad_out * weight)
+    __shared__ double shared_sum2[BLOCK_SZ];  // For sum(grad_out * weight * normalized)
 
-    // Compute sums needed for input gradient
-    T sum_grad_out = 0;
-    T sum_grad_out_normalized = 0;
+    // Compute sums needed for input gradient (accumulate in double)
+    double sum_grad_out = 0.0;
+    double sum_grad_out_normalized = 0.0;
 
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
         T grad_out_weighted = batch_grad_out[i] * weight[i];
 
-        sum_grad_out += grad_out_weighted;
-        sum_grad_out_normalized += grad_out_weighted * normalized;
+        sum_grad_out += static_cast<double>(grad_out_weighted);
+        sum_grad_out_normalized += static_cast<double>(grad_out_weighted) * static_cast<double>(normalized);
 
         // Accumulate weight and bias gradients atomically
         atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
@@ -3155,16 +3172,16 @@ __global__ void fused_layer_norm_backward_kernel_hip(
         __syncthreads();
     }
 
-    T mean_grad_out = shared_sum1[0] / static_cast<T>(norm_size);
-    T mean_grad_out_normalized = shared_sum2[0] / static_cast<T>(norm_size);
+    double mean_grad_out = shared_sum1[0] / static_cast<double>(norm_size);
+    double mean_grad_out_normalized = shared_sum2[0] / static_cast<double>(norm_size);
 
-    // Compute input gradients
+    // Compute input gradients (in double, narrow to T on store)
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
         T grad_out_weighted = batch_grad_out[i] * weight[i];
 
-        batch_grad_in[i] = (grad_out_weighted - mean_grad_out -
-                           normalized * mean_grad_out_normalized) * batch_inv_std;
+        batch_grad_in[i] = static_cast<T>((static_cast<double>(grad_out_weighted) - mean_grad_out -
+                           static_cast<double>(normalized) * mean_grad_out_normalized) * static_cast<double>(batch_inv_std));
     }
 }
 

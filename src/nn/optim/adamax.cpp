@@ -85,12 +85,15 @@ auto Adamax::step_impl() -> void {
         exp_avg_[i] = exp_avg_[i] * scalar(hp.beta1) +
                       grad_copy    * scalar(1.0 - hp.beta1);
 
-        // u_t = max(beta2 * u_{t-1}, |g_t|)
-        // element-wise via maximum(), not a reduction.
-        exp_inf_[i] = maximum(exp_inf_[i] * scalar(hp.beta2), abs(grad_copy));
+        // u_t = max(beta2 * u_{t-1}, |g_t| + eps)
+        // element-wise via maximum(), not a reduction.  PyTorch folds eps
+        // INTO the max (|grad| + eps) rather than adding it to the resulting
+        // infinity-norm, so denom is exactly u_t with no trailing +eps.
+        exp_inf_[i] = maximum(exp_inf_[i] * scalar(hp.beta2),
+                              abs(grad_copy) + scalar(hp.eps));
 
-        // denom = u_t + eps
-        auto denom = exp_inf_[i] + scalar(hp.eps);
+        // denom = u_t
+        auto denom = exp_inf_[i];
 
         // theta -= (lr / (1 - beta1^t)) * m_t / denom
         Tensor updated = param_hi -

@@ -306,8 +306,8 @@ class AvgPool1d(Module):
         kernel_size: int,
         stride: Optional[int] = None,
         padding: int = 0,
-        ceil_mode: bool = False,
-        count_include_pad: bool = True
+        count_include_pad: bool = True,
+        ceil_mode: bool = False
     ) -> None: ...
 
     def forward(self, input: Tensor) -> Tensor: ...
@@ -320,8 +320,8 @@ class AvgPool2d(Module):
         kernel_size: int | Tuple[int, int],
         stride: Optional[int | Tuple[int, int]] = None,
         padding: int | Tuple[int, int] = 0,
-        ceil_mode: bool = False,
-        count_include_pad: bool = True
+        count_include_pad: bool = True,
+        ceil_mode: bool = False
     ) -> None: ...
 
     def forward(self, input: Tensor) -> Tensor: ...
@@ -372,6 +372,8 @@ class AvgPool3d(Module):
         kernel_size: int,
         stride: Optional[int] = None,
         padding: int = 0,
+        count_include_pad: bool = True,
+        ceil_mode: bool = False,
     ) -> None: ...
 
     def forward(self, input: Tensor) -> Tensor: ...
@@ -436,6 +438,15 @@ class ReflectionPad2d(Module):
 
     @overload
     def __init__(self, padding_left: int, padding_right: int, padding_top: int, padding_bottom: int) -> None: ...
+    @overload
+    def __init__(self, padding: int) -> None: ...
+    def forward(self, input: Tensor) -> Tensor: ...
+
+class ReflectionPad3d(Module):
+    """3D reflection padding layer."""
+
+    @overload
+    def __init__(self, padding: List[int]) -> None: ...
     @overload
     def __init__(self, padding: int) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...

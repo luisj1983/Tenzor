@@ -16,6 +16,23 @@ layout(push_constant) uniform PushConstants {
     uint kernel_d; uint kernel_h; uint kernel_w;
 } params;
 
+// PyTorch FractionalMaxPool window start for output index `i` along one axis;
+// windows are `pool`-wide (== kernel_size) and OVERLAP (ATen generate_intervals,
+// Graham arXiv:1412.6071):
+//   alpha    = (in - pool) / (out - 1)                     [out > 1]
+//   start(i) = floor((i + u) * alpha) - floor(u * alpha)   [i < out-1]
+//   start(out-1) = in - pool
+int frac_pool_start(int i, int in_size, int out_size, int pool, float u) {
+    int start;
+    if (out_size <= 1 || i == out_size - 1) {
+        start = in_size - pool;
+    } else {
+        float alpha = float(in_size - pool) / float(out_size - 1);
+        start = int((float(i) + u) * alpha) - int(u * alpha);
+    }
+    return clamp(start, 0, in_size - pool);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.total_output) return;
@@ -38,34 +55,17 @@ void main() {
         sample_w = samples_data[si + 2];
     }
 
-    // Pool regions use Graham's disjoint-subsequence method (arXiv:1412.6071),
-    // matching the CPU reference kernel exactly (see
-    // cpu/kernels/pooling.cpp fractional_maxpool3d_impl):
-    //   start_i = floor((i + u) * (in/out) - u)
-    //   end_i   = floor((i + 1 + u) * (in/out) - u)
-    // The earlier kernel-window formula floor((i+u)*(in-k)/(out-1)) chose a
-    // different window than the CPU for u >= 0.5 and broke backend parity.
-    float d_alpha = float(params.D) / float(params.out_d);
-    float h_alpha = float(params.H) / float(params.out_h);
-    float w_alpha = float(params.W) / float(params.out_w);
+    // PyTorch overlapping windows of width == kernel_d x kernel_h x kernel_w,
+    // positioned by the pseudo-random sample offset (see frac_pool_start above).
+    // Earlier versions ignored the kernel sizes and derived a disjoint window
+    // from the input/output ratio (adaptive-style), diverging from torch.nn.
+    int d_start = frac_pool_start(int(od), int(params.D), int(params.out_d), int(params.kernel_d), sample_d);
+    int h_start = frac_pool_start(int(oh), int(params.H), int(params.out_h), int(params.kernel_h), sample_h);
+    int w_start = frac_pool_start(int(ow), int(params.W), int(params.out_w), int(params.kernel_w), sample_w);
 
-    int d_start = int(floor((float(od) + sample_d) * d_alpha - sample_d));
-    int h_start = int(floor((float(oh) + sample_h) * h_alpha - sample_h));
-    int w_start = int(floor((float(ow) + sample_w) * w_alpha - sample_w));
-
-    int d_end = int(floor((float(od) + 1.0 + sample_d) * d_alpha - sample_d));
-    int h_end = int(floor((float(oh) + 1.0 + sample_h) * h_alpha - sample_h));
-    int w_end = int(floor((float(ow) + 1.0 + sample_w) * w_alpha - sample_w));
-
-    d_start = max(d_start, 0); d_end = min(d_end, int(params.D));
-    h_start = max(h_start, 0); h_end = min(h_end, int(params.H));
-    w_start = max(w_start, 0); w_end = min(w_end, int(params.W));
-    if (d_end <= d_start) d_end = d_start + 1;
-    if (h_end <= h_start) h_end = h_start + 1;
-    if (w_end <= w_start) w_end = w_start + 1;
-    d_end = min(d_end, int(params.D));
-    h_end = min(h_end, int(params.H));
-    w_end = min(w_end, int(params.W));
+    int d_end = min(d_start + int(params.kernel_d), int(params.D));
+    int h_end = min(h_start + int(params.kernel_h), int(params.H));
+    int w_end = min(w_start + int(params.kernel_w), int(params.W));
 
     float max_val = -1.0 / 0.0;
     int max_idx = (d_start * int(params.H) + h_start) * int(params.W) + w_start;

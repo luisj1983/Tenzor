@@ -48,9 +48,20 @@ auto clip_grad_norm_(std::vector<std::shared_ptr<Variable>> parameters,
         return (t.dtype() == accum_dtype) ? t : t.to(accum_dtype);
     };
 
+    // Widen Float16/BFloat16 grads to Float32 BEFORE reducing: norm(g, p) for
+    // p==2 sums squares, and an F16 sum-of-squares overflows to Inf for grads
+    // with magnitude > ~255 (F16 max 65504). The reduction must therefore run
+    // in at least Float32, not the grad's native half precision (F062). (F64
+    // grads are left as F64 so their norm is not truncated.)
+    auto widen_grad = [](const Tensor& g) -> Tensor {
+        return (g.dtype() == DType::Float16 || g.dtype() == DType::BFloat16)
+            ? g.to(DType::Float32)
+            : g;
+    };
+
     if (std::isinf(norm_type)) {
         for (auto& g : grads) {
-            auto g_max = tenzor::norm(tenzor::abs(g),
+            auto g_max = tenzor::norm(tenzor::abs(widen_grad(g)),
                                       std::numeric_limits<float>::infinity());
             Tensor m_acc = promote(g_max);
             if (!accum.impl()) {
@@ -62,7 +73,7 @@ auto clip_grad_norm_(std::vector<std::shared_ptr<Variable>> parameters,
         }
     } else {
         for (auto& g : grads) {
-            auto g_norm = tenzor::norm(g, static_cast<float>(norm_type));
+            auto g_norm = tenzor::norm(widen_grad(g), static_cast<float>(norm_type));
             Tensor n_acc = promote(g_norm);
             Tensor contribution = ::tenzor::pow(n_acc, static_cast<float>(norm_type));
             if (!accum.impl()) {

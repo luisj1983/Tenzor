@@ -823,11 +823,11 @@ auto conv3d_forward_kernel(
 
     switch (input_c.dtype()) {
         case DType::Float32:
-            // Upgrade the f32 accumulator to double, matching conv3d_backward.
-            // The forward reduction sums Cin_per_g*kD*kH*kW MACs; a float
-            // accumulator drifts O(sqrt(N)) ULPs and diverges from the CPU
-            // reference past the cross-backend rtol=1e-3.
-            launch_conv3d_forward<float, double>(
+            // Accumulate F32 in float to match the CPU reference (conv2d.cpp
+            // AccumT=float for F32) and the ROCm/Vulkan conv3d kernels. A double
+            // accumulator here made CUDA the lone outlier, drifting O(sqrt(N))
+            // ULPs from the other four backends past the cross-backend tol (F038).
+            launch_conv3d_forward<float, float>(
                 input_c, weight_c, bias_ptr, output, N, Cin, D, H, W, Cout, Cin_per_g,
                 kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;

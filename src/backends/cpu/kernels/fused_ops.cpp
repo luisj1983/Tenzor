@@ -1953,8 +1953,8 @@ auto batchnorm2d_fused_training_kernel(const Tensor& input, Tensor& running_mean
 // =========================================================================
 
 auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
-                           float lr, float momentum, float weight_decay,
-                           float dampening, bool nesterov) -> void {
+                           double lr, double momentum, double weight_decay,
+                           double dampening, bool nesterov) -> void {
     const int64_t n = param.numel();
 
     if (param.dtype() == DType::Float32) {
@@ -2094,14 +2094,14 @@ auto fused_adam_step_kernel(Tensor& param, const Tensor& grad,
 auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
                                   Tensor& exp_avg, Tensor& exp_avg_sq,
                                   Tensor* max_exp_avg_sq,
-                                  float lr, float beta1, float beta2,
-                                  float eps, float weight_decay,
+                                  double lr, double beta1, double beta2,
+                                  double eps, double weight_decay,
                                   int64_t step, bool amsgrad) -> void {
     const int64_t n = param.numel();
 
-    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
-    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
-    float step_size = lr / bias_correction1;
+    double bias_correction1 = 1.0 - std::pow(beta1, static_cast<double>(step));
+    double bias_correction2 = 1.0 - std::pow(beta2, static_cast<double>(step));
+    double step_size = lr / bias_correction1;
 
     if (param.dtype() == DType::Float32) {
         float* p = param.data<float>();
@@ -2173,8 +2173,8 @@ auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
 auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
                                 Tensor& square_avg, Tensor* grad_avg,
                                 Tensor* momentum_buffer,
-                                float lr, float alpha, float eps,
-                                float weight_decay, float momentum,
+                                double lr, double alpha, double eps,
+                                double weight_decay, double momentum,
                                 bool centered) -> void {
     const int64_t n = param.numel();
 
@@ -2197,9 +2197,9 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
             float avg;
             if (centered && ga) {
                 ga[i] = alpha * ga[i] + (1.0f - alpha) * grad_val;
-                avg = std::sqrt(sq[i] - ga[i] * ga[i] + eps);
+                avg = std::sqrt(sq[i] - ga[i] * ga[i]) + eps;
             } else {
-                avg = std::sqrt(sq[i] + eps);
+                avg = std::sqrt(sq[i]) + eps;
             }
 
             if (buf) {
@@ -2227,10 +2227,10 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
 
             double avg;
             if (centered && ga) {
-                ga[i] = static_cast<double>(alpha) * ga[i] + (1.0 - static_cast<double>(alpha)) * grad_val;
-                avg = std::sqrt(sq[i] - ga[i] * ga[i] + static_cast<double>(eps));
+                ga[i] = alpha * ga[i] + (1.0 - alpha) * grad_val;
+                avg = std::sqrt(sq[i] - ga[i] * ga[i]) + eps;
             } else {
-                avg = std::sqrt(sq[i] + static_cast<double>(eps));
+                avg = std::sqrt(sq[i]) + eps;
             }
 
             if (buf) {
@@ -2251,8 +2251,8 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
 
 auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
                                  Tensor& square_avg, Tensor& acc_delta,
-                                 float rho, float eps, float lr,
-                                 float weight_decay) -> void {
+                                 double rho, double eps, double lr,
+                                 double weight_decay) -> void {
     const int64_t n = param.numel();
 
     if (param.dtype() == DType::Float32) {
@@ -2301,11 +2301,11 @@ auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
 }
 
 auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
-                                Tensor& sum_sq, float lr, float lr_decay,
-                                float eps, float weight_decay,
+                                Tensor& sum_sq, double lr, double lr_decay,
+                                double eps, double weight_decay,
                                 int64_t step) -> void {
     const int64_t n = param.numel();
-    float clr = lr / (1.0f + static_cast<float>(step - 1) * lr_decay);
+    double clr = lr / (1.0 + static_cast<double>(step - 1) * lr_decay);
 
     if (param.dtype() == DType::Float32) {
         float* p = param.data<float>();

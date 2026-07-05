@@ -2499,9 +2499,14 @@ auto flash_attention_impl(
                             }
                             score += q_val * sc * K_tile[j * ks + d];
                         }
-                        // Apply causal mask
+                        // Apply causal mask. F021: bottom-right alignment
+                        // (matches the MHA/GQA manual BMM path and PyTorch).
+                        // Query at absolute position query_idx attends to keys
+                        // kv_pos <= query_idx + (slk - slq). Self-attention =>
+                        // offset 0; KV-cache cross-attention (slq < slk) lets
+                        // the query see all preceding keys instead of only key 0.
                         int kv_pos = k_start + j;
-                        if (causal && kv_pos > query_idx) {
+                        if (causal && kv_pos > query_idx + (slk - slq)) {
                             score = -std::numeric_limits<ComputeT>::infinity();
                         }
                         // Apply additive attn_mask (audit C4 OneAPI fix —

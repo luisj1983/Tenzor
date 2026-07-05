@@ -1111,6 +1111,17 @@ auto where_hip(
             reinterpret_cast<uint64_t*>(output.data_ptr()),
             total_elements);
         HIP_POST_LAUNCH_CHECK();
+    } else if (x.dtype() == DType::Complex128) {
+        // Complex128 == 16-byte element; where is pure selection/copy, so a
+        // 16-byte bit-copy suffices (mirrors masked_fill/gather in this file).
+        hipLaunchKernelGGL(where_kernel<Bytes16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            cond_ptr,
+            reinterpret_cast<const Bytes16*>(x.data_ptr()),
+            reinterpret_cast<const Bytes16*>(y.data_ptr()),
+            reinterpret_cast<Bytes16*>(output.data_ptr()),
+            total_elements);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("where_hip: Unsupported dtype");
     }
@@ -2556,6 +2567,20 @@ auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& ind
             reinterpret_cast<__half*>(output.data<Float16>()),
             num_positions, num_heads, num_heads, num_table_rows);
             HIP_POST_LAUNCH_CHECK();
+    } else if (table.dtype() == DType::BFloat16) {
+        // BFloat16: widen the table to Float32, gather, and narrow back —
+        // mirrors the CPU widen (vision.cpp). gather is a pure value copy so the
+        // widen only exists to give this dtype a supported path (CUDA/ROCm
+        // previously else-threw here).
+        Tensor table_f32 = table.to(DType::Float32);
+        Tensor out_f32({num_positions, num_positions, num_heads},
+                       DType::Float32, table.device());
+        hipLaunchKernelGGL(gather_2d_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            table_f32.data<float>(), indices_device.data<int64_t>(), out_f32.data<float>(),
+            num_positions, num_heads, num_heads, num_table_rows);
+            HIP_POST_LAUNCH_CHECK();
+        output = out_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("gather_relative_position_bias: unsupported dtype");
     }

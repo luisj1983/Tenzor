@@ -424,6 +424,16 @@ auto encode_boxes(const Tensor& boxes, const Tensor& anchors,
         throw std::invalid_argument("Weights must have 4 elements");
     }
 
+    // For Float16/BFloat16, widen to Float32 for the numerically-sensitive
+    // log/division (and so the anchors_w+1e-7 eps guards keep significance),
+    // then narrow the result back — matching box_iou/nms in the same pipeline.
+    if (boxes.dtype() == DType::Float16 || boxes.dtype() == DType::BFloat16 ||
+        anchors.dtype() == DType::Float16 || anchors.dtype() == DType::BFloat16) {
+        auto r = encode_boxes(boxes.to(DType::Float32), anchors.to(DType::Float32),
+                              weights);
+        return r.to(boxes.dtype());
+    }
+
     // Convert to (cx, cy, w, h) format
     auto boxes_x1 = boxes.slice(1, 0, 1);
     auto boxes_y1 = boxes.slice(1, 1, 2);
@@ -471,6 +481,16 @@ auto decode_boxes(const Tensor& deltas, const Tensor& anchors,
         throw std::invalid_argument("Weights must have 4 elements");
     }
 
+    // For Float16/BFloat16, widen to Float32 for the numerically-sensitive
+    // exp/clamp of the deltas, then narrow back — matching box_iou/nms in the
+    // same pipeline (half exp loses significance and can round the clip to 0).
+    if (deltas.dtype() == DType::Float16 || deltas.dtype() == DType::BFloat16 ||
+        anchors.dtype() == DType::Float16 || anchors.dtype() == DType::BFloat16) {
+        auto r = decode_boxes(deltas.to(DType::Float32), anchors.to(DType::Float32),
+                              weights);
+        return r.to(deltas.dtype());
+    }
+
     // Extract deltas
     auto dx = deltas.slice(1, 0, 1) * weights[0];
     auto dy = deltas.slice(1, 1, 2) * weights[1];
@@ -509,6 +529,13 @@ auto decode_boxes(const Tensor& deltas, const Tensor& anchors,
 }
 
 auto clip_boxes_to_image(const Tensor& boxes, int64_t height, int64_t width) -> Tensor {
+    // For Float16/BFloat16, widen to Float32 so the clamp bounds (which can be
+    // large image dimensions) keep significance, then narrow back — matching
+    // box_iou/nms and the encode/decode paths in the same pipeline.
+    if (boxes.dtype() == DType::Float16 || boxes.dtype() == DType::BFloat16) {
+        auto r = clip_boxes_to_image(boxes.to(DType::Float32), height, width);
+        return r.to(boxes.dtype());
+    }
     // Clamp each coordinate separately
     auto x1 = tenzor::clamp(boxes.slice(1, 0, 1), 0.0f, static_cast<float>(width));
     auto y1 = tenzor::clamp(boxes.slice(1, 1, 2), 0.0f, static_cast<float>(height));

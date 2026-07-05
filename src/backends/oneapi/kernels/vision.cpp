@@ -1423,9 +1423,9 @@ auto interpolate_kernel(
                         float h_w = sycl::fabs(h_real - (h_floor + dh));
                         float hw;
                         if (h_w < 1.0f) {
-                            hw = ((1.5f * h_w - 2.5f) * h_w) * h_w + 1.0f;
+                            hw = ((1.25f * h_w - 2.25f) * h_w) * h_w + 1.0f;
                         } else if (h_w < 2.0f) {
-                            hw = ((-0.5f * h_w + 2.5f) * h_w - 4.0f) * h_w + 2.0f;
+                            hw = ((-0.75f * h_w + 3.75f) * h_w - 6.0f) * h_w + 3.0f;
                         } else {
                             hw = 0.0f;
                         }
@@ -1435,9 +1435,9 @@ auto interpolate_kernel(
                             float w_w = sycl::fabs(w_real - (w_floor + dw));
                             float ww;
                             if (w_w < 1.0f) {
-                                ww = ((1.5f * w_w - 2.5f) * w_w) * w_w + 1.0f;
+                                ww = ((1.25f * w_w - 2.25f) * w_w) * w_w + 1.0f;
                             } else if (w_w < 2.0f) {
-                                ww = ((-0.5f * w_w + 2.5f) * w_w - 4.0f) * w_w + 2.0f;
+                                ww = ((-0.75f * w_w + 3.75f) * w_w - 6.0f) * w_w + 3.0f;
                             } else {
                                 ww = 0.0f;
                             }
@@ -1482,9 +1482,9 @@ auto interpolate_kernel(
                         double h_w = sycl::fabs(h_real - (h_floor + dh));
                         double hw;
                         if (h_w < 1.0) {
-                            hw = ((1.5 * h_w - 2.5) * h_w) * h_w + 1.0;
+                            hw = ((1.25 * h_w - 2.25) * h_w) * h_w + 1.0;
                         } else if (h_w < 2.0) {
-                            hw = ((-0.5 * h_w + 2.5) * h_w - 4.0) * h_w + 2.0;
+                            hw = ((-0.75 * h_w + 3.75) * h_w - 6.0) * h_w + 3.0;
                         } else {
                             hw = 0.0;
                         }
@@ -1494,9 +1494,9 @@ auto interpolate_kernel(
                             double w_w = sycl::fabs(w_real - (w_floor + dw));
                             double ww;
                             if (w_w < 1.0) {
-                                ww = ((1.5 * w_w - 2.5) * w_w) * w_w + 1.0;
+                                ww = ((1.25 * w_w - 2.25) * w_w) * w_w + 1.0;
                             } else if (w_w < 2.0) {
-                                ww = ((-0.5 * w_w + 2.5) * w_w - 4.0) * w_w + 2.0;
+                                ww = ((-0.75 * w_w + 3.75) * w_w - 6.0) * w_w + 3.0;
                             } else {
                                 ww = 0.0;
                             }
@@ -1541,9 +1541,9 @@ auto interpolate_kernel(
                         float h_w = sycl::fabs(h_real - (h_floor + dh));
                         float hw;
                         if (h_w < 1.0f) {
-                            hw = ((1.5f * h_w - 2.5f) * h_w) * h_w + 1.0f;
+                            hw = ((1.25f * h_w - 2.25f) * h_w) * h_w + 1.0f;
                         } else if (h_w < 2.0f) {
-                            hw = ((-0.5f * h_w + 2.5f) * h_w - 4.0f) * h_w + 2.0f;
+                            hw = ((-0.75f * h_w + 3.75f) * h_w - 6.0f) * h_w + 3.0f;
                         } else {
                             hw = 0.0f;
                         }
@@ -1553,9 +1553,9 @@ auto interpolate_kernel(
                             float w_w = sycl::fabs(w_real - (w_floor + dw));
                             float ww;
                             if (w_w < 1.0f) {
-                                ww = ((1.5f * w_w - 2.5f) * w_w) * w_w + 1.0f;
+                                ww = ((1.25f * w_w - 2.25f) * w_w) * w_w + 1.0f;
                             } else if (w_w < 2.0f) {
-                                ww = ((-0.5f * w_w + 2.5f) * w_w - 4.0f) * w_w + 2.0f;
+                                ww = ((-0.75f * w_w + 3.75f) * w_w - 6.0f) * w_w + 3.0f;
                             } else {
                                 ww = 0.0f;
                             }
@@ -1600,9 +1600,9 @@ auto interpolate_kernel(
                         float h_w = sycl::fabs(h_real - (h_floor + dh));
                         float hw;
                         if (h_w < 1.0f) {
-                            hw = ((1.5f * h_w - 2.5f) * h_w) * h_w + 1.0f;
+                            hw = ((1.25f * h_w - 2.25f) * h_w) * h_w + 1.0f;
                         } else if (h_w < 2.0f) {
-                            hw = ((-0.5f * h_w + 2.5f) * h_w - 4.0f) * h_w + 2.0f;
+                            hw = ((-0.75f * h_w + 3.75f) * h_w - 6.0f) * h_w + 3.0f;
                         } else {
                             hw = 0.0f;
                         }
@@ -1612,9 +1612,9 @@ auto interpolate_kernel(
                             float w_w = sycl::fabs(w_real - (w_floor + dw));
                             float ww;
                             if (w_w < 1.0f) {
-                                ww = ((1.5f * w_w - 2.5f) * w_w) * w_w + 1.0f;
+                                ww = ((1.25f * w_w - 2.25f) * w_w) * w_w + 1.0f;
                             } else if (w_w < 2.0f) {
-                                ww = ((-0.5f * w_w + 2.5f) * w_w - 4.0f) * w_w + 2.0f;
+                                ww = ((-0.75f * w_w + 3.75f) * w_w - 6.0f) * w_w + 3.0f;
                             } else {
                                 ww = 0.0f;
                             }

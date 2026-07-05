@@ -29,12 +29,14 @@ ASGD::ASGD(std::vector<optim::ParamGroup> groups,
 }
 
 auto ASGD::step_impl() -> void {
-    // Increment the global step at the TOP (matching AdamAtan2's convention)
-    // so the very first step uses step_count_ == 1: the eta decay term and
-    // the mu running-average weight both engage from step 1 instead of being
-    // skipped (eta == lr, mu == 1) on the first step as they were when the
-    // counter was bumped at the bottom.
+    // Increment the global step at the TOP so step_count_ counts completed
+    // steps, but the eta/mu SCHEDULE is computed from the PRE-increment index
+    // (step_count_ - 1). PyTorch initialises eta = lr and mu = 1 and only
+    // recomputes them at the END of each step, so the very first update uses
+    // the undecayed eta == lr and mu == 1; the decay engages from the second
+    // step onward. Using (step_count_ - 1) here reproduces that exactly.
     step_count_++;
+    const double sched_step = static_cast<double>(step_count_) - 1.0;
 
     // Audit D.4: per-parameter hyperparameters resolve from the
     // active ParamGroup (when one was set up) or fall through to
@@ -92,7 +94,8 @@ auto ASGD::step_impl() -> void {
         }
 
         // Compute step-dependent learning rate: eta_t = lr / (1 + lambd * lr * t)^alpha
-        double eta = hp.lr / std::pow(1.0 + hp.lambd * hp.lr * static_cast<double>(step_count_), hp.alpha);
+        // where t is the PRE-increment step index (0 on the first step, so eta == lr).
+        double eta = hp.lr / std::pow(1.0 + hp.lambd * hp.lr * sched_step, hp.alpha);
 
         // ASGD weight shrinkage (decay) term, applied to the parameter BEFORE
         // the gradient step: param *= (1 - lambd * eta). This is the averaged-
@@ -107,7 +110,7 @@ auto ASGD::step_impl() -> void {
         // Update running average after t0 steps
         // mu_t = max(1, t - t0)
         // ax_t = (1 - 1/mu_t) * ax_{t-1} + (1/mu_t) * x_t
-        double mu = std::max(1.0, static_cast<double>(step_count_) - hp.t0);
+        double mu = std::max(1.0, sched_step - hp.t0);
         double inv_mu = 1.0 / mu;
         ax_buffers_[i] = ax_buffers_[i] * scalar(1.0 - inv_mu) + param_hi * scalar(inv_mu);
     }

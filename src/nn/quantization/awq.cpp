@@ -56,7 +56,10 @@ auto AWQQuantizer::quant_range() const -> std::pair<int32_t, int32_t> {
 auto AWQQuantizer::quantize_value(float val, float scale, float zero) const -> int32_t {
     auto [qmin, qmax] = quant_range();
     float q = val / scale + zero;
-    q = std::round(q);
+    // Round half-to-even (std::nearbyint) to match the PTQ quantizer
+    // (quantize.cpp std::nearbyint) and QAT round_half_to_even. std::round is
+    // half-away-from-zero and codes .5 ties one step apart from the PTQ/QAT path.
+    q = std::nearbyint(q);
     q = std::clamp(q, static_cast<float>(qmin), static_cast<float>(qmax));
     return static_cast<int32_t>(q);
 }

@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 
 namespace tenzor {
 namespace nn {
@@ -163,7 +164,16 @@ auto NeuralNetwork::fit(DataLoader& train_loader,
             : 0.0;
 
         // === Validation Phase ===
-        double avg_val_loss = 0.0;
+        // F085: when there is no validation loader we must NOT report a bogus
+        // val_loss of 0.0 — EarlyStopping/ModelCheckpoint monitoring "val_loss"
+        // would treat 0.0 as a genuine (and unbeatable) loss, tripping patience
+        // or saving a fake "best" model. Report NaN instead, the established
+        // "not available" sentinel: ProgressCallback already guards on
+        // `val_loss >= 0.0f` (NaN fails that, so it is not printed), and the
+        // `<`-comparisons in EarlyStopping/ModelCheckpoint are all false for
+        // NaN, so no spurious improvement is ever recorded. train_loss is
+        // reported unchanged.
+        double avg_val_loss = std::numeric_limits<double>::quiet_NaN();
 
         if (val_loader != nullptr) {
             model_->eval();

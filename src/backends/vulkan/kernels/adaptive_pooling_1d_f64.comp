@@ -25,7 +25,7 @@ int end_index(int a, int b, int c) {
     // Floor end-index (integer division) to match the CPU adaptive-pooling
     // convention and Vulkan's floor-based backward; ceil-end diverged for
     // non-divisible shapes.
-    return int((a + 1) * c) / int(b);
+    return int(((a + 1) * c + b - 1) / b);
 }
 
 void main() {
@@ -58,7 +58,7 @@ void main() {
         double value = input_data[input_idx];
 
         if (params.pool_type == 0) {
-            if (value > result) {
+            if (isnan(value) || value > result) {
                 result = value;
                 max_idx = int(input_idx);
             }

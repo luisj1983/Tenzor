@@ -1268,6 +1268,33 @@ auto make_conv_transpose2d_backward(int64_t stride, int64_t padding,
         stride, padding, output_padding, dilation, groups,
         std::move(tensors_to_save));
 }
+
+// F127: anisotropic (per-axis) factory overloads. Conv3dBackward and
+// ConvTranspose2dBackward already carry per-axis members and use them
+// throughout their backward math, so F::conv3d / F::conv_transpose2d can wire
+// true per-axis stride/padding/dilation/output_padding instead of throwing on
+// asymmetric values.
+auto make_conv3d_backward(int64_t sD, int64_t sH, int64_t sW,
+                          int64_t pD, int64_t pH, int64_t pW,
+                          int64_t dD, int64_t dH, int64_t dW,
+                          int64_t groups,
+                          std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<Conv3dBackward>(
+        sD, sH, sW, pD, pH, pW, dD, dH, dW, groups,
+        std::move(tensors_to_save));
+}
+auto make_conv_transpose2d_backward(int64_t sH, int64_t sW,
+                                    int64_t pH, int64_t pW,
+                                    int64_t opH, int64_t opW,
+                                    int64_t dH, int64_t dW,
+                                    int64_t groups,
+                                    std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<ConvTranspose2dBackward>(
+        sH, sW, pH, pW, opH, opW, dH, dW, groups,
+        std::move(tensors_to_save));
+}
 } // namespace internal
 
 // Audit I5: per-axis Conv3d ctor. Each spatial axis (D/H/W) gets its own
@@ -2048,29 +2075,16 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
     DType original_dtype = input.dtype();
     Tensor output;
 
-    if (::tenzor::is_op_supported(OpId::ConvTranspose1dForward,
-                                  input.tensor().device().type)) {
-        // Native 1-D transpose conv: 3-D operands keep the op faithful for JIT
-        // tracing / ONNX export (3-D weight, rank-1 attrs). The backend kernel
-        // applies padding/output_padding to the length axis only — numerically
-        // identical to the unsqueeze→ConvTranspose2d(pad=0)→trim path below.
-        std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
-        if (bias_ptr != nullptr) {
-            inputs_vec.push_back(*bias_ptr);
-        }
-        NewOpAttributes forward_attrs;
-        forward_attrs.set(AttrKey::KernelSize, kernel_size_);
-        forward_attrs.set(AttrKey::Stride, stride_);
-        forward_attrs.set(AttrKey::Padding, padding_);
-        forward_attrs.set(AttrKey::OutputPadding, output_padding_);
-        forward_attrs.set(AttrKey::Dilation, dilation_);
-        forward_attrs.set(AttrKey::Groups, groups_);
-        auto output_result = dispatch(OpId::ConvTranspose1dForward,
-            std::span<const Tensor>(inputs_vec), forward_attrs);
-        output = output_result[0];
-    } else {
-        // Fallback (backends without a native ConvTranspose1dForward kernel):
-        // unsqueeze to 4-D, dispatch ConvTranspose2d with scalar pad=0 (the
+    {
+        // F039: unify the forward code path across ALL backends. Previously only
+        // CPU registered a native ConvTranspose1dForward kernel (others fell
+        // through to this 2-D-lowered path), so CPU ran different code than the
+        // GPU backends and any output_padding/accumulator difference surfaced as
+        // CPU-vs-GPU drift. The backward (ConvTranspose1dBackward) is already
+        // 2-D-lowered on every backend, so lowering the forward everywhere makes
+        // forward and backward consistent AND identical across backends.
+        //
+        // Unsqueeze to 4-D, dispatch ConvTranspose2d with scalar pad=0 (the
         // kernel would otherwise pad BOTH H and W), squeeze, then trim the W
         // axis by padding_ (ConvTranspose "padding" trims output edges). The H
         // axis is a singleton so dH must stay 1.
@@ -2084,6 +2098,14 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         forward_attrs.set(AttrKey::Stride, stride_);
         forward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
         forward_attrs.set(AttrKey::OutputPadding, output_padding_);
+        // The synthetic H axis is a singleton (length 1), so its output_padding
+        // MUST be 0 — otherwise the 2D kernel reads OutputPaddingH (which falls
+        // back to the scalar OutputPadding=output_padding_) and produces an H of
+        // output_padding_+1, leaving a stray 4-D tensor after squeeze(2) and
+        // trimming the wrong axis. Pin H=0, real length on W. (Same reason
+        // DilationH is pinned to 1 below.)
+        forward_attrs.set(AttrKey::OutputPaddingH, static_cast<int64_t>(0));
+        forward_attrs.set(AttrKey::OutputPaddingW, output_padding_);
         forward_attrs.set(AttrKey::Dilation, dilation_);
         forward_attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
         forward_attrs.set(AttrKey::DilationW, dilation_);
@@ -2398,6 +2420,21 @@ auto make_conv_transpose3d_backward(int64_t stride, int64_t padding,
     -> std::shared_ptr<::tenzor::Function> {
     return std::make_shared<ConvTranspose3dBackward>(
         stride, padding, output_padding, dilation, groups,
+        std::move(tensors_to_save));
+}
+
+// F127: anisotropic (per-axis) overload. ConvTranspose3dBackward already stores
+// and uses per-axis stride/padding/output_padding/dilation in its backward
+// math, so F::conv_transpose3d can wire asymmetric values directly.
+auto make_conv_transpose3d_backward(int64_t sD, int64_t sH, int64_t sW,
+                                    int64_t pD, int64_t pH, int64_t pW,
+                                    int64_t opD, int64_t opH, int64_t opW,
+                                    int64_t dD, int64_t dH, int64_t dW,
+                                    int64_t groups,
+                                    std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<ConvTranspose3dBackward>(
+        sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups,
         std::move(tensors_to_save));
 }
 } // namespace internal

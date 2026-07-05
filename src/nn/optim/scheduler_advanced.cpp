@@ -189,9 +189,11 @@ auto ReduceLROnPlateau::step(double metric) -> void {
         num_bad_epochs_++;
     }
 
-    // Reduce LR after patience epochs of no improvement
-    // Matches PyTorch: patience=2 means reduce when bad_epochs reaches 2
-    if (num_bad_epochs_ >= patience_) {
+    // Reduce LR after patience epochs of no improvement.
+    // Matches PyTorch: it triggers only when num_bad_epochs strictly EXCEEDS
+    // patience (patience=2 means reduce on the 3rd consecutive bad epoch), so
+    // the comparison is `>`, not `>=`.
+    if (num_bad_epochs_ > patience_) {
         reduce_lr();
         // Set cooldown counter for next cooldown_ epochs
         cooldown_counter_ = cooldown_;

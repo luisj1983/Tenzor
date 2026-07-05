@@ -37,9 +37,21 @@ void main() {
 
     float sum = 0.0;
     if (params.p == 2.0) {
+        // F130: the CPU reference accumulates the sum of squared differences in
+        // double (and CUDA/ROCm/oneAPI now do too). This Float32 Vulkan shader
+        // must stay fp64-free — shaderFloat64 is optional and this shader also
+        // runs on devices without it (genuine Float64 input goes through the
+        // dedicated cdist_f64.comp, which is gated on that feature). To narrow
+        // the gap to the double reference without requiring fp64, accumulate the
+        // squared-difference sum with Kahan compensated summation.
+        float comp = 0.0;  // running compensation for lost low-order bits
         for (uint m = 0; m < params.M; ++m) {
             float diff = x1[a_off + m] - x2[b_off + m];
-            sum += diff * diff;
+            float term = diff * diff;
+            float y = term - comp;
+            float t = sum + y;
+            comp = (t - sum) - y;
+            sum = t;
         }
         out_data[idx] = sqrt(sum);
     } else if (params.p == 1.0) {

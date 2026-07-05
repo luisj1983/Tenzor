@@ -284,24 +284,30 @@ struct PickleValue {
 
 // Map PyTorch storage type to Tenzor DType
 auto pytorch_type_to_dtype(const std::string& type_str) -> DType {
-    if (type_str.find("Float") != std::string::npos ||
-        type_str.find("float32") != std::string::npos) return DType::Float32;
+    // Ordering matters: several storage-type strings are substrings of others,
+    // so the more specific names MUST be tested first.
+    //   - "BFloat16Storage" contains "Float"  -> would match Float32
+    //   - "bfloat16"        contains "float16" -> would match Half/Float16
+    //   - "uint8"           contains "int8"    -> would match Char/Int8
+    // Test BFloat16 before Float16/Float32, and Byte(uint8) before Char(int8).
+    if (type_str.find("BFloat16") != std::string::npos ||
+        type_str.find("bfloat16") != std::string::npos) return DType::BFloat16;
     if (type_str.find("Double") != std::string::npos ||
         type_str.find("float64") != std::string::npos) return DType::Float64;
     if (type_str.find("Half") != std::string::npos ||
         type_str.find("float16") != std::string::npos) return DType::Float16;
-    if (type_str.find("BFloat16") != std::string::npos ||
-        type_str.find("bfloat16") != std::string::npos) return DType::BFloat16;
+    if (type_str.find("Float") != std::string::npos ||
+        type_str.find("float32") != std::string::npos) return DType::Float32;
     if (type_str.find("Long") != std::string::npos ||
         type_str.find("int64") != std::string::npos) return DType::Int64;
     if (type_str.find("Int") != std::string::npos ||
         type_str.find("int32") != std::string::npos) return DType::Int32;
     if (type_str.find("Short") != std::string::npos ||
         type_str.find("int16") != std::string::npos) return DType::Int16;
-    if (type_str.find("Char") != std::string::npos ||
-        type_str.find("int8") != std::string::npos) return DType::Int8;
     if (type_str.find("Byte") != std::string::npos ||
         type_str.find("uint8") != std::string::npos) return DType::UInt8;
+    if (type_str.find("Char") != std::string::npos ||
+        type_str.find("int8") != std::string::npos) return DType::Int8;
     if (type_str.find("Bool") != std::string::npos ||
         type_str.find("bool") != std::string::npos) return DType::Bool;
 
@@ -312,8 +318,11 @@ auto pytorch_type_to_dtype(const std::string& type_str) -> DType {
 struct StorageDesc {
     std::string data_key;  // e.g., "0", "1" — maps to archive/data/0
     DType dtype;
-    int64_t numel;
-};
+    int64_t numel;                 // number of elements in the underlying storage
+    int64_t storage_offset{0};     // element offset of the view into the storage
+    std::vector<int64_t> stride;   // per-dim element strides of the view (may be empty)
+    std::string device{"cpu"};     // saved device string from the persistent id (F071)
+};;
 
 // Simplified pickle parser that extracts the state dict structure
 class PickleParser {
@@ -837,8 +846,8 @@ private:
 
         // Check if value is a _rebuild_tensor_v2 result with persistent storage
         if (val.type == PVal::Tuple && val.list_val.size() >= 4) {
-            // _rebuild_tensor_v2 args: (storage, offset, shape, stride, ...)
-            // storage is a persistent ID
+            // _rebuild_tensor_v2 args: (storage, storage_offset, shape, stride, ...)
+            // storage is a persistent ID.
             const auto& storage = val.list_val[0];
             if (storage.type == PVal::Persistent && storage.list_val.size() >= 4) {
                 // Persistent ID tuple: (storage_type_str, data_key, device, numel)
@@ -847,11 +856,35 @@ private:
                 desc.data_key = storage.list_val[1].str_val;
                 desc.numel = storage.list_val[3].int_val;
 
+                // F071: record the saved device (index 2) instead of dropping it.
+                // Torch encodes this as a string ("cpu", "cuda:0", ...). This is
+                // consumed by load_pytorch_state_dict's map_location handling
+                // (MapLocation::preserve() relocates the tensor to this device).
+                if (storage.list_val[2].type == PVal::String &&
+                    !storage.list_val[2].str_val.empty()) {
+                    desc.device = storage.list_val[2].str_val;
+                }
+
+                // F068: honor storage_offset (arg 1) and stride (arg 3) so that
+                // non-contiguous / offset views of a shared storage are reconstructed
+                // with the correct element values rather than a blind memcpy from
+                // byte 0.
+                if (val.list_val.size() > 1 && val.list_val[1].type == PVal::Int) {
+                    desc.storage_offset = val.list_val[1].int_val;
+                }
+
                 // Extract shape from the third arg
                 std::vector<int64_t> shape;
                 if (val.list_val.size() > 2 && val.list_val[2].type == PVal::Tuple) {
                     for (const auto& dim : val.list_val[2].list_val) {
                         shape.push_back(dim.int_val);
+                    }
+                }
+
+                // Extract stride from the fourth arg
+                if (val.list_val.size() > 3 && val.list_val[3].type == PVal::Tuple) {
+                    for (const auto& s : val.list_val[3].list_val) {
+                        desc.stride.push_back(s.int_val);
                     }
                 }
 
@@ -863,6 +896,16 @@ private:
                 if (desc.numel < 0) {
                     throw std::runtime_error(
                         "pytorch_loader: negative storage numel in pickle stream");
+                }
+                if (desc.storage_offset < 0) {
+                    throw std::runtime_error(
+                        "pytorch_loader: negative storage_offset in pickle stream");
+                }
+                for (int64_t s : desc.stride) {
+                    if (s < 0) {
+                        throw std::runtime_error(
+                            "pytorch_loader: negative stride in pickle stream");
+                    }
                 }
                 int64_t shape_prod = 1;
                 for (int64_t d : shape) {
@@ -945,9 +988,32 @@ auto list_pytorch_tensors(const std::string& path) -> std::vector<std::string> {
     return names;
 }
 
-auto load_pytorch_state_dict(const std::string& path)
+auto load_pytorch_state_dict(const std::string& path,
+                             const MapLocation& map_location)
     -> std::unordered_map<std::string, Tensor> {
     ZipReader zip(path);
+
+    // F071: resolve the target device for a given saved-storage descriptor.
+    //   - CPU (default): keep the historical behavior, everything on the host.
+    //   - Device: honor the caller's explicit map_location device.
+    //   - Preserve: place each tensor on its recorded saved device, falling
+    //     back to CPU when the saved string is absent/unparseable so a
+    //     checkpoint with an unknown device never hard-fails the load.
+    auto resolve_target_device = [&](const StorageDesc& desc) -> Device {
+        switch (map_location.mode) {
+            case MapLocation::Mode::CPU:
+                return Device::cpu();
+            case MapLocation::Mode::Device:
+                return map_location.device;
+            case MapLocation::Mode::Preserve:
+                try {
+                    return Device::from_string(desc.device);
+                } catch (...) {
+                    return Device::cpu();
+                }
+        }
+        return Device::cpu();
+    };
 
     // Find the pickle file
     std::string pkl_name;
@@ -994,16 +1060,93 @@ auto load_pytorch_state_dict(const std::string& path)
             raw_size = data.size();
         }
 
-        // Create tensor and copy data
+        // Stage into a contiguous CPU tensor first: the strided gather / memcpy
+        // below fills host memory, so the buffer must be CPU-resident regardless
+        // of the requested map_location. The tensor is relocated to its target
+        // device (F071) at the end of the loop iteration.
         Tensor tensor(shape, desc.dtype, Device::cpu());
-        size_t expected_bytes = tensor.numel() * dtype_size(desc.dtype);
+        const size_t elem_size = dtype_size(desc.dtype);
+        const int64_t out_numel = tensor.numel();
 
-        if (raw_size >= expected_bytes) {
-            std::memcpy(tensor.data_ptr(), raw_ptr, expected_bytes);
+        // F068: reconstruct the tensor honoring storage_offset and stride instead of
+        // assuming a contiguous-from-byte-0 layout. The storage holds `storage_numel`
+        // elements; the tensor is a (possibly offset / non-contiguous) view of it.
+        const int64_t storage_numel = static_cast<int64_t>(raw_size / elem_size);
+
+        // Resolve effective strides: if the pickle did not carry a stride tuple,
+        // fall back to standard row-major contiguous strides.
+        std::vector<int64_t> stride = desc.stride;
+        if (stride.empty()) {
+            stride.assign(shape.size(), 0);
+            int64_t acc = 1;
+            for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
+                stride[i] = acc;
+                acc *= shape[i];
+            }
+        } else if (stride.size() != shape.size()) {
+            throw std::runtime_error("pytorch_loader: stride rank (" +
+                                     std::to_string(stride.size()) +
+                                     ") != shape rank (" + std::to_string(shape.size()) +
+                                     ") for tensor '" + name + "'");
+        }
+
+        // Validate that every element the view addresses lies within the storage.
+        if (out_numel > 0) {
+            int64_t max_index = desc.storage_offset;
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (shape[i] > 0) {
+                    max_index += (shape[i] - 1) * stride[i];
+                }
+            }
+            if (desc.storage_offset >= storage_numel || max_index >= storage_numel) {
+                throw std::runtime_error(
+                    "Data file too small for tensor '" + name + "': view addresses " +
+                    "element " + std::to_string(max_index) + " but storage holds only " +
+                    std::to_string(storage_numel) + " elements");
+            }
+        }
+
+        uint8_t* dst = static_cast<uint8_t*>(tensor.data_ptr());
+
+        // Fast path: a view that starts at offset 0 and is contiguous (ignoring
+        // size-1 dims, matching PyTorch's is_contiguous) can be copied in one shot.
+        bool contiguous = (desc.storage_offset == 0);
+        if (contiguous) {
+            int64_t expected = 1;
+            for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
+                if (shape[i] == 1) continue;
+                if (stride[i] != expected) { contiguous = false; break; }
+                expected *= shape[i];
+            }
+        }
+
+        if (contiguous) {
+            std::memcpy(dst, raw_ptr, static_cast<size_t>(out_numel) * elem_size);
         } else {
-            throw std::runtime_error("Data file too small for tensor '" + name +
-                                     "': expected " + std::to_string(expected_bytes) +
-                                     " bytes, got " + std::to_string(raw_size));
+            // General strided gather into a contiguous output buffer.
+            std::vector<int64_t> idx(shape.size(), 0);
+            for (int64_t out = 0; out < out_numel; ++out) {
+                int64_t src = desc.storage_offset;
+                for (size_t d = 0; d < shape.size(); ++d) {
+                    src += idx[d] * stride[d];
+                }
+                std::memcpy(dst + static_cast<size_t>(out) * elem_size,
+                            raw_ptr + static_cast<size_t>(src) * elem_size,
+                            elem_size);
+                // Advance the row-major multi-index.
+                for (int64_t d = static_cast<int64_t>(shape.size()) - 1; d >= 0; --d) {
+                    if (++idx[d] < shape[d]) break;
+                    idx[d] = 0;
+                }
+            }
+        }
+
+        // F071: honor map_location by relocating the staged CPU tensor to its
+        // target device. For the default CPU map_location this is a no-op, so
+        // existing callers keep getting plain CPU tensors.
+        Device target = resolve_target_device(desc);
+        if (target.type != Device::Type::CPU) {
+            tensor = tensor.to(target);
         }
 
         result[name] = std::move(tensor);

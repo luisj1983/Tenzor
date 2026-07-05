@@ -37,21 +37,14 @@ void main() {
     uint c = temp % params.channels;
     uint n = temp / params.channels;
 
-    // Compute nearest source coordinates
-    uint h_in, w_in;
-    if (params.align_corners != 0 && params.out_height > 1) {
-        h_in = uint(round(float(h_out) * float(params.in_height - 1) / float(params.out_height - 1)));
-    } else {
-        h_in = min(uint(floor(float(h_out) * float(params.in_height) / float(params.out_height))),
-                   params.in_height - 1);
-    }
-
-    if (params.align_corners != 0 && params.out_width > 1) {
-        w_in = uint(round(float(w_out) * float(params.in_width - 1) / float(params.out_width - 1)));
-    } else {
-        w_in = min(uint(floor(float(w_out) * float(params.in_width) / float(params.out_width))),
-                   params.in_width - 1);
-    }
+    // Compute nearest source coordinates.
+    // Nearest-neighbor interpolation IGNORES align_corners on every backend
+    // (CPU/CUDA/ROCm/oneAPI/MPS) and in PyTorch: always use the plain
+    // floor(out * in / out) scale, regardless of the align_corners flag.
+    uint h_in = min(uint(floor(float(h_out) * float(params.in_height) / float(params.out_height))),
+                    params.in_height - 1);
+    uint w_in = min(uint(floor(float(w_out) * float(params.in_width) / float(params.out_width))),
+                    params.in_width - 1);
 
     // Compute input index: (n, c, h_in, w_in)
     uint input_idx = n * params.channels * params.in_height * params.in_width +

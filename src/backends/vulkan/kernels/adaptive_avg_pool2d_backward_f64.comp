@@ -40,13 +40,13 @@ void main() {
     // and accumulate their contributions
     for (uint h_out = 0; h_out < params.H_out; ++h_out) {
         uint h_start = (h_out * params.H_in) / params.H_out;
-        uint h_end = ((h_out + 1) * params.H_in) / params.H_out;
+        uint h_end = ((h_out + 1) * params.H_in + params.H_out - 1) / params.H_out;
 
         // Check if this input h is in the window
         if (h_in >= h_start && h_in < h_end) {
             for (uint w_out = 0; w_out < params.W_out; ++w_out) {
                 uint w_start = (w_out * params.W_in) / params.W_out;
-                uint w_end = ((w_out + 1) * params.W_in) / params.W_out;
+                uint w_end = ((w_out + 1) * params.W_in + params.W_out - 1) / params.W_out;
 
                 // Check if this input w is in the window
                 if (w_in >= w_start && w_in < w_end) {

@@ -6294,7 +6294,11 @@ __global__ void cosine_similarity_along_dim_kernel(
         norm_b_acc += bv * bv;
     }
 
-    AccT denom = sqrt(norm_a_acc) * sqrt(norm_b_acc) + static_cast<AccT>(eps);
+    // PyTorch clamps the denominator: dot / max(||a||*||b||, eps) (NOT an
+    // additive eps, which would cap similarity below 1 and bias toward 0).
+    AccT norm_prod = sqrt(norm_a_acc) * sqrt(norm_b_acc);
+    AccT eps_acc = static_cast<AccT>(eps);
+    AccT denom = norm_prod > eps_acc ? norm_prod : eps_acc;
     output[out_idx] = static_cast<T>(dot_acc / denom);
     }
 }

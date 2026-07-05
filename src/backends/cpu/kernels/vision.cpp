@@ -1071,7 +1071,7 @@ void roi_align_forward_impl(
     const T* feat_data, const T* roi_data, T* out_data,
     int64_t num_rois, int64_t batch_size, int64_t channels, int64_t height, int64_t width,
     int64_t output_h, int64_t output_w,
-    float spatial_scale_f, int64_t sampling_ratio, bool aligned)
+    double spatial_scale_f, int64_t sampling_ratio, bool aligned)
 {
     using Compute = interp_acc_t<T>;
     const Compute spatial_scale = static_cast<Compute>(spatial_scale_f);
@@ -1147,7 +1147,7 @@ void roi_align_backward_impl(
     const T* go_data, const T* roi_data, T* gi_data,
     int64_t num_rois, int64_t batch_size, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w,
-    float spatial_scale_f, int64_t sampling_ratio, bool aligned)
+    double spatial_scale_f, int64_t sampling_ratio, bool aligned)
 {
     using Compute = interp_acc_t<T>;
     const Compute spatial_scale = static_cast<Compute>(spatial_scale_f);
@@ -1247,7 +1247,7 @@ void roi_align_backward_impl(
 
 auto roi_align_forward_kernel(const Tensor& features_in, const Tensor& rois_in,
                                int64_t output_h, int64_t output_w,
-                               float spatial_scale, int64_t sampling_ratio,
+                               double spatial_scale, int64_t sampling_ratio,
                                bool aligned) -> Tensor {
     // features: (N, C, H, W)
     // rois: (num_rois, 5) where each row is [batch_idx, x1, y1, x2, y2]
@@ -1264,16 +1264,23 @@ auto roi_align_forward_kernel(const Tensor& features_in, const Tensor& rois_in,
     Tensor output({num_rois, channels, output_h, output_w},
                   features.dtype(), features.device());
 
+    // The typed impls read rois.data<T>() with T matching the features dtype,
+    // but ROI boxes are commonly supplied as Float32 even for Float64 features.
+    // Coerce rois to the features dtype for the F32/F64 paths (the F16/BF16
+    // path widens both to Float32 below from the original rois).
+    Tensor rois_typed = (rois.dtype() == features.dtype()) ? rois
+                                                           : rois.to(features.dtype());
+
     switch (features.dtype()) {
         case DType::Float32:
             roi_align_forward_impl<float>(
-                features.data<float>(), rois.data<float>(), output.data<float>(),
+                features.data<float>(), rois_typed.data<float>(), output.data<float>(),
                 num_rois, batch_size, channels, height, width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;
         case DType::Float64:
             roi_align_forward_impl<double>(
-                features.data<double>(), rois.data<double>(), output.data<double>(),
+                features.data<double>(), rois_typed.data<double>(), output.data<double>(),
                 num_rois, batch_size, channels, height, width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;
@@ -1296,7 +1303,7 @@ auto roi_align_forward_kernel(const Tensor& features_in, const Tensor& rois_in,
 
 auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
                                 int64_t batch_size, int64_t feat_height, int64_t feat_width,
-                                float spatial_scale, int64_t sampling_ratio,
+                                double spatial_scale, int64_t sampling_ratio,
                                 bool aligned) -> Tensor {
     const auto& grad_shape = grad_output.shape();
     int64_t num_rois = grad_shape[0];
@@ -1309,16 +1316,21 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
     std::memset(grad_input.data<uint8_t>(), 0,
                 grad_input.numel() * dtype_size(grad_input.dtype()));
 
+    // rois may be Float32 while grad_output is Float64; the typed impl reads
+    // rois.data<T>() with T = grad_output dtype, so coerce for the F32/F64 paths.
+    Tensor rois_typed = (rois.dtype() == grad_output.dtype()) ? rois
+                                                             : rois.to(grad_output.dtype());
+
     switch (grad_output.dtype()) {
         case DType::Float32:
             roi_align_backward_impl<float>(
-                grad_output.data<float>(), rois.data<float>(), grad_input.data<float>(),
+                grad_output.data<float>(), rois_typed.data<float>(), grad_input.data<float>(),
                 num_rois, batch_size, channels, feat_height, feat_width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;
         case DType::Float64:
             roi_align_backward_impl<double>(
-                grad_output.data<double>(), rois.data<double>(), grad_input.data<double>(),
+                grad_output.data<double>(), rois_typed.data<double>(), grad_input.data<double>(),
                 num_rois, batch_size, channels, feat_height, feat_width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;

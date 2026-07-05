@@ -98,12 +98,21 @@ auto ckpt_read_tensor(std::ifstream& file) -> Tensor {
         throw std::runtime_error("Checkpoint: unexpected end of file reading dtype");
     }
     const DType dtype = static_cast<DType>(dtype_byte);
+    // Keep this whitelist in sync with every dtype write_checkpoint can emit
+    // (it writes static_cast<uint8_t>(tensor.dtype()) for any dtype). Missing
+    // cases here made complex / FP8 / quantized / wide-unsigned models save fine
+    // but fail to load with a spurious "unknown dtype".
     switch (dtype) {
         case DType::Float32: case DType::Float64:
         case DType::Int32:   case DType::Int64:
         case DType::UInt8:   case DType::Bool:
         case DType::Float16: case DType::BFloat16:
         case DType::Int8:    case DType::Int16:
+        case DType::UInt16:  case DType::UInt32:  case DType::UInt64:
+        case DType::Complex64: case DType::Complex128:
+        case DType::FP8_E4M3:  case DType::FP8_E5M2:
+        case DType::FP8_E4M3FNUZ: case DType::FP8_E5M2FNUZ:
+        case DType::QInt8:   case DType::QUInt8:  case DType::QInt4x2:
             break;
         default:
             throw std::runtime_error("Checkpoint: unknown dtype in file: " +

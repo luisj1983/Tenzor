@@ -94,9 +94,10 @@ auto LRScheduler::state_dict() const -> std::unordered_map<std::string, Tensor> 
 
 auto LRScheduler::load_state_dict(
     const std::unordered_map<std::string, Tensor>& /*state*/) -> void {
-    // Base class has no settable state beyond what derived classes track.
-    // Derived classes call this base method first, then unpack their
-    // own counters.
+    // Base class has no settable state beyond what derived classes track
+    // (each concrete scheduler owns its own last_lr_ counter and restores it
+    // in its own load_state_dict). Derived classes call this base method first,
+    // then unpack their own counters.
 }
 
 //==============================================================================
@@ -738,6 +739,13 @@ auto ChainedScheduler::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
     check_scheduler_type(state, "ChainedScheduler", /*force=*/false);
     LRScheduler::load_state_dict(state);
+    // Restore the cached composed LR so get_last_lr() is correct immediately
+    // after a bare load (before any step()). state_dict() persists it under
+    // "last_lr" via LRScheduler::state_dict(); without this, a restored chain
+    // reported last_lr = 0 until it stepped again.
+    if (auto it = state.find("last_lr"); it != state.end() && it->second.numel() >= 1) {
+        last_lr_ = it->second.to(DType::Float64).to(Device::cpu()).data<double>()[0];
+    }
     if (auto it = state.find("chained_base_lr"); it != state.end() && it->second.numel() >= 1) {
         chained_base_lr_ = it->second.to(DType::Float64).to(Device::cpu()).data<double>()[0];
     }

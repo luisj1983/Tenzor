@@ -34,7 +34,13 @@ __global__ void quantized_linear_kernel_hip(
     int64_t out_features,
     float combined_scale,
     int32_t input_zp,
-    int32_t weight_zp
+    int32_t weight_zp,
+    // Per-channel (F045): when weight_scales != nullptr each output channel o
+    // uses weight_scales[o] and (weight_zps ? weight_zps[o] : 0); the dequant
+    // scale is input_over_output * weight_scales[o]. nullptr => per-tensor.
+    const float* __restrict__ weight_scales,
+    const int32_t* __restrict__ weight_zps,
+    float input_over_output
 ) {
     // 2D grid: blockIdx.y = batch, blockIdx.x * blockDim.x + threadIdx.x = output feature
     int64_t b = blockIdx.y;
@@ -42,12 +48,22 @@ __global__ void quantized_linear_kernel_hip(
 
     if (b >= batch_size || o >= out_features) return;
 
+    // Per-channel weight scale / zero-point (each output channel o).
+    const int32_t w_zp = weight_scales ? (weight_zps ? weight_zps[o] : 0) : weight_zp;
+    const float out_scale = weight_scales ? (input_over_output * weight_scales[o])
+                                          : combined_scale;
+
     const int8_t* input_row = input + b * in_features;
     const int8_t* weight_row = weight + o * in_features;
 
-    int32_t acc = 0;
-    int32_t sum_x = 0;
-    int32_t sum_w = 0;
+    // int64 accumulation to match the CUDA kernel (quantized_linear.cu): each
+    // int8*int8 product fits in int32, but the row sum and the
+    // input_zp*weight_zp*in_features correction term can exceed INT32_MAX for
+    // wide layers (in_features >~ 131072), so accumulate in int64 to avoid
+    // silent wraparound.
+    int64_t acc = 0;
+    int64_t sum_x = 0;
+    int64_t sum_w = 0;
 
     // Vectorized loading: process 16 int8 values at a time via int4 (16 bytes).
     // The int4 (16-byte) dereference requires the per-row base pointer to be
@@ -70,9 +86,9 @@ __global__ void quantized_linear_kernel_hip(
 
             #pragma unroll
             for (int i = 0; i < VEC_SIZE; ++i) {
-                acc += static_cast<int32_t>(input_bytes[i]) * static_cast<int32_t>(weight_bytes[i]);
-                sum_x += static_cast<int32_t>(input_bytes[i]);
-                sum_w += static_cast<int32_t>(weight_bytes[i]);
+                acc += static_cast<int64_t>(input_bytes[i]) * static_cast<int64_t>(weight_bytes[i]);
+                sum_x += static_cast<int64_t>(input_bytes[i]);
+                sum_w += static_cast<int64_t>(weight_bytes[i]);
             }
         }
         start = vec_steps * VEC_SIZE;
@@ -80,19 +96,20 @@ __global__ void quantized_linear_kernel_hip(
 
     // Remainder / scalar fallback elements
     for (int64_t i = start; i < in_features; ++i) {
-        acc += static_cast<int32_t>(input_row[i]) * static_cast<int32_t>(weight_row[i]);
-        sum_x += static_cast<int32_t>(input_row[i]);
-        sum_w += static_cast<int32_t>(weight_row[i]);
+        acc += static_cast<int64_t>(input_row[i]) * static_cast<int64_t>(weight_row[i]);
+        sum_x += static_cast<int64_t>(input_row[i]);
+        sum_w += static_cast<int64_t>(weight_row[i]);
     }
 
-    // Zero point correction:
+    // Zero point correction (int64 to avoid wraparound, matching CUDA):
     // Full expansion: sum((x_i - x_zp) * (w_j - w_zp))
     //   = sum(x_i * w_j) - x_zp * sum(w_j) - w_zp * sum(x_i) + x_zp * w_zp * K
-    acc = acc - input_zp * sum_w - weight_zp * sum_x
-          + input_zp * weight_zp * static_cast<int32_t>(in_features);
+    acc = acc - static_cast<int64_t>(input_zp) * sum_w
+          - static_cast<int64_t>(w_zp) * sum_x
+          + static_cast<int64_t>(input_zp) * static_cast<int64_t>(w_zp) * in_features;
 
     // Dequantize to float and add bias
-    float result = static_cast<float>(acc) * combined_scale;
+    float result = static_cast<float>(acc) * out_scale;
     if (bias != nullptr) {
         result += bias[o];
     }
@@ -113,7 +130,10 @@ auto quantized_linear_hip(
     int32_t weight_zero_point,
     float output_scale,
     int32_t output_zero_point,
-    hipStream_t stream
+    hipStream_t stream,
+    // Per-channel (F045): [out_features] weight scales / zero-points; nullptr => per-tensor.
+    const Tensor* weight_scales,
+    const Tensor* weight_zps
 ) -> Tensor {
     // The kernel flat-indexes input/weight from shape-derived row offsets
     // (input_row = input + b*in_features, weight_row = weight + o*in_features),
@@ -140,6 +160,21 @@ auto quantized_linear_hip(
     const float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
     (void)output_zero_point;
     float combined_scale = input_scale * weight_scale / safe_output_scale;
+    float input_over_output = input_scale / safe_output_scale;
+
+    // Per-channel weight scale/zero-point (optional). Materialize contiguous so
+    // the kernel can index by output channel.
+    Tensor wscale_c, wzp_c;
+    const float* wscale_ptr = nullptr;
+    const int32_t* wzp_ptr = nullptr;
+    if (weight_scales != nullptr && weight_scales->numel() > 1) {
+        wscale_c = weight_scales->is_contiguous() ? *weight_scales : weight_scales->contiguous();
+        wscale_ptr = wscale_c.data<float>();
+        if (weight_zps != nullptr && weight_zps->numel() > 0) {
+            wzp_c = weight_zps->is_contiguous() ? *weight_zps : weight_zps->contiguous();
+            wzp_ptr = wzp_c.data<int32_t>();
+        }
+    }
 
     const int THREADS = 256;
     dim3 blocks((out_features + THREADS - 1) / THREADS, batch_size);
@@ -152,7 +187,8 @@ auto quantized_linear_hip(
         bias ? bias->data<float>() : nullptr,
         output.data<float>(),
         batch_size, in_features, out_features,
-        combined_scale, input_zero_point, weight_zero_point);
+        combined_scale, input_zero_point, weight_zero_point,
+        wscale_ptr, wzp_ptr, input_over_output);
 
     HIP_CHECK(hipGetLastError());
     return output;
@@ -216,36 +252,40 @@ __global__ void im2col_int8_kernel(
     int64_t channel_offset,       // first input channel of this group
     int64_t h_in,
     int64_t w_in,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t kernel_h,             // per-axis kernel size (F044: rectangular)
+    int64_t kernel_w,
+    int64_t stride_h,             // per-axis stride/padding/dilation (F044: asymmetric)
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t h_out,
     int64_t w_out,
     int8_t input_zp
 ) {
-    int64_t total = batch * h_out * w_out * in_channels_per_group * kernel_size * kernel_size;
+    int64_t total = batch * h_out * w_out * in_channels_per_group * kernel_h * kernel_w;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
 
     // Decode flat index to (b, oh, ow, ic_local, kh, kw)
     int64_t temp = idx;
-    int64_t kw = temp % kernel_size; temp /= kernel_size;
-    int64_t kh = temp % kernel_size; temp /= kernel_size;
+    int64_t kw = temp % kernel_w; temp /= kernel_w;
+    int64_t kh = temp % kernel_h; temp /= kernel_h;
     int64_t ic_local = temp % in_channels_per_group; temp /= in_channels_per_group;
     int64_t ow = temp % w_out; temp /= w_out;
     int64_t oh = temp % h_out; temp /= h_out;
     int64_t b = temp;
 
-    int64_t ih = oh * stride - padding + kh * dilation;
-    int64_t iw = ow * stride - padding + kw * dilation;
+    int64_t ih = oh * stride_h - pad_h + kh * dil_h;
+    int64_t iw = ow * stride_w - pad_w + kw * dil_w;
 
     // Output index in column matrix (rows are per-group spatial patches)
     // Row: b * out_h * out_w + oh * out_w + ow
-    // Col: ic_local * kernel_size * kernel_size + kh * kernel_size + kw
-    int64_t col_cols = in_channels_per_group * kernel_size * kernel_size;
+    // Col: ic_local * kernel_h * kernel_w + kh * kernel_w + kw
+    int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
     int64_t out_row = b * h_out * w_out + oh * w_out + ow;
-    int64_t out_col = ic_local * kernel_size * kernel_size + kh * kernel_size + kw;
+    int64_t out_col = ic_local * kernel_h * kernel_w + kh * kernel_w + kw;
 
     int8_t value = input_zp;  // Use zero point for out-of-bounds (padding)
     if (ih >= 0 && ih < h_in && iw >= 0 && iw < w_in) {
@@ -310,7 +350,12 @@ __global__ void dequantize_bias_kernel(
     int64_t k_inner,                // in_channels_per_group * kernel_h * kernel_w
     int32_t input_zp,
     int32_t weight_zp,
-    float combined_scale
+    float combined_scale,
+    // Per-channel (F045): [out_channels] weight scales / zero-points; nullptr => per-tensor.
+    // Per-channel dequant scale = input_scale_pc * weight_scales[oc].
+    const float* __restrict__ weight_scales,
+    const int32_t* __restrict__ weight_zps,
+    float input_scale_pc
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
@@ -320,16 +365,21 @@ __global__ void dequantize_bias_kernel(
     int64_t oc_local = idx % out_channels_per_group;
     int64_t oc = oc_base + oc_local;             // global output channel
 
+    // Per-channel weight zero-point / scale (each global output channel oc).
+    const int32_t w_zp = weight_scales ? (weight_zps ? weight_zps[oc] : 0) : weight_zp;
+    const float out_scale = weight_scales ? (input_scale_pc * weight_scales[oc])
+                                          : combined_scale;
+
     // Zero-point correction (mirrors quantized_linear_kernel_hip):
     //   sum_k (A - input_zp)(B - weight_zp)
     //     = C - input_zp*sum_k B[oc] - weight_zp*sum_k A[row] + input_zp*weight_zp*K
     // A = im2col(input) (padding filled with input_zp), B = weight[oc].
-    int32_t acc = gemm_output[idx]
-                  - input_zp * weight_col_sums[oc_local]
-                  - weight_zp * row_sums[row]
-                  + input_zp * weight_zp * static_cast<int32_t>(k_inner);
+    int64_t acc = static_cast<int64_t>(gemm_output[idx])
+                  - static_cast<int64_t>(input_zp) * weight_col_sums[oc_local]
+                  - static_cast<int64_t>(w_zp) * row_sums[row]
+                  + static_cast<int64_t>(input_zp) * static_cast<int64_t>(w_zp) * k_inner;
 
-    float result = static_cast<float>(acc) * combined_scale;
+    float result = static_cast<float>(acc) * out_scale;
     if (bias != nullptr) {
         result += bias[oc];
     }
@@ -357,9 +407,12 @@ auto quantized_conv2d_hip(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups,
     float input_scale,
     int32_t input_zero_point,
@@ -367,7 +420,10 @@ auto quantized_conv2d_hip(
     int32_t weight_zero_point,
     float output_scale,
     int32_t output_zero_point,
-    hipStream_t stream
+    hipStream_t stream,
+    // Per-channel (F045): [out_channels] weight scales / zero-points; nullptr => per-tensor.
+    const Tensor* weight_scales,
+    const Tensor* weight_zps
 ) -> Tensor {
     // im2col and the GEMM/dequant kernels flat-index input/weight/bias from
     // shape-derived offsets, which is only valid for contiguous storage.
@@ -390,7 +446,9 @@ auto quantized_conv2d_hip(
 
     auto weight_shape = weight_c.shape();
     int64_t out_channels = weight_shape[0];
-    int64_t kernel_size = weight_shape[2];
+    // Per-axis kernel size (F044: rectangular kernels).
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
 
     if (groups < 1)
         throw std::invalid_argument("quantized_conv2d: groups must be >= 1");
@@ -399,8 +457,8 @@ auto quantized_conv2d_hip(
     if (out_channels % groups != 0)
         throw std::invalid_argument("quantized_conv2d: out_channels must be divisible by groups");
 
-    int64_t h_out = (h_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t w_out = (w_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t h_out = (h_in + 2 * pad_h - dil_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t w_out = (w_in + 2 * pad_w - dil_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, input_c.device());
 
@@ -412,6 +470,20 @@ auto quantized_conv2d_hip(
     (void)output_zero_point;
     float combined_scale = input_scale * weight_scale;
 
+    // Per-channel weight scale/zero-point (optional, F045). Materialize contiguous
+    // device tensors so the dequantize kernel can index by global output channel.
+    Tensor wscale_c, wzp_c;
+    const float* wscale_ptr = nullptr;
+    const int32_t* wzp_ptr = nullptr;
+    if (weight_scales != nullptr && weight_scales->numel() > 1) {
+        wscale_c = weight_scales->is_contiguous() ? *weight_scales : weight_scales->contiguous();
+        wscale_ptr = wscale_c.data<float>();
+        if (weight_zps != nullptr && weight_zps->numel() > 0) {
+            wzp_c = weight_zps->is_contiguous() ? *weight_zps : weight_zps->contiguous();
+            wzp_ptr = wzp_c.data<int32_t>();
+        }
+    }
+
     const int64_t in_channels_per_group = in_channels / groups;
     const int64_t out_channels_per_group = out_channels / groups;
 
@@ -419,7 +491,7 @@ auto quantized_conv2d_hip(
     // (out_channels, in_channels_per_group, kh, kw) — i.e. each filter already
     // only spans its own group's input channels.
     int64_t M = batch * h_out * w_out;                                   // patches per group
-    int64_t K = in_channels_per_group * kernel_size * kernel_size;       // patch size (per group)
+    int64_t K = in_channels_per_group * kernel_h * kernel_w;             // patch size (per group)
     int64_t N = out_channels_per_group;                                  // filters per group
 
     const int THREADS = 256;
@@ -453,7 +525,7 @@ auto quantized_conv2d_hip(
 
             // Step 1: im2col for this group's input channels.
             int64_t im2col_total =
-                batch * h_out * w_out * in_channels_per_group * kernel_size * kernel_size;
+                batch * h_out * w_out * in_channels_per_group * kernel_h * kernel_w;
             int im2col_blocks = static_cast<int>((im2col_total + THREADS - 1) / THREADS);
 
             hipLaunchKernelGGL(im2col_int8_kernel,
@@ -461,7 +533,7 @@ auto quantized_conv2d_hip(
                 input_c.data<int8_t>(),
                 col_buffer,
                 batch, in_channels, in_channels_per_group, ic_base, h_in, w_in,
-                kernel_size, stride, padding, dilation,
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
                 h_out, w_out,
                 static_cast<int8_t>(input_zero_point));
             HIP_CHECK(hipGetLastError());
@@ -532,7 +604,10 @@ auto quantized_conv2d_hip(
                 K,
                 input_zero_point,
                 weight_zero_point,
-                combined_scale);
+                combined_scale,
+                wscale_ptr,
+                wzp_ptr,
+                input_scale);
             HIP_CHECK(hipGetLastError());
 
             // Sync before the next group reuses the shared buffers.

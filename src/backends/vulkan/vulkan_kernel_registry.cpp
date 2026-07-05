@@ -1940,10 +1940,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         // norms along dim
         Tensor norm_a = vk->dispatchNorm(inputs[0], 2.0f, dim, false);
         Tensor norm_b = vk->dispatchNorm(inputs[1], 2.0f, dim, false);
-        // norm_a * norm_b + eps
+        // PyTorch clamps the denominator: dot / max(||a||*||b||, eps) (a
+        // multiplicative floor), NOT an additive eps (which caps similarity
+        // below 1 and biases toward 0).
         Tensor norms = vk->dispatchBinaryOp("mul", norm_a, norm_b);
         Tensor eps_tensor = vk->dispatchFull({1}, static_cast<float>(eps), norms.dtype());
-        Tensor denom = vk->dispatchBinaryOp("add", norms, eps_tensor);
+        Tensor denom = vk->dispatchBinaryOp("maximum", norms, eps_tensor);
         return vk->dispatchBinaryOp("div", dot, denom);
     });
 
@@ -2442,13 +2444,6 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_single_output_kernel(OpId::QuantizedLinear,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        if (inputs.size() >= 4) {
-            throw std::invalid_argument(
-                "QuantizedLinear (GPU): per-channel weight scale/zero-point "
-                "(inputs[3]/[4]) is not supported by this backend kernel; use "
-                "per-tensor quantization (scalar WeightScaleQ/WeightZeroPoint) — "
-                "JIT-041.");
-        }
             const auto& input = inputs[0];
             const auto& weight = inputs[1];
 
@@ -2464,8 +2459,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
             float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
 
+            // Per-channel weight scale/zero-point (inputs[3]/[4]) (F045).
+            const Tensor* wscales = (inputs.size() > 3 && inputs[3].numel() > 1) ? &inputs[3] : nullptr;
+            const Tensor* wzps = (inputs.size() > 4 && inputs[4].numel() > 0) ? &inputs[4] : nullptr;
+
             Tensor result = get_vulkan_backend()->dispatchQuantizedLinear(
-                input, weight, bias, input_scale, weight_scale, input_zp, weight_zp);
+                input, weight, bias, input_scale, weight_scale, input_zp, weight_zp,
+                wscales, wzps);
             // The Vulkan shader computes (acc*input_scale*weight_scale + bias) at
             // NATURAL bias scale, but CPU/CUDA/ROCm/OneAPI compute
             // acc*(in*wt/out) + bias (bias NOT divided by output_scale). Dividing
@@ -2489,39 +2489,27 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 ? inputs[2]
                 : Tensor({weight_shape[0]}, DType::Float32, input.device());
 
-            // F.11: per-axis read with scalar fallback; Vulkan quantized conv
-            // shader takes scalar stride/padding — fail loudly on asymmetric
-            // rather than silently squash StrideW/PaddingW.
+            // F044: per-axis stride/padding/dilation, grouped and rectangular
+            // kernels are all handled natively by the shader now.
             const auto stride_arr  = ::tenzor::backend::attrs::stride_2d(attrs);
             const auto padding_arr = ::tenzor::backend::attrs::padding_2d(attrs);
-            if (stride_arr[0] != stride_arr[1] || padding_arr[0] != padding_arr[1]) {
-                throw std::invalid_argument(
-                    "QuantizedConv2d (Vulkan): backend shader only supports symmetric "
-                    "stride/padding; got stride=" + std::to_string(stride_arr[0]) + "x" + std::to_string(stride_arr[1]) +
-                    ", padding=" + std::to_string(padding_arr[0]) + "x" + std::to_string(padding_arr[1]) + ".");
-            }
-            // The Vulkan quantized-conv shader also ignores dilation and groups and
-            // assumes a square kernel; fail loudly on those rather than silently
-            // computing the wrong result (JIT-040).
             const auto dilation_arr = ::tenzor::backend::attrs::dilation_2d(attrs);
             const int64_t q_groups = attrs.get_int(AttrKey::Groups, 1);
-            if (dilation_arr[0] != 1 || dilation_arr[1] != 1 || q_groups != 1 ||
-                (weight_shape.size() >= 4 && weight_shape[2] != weight_shape[3])) {
-                throw std::invalid_argument(
-                    "QuantizedConv2d (Vulkan): backend shader supports only "
-                    "dilation=1, groups=1 and a square kernel (JIT-040); got "
-                    "dilation=" + std::to_string(dilation_arr[0]) + "x" +
-                    std::to_string(dilation_arr[1]) + ", groups=" +
-                    std::to_string(q_groups) + ".");
-            }
             float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
 
+            // Per-channel weight scale/zero-point (inputs[3]/[4]) (F045).
+            const Tensor* wscales = (inputs.size() > 3 && inputs[3].numel() > 1) ? &inputs[3] : nullptr;
+            const Tensor* wzps = (inputs.size() > 4 && inputs[4].numel() > 0) ? &inputs[4] : nullptr;
+
             return get_vulkan_backend()->dispatchQuantizedConv2d(
-                input, weight, bias, stride_arr[0], padding_arr[0],
-                input_scale, weight_scale, input_zp, weight_zp);
+                input, weight, bias,
+                stride_arr[0], stride_arr[1], padding_arr[0], padding_arr[1],
+                dilation_arr[0], dilation_arr[1], q_groups,
+                input_scale, weight_scale, input_zp, weight_zp,
+                wscales, wzps);
         });
     table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs)
         -> std::vector<Tensor> {
@@ -3025,89 +3013,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 return {output, lse};
             }
 
-            if (score_mod_id == 2) {
-                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-                if (window_size <= 0) {
-                    throw std::invalid_argument(
-                        "FlexAttention Vulkan: ScoreModId=2 requires AttrKey::WindowSize > 0.");
-                }
-                const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
-                int64_t S_q = Q.shape()[Q.shape().size() - 2];
-                int64_t S_k = K.shape()[K.shape().size() - 2];
-                Tensor Kt = tenzor::transpose(K, -1, -2);
-                Tensor scores = tenzor::bmm(Q, Kt);
-                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                               scores.dtype(), scores.device());
-                scores = scores * scale_t;
-                int64_t half = window_size / 2;
-                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
-                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
-                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
-                                              abs_diff.dtype(), abs_diff.device());
-                Tensor outside = tenzor::gt(abs_diff, half_t);
-                Tensor neg_inf = tenzor::full(scores_shape,
-                    -std::numeric_limits<float>::infinity(),
-                    scores.dtype(), scores.device());
-                scores = scores + (outside.to(scores.dtype()) * neg_inf);
-                // Phase 2.10: emit a real Float32 LSE per the attention
-                // contract — computed on the masked, pre-softmax scores so
-                // that backward can recover P = exp(S - L).
-                Tensor lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
-                if (lse.dtype() != DType::Float32) {
-                    lse = lse.to(DType::Float32);
-                }
-                NewOpAttributes sm_attrs;
-                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-                std::vector<Tensor> sm_in = {scores};
-                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-                Tensor output = tenzor::bmm(probs, V);
-                return {output, lse};
-            }
-
-            // Wave C: ScoreModId >= 3 routes through the process-wide score_mod
-            // registry populated by `tenzor::nn::register_score_mod` (same
-            // pattern as CPU/CUDA/OneAPI). Forward composes Q@K^T → user
-            // functor → softmax → @V via tenzor:: ops (which dispatch to
-            // Vulkan automatically since Q/K/V live on Vulkan).
-            if (score_mod_id >= 3) {
-                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-                if (!fn) {
-                    throw std::runtime_error(
-                        "FlexAttention Vulkan: no user score_mod registered for ScoreModId=" +
-                        std::to_string(score_mod_id) +
-                        ". Register via tenzor::nn::register_score_mod(id, fn) before dispatch.");
-                }
-                const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
-                Tensor Kt = tenzor::transpose(K, -1, -2);
-                Tensor scores = tenzor::bmm(Q, Kt);
-                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                               scores.dtype(), scores.device());
-                scores = scores * scale_t;
-                Tensor modified = fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
-                // Phase 2.10: emit a real Float32 LSE per the attention
-                // contract — computed on the post-functor, pre-softmax
-                // scores so that backward can recover P = exp(S - L).
-                Tensor lse = tenzor::logsumexp(modified, -1, /*keepdim=*/false);
-                if (lse.dtype() != DType::Float32) {
-                    lse = lse.to(DType::Float32);
-                }
-                NewOpAttributes sm_attrs;
-                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-                std::vector<Tensor> sm_in = {modified};
-                Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-                Tensor output = tenzor::bmm(probs, V);
-                return {output, lse};
+            // ScoreModId 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
+            // sliding_window_sym, user_lambda) and user-registered functors
+            // (>= 8) go through the shared, device-agnostic composed-ops
+            // forward. The tenzor:: ops inside dispatch to Vulkan automatically
+            // (Q/K/V live on Vulkan), so Vulkan runs bit-for-bit the same math
+            // as the CPU reference and every other backend (F018/F019/F023/
+            // F024). This also unifies the mask sentinel to where(-inf) (was an
+            // additive outside*neg_inf that produced 0*-inf = NaN at kept
+            // positions, F020).
+            if (score_mod_id >= 2) {
+                return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
             }
 
             throw std::runtime_error(
                 "FlexAttention Vulkan: ScoreModId=" + std::to_string(score_mod_id) +
-                " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window; "
-                "register user IDs >= 3 via tenzor::nn::register_score_mod).");
+                " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window, "
+                "3=relpos_bias, 4=alibi, 5=prefix_lm, 6=sliding_window_sym, "
+                "7=user_lambda; user IDs >= 8 via tenzor::nn::register_score_mod).");
         });
 
     table.register_kernel(OpId::FlexAttentionBackward,
@@ -3125,81 +3048,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
             }
 
-            // Wave C: ScoreModId == 2 (sliding window) or >= 3 (user functor) — composed backward.
-            if (score_mod_id == 2 || score_mod_id >= 3) {
-                const Tensor& dO = inputs[0];
-                const Tensor& Q  = inputs[1];
-                const Tensor& K  = inputs[2];
-                const Tensor& V  = inputs[3];
-                Tensor Kt = tenzor::transpose(K, -1, -2);
-                Tensor scores = tenzor::bmm(Q, Kt);
-                auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-                Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                               scores.dtype(), scores.device());
-                scores = scores * scale_t;
-
-                if (score_mod_id == 2) {
-                    int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-                    if (window_size <= 0) {
-                        throw std::invalid_argument(
-                            "FlexAttentionBackward Vulkan: ScoreModId=2 requires AttrKey::WindowSize > 0.");
-                    }
-                    int64_t S_q = Q.shape()[Q.shape().size() - 2];
-                    int64_t S_k = K.shape()[K.shape().size() - 2];
-                    int64_t half = window_size / 2;
-                    Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-                    Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-                    Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
-                    Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
-                    Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-                    Tensor half_t = tenzor::full({1}, static_cast<double>(half),
-                                                  abs_diff.dtype(), abs_diff.device());
-                    Tensor outside = tenzor::gt(abs_diff, half_t);
-                    // Use large finite negative; softmax(-1e30) underflows to 0
-                    // (same effect as -inf) without producing NaN at in-window
-                    // positions via 0 * -inf.
-                    Tensor large_neg = tenzor::full(scores_shape, -1.0e30,
-                                                     scores.dtype(), scores.device());
-                    scores = scores + (outside.to(scores.dtype()) * large_neg);
-                } else {
-                    auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-                    if (!fn) {
-                        throw std::runtime_error(
-                            "FlexAttentionBackward Vulkan: no user score_mod registered for ScoreModId=" +
-                            std::to_string(score_mod_id));
-                    }
-                    scores = fn(scores, 0, 0, 0, 0);
-                }
-
-                NewOpAttributes sm_attrs;
-                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-                std::vector<Tensor> sm_in = {scores};
-                Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-
-                Tensor attn_t = tenzor::transpose(attn, -1, -2);
-                Tensor dV = tenzor::bmm(attn_t, dO);
-
-                Tensor Vt = tenzor::transpose(V, -1, -2);
-                Tensor dAttn = tenzor::bmm(dO, Vt);
-
-                Tensor ad = tenzor::mul(attn, dAttn);
-                NewOpAttributes sum_attrs;
-                sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-                sum_attrs.set(AttrKey::Keepdim, true);
-                std::vector<Tensor> sum_inputs = {ad};
-                Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
-                Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
-
-                Tensor scale_t2 = tenzor::full(
-                    std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
-                    static_cast<double>(scale), dScores.dtype(), dScores.device());
-                dScores = tenzor::mul(dScores, scale_t2);
-
-                Tensor dQ = tenzor::bmm(dScores, K);
-                Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
-                Tensor dK = tenzor::bmm(dScores_t, Q);
-
-                return {dQ, dK, dV};
+            // ScoreModId >= 2 (built-ins 2-7 and user functors >= 8) — composed backward.
+            if (score_mod_id >= 2) {
+                // ScoreModId 2-7 and user functors (>= 8): shared,
+                // device-agnostic composed backward (replays forward, softmax
+                // chain rule). Same helper as the CPU reference and every other
+                // backend, so forward/backward stay consistent (F018/F023/F024).
+                return tenzor::nn::flex_attention_score_mod_backward(inputs, attrs);
             }
 
             throw std::runtime_error(
@@ -4310,8 +4165,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
-        int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, 1);
-        int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, 1);
+        // F109: overlapping windows of width == kernel_size (scalar KernelSize
+        // as fallback for square pools).
+        int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = get_vulkan_backend()->dispatchFractionalMaxPool2dForward(
             inputs[0], out_h, out_w, kernel_h, kernel_w, samples);
@@ -4341,9 +4198,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
-        int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD, 1);
-        int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, 1);
-        int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, 1);
+        // F109: overlapping windows of width == kernel_size (scalar KernelSize
+        // as fallback for cubic pools).
+        int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD, attrs.get_int(AttrKey::KernelSize, 1));
+        int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = get_vulkan_backend()->dispatchFractionalMaxPool3dForward(
             inputs[0], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples);

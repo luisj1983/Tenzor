@@ -90,12 +90,44 @@ public:
 
         // grad_input: conv_transpose2d(grad_output, weight, stride, padding)
         // Uses F::conv_transpose2d which takes Variables and preserves the graph.
+        //
+        // For stride > 1 the transpose is ambiguous: several input spatial sizes
+        // map to the same conv output size, so conv_transpose2d with
+        // output_padding={0,0} produces an input up to (stride-1) smaller than the
+        // true input. Recover the exact output_padding from the SAVED input
+        // spatial size so the 2nd-order grad_input matches the true input shape,
+        // mirroring the 1st-order path which threads AttrKey::InputShape. With
+        //   out = floor((in + 2*pad - dilation*(k-1) - 1)/stride) + 1
+        // the transpose base size (output_padding=0) is
+        //   base = (out-1)*stride - 2*pad + dilation*(k-1) + 1
+        // and output_padding = in - base (in [0, stride-1]).
+        const auto& in_shape = input_var.tensor().shape();
+        const auto& go_shape = grad_out_var.tensor().shape();
+        const auto& w_shape = weight_var.tensor().shape();
+        auto compute_output_padding = [](int64_t in_size, int64_t out_size,
+                                         int64_t stride, int64_t pad,
+                                         int64_t dilation, int64_t k) -> int64_t {
+            int64_t base = (out_size - 1) * stride - 2 * pad + dilation * (k - 1) + 1;
+            int64_t op = in_size - base;
+            if (op < 0) op = 0;              // clamp against malformed saved shapes
+            if (op > stride - 1) op = stride - 1;
+            return op;
+        };
+        int64_t out_pad_h = 0, out_pad_w = 0;
+        if (in_shape.size() == 4 && go_shape.size() == 4 && w_shape.size() == 4) {
+            out_pad_h = compute_output_padding(in_shape[2], go_shape[2],
+                                               stride_h_, padding_h_,
+                                               dilation_h_, w_shape[2]);
+            out_pad_w = compute_output_padding(in_shape[3], go_shape[3],
+                                               stride_w_, padding_w_,
+                                               dilation_w_, w_shape[3]);
+        }
         auto grad_input = ::tenzor::nn::functional::conv_transpose2d(
             grad_out_var, weight_var,
             std::nullopt, // no bias for the transpose op
             {stride_h_, stride_w_},
             {padding_h_, padding_w_},
-            {0, 0}, // output_padding
+            {out_pad_h, out_pad_w}, // output_padding recovered from saved input size
             groups_,
             {dilation_h_, dilation_w_});
 

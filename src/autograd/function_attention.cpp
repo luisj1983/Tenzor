@@ -348,19 +348,31 @@ auto try_flex_backward_or_throw(const Tensor& dO,
                                 const Tensor& L,
                                 double scale,
                                 int64_t score_mod_id,
-                                const Tensor& block_mask) -> std::vector<Tensor> {
+                                const Tensor& block_mask,
+                                int64_t window_size,
+                                int64_t prefix_length,
+                                const Tensor& relpos_bias) -> std::vector<Tensor> {
     // V.8: double scale; the FlexAttentionBackward holds `double scale_`.
     // A-03: canonical flex-backward input order is
-    //   [dO, Q, K, V, O, (L?), (block_mask?)].
+    //   [dO, Q, K, V, O, (L?), (block_mask?), (relpos_bias?)].
     // The trailing optionals are disambiguated upstream by save-time boolean
     // predicates (has_lse, and has_block_mask_) in FlexAttentionBackward::backward
     // — NOT by vector size or slot position. See the A-01 decode there.
     std::vector<Tensor> bwd_inputs = {dO, Q, K, V, O};
     if (L.is_valid() && L.shape().size() > 0) bwd_inputs.push_back(L);
     if (block_mask.is_valid() && block_mask.shape().size() > 0) bwd_inputs.push_back(block_mask);
+    // R8 fix: relpos_bias (id 3) is appended LAST, matching exactly what
+    // flex_attention_score_mod_backward reads (inputs.back() for id 3). The
+    // builder previously never appended a bias, so the backward helper aliased
+    // L / block_mask as the bias and produced wrong gradients.
+    if (relpos_bias.is_valid() && relpos_bias.shape().size() > 0) bwd_inputs.push_back(relpos_bias);
     OpAttributes bwd_attrs;
     bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
     bwd_attrs.set(AttrKey::ScoreModId, static_cast<int64_t>(score_mod_id));
+    // Same built-in score-mod parameters as the forward so the replayed scores
+    // (and thus the gradients) match the forward exactly.
+    if (window_size > 0) bwd_attrs.set(AttrKey::WindowSize, static_cast<int64_t>(window_size));
+    if (prefix_length > 0) bwd_attrs.set(AttrKey::PrefixLength, static_cast<int64_t>(prefix_length));
     return dispatch<OpId::FlexAttentionBackward>(bwd_inputs, bwd_attrs);
 }
 
@@ -473,7 +485,9 @@ auto FlexAttentionBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
     Tensor L          = has_lse        ? saved[idx++] : Tensor{};
     Tensor block_mask = has_block_mask ? saved[idx++] : Tensor{};
 
-    return try_flex_backward_or_throw(dO, Q, K, V, O, L, scale_, score_mod_id_, block_mask);
+    return try_flex_backward_or_throw(dO, Q, K, V, O, L, scale_, score_mod_id_,
+                                      block_mask, window_size_, prefix_length_,
+                                      relpos_bias_);
 }
 
 namespace {
@@ -734,13 +748,23 @@ auto run_fused_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V,
 }
 
 auto run_flex_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V,
-                       float scale, int64_t score_mod_id, const Tensor& block_mask)
+                       float scale, int64_t score_mod_id, const Tensor& block_mask,
+                       int64_t window_size, int64_t prefix_length,
+                       const Tensor& relpos_bias)
     -> std::vector<Tensor> {
     OpAttributes attrs;
     attrs.set(AttrKey::Scale, static_cast<double>(scale));
     attrs.set(AttrKey::ScoreModId, static_cast<int64_t>(score_mod_id));
+    // Built-in score-mod parameters. WindowSize feeds ids 2/6 (sliding_window),
+    // PrefixLength feeds id 5 (prefix_lm); the shared helper only reads the one
+    // relevant to score_mod_id, so setting a value harmlessly no-ops otherwise.
+    if (window_size > 0) attrs.set(AttrKey::WindowSize, static_cast<int64_t>(window_size));
+    if (prefix_length > 0) attrs.set(AttrKey::PrefixLength, static_cast<int64_t>(prefix_length));
     std::vector<Tensor> inputs = {Q, K, V};
     if (block_mask.is_valid() && block_mask.shape().size() > 0) inputs.push_back(block_mask);
+    // relpos_bias (id 3) is appended LAST so the forward helper's contract holds
+    // in both cases: inputs[3] when there is no block_mask, else inputs.back().
+    if (relpos_bias.is_valid() && relpos_bias.shape().size() > 0) inputs.push_back(relpos_bias);
     std::vector<Tensor> outs = dispatch<OpId::FlexAttention>(inputs, attrs);
     while (outs.size() < 2) outs.emplace_back();
     return outs;
@@ -930,21 +954,30 @@ auto flex_attention(const Variable& Q,
                     const Variable& V,
                     float scale,
                     int64_t score_mod_id,
-                    const Tensor& block_mask) -> Variable {
+                    const Tensor& block_mask,
+                    int64_t window_size,
+                    int64_t prefix_length,
+                    const Tensor& relpos_bias) -> Variable {
     bool any_grad = Q.requires_grad() || K.requires_grad() || V.requires_grad();
     if (!any_grad || !is_grad_enabled()) {
         auto outs = run_flex_dispatch(Q.tensor(), K.tensor(), V.tensor(),
-                                      scale, score_mod_id, block_mask);
+                                      scale, score_mod_id, block_mask,
+                                      window_size, prefix_length, relpos_bias);
         return Variable(outs[0], false);
     }
 
     auto outs = run_flex_dispatch(Q.tensor(), K.tensor(), V.tensor(),
-                                  scale, score_mod_id, block_mask);
+                                  scale, score_mod_id, block_mask,
+                                  window_size, prefix_length, relpos_bias);
     const Tensor& O_t = outs[0];
     const Tensor& L_t = outs[1];
 
     bool has_block_mask = block_mask.is_valid() && block_mask.shape().size() > 0;
-    auto grad_fn = std::make_shared<FlexAttentionBackward>(scale, score_mod_id, has_block_mask);
+    // Carry the built-in score-mod parameters (WindowSize/PrefixLength/relpos
+    // bias) into the backward node so the replayed scores match the forward.
+    auto grad_fn = std::make_shared<FlexAttentionBackward>(
+        scale, score_mod_id, has_block_mask, window_size, prefix_length,
+        relpos_bias);
     std::vector<Tensor> saved = {Q.tensor(), K.tensor(), V.tensor(), O_t};
     if (L_t.is_valid()) saved.push_back(L_t);
     if (has_block_mask) saved.push_back(block_mask);

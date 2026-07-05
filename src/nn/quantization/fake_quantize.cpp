@@ -14,6 +14,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include <cmath>
 #include <stdexcept>
 
 namespace tenzor {
@@ -544,8 +545,14 @@ namespace {
 // Reduce a per-element scale-gradient contribution down to the scale parameter
 // shape: a scalar {1} for per-tensor, or {C} along `axis` for per-channel
 // (sum over every other dimension).
-Tensor reduce_to_scale(const Tensor& g, int64_t numel_scale, bool per_channel,
+Tensor reduce_to_scale(const Tensor& g_in, int64_t numel_scale, bool per_channel,
                        int64_t axis, DType out_dtype) {
+    // The scale-gradient sum is the ENTIRE gradient of the learned step size, so
+    // widen the per-element contribution to at least Float32 (Float64 for Float64
+    // scale params) BEFORE the sum reduction. Reducing in a half dtype (F16/BF16)
+    // accumulates the whole sum in half and loses precision / overflows.
+    DType compute_dtype = (out_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor g = (g_in.dtype() == compute_dtype) ? g_in : g_in.to(compute_dtype);
     Tensor r;
     if (!per_channel || numel_scale <= 1) {
         r = tenzor::sum(g).reshape({1});
@@ -639,6 +646,21 @@ auto LSQFakeQuantizeFunction::backward(std::vector<Tensor> grad_outputs)
               + big    * (qmax_t - z_bc);
     Tensor grad_scale =
         reduce_to_scale(g * ds, s.numel(), per_channel_, axis_, s.dtype());
+
+    // LSQ gradient-scale normalization (Esser et al. 2020): scale dL/ds by
+    //   g = 1 / sqrt(N * Q_p)
+    // where N is the number of elements each step size is applied to (total for
+    // per-tensor, per-channel element count for per-channel) and Q_p = quant_max.
+    // Without this the effective LR on the step size is ~sqrt(N*Q_p) too large
+    // vs the weight LR, changing the joint weight+step QAT trajectory.
+    int64_t numel_scale = s.numel();
+    int64_t n_per_scale = (numel_scale > 0) ? (x.numel() / numel_scale) : x.numel();
+    if (n_per_scale > 0 && quant_max_ > 0.0f) {
+        double grad_scale_factor =
+            1.0 / std::sqrt(static_cast<double>(n_per_scale) *
+                            static_cast<double>(quant_max_));
+        grad_scale = grad_scale * grad_scale_factor;
+    }
 
     return {grad_input, grad_scale};
 }

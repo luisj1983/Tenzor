@@ -418,6 +418,8 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // output/h_final shapes. Bidirectional must fall through to the per-timestep
     // autograd path that also runs backward_cells_.
     const bool can_use_fused =
+        is_op_supported(OpId::GRUForward, input.device().type) &&
+        input.dtype() == DType::Float32 &&
         linear_before_reset_ &&
         !bidirectional_ &&
         !x.requires_grad() && !tenzor::is_grad_enabled();

@@ -1,5 +1,4 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Log softmax backward: grad_input = grad_output - exp(output) * sum(grad_output)
 // This requires reduction along a dimension
@@ -30,22 +29,18 @@ void main() {
     uint offset = (outer_idx * params.dim_size * params.inner_size) + inner_idx;
 
     // Compute sum of gradients along dimension.
-    // Accumulate in double to match the forward log_softmax, which deliberately
-    // uses double accumulation to meet Float32 parity vs CPU.
-    double sum_grad = 0.0lf;
+    // Accumulate in float to match the forward log_softmax (Float32 path) and
+    // the CPU/CUDA/ROCm/oneAPI/MPS reference backends, which all use float here.
+    float sum_grad = 0.0;
     for (uint d = 0; d < params.dim_size; ++d) {
         uint idx = offset + d * params.inner_size;
-        sum_grad += double(grad_output[idx]);
+        sum_grad += grad_output[idx];
     }
 
-    // Compute gradient: grad_output - exp(log_softmax) * sum_grad.
-    // exp() is evaluated in float (GLSL has no double exp here), but the
-    // subtraction and the sum_grad factor stay in double so the dominant
-    // reduction error — the sum over the reduction dim — is double-accurate.
+    // Compute gradient: grad_output - exp(log_softmax) * sum_grad, in float.
     for (uint d = 0; d < params.dim_size; ++d) {
         uint idx = offset + d * params.inner_size;
-        double softmax = double(exp(output_data[idx]));
-        double g = double(grad_output[idx]) - softmax * sum_grad;
-        grad_input[idx] = float(g);
+        float softmax = exp(output_data[idx]);
+        grad_input[idx] = grad_output[idx] - softmax * sum_grad;
     }
 }

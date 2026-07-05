@@ -253,7 +253,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                 if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                     int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                     float val = in_ptr[input_idx];
-                    if (val > max_val) {
+                    if (sycl::isnan(val) || val > max_val) {
                         max_val = val;
                         max_idx = input_idx;
                     }
@@ -462,7 +462,7 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                         double val = in_ptr[input_idx];
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = input_idx;
                         }
@@ -501,7 +501,7 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                         float val = static_cast<float>(in_ptr[input_idx]);
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = input_idx;
                         }
@@ -540,7 +540,7 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                         float val = bf16_to_f32(in_ptr[input_idx]);
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = input_idx;
                         }
@@ -612,7 +612,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                         float val = in_ptr[input_idx];
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = input_idx;
                         }
@@ -651,7 +651,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                         double val = in_ptr[input_idx];
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = input_idx;
                         }
@@ -691,7 +691,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                         float val = static_cast<float>(in_ptr[input_idx]);
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = input_idx;
                         }
@@ -731,7 +731,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
                         float val = bf16_to_f32(in_ptr[input_idx]);
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = input_idx;
                         }
@@ -966,9 +966,9 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
 
             // Calculate input region
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             float sum = 0.0f;
             int64_t count = 0;
@@ -999,9 +999,9 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             double sum = 0.0;
             int64_t count = 0;
@@ -1033,9 +1033,9 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
 
             // Calculate input region
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             // Use float accumulation for numerical stability
             float sum = 0.0f;
@@ -1068,9 +1068,9 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
 
             // Calculate input region
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             // Use float accumulation for numerical stability
             float sum = 0.0f;
@@ -1129,9 +1129,9 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
 
             // Calculate input region
             const int64_t h_start = (h_out * H_in) / H_out;
-            const int64_t h_end = ((h_out + 1) * H_in) / H_out;
+            const int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
             const int64_t w_start = (w_out * W_in) / W_out;
-            const int64_t w_end = ((w_out + 1) * W_in) / W_out;
+            const int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
             const int64_t count = (h_end - h_start) * (w_end - w_start);
             const float grad_val = grad_out_ptr[flat_idx] / static_cast<float>(count);
@@ -1162,9 +1162,9 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / H_out;
-            const int64_t h_end = ((h_out + 1) * H_in) / H_out;
+            const int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
             const int64_t w_start = (w_out * W_in) / W_out;
-            const int64_t w_end = ((w_out + 1) * W_in) / W_out;
+            const int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
             const int64_t count = (h_end - h_start) * (w_end - w_start);
             const double grad_val = grad_out_ptr[flat_idx] / static_cast<double>(count);
@@ -1201,9 +1201,9 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / H_out;
-            const int64_t h_end = ((h_out + 1) * H_in) / H_out;
+            const int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
             const int64_t w_start = (w_out * W_in) / W_out;
-            const int64_t w_end = ((w_out + 1) * W_in) / W_out;
+            const int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
             const int64_t count = (h_end - h_start) * (w_end - w_start);
             const float grad_val = static_cast<float>(grad_out_ptr[flat_idx]) / static_cast<float>(count);
@@ -1245,9 +1245,9 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / H_out;
-            const int64_t h_end = ((h_out + 1) * H_in) / H_out;
+            const int64_t h_end = ((h_out + 1) * H_in + H_out - 1) / H_out;
             const int64_t w_start = (w_out * W_in) / W_out;
-            const int64_t w_end = ((w_out + 1) * W_in) / W_out;
+            const int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
             const int64_t count = (h_end - h_start) * (w_end - w_start);
             const float grad_val = bf16_to_f32(grad_out_ptr[flat_idx]) / static_cast<float>(count);
@@ -1307,9 +1307,9 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
@@ -1318,7 +1318,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     float val = in_ptr[idx];
-                    if (val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
                 }
             }
 
@@ -1342,9 +1342,9 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             double max_val = -1.7976931348623157e+308;
             int64_t max_idx = 0;
@@ -1353,7 +1353,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     double val = in_ptr[idx];
-                    if (val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
                 }
             }
 
@@ -1377,9 +1377,9 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
@@ -1388,7 +1388,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     float val = static_cast<float>(in_ptr[idx]);
-                    if (val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
                 }
             }
 
@@ -1412,9 +1412,9 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             const int64_t n = temp / C;
 
             const int64_t h_start = (h_out * H_in) / output_h;
-            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in + output_h - 1) / output_h;
             const int64_t w_start = (w_out * W_in) / output_w;
-            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in + output_w - 1) / output_w;
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = 0;
@@ -1423,7 +1423,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     float val = bf16_to_f32(in_ptr[idx]);
-                    if (val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
                 }
             }
 
@@ -2231,7 +2231,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = in_ptr[idx];
-                    if (v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2251,7 +2251,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     double v = in_ptr[idx];
-                    if (v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2271,7 +2271,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = static_cast<float>(in_ptr[idx]);
-                    if (v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2291,7 +2291,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = bf16_to_f32(in_ptr[idx]);
-                    if (v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2624,12 +2624,12 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             float mx = -3.4028235e+38f; int64_t mi = start;
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 float v = in_ptr[idx];
-                if (v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
@@ -2643,12 +2643,12 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             double mx = -1.7976931348623157e+308; int64_t mi = start;
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 double v = in_ptr[idx];
-                if (v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
@@ -2662,12 +2662,12 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             float mx = -3.4028235e+38f; int64_t mi = start;
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 float v = static_cast<float>(in_ptr[idx]);
-                if (v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = sycl::half(mx); idx_ptr[oi] = mi;
@@ -2681,12 +2681,12 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             float mx = -3.4028235e+38f; int64_t mi = start;
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 float v = bf16_to_f32(in_ptr[idx]);
-                if (v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = f32_to_bf16(mx); idx_ptr[oi] = mi;
@@ -2722,7 +2722,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             float sum = 0.0f;
             for (int64_t i = start; i < end; ++i)
                 sum += in_ptr[(n * C + c) * L_in + i];
@@ -2737,7 +2737,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             double sum = 0.0;
             for (int64_t i = start; i < end; ++i)
                 sum += in_ptr[(n * C + c) * L_in + i];
@@ -2752,7 +2752,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             float sum = 0.0f;
             for (int64_t i = start; i < end; ++i)
                 sum += static_cast<float>(in_ptr[(n * C + c) * L_in + i]);
@@ -2767,7 +2767,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             float sum = 0.0f;
             for (int64_t i = start; i < end; ++i)
                 sum += bf16_to_f32(in_ptr[(n * C + c) * L_in + i]);
@@ -2801,7 +2801,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             int64_t cnt = end - start;
             float gv = cnt > 0 ? go[gid] / static_cast<float>(cnt) : 0.0f;
             for (int64_t i = start; i < end; ++i) {
@@ -2818,7 +2818,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             int64_t cnt = end - start;
             double gv = cnt > 0 ? go[gid] / static_cast<double>(cnt) : 0.0;
             for (int64_t i = start; i < end; ++i) {
@@ -2836,7 +2836,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             int64_t cnt = end - start;
             float gv = cnt > 0 ? static_cast<float>(go[gid]) / static_cast<float>(cnt) : 0.0f;
             for (int64_t i = start; i < end; ++i) {
@@ -2856,7 +2856,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
             int64_t start = (l * L_in) / L_out;
-            int64_t end = ((l + 1) * L_in) / L_out;
+            int64_t end = ((l + 1) * L_in + L_out - 1) / L_out;
             int64_t cnt = end - start;
             float gv = cnt > 0 ? bf16_to_f32(go[gid]) / static_cast<float>(cnt) : 0.0f;
             for (int64_t i = start; i < end; ++i) {
@@ -2918,7 +2918,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = in_p[idx];
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
                 }
             }
@@ -2947,7 +2947,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         double v = in_p[idx];
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
                 }
             }
@@ -2976,7 +2976,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = static_cast<float>(in_p[idx]);
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
                 }
             }
@@ -3005,7 +3005,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = bf16_to_f32(in_p[idx]);
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
                 }
             }
@@ -3390,16 +3390,16 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             float mx = -3.4028235e+38f; int64_t mi = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = in_p[idx];
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = mx; idx_p[gid] = mi;
         }).wait();
@@ -3413,16 +3413,16 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             double mx = -1.7976931348623157e+308; int64_t mi = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         double v = in_p[idx];
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = mx; idx_p[gid] = mi;
         }).wait();
@@ -3436,16 +3436,16 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             float mx = -3.4028235e+38f; int64_t mi = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = static_cast<float>(in_p[idx]);
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = sycl::half(mx); idx_p[gid] = mi;
         }).wait();
@@ -3459,16 +3459,16 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             float mx = -3.4028235e+38f; int64_t mi = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = bf16_to_f32(in_p[idx]);
-                        if (v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = f32_to_bf16(mx); idx_p[gid] = mi;
         }).wait();
@@ -3504,9 +3504,9 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             float sum = 0.0f; int64_t cnt = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
@@ -3524,9 +3524,9 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             double sum = 0.0; int64_t cnt = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
@@ -3544,9 +3544,9 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             float sum = 0.0f; int64_t cnt = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
@@ -3564,9 +3564,9 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             float sum = 0.0f; int64_t cnt = 0;
             for (int64_t di = ds; di < de; ++di)
                 for (int64_t hi = hs; hi < he; ++hi)
@@ -3604,9 +3604,9 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             int64_t cnt = (de - ds) * (he - hs) * (we - ws);
             float gv = cnt > 0 ? go[gid] / static_cast<float>(cnt) : 0.0f;
             for (int64_t di = ds; di < de; ++di)
@@ -3628,9 +3628,9 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             int64_t cnt = (de - ds) * (he - hs) * (we - ws);
             double gv = cnt > 0 ? go[gid] / static_cast<double>(cnt) : 0.0;
             for (int64_t di = ds; di < de; ++di)
@@ -3653,9 +3653,9 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             int64_t cnt = (de - ds) * (he - hs) * (we - ws);
             float gv = cnt > 0 ? static_cast<float>(go[gid]) / static_cast<float>(cnt) : 0.0f;
             for (int64_t di = ds; di < de; ++di)
@@ -3680,9 +3680,9 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
             const int64_t h = tmp % H_out; tmp /= H_out;
             const int64_t d = tmp % D_out; tmp /= D_out;
             const int64_t c = tmp % Ch; const int64_t n = tmp / Ch;
-            int64_t ds = (d * D_in) / D_out, de = ((d+1) * D_in) / D_out;
-            int64_t hs = (h * H_in) / H_out, he = ((h+1) * H_in) / H_out;
-            int64_t ws = (w * W_in) / W_out, we = ((w+1) * W_in) / W_out;
+            int64_t ds = (d * D_in) / D_out, de = ((d + 1) * D_in + D_out - 1) / D_out;
+            int64_t hs = (h * H_in) / H_out, he = ((h + 1) * H_in + H_out - 1) / H_out;
+            int64_t ws = (w * W_in) / W_out, we = ((w + 1) * W_in + W_out - 1) / W_out;
             int64_t cnt = (de - ds) * (he - hs) * (we - ws);
             float gv = cnt > 0 ? bf16_to_f32(go[gid]) / static_cast<float>(cnt) : 0.0f;
             for (int64_t di = ds; di < de; ++di)
@@ -3737,8 +3737,33 @@ class ZeroFillFloat64 {};
 // Fractional Max Pool 2D Forward
 // ============================================================================
 
+// F109: PyTorch FractionalMaxPool window start for output index `i` along one
+// axis. Windows are `pool`-wide (== kernel_size) and OVERLAP when pool > alpha,
+// matching torch.nn.FractionalMaxPool{2,3}d (ATen generate_intervals):
+//   alpha = (in - pool) / (out - 1)              [out > 1]
+//   start(i) = floor((i + u) * alpha) - floor(u * alpha)   [i < out-1]
+//   start(out-1) = in - pool
+// The earlier code derived each window from an adaptive-style DISJOINT ratio
+// partition (in/out) and never used the pool size, so kernel_size was a no-op.
+inline int64_t frac_pool_start_oneapi(int64_t i, int64_t in_size, int64_t out_size,
+                                      int64_t pool, float sample) {
+    int64_t start;
+    if (out_size <= 1 || i == out_size - 1) {
+        start = in_size - pool;
+    } else {
+        float alpha = static_cast<float>(in_size - pool) /
+                      static_cast<float>(out_size - 1);
+        start = static_cast<int64_t>((static_cast<float>(i) + sample) * alpha) -
+                static_cast<int64_t>(sample * alpha);
+    }
+    if (start < 0) start = 0;
+    if (start > in_size - pool) start = in_size - pool;
+    return start;
+}
+
 auto fractional_maxpool2d_forward_kernel(const Tensor& input,
                                          int64_t out_h, int64_t out_w,
+                                         int64_t kernel_h, int64_t kernel_w,
                                          const Tensor* random_samples,
                                          sycl::queue& queue)
     -> std::pair<Tensor, Tensor> {
@@ -3782,24 +3807,11 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
             float sample_h = sp ? sp[(n * C + c) * 2 + 0] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 2 + 1] : 0.5f;
 
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t h_start = static_cast<int64_t>(sycl::floor(
-                (oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end = static_cast<int64_t>(sycl::floor(
-                (oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor(
-                (ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end = static_cast<int64_t>(sycl::floor(
-                (ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            h_start = sycl::max(h_start, int64_t{0});
-            h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0});
-            w_end = sycl::min(w_end, W);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = h_start * W + w_start;
@@ -3808,7 +3820,7 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * H + h) * W + w;
                     float val = in_ptr[in_idx];
-                    if (val > max_val) {
+                    if (sycl::isnan(val) || val > max_val) {
                         max_val = val;
                         max_idx = h * W + w;
                     }
@@ -3836,24 +3848,11 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
             float sample_h = sp ? sp[(n * C + c) * 2 + 0] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 2 + 1] : 0.5f;
 
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t h_start = static_cast<int64_t>(sycl::floor(
-                (oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end = static_cast<int64_t>(sycl::floor(
-                (oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor(
-                (ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end = static_cast<int64_t>(sycl::floor(
-                (ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            h_start = sycl::max(h_start, int64_t{0});
-            h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0});
-            w_end = sycl::min(w_end, W);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             double max_val = -1.7976931348623157e+308;
             int64_t max_idx = h_start * W + w_start;
@@ -3862,7 +3861,7 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * H + h) * W + w;
                     double val = in_ptr[in_idx];
-                    if (val > max_val) {
+                    if (sycl::isnan(val) || val > max_val) {
                         max_val = val;
                         max_idx = h * W + w;
                     }
@@ -3889,24 +3888,11 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
 
             float sample_h = sp ? sp[(n * C + c) * 2 + 0] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 2 + 1] : 0.5f;
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t h_start = static_cast<int64_t>(sycl::floor(
-                (oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end = static_cast<int64_t>(sycl::floor(
-                (oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor(
-                (ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end = static_cast<int64_t>(sycl::floor(
-                (ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            h_start = sycl::max(h_start, int64_t{0});
-            h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0});
-            w_end = sycl::min(w_end, W);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = h_start * W + w_start;
@@ -3915,7 +3901,7 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * H + h) * W + w;
                     float val = static_cast<float>(in_ptr[in_idx]);
-                    if (val > max_val) {
+                    if (sycl::isnan(val) || val > max_val) {
                         max_val = val;
                         max_idx = h * W + w;
                     }
@@ -3942,24 +3928,11 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
 
             float sample_h = sp ? sp[(n * C + c) * 2 + 0] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 2 + 1] : 0.5f;
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t h_start = static_cast<int64_t>(sycl::floor(
-                (oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end = static_cast<int64_t>(sycl::floor(
-                (oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor(
-                (ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end = static_cast<int64_t>(sycl::floor(
-                (ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            h_start = sycl::max(h_start, int64_t{0});
-            h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0});
-            w_end = sycl::min(w_end, W);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = h_start * W + w_start;
@@ -3968,7 +3941,7 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * H + h) * W + w;
                     float val = bf16_to_f32(in_ptr[in_idx]);
-                    if (val > max_val) {
+                    if (sycl::isnan(val) || val > max_val) {
                         max_val = val;
                         max_idx = h * W + w;
                     }
@@ -4118,6 +4091,7 @@ auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output,
 
 auto fractional_maxpool3d_forward_kernel(const Tensor& input,
                                          int64_t out_d, int64_t out_h, int64_t out_w,
+                                         int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                                          const Tensor* random_samples,
                                          sycl::queue& queue)
     -> std::pair<Tensor, Tensor> {
@@ -4162,23 +4136,13 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
             float sample_h = sp ? sp[(n * C + c) * 3 + 1] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 3 + 2] : 0.5f;
 
-            float ratio_d = static_cast<float>(D) / static_cast<float>(out_d);
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t d_start = static_cast<int64_t>(sycl::floor((od_idx + sample_d) * ratio_d - sample_d));
-            int64_t d_end   = static_cast<int64_t>(sycl::floor((od_idx + 1 + sample_d) * ratio_d - sample_d));
-            int64_t h_start = static_cast<int64_t>(sycl::floor((oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end   = static_cast<int64_t>(sycl::floor((oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor((ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end   = static_cast<int64_t>(sycl::floor((ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            d_start = sycl::max(d_start, int64_t{0}); d_end = sycl::min(d_end, D);
-            h_start = sycl::max(h_start, int64_t{0}); h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0}); w_end = sycl::min(w_end, W);
-            if (d_end <= d_start) d_end = sycl::min(d_start + 1, D);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t d_start = frac_pool_start_oneapi(od_idx, D, out_d, kernel_d, sample_d);
+            int64_t d_end   = sycl::min(d_start + kernel_d, D);
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = (d_start * H + h_start) * W + w_start;
@@ -4188,7 +4152,7 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
                     for (int64_t w = w_start; w < w_end; ++w) {
                         int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
                         float val = in_ptr[in_idx];
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = (d * H + h) * W + w;
                         }
@@ -4219,23 +4183,13 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
             float sample_h = sp ? sp[(n * C + c) * 3 + 1] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 3 + 2] : 0.5f;
 
-            float ratio_d = static_cast<float>(D) / static_cast<float>(out_d);
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t d_start = static_cast<int64_t>(sycl::floor((od_idx + sample_d) * ratio_d - sample_d));
-            int64_t d_end   = static_cast<int64_t>(sycl::floor((od_idx + 1 + sample_d) * ratio_d - sample_d));
-            int64_t h_start = static_cast<int64_t>(sycl::floor((oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end   = static_cast<int64_t>(sycl::floor((oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor((ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end   = static_cast<int64_t>(sycl::floor((ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            d_start = sycl::max(d_start, int64_t{0}); d_end = sycl::min(d_end, D);
-            h_start = sycl::max(h_start, int64_t{0}); h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0}); w_end = sycl::min(w_end, W);
-            if (d_end <= d_start) d_end = sycl::min(d_start + 1, D);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t d_start = frac_pool_start_oneapi(od_idx, D, out_d, kernel_d, sample_d);
+            int64_t d_end   = sycl::min(d_start + kernel_d, D);
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             double max_val = -1.7976931348623157e+308;
             int64_t max_idx = (d_start * H + h_start) * W + w_start;
@@ -4245,7 +4199,7 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
                     for (int64_t w = w_start; w < w_end; ++w) {
                         int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
                         double val = in_ptr[in_idx];
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = (d * H + h) * W + w;
                         }
@@ -4276,23 +4230,13 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
             float sample_h = sp ? sp[(n * C + c) * 3 + 1] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 3 + 2] : 0.5f;
 
-            float ratio_d = static_cast<float>(D) / static_cast<float>(out_d);
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t d_start = static_cast<int64_t>(sycl::floor((od_idx + sample_d) * ratio_d - sample_d));
-            int64_t d_end   = static_cast<int64_t>(sycl::floor((od_idx + 1 + sample_d) * ratio_d - sample_d));
-            int64_t h_start = static_cast<int64_t>(sycl::floor((oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end   = static_cast<int64_t>(sycl::floor((oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor((ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end   = static_cast<int64_t>(sycl::floor((ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            d_start = sycl::max(d_start, int64_t{0}); d_end = sycl::min(d_end, D);
-            h_start = sycl::max(h_start, int64_t{0}); h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0}); w_end = sycl::min(w_end, W);
-            if (d_end <= d_start) d_end = sycl::min(d_start + 1, D);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t d_start = frac_pool_start_oneapi(od_idx, D, out_d, kernel_d, sample_d);
+            int64_t d_end   = sycl::min(d_start + kernel_d, D);
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = (d_start * H + h_start) * W + w_start;
@@ -4302,7 +4246,7 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
                     for (int64_t w = w_start; w < w_end; ++w) {
                         int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
                         float val = static_cast<float>(in_ptr[in_idx]);
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = (d * H + h) * W + w;
                         }
@@ -4333,23 +4277,13 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
             float sample_h = sp ? sp[(n * C + c) * 3 + 1] : 0.5f;
             float sample_w = sp ? sp[(n * C + c) * 3 + 2] : 0.5f;
 
-            float ratio_d = static_cast<float>(D) / static_cast<float>(out_d);
-            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
-            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
-
-            int64_t d_start = static_cast<int64_t>(sycl::floor((od_idx + sample_d) * ratio_d - sample_d));
-            int64_t d_end   = static_cast<int64_t>(sycl::floor((od_idx + 1 + sample_d) * ratio_d - sample_d));
-            int64_t h_start = static_cast<int64_t>(sycl::floor((oh_idx + sample_h) * ratio_h - sample_h));
-            int64_t h_end   = static_cast<int64_t>(sycl::floor((oh_idx + 1 + sample_h) * ratio_h - sample_h));
-            int64_t w_start = static_cast<int64_t>(sycl::floor((ow_idx + sample_w) * ratio_w - sample_w));
-            int64_t w_end   = static_cast<int64_t>(sycl::floor((ow_idx + 1 + sample_w) * ratio_w - sample_w));
-
-            d_start = sycl::max(d_start, int64_t{0}); d_end = sycl::min(d_end, D);
-            h_start = sycl::max(h_start, int64_t{0}); h_end = sycl::min(h_end, H);
-            w_start = sycl::max(w_start, int64_t{0}); w_end = sycl::min(w_end, W);
-            if (d_end <= d_start) d_end = sycl::min(d_start + 1, D);
-            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
-            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+            // F109: overlapping windows of width == kernel_size.
+            int64_t d_start = frac_pool_start_oneapi(od_idx, D, out_d, kernel_d, sample_d);
+            int64_t d_end   = sycl::min(d_start + kernel_d, D);
+            int64_t h_start = frac_pool_start_oneapi(oh_idx, H, out_h, kernel_h, sample_h);
+            int64_t h_end   = sycl::min(h_start + kernel_h, H);
+            int64_t w_start = frac_pool_start_oneapi(ow_idx, W, out_w, kernel_w, sample_w);
+            int64_t w_end   = sycl::min(w_start + kernel_w, W);
 
             float max_val = -3.4028235e+38f;
             int64_t max_idx = (d_start * H + h_start) * W + w_start;
@@ -4359,7 +4293,7 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
                     for (int64_t w = w_start; w < w_end; ++w) {
                         int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
                         float val = bf16_to_f32(in_ptr[in_idx]);
-                        if (val > max_val) {
+                        if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = (d * H + h) * W + w;
                         }
@@ -4514,6 +4448,14 @@ auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output,
 auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices,
                                  int64_t out_h, int64_t out_w,
                                  sycl::queue& queue) -> Tensor {
+    // BFloat16: widen to Float32, scatter, narrow back (mirrors the Float16
+    // branch; the op is a pure index-scatter so widening is lossless).
+    if (input.dtype() == DType::BFloat16) {
+        Tensor out = max_unpool2d_forward_kernel(input.to(DType::Float32), indices,
+                                                 out_h, out_w, queue);
+        return out.to(DType::BFloat16);
+    }
+
     auto shape = input.shape();
     const int64_t N = shape[0];
     const int64_t C = shape[1];
@@ -4591,6 +4533,14 @@ auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices,
 auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                   const std::vector<int64_t>& input_shape,
                                   sycl::queue& queue) -> Tensor {
+    // BFloat16: widen to Float32, gather, narrow back (mirrors the Float16
+    // branch; the op is a pure index-gather so widening is lossless).
+    if (grad_output.dtype() == DType::BFloat16) {
+        Tensor gi = max_unpool2d_backward_kernel(grad_output.to(DType::Float32), indices,
+                                                 input_shape, queue);
+        return gi.to(DType::BFloat16);
+    }
+
     const int64_t N = input_shape[0];
     const int64_t C = input_shape[1];
     const int64_t in_h = input_shape[2];
@@ -4667,6 +4617,14 @@ auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indic
 auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices,
                                  int64_t out_d, int64_t out_h, int64_t out_w,
                                  sycl::queue& queue) -> Tensor {
+    // BFloat16: widen to Float32, scatter, narrow back (mirrors the Float16
+    // branch; the op is a pure index-scatter so widening is lossless).
+    if (input.dtype() == DType::BFloat16) {
+        Tensor out = max_unpool3d_forward_kernel(input.to(DType::Float32), indices,
+                                                 out_d, out_h, out_w, queue);
+        return out.to(DType::BFloat16);
+    }
+
     auto shape = input.shape();
     const int64_t N = shape[0];
     const int64_t C = shape[1];
@@ -4743,6 +4701,14 @@ auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices,
 auto max_unpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                   const std::vector<int64_t>& input_shape,
                                   sycl::queue& queue) -> Tensor {
+    // BFloat16: widen to Float32, gather, narrow back (mirrors the Float16
+    // branch; the op is a pure index-gather so widening is lossless).
+    if (grad_output.dtype() == DType::BFloat16) {
+        Tensor gi = max_unpool3d_backward_kernel(grad_output.to(DType::Float32), indices,
+                                                 input_shape, queue);
+        return gi.to(DType::BFloat16);
+    }
+
     const int64_t N = input_shape[0];
     const int64_t C = input_shape[1];
     const int64_t in_d = input_shape[2];

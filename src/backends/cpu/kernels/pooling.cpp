@@ -247,7 +247,7 @@ void maxpool2d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                             if (h >= 0 && h < H && w >= 0 && w < W) {
                                 int64_t in_idx = ((n * C + c) * H + h) * W + w;
                                 Compute val = static_cast<Compute>(in_data[in_idx]);
-                                if (val > max_val) {
+                                if (std::isnan(val) || val > max_val) {
                                     max_val = val;
                                     max_idx = h * W + w;
                                 }
@@ -759,7 +759,7 @@ void adaptive_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                         for (int64_t w = w_start; w < w_end; ++w) {
                             int64_t in_idx = ((n * C + c) * H + h) * W + w;
                             Compute val = static_cast<Compute>(in_data[in_idx]);
-                            if (val > max_val) {
+                            if (std::isnan(val) || val > max_val) {
                                 max_val = val;
                                 max_idx = h * W + w;
                             }
@@ -889,7 +889,7 @@ void maxpool1d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                     if (l >= 0 && l < L) {
                         int64_t in_idx = (n * C + c) * L + l;
                         Compute val = static_cast<Compute>(in_data[in_idx]);
-                        if (val > max_val) {
+                        if (std::isnan(val) || val > max_val) {
                             max_val = val;
                             max_idx = l;
                         }
@@ -1278,7 +1278,7 @@ void adaptive_maxpool1d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                 for (int64_t l = l_start; l < l_end; ++l) {
                     int64_t in_idx = (n * C + c) * L + l;
                     Compute val = static_cast<Compute>(in_data[in_idx]);
-                    if (val > max_val) {
+                    if (std::isnan(val) || val > max_val) {
                         max_val = val;
                         max_idx = l;
                     }
@@ -1411,7 +1411,7 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                                         int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
                                         Compute val = static_cast<Compute>(in_data[in_idx]);
-                                        if (val > max_val) {
+                                        if (std::isnan(val) || val > max_val) {
                                             max_val = val;
                                             max_idx = d * H * W + h * W + w;
                                         }
@@ -1779,7 +1779,7 @@ void adaptive_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                 for (int64_t wi = w_start; wi < w_end; ++wi) {
                                     int64_t in_idx = ((n * C + c) * D + di) * H * W + hi * W + wi;
                                     Compute val = static_cast<Compute>(in_data[in_idx]);
-                                    if (val > max_val) {
+                                    if (std::isnan(val) || val > max_val) {
                                         max_val = val;
                                         max_idx = di * H * W + hi * W + wi;
                                     }
@@ -2041,41 +2041,55 @@ auto adaptive_avgpool3d_backward_kernel(const Tensor& grad_output_orig,
 // Phase 9: Fractional Max Pool 2D
 // ============================================================================
 
+// F109: PyTorch FractionalMaxPool window start for output index `i` along one
+// axis. Windows are `pool`-wide (== kernel_size) and OVERLAP when pool > alpha,
+// exactly matching torch.nn.FractionalMaxPool{2,3}d (Ben Graham arXiv:1412.6071
+// as implemented in ATen generate_intervals):
+//   alpha = (in - pool) / (out - 1)              [out > 1]
+//   start(i) = floor((i + u) * alpha) - floor(u * alpha)   [i < out-1]
+//   start(out-1) = in - pool
+// The earlier code derived each window from an adaptive-style DISJOINT ratio
+// partition (in/out) and never used the pool size, so kernel_size was a no-op.
+inline int64_t frac_pool_start(int64_t i, int64_t in_size, int64_t out_size,
+                               int64_t pool, float sample) {
+    int64_t start;
+    if (out_size <= 1 || i == out_size - 1) {
+        start = in_size - pool;
+    } else {
+        float alpha = static_cast<float>(in_size - pool) /
+                      static_cast<float>(out_size - 1);
+        start = static_cast<int64_t>((static_cast<float>(i) + sample) * alpha) -
+                static_cast<int64_t>(sample * alpha);
+    }
+    // Clamp so the pool-wide window stays inside [0, in_size).
+    if (start < 0) start = 0;
+    if (start > in_size - pool) start = in_size - pool;
+    return start;
+}
+
 template<typename T>
 void fractional_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                int64_t N, int64_t C, int64_t H, int64_t W,
                                int64_t out_h, int64_t out_w,
+                               int64_t kernel_h, int64_t kernel_w,
                                const float* samples) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     // samples layout: [N, C, 2] — fractional values in (0,1) for h and w axes
     #pragma omp parallel for collapse(2)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
-            // Generate pool region boundaries from random samples
-            // Using the disjoint-subsequence method from the paper:
-            // "Fractional Max-Pooling" by Ben Graham (arXiv:1412.6071)
             // Per-(n,c) random offset from samples
             float sample_h = samples ? samples[(n * C + c) * 2 + 0] : 0.5f;
             float sample_w = samples ? samples[(n * C + c) * 2 + 1] : 0.5f;
 
             for (int64_t oh = 0; oh < out_h; ++oh) {
                 for (int64_t ow = 0; ow < out_w; ++ow) {
-                    // Compute pool region using pseudo-random sequence
-                    int64_t h_start = static_cast<int64_t>(std::floor(
-                        (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-                    int64_t h_end = static_cast<int64_t>(std::floor(
-                        (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-                    int64_t w_start = static_cast<int64_t>(std::floor(
-                        (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-                    int64_t w_end = static_cast<int64_t>(std::floor(
-                        (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+                    // PyTorch overlapping windows of width == kernel_size.
+                    int64_t h_start = frac_pool_start(oh, H, out_h, kernel_h, sample_h);
+                    int64_t h_end   = h_start + kernel_h;
+                    int64_t w_start = frac_pool_start(ow, W, out_w, kernel_w, sample_w);
+                    int64_t w_end   = w_start + kernel_w;
 
-                    h_start = std::max(h_start, int64_t{0});
-                    h_end = std::min(h_end, H);
-                    w_start = std::max(w_start, int64_t{0});
-                    w_end = std::min(w_end, W);
-                    if (h_end <= h_start) h_end = h_start + 1;
-                    if (w_end <= w_start) w_end = w_start + 1;
                     h_end = std::min(h_end, H);
                     w_end = std::min(w_end, W);
 
@@ -2086,7 +2100,7 @@ void fractional_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                         for (int64_t w = w_start; w < w_end; ++w) {
                             int64_t in_idx = ((n * C + c) * H + h) * W + w;
                             Compute val = static_cast<Compute>(in_data[in_idx]);
-                            if (val > max_val) {
+                            if (std::isnan(val) || val > max_val) {
                                 max_val = val;
                                 max_idx = h * W + w;
                             }
@@ -2104,6 +2118,7 @@ void fractional_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
 
 auto fractional_maxpool2d_forward_kernel(const Tensor& input_orig,
                                          int64_t out_h, int64_t out_w,
+                                         int64_t kernel_h, int64_t kernel_w,
                                          const Tensor* random_samples)
     -> std::pair<Tensor, Tensor> {
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
@@ -2126,16 +2141,16 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input_orig,
 
     if (input.dtype() == DType::Float32) {
         fractional_maxpool2d_impl<float>(input.data<float>(), output.data<float>(), idx_data,
-                                          N, C, H, W, out_h, out_w, samples_ptr);
+                                          N, C, H, W, out_h, out_w, kernel_h, kernel_w, samples_ptr);
     } else if (input.dtype() == DType::Float64) {
         fractional_maxpool2d_impl<double>(input.data<double>(), output.data<double>(), idx_data,
-                                           N, C, H, W, out_h, out_w, samples_ptr);
+                                           N, C, H, W, out_h, out_w, kernel_h, kernel_w, samples_ptr);
     } else if (input.dtype() == DType::Float16) {
         fractional_maxpool2d_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
-                                            N, C, H, W, out_h, out_w, samples_ptr);
+                                            N, C, H, W, out_h, out_w, kernel_h, kernel_w, samples_ptr);
     } else if (input.dtype() == DType::BFloat16) {
         fractional_maxpool2d_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
-                                             N, C, H, W, out_h, out_w, samples_ptr);
+                                             N, C, H, W, out_h, out_w, kernel_h, kernel_w, samples_ptr);
     } else {
         throw std::runtime_error("Unsupported dtype for fractional_maxpool2d_forward");
     }
@@ -2211,6 +2226,7 @@ template<typename T>
 void fractional_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                int64_t N, int64_t C, int64_t D, int64_t H, int64_t W,
                                int64_t out_d, int64_t out_h, int64_t out_w,
+                               int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                                const float* samples) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2)
@@ -2223,28 +2239,13 @@ void fractional_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
             for (int64_t od = 0; od < out_d; ++od) {
                 for (int64_t oh = 0; oh < out_h; ++oh) {
                     for (int64_t ow = 0; ow < out_w; ++ow) {
-                        int64_t d_start = static_cast<int64_t>(std::floor(
-                            (od + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
-                        int64_t d_end = static_cast<int64_t>(std::floor(
-                            (od + 1 + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
-                        int64_t h_start = static_cast<int64_t>(std::floor(
-                            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-                        int64_t h_end = static_cast<int64_t>(std::floor(
-                            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
-                        int64_t w_start = static_cast<int64_t>(std::floor(
-                            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-                        int64_t w_end = static_cast<int64_t>(std::floor(
-                            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
-
-                        d_start = std::max(d_start, int64_t{0}); d_end = std::min(d_end, D);
-                        h_start = std::max(h_start, int64_t{0}); h_end = std::min(h_end, H);
-                        w_start = std::max(w_start, int64_t{0}); w_end = std::min(w_end, W);
-                        if (d_end <= d_start) d_end = d_start + 1;
-                        if (h_end <= h_start) h_end = h_start + 1;
-                        if (w_end <= w_start) w_end = w_start + 1;
-                        d_end = std::min(d_end, D);
-                        h_end = std::min(h_end, H);
-                        w_end = std::min(w_end, W);
+                        // PyTorch overlapping windows of width == kernel_size.
+                        int64_t d_start = frac_pool_start(od, D, out_d, kernel_d, sample_d);
+                        int64_t d_end   = std::min(d_start + kernel_d, D);
+                        int64_t h_start = frac_pool_start(oh, H, out_h, kernel_h, sample_h);
+                        int64_t h_end   = std::min(h_start + kernel_h, H);
+                        int64_t w_start = frac_pool_start(ow, W, out_w, kernel_w, sample_w);
+                        int64_t w_end   = std::min(w_start + kernel_w, W);
 
                         Compute max_val = -std::numeric_limits<Compute>::infinity();
                         int64_t max_idx = d_start * H * W + h_start * W + w_start;
@@ -2254,7 +2255,7 @@ void fractional_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
                                 for (int64_t w = w_start; w < w_end; ++w) {
                                     int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
                                     Compute val = static_cast<Compute>(in_data[in_idx]);
-                                    if (val > max_val) {
+                                    if (std::isnan(val) || val > max_val) {
                                         max_val = val;
                                         max_idx = (d * H + h) * W + w;
                                     }
@@ -2274,6 +2275,7 @@ void fractional_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
 
 auto fractional_maxpool3d_forward_kernel(const Tensor& input_orig,
                                          int64_t out_d, int64_t out_h, int64_t out_w,
+                                         int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                                          const Tensor* random_samples)
     -> std::pair<Tensor, Tensor> {
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
@@ -2293,16 +2295,16 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input_orig,
 
     if (input.dtype() == DType::Float32) {
         fractional_maxpool3d_impl<float>(input.data<float>(), output.data<float>(), idx_data,
-                                          N, C, D, H, W, out_d, out_h, out_w, samples_ptr);
+                                          N, C, D, H, W, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples_ptr);
     } else if (input.dtype() == DType::Float64) {
         fractional_maxpool3d_impl<double>(input.data<double>(), output.data<double>(), idx_data,
-                                           N, C, D, H, W, out_d, out_h, out_w, samples_ptr);
+                                           N, C, D, H, W, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples_ptr);
     } else if (input.dtype() == DType::Float16) {
         fractional_maxpool3d_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
-                                            N, C, D, H, W, out_d, out_h, out_w, samples_ptr);
+                                            N, C, D, H, W, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples_ptr);
     } else if (input.dtype() == DType::BFloat16) {
         fractional_maxpool3d_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
-                                             N, C, D, H, W, out_d, out_h, out_w, samples_ptr);
+                                             N, C, D, H, W, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples_ptr);
     } else {
         throw std::runtime_error("Unsupported dtype for fractional_maxpool3d_forward");
     }

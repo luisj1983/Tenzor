@@ -37,15 +37,15 @@ void main() {
 
     for (uint d_out = 0; d_out < params.D_out; ++d_out) {
         uint d_start = (d_out * params.D_in) / params.D_out;
-        uint d_end = ((d_out + 1) * params.D_in) / params.D_out;
+        uint d_end = ((d_out + 1) * params.D_in + params.D_out - 1) / params.D_out;
         if (d_in < d_start || d_in >= d_end) continue;
         for (uint h_out = 0; h_out < params.H_out; ++h_out) {
             uint h_start = (h_out * params.H_in) / params.H_out;
-            uint h_end = ((h_out + 1) * params.H_in) / params.H_out;
+            uint h_end = ((h_out + 1) * params.H_in + params.H_out - 1) / params.H_out;
             if (h_in < h_start || h_in >= h_end) continue;
             for (uint w_out = 0; w_out < params.W_out; ++w_out) {
                 uint w_start = (w_out * params.W_in) / params.W_out;
-                uint w_end = ((w_out + 1) * params.W_in) / params.W_out;
+                uint w_end = ((w_out + 1) * params.W_in + params.W_out - 1) / params.W_out;
                 if (w_in < w_start || w_in >= w_end) continue;
                 uint count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
                 if (count > 0u) {

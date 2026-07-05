@@ -1392,10 +1392,9 @@ kernel void gelu_kernel(
     uint id [[thread_position_in_grid]])
 {
     float x = input[id];
-    // GELU: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    float c = 0.7978845608f;  // sqrt(2/pi)
-    float inner = c * (x + 0.044715f * x * x * x);
-    output[id] = 0.5f * x * (1.0f + tanh(inner));
+    // Exact erf GELU: 0.5 * x * (1 + erf(x / sqrt(2)))  (matches CPU/CUDA/oneAPI)
+    float inv_sqrt2 = 0.70710678f;  // 1/sqrt(2)
+    output[id] = 0.5f * x * (1.0f + metal::erf(x * inv_sqrt2));
 }
 
 kernel void gelu_backward_kernel(
@@ -1404,13 +1403,14 @@ kernel void gelu_backward_kernel(
     device float* output [[buffer(2)]],
     uint id [[thread_position_in_grid]])
 {
+    // Exact GELU derivative (matches the erf forward):
+    //   gelu'(x) = 0.5 * (1 + erf(x / sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2)
     float x = input[id];
-    float c = 0.7978845608f;  // sqrt(2/pi)
-    float inner = c * (x + 0.044715f * x * x * x);
-    float t = tanh(inner);
-    float sech2 = 1.0f - t * t;
-    float d_inner = c * (1.0f + 3.0f * 0.044715f * x * x);
-    output[id] = grad[id] * (0.5f * (1.0f + t) + 0.5f * x * sech2 * d_inner);
+    float inv_sqrt2 = 0.70710678f;  // 1/sqrt(2)
+    float pdf_coef = 0.39894228f;   // 1/sqrt(2*pi)
+    float cdf = 0.5f * (1.0f + metal::erf(x * inv_sqrt2));
+    float pdf = pdf_coef * exp(-0.5f * x * x);
+    output[id] = grad[id] * (cdf + x * pdf);
 }
 
 kernel void swish_kernel(
@@ -1563,9 +1563,9 @@ kernel void gelu_kernel_f16(
     uint id [[thread_position_in_grid]])
 {
     float x = float(input[id]);
-    float c = 0.7978845608f;
-    float inner = c * (x + 0.044715f * x * x * x);
-    output[id] = half(0.5f * x * (1.0f + tanh(inner)));
+    // Exact erf GELU: 0.5 * x * (1 + erf(x / sqrt(2)))  (matches CPU/CUDA/oneAPI)
+    float inv_sqrt2 = 0.70710678f;  // 1/sqrt(2)
+    output[id] = half(0.5f * x * (1.0f + metal::erf(x * inv_sqrt2)));
 }
 
 kernel void gelu_backward_kernel_f16(
@@ -1574,13 +1574,14 @@ kernel void gelu_backward_kernel_f16(
     device half* output [[buffer(2)]],
     uint id [[thread_position_in_grid]])
 {
+    // Exact GELU derivative (matches the erf forward):
+    //   gelu'(x) = 0.5 * (1 + erf(x / sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2)
     float x = float(input[id]);
-    float c = 0.7978845608f;
-    float inner = c * (x + 0.044715f * x * x * x);
-    float t = tanh(inner);
-    float sech2 = 1.0f - t * t;
-    float d_inner = c * (1.0f + 3.0f * 0.044715f * x * x);
-    output[id] = half(float(grad[id]) * (0.5f * (1.0f + t) + 0.5f * x * sech2 * d_inner));
+    float inv_sqrt2 = 0.70710678f;  // 1/sqrt(2)
+    float pdf_coef = 0.39894228f;   // 1/sqrt(2*pi)
+    float cdf = 0.5f * (1.0f + metal::erf(x * inv_sqrt2));
+    float pdf = pdf_coef * exp(-0.5f * x * x);
+    output[id] = half(float(grad[id]) * (cdf + x * pdf));
 }
 
 kernel void swish_kernel_f16(

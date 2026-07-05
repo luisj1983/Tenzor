@@ -7,12 +7,20 @@
 // INT32_MAX for wide layers, so accumulate in int64 to avoid silent wraparound,
 // matching the CUDA quantized reference.
 // Each thread computes one output element: output[b][o]
+//
+// Per-channel (F045): when per_channel != 0 each output channel o uses
+// weight_scales[o] and weight_zps[o] (bindings 4/5) instead of the scalar
+// push-constant weight_scale / weight_zero_point. Bindings 4/5 are always bound
+// (placeholder 1-element buffers in the per-tensor case) so the descriptor set
+// is always complete.
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer InputData { int8_t input_data[]; };
 layout(binding = 1) buffer WeightData { int8_t weight_data[]; };
 layout(binding = 2) buffer BiasData { float bias_data[]; };
 layout(binding = 3) buffer OutputData { float output_data[]; };
+layout(binding = 4) readonly buffer WeightScales { float weight_scales[]; };
+layout(binding = 5) readonly buffer WeightZeroPoints { int weight_zps[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M;                 // batch_size
@@ -22,6 +30,7 @@ layout(push_constant) uniform PushConstants {
     float weight_scale;
     int input_zero_point;
     int weight_zero_point;
+    uint per_channel;       // 0 = per-tensor scalars, 1 = per-channel buffers
 } params;
 
 void main() {
@@ -31,6 +40,14 @@ void main() {
 
     uint b = idx / params.N;  // batch index
     uint o = idx % params.N;  // output feature index
+
+    // Per-channel weight scale / zero-point (each output channel o).
+    int w_zp = params.weight_zero_point;
+    float w_scale = params.weight_scale;
+    if (params.per_channel != 0u) {
+        w_scale = weight_scales[o];
+        w_zp = weight_zps[o];
+    }
 
     // Accumulate in int64
     int64_t acc = 0;
@@ -52,11 +69,11 @@ void main() {
     // sum((x_i - x_zp) * (w_j - w_zp))
     //   = sum(x_i * w_j) - x_zp * sum(w_j) - w_zp * sum(x_i) + x_zp * w_zp * K
     acc = acc - int64_t(params.input_zero_point) * sum_w
-              - int64_t(params.weight_zero_point) * sum_x
-              + int64_t(params.input_zero_point) * int64_t(params.weight_zero_point) * int64_t(params.K);
+              - int64_t(w_zp) * sum_x
+              + int64_t(params.input_zero_point) * int64_t(w_zp) * int64_t(params.K);
 
     // Dequantize to float and add bias
-    float result = float(acc) * params.input_scale * params.weight_scale;
+    float result = float(acc) * params.input_scale * w_scale;
     result += bias_data[o];
 
     output_data[idx] = result;

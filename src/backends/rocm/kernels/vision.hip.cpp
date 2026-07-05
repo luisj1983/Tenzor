@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 #include <cmath>
+#include <type_traits>
 
 namespace tenzor {
 namespace rocm {
@@ -621,6 +622,119 @@ auto fold_kernel(const Tensor& input,
     return output;
 }
 
+// ============================================================================
+// 5D forward interpolation kernels (trilinear, nearest-3d). Mirror the CUDA
+// siblings (vision.cu interpolate_trilinear_kernel / interpolate_nearest_5d_kernel)
+// 1:1 so ROCm produces identical output; the matching 5D backward already exists.
+// ============================================================================
+template<typename T>
+__global__ void interpolate_trilinear_kernel_hip(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch, int64_t channels,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w,
+    bool align_corners)
+{
+    // Compute in double for Float64 inputs to preserve FP64 precision/parity
+    // with the CPU reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
+    int64_t total = batch * channels * out_d * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        Compute z, y, x;
+        if (align_corners) {
+            z = (out_d > 1) ? static_cast<Compute>(od) * (in_d - 1) / (out_d - 1) : Compute(0);
+            y = (out_h > 1) ? static_cast<Compute>(oh) * (in_h - 1) / (out_h - 1) : Compute(0);
+            x = (out_w > 1) ? static_cast<Compute>(ow) * (in_w - 1) / (out_w - 1) : Compute(0);
+        } else {
+            Compute scale_d = static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+            Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+            Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
+            z = (od + Compute(0.5)) * scale_d - Compute(0.5);
+            y = (oh + Compute(0.5)) * scale_h - Compute(0.5);
+            x = (ow + Compute(0.5)) * scale_w - Compute(0.5);
+        }
+
+        const Compute zhi = static_cast<Compute>(in_d - 1);
+        const Compute yhi = static_cast<Compute>(in_h - 1);
+        const Compute xhi = static_cast<Compute>(in_w - 1);
+        z = z < Compute(0) ? Compute(0) : (z > zhi ? zhi : z);
+        y = y < Compute(0) ? Compute(0) : (y > yhi ? yhi : y);
+        x = x < Compute(0) ? Compute(0) : (x > xhi ? xhi : x);
+
+        int64_t z0 = static_cast<int64_t>(z);
+        int64_t y0 = static_cast<int64_t>(y);
+        int64_t x0 = static_cast<int64_t>(x);
+        int64_t z1 = min(z0 + 1, in_d - 1);
+        int64_t y1 = min(y0 + 1, in_h - 1);
+        int64_t x1 = min(x0 + 1, in_w - 1);
+
+        Compute fz = z - z0;
+        Compute fy = y - y0;
+        Compute fx = x - x0;
+
+        int64_t base = (b * channels + c) * in_d * in_h * in_w;
+
+        Compute v000 = static_cast<Compute>(input[base + z0 * in_h * in_w + y0 * in_w + x0]);
+        Compute v001 = static_cast<Compute>(input[base + z0 * in_h * in_w + y0 * in_w + x1]);
+        Compute v010 = static_cast<Compute>(input[base + z0 * in_h * in_w + y1 * in_w + x0]);
+        Compute v011 = static_cast<Compute>(input[base + z0 * in_h * in_w + y1 * in_w + x1]);
+        Compute v100 = static_cast<Compute>(input[base + z1 * in_h * in_w + y0 * in_w + x0]);
+        Compute v101 = static_cast<Compute>(input[base + z1 * in_h * in_w + y0 * in_w + x1]);
+        Compute v110 = static_cast<Compute>(input[base + z1 * in_h * in_w + y1 * in_w + x0]);
+        Compute v111 = static_cast<Compute>(input[base + z1 * in_h * in_w + y1 * in_w + x1]);
+
+        Compute result =
+            v000 * (Compute(1) - fz) * (Compute(1) - fy) * (Compute(1) - fx) +
+            v001 * (Compute(1) - fz) * (Compute(1) - fy) * fx +
+            v010 * (Compute(1) - fz) * fy * (Compute(1) - fx) +
+            v011 * (Compute(1) - fz) * fy * fx +
+            v100 * fz * (Compute(1) - fy) * (Compute(1) - fx) +
+            v101 * fz * (Compute(1) - fy) * fx +
+            v110 * fz * fy * (Compute(1) - fx) +
+            v111 * fz * fy * fx;
+
+        output[idx] = static_cast<T>(result);
+    }
+}
+
+template<typename T>
+__global__ void interpolate_nearest_5d_kernel_hip(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch, int64_t channels,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w)
+{
+    float scale_d = static_cast<float>(in_d) / out_d;
+    float scale_h = static_cast<float>(in_h) / out_h;
+    float scale_w = static_cast<float>(in_w) / out_w;
+    int64_t total = batch * channels * out_d * out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        int64_t id = min(static_cast<int64_t>(od * scale_d), in_d - 1);
+        int64_t ih = min(static_cast<int64_t>(oh * scale_h), in_h - 1);
+        int64_t iw = min(static_cast<int64_t>(ow * scale_w), in_w - 1);
+
+        int64_t in_idx = ((b * channels + c) * in_d + id) * in_h * in_w + ih * in_w + iw;
+        output[idx] = input[in_idx];
+    }
+}
+
 // Interpolate host function
 auto interpolate_kernel(const Tensor& input,
                         const std::vector<int64_t>& size,
@@ -639,10 +753,61 @@ auto interpolate_kernel(const Tensor& input,
             .to(DType::BFloat16);
     }
 
-    // Kernels index with dense NCHW offsets; materialize contiguous input.
+    // Kernels index with dense NCHW/NCDHW offsets; materialize contiguous input.
     Tensor in = input.is_contiguous() ? input : input.contiguous();
 
     auto shape = in.shape();
+
+    // Handle 5D input (trilinear / nearest-3d). Do NOT fall back to 4D — a 5D
+    // nearest previously silently dropped the depth axis. Mirrors the CUDA host.
+    if (shape.size() == 5) {
+        int64_t batch = shape[0], channels = shape[1];
+        int64_t in_d = shape[2], in_h = shape[3], in_w = shape[4];
+        int64_t out_d = size[0], out_h = size[1], out_w = size[2];
+
+        std::vector<int64_t> output_shape = {batch, channels, out_d, out_h, out_w};
+        Tensor output(output_shape, in.dtype(), in.device());
+
+        int64_t total = batch * channels * out_d * out_h * out_w;
+        int num_blocks = get_num_blocks(total);
+
+        if (mode == "trilinear") {
+            if (in.dtype() == DType::Float32) {
+                hipLaunchKernelGGL(interpolate_trilinear_kernel_hip<float>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    in.data<float>(), output.data<float>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners);
+            } else if (in.dtype() == DType::Float64) {
+                hipLaunchKernelGGL(interpolate_trilinear_kernel_hip<double>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    in.data<double>(), output.data<double>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners);
+            } else {
+                throw std::runtime_error("interpolate_kernel: Unsupported dtype");
+            }
+        } else if (mode == "nearest") {
+            if (in.dtype() == DType::Float32) {
+                hipLaunchKernelGGL(interpolate_nearest_5d_kernel_hip<float>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    in.data<float>(), output.data<float>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w);
+            } else if (in.dtype() == DType::Float64) {
+                hipLaunchKernelGGL(interpolate_nearest_5d_kernel_hip<double>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    in.data<double>(), output.data<double>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w);
+            } else {
+                throw std::runtime_error("interpolate_kernel: Unsupported dtype");
+            }
+        } else {
+            throw std::runtime_error("interpolate_kernel: Unsupported 5D mode: " + mode +
+                                     " (use 'trilinear' or 'nearest')");
+        }
+
+        HIP_CHECK(hipGetLastError());
+        return output;
+    }
+
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t in_h = shape[2];

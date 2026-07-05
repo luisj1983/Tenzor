@@ -11,8 +11,69 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cstring>
+#include <cstdint>
+#include <bit>
+#include <vector>
 
 namespace tenzor::nn {
+
+// ============================================================================
+// Endianness helpers
+//
+// The SafeTensors format is defined as little-endian: the 8-byte header length
+// prefix and every multi-byte tensor element are stored little-endian on disk.
+// On little-endian hosts (the overwhelmingly common case) all of the routines
+// below are no-ops. On big-endian hosts we byte-swap the header length and each
+// scalar component so files round-trip identically regardless of host endianness.
+// ============================================================================
+namespace {
+
+constexpr bool kHostIsBigEndian = (std::endian::native == std::endian::big);
+
+// Width (in bytes) of the scalar component to byte-swap for endianness. Complex
+// values are two real components stored back-to-back, so each half must be
+// swapped independently to keep every scalar little-endian.
+inline size_t endian_component_width(DType dtype) {
+    switch (dtype) {
+        case DType::Complex64:  return 4;  // two float32
+        case DType::Complex128: return 8;  // two float64
+        default:                return dtype_size(dtype);
+    }
+}
+
+inline void byteswap_in_place(uint8_t* p, size_t width) {
+    for (size_t i = 0; i < width / 2; ++i) {
+        std::swap(p[i], p[width - 1 - i]);
+    }
+}
+
+// In-place conversion between host order and little-endian for a raw element
+// buffer. Symmetric (its own inverse), so used for both save and load. No-op on
+// little-endian hosts and for 1-byte components (int8/uint8/bool/fp8/packed).
+inline void convert_endianness(void* data, size_t nbytes, DType dtype) {
+    if constexpr (!kHostIsBigEndian) {
+        (void)data; (void)nbytes; (void)dtype;
+        return;
+    } else {
+        const size_t w = endian_component_width(dtype);
+        if (w <= 1) return;
+        auto* p = static_cast<uint8_t*>(data);
+        for (size_t off = 0; off + w <= nbytes; off += w) {
+            byteswap_in_place(p + off, w);
+        }
+    }
+}
+
+// Convert a u64 between host order and little-endian (symmetric).
+inline uint64_t u64_host_le(uint64_t v) {
+    if constexpr (kHostIsBigEndian) {
+        return __builtin_bswap64(v);
+    } else {
+        return v;
+    }
+}
+
+} // namespace
 
 // ============================================================================
 // DType <-> SafeTensors string mapping
@@ -304,8 +365,8 @@ void SafeTensorsSerializer::save(
         throw std::runtime_error("SafeTensors: cannot open file for writing: " + path);
     }
 
-    // Write header size (8 bytes, little-endian)
-    uint64_t header_size = header_json.size();
+    // Write header size (8 bytes, little-endian per spec)
+    uint64_t header_size = u64_host_le(header_json.size());
     file.write(reinterpret_cast<const char*>(&header_size), 8);
 
     // Write JSON header
@@ -317,7 +378,18 @@ void SafeTensorsSerializer::save(
                             ? tensor->to(Device::cpu()) : *tensor;
         Tensor contiguous = cpu_tensor.is_contiguous() ? cpu_tensor : cpu_tensor.contiguous();
         size_t nbytes = contiguous.numel() * dtype_size(contiguous.dtype());
-        file.write(static_cast<const char*>(contiguous.data_ptr()), static_cast<std::streamsize>(nbytes));
+        if constexpr (kHostIsBigEndian) {
+            // Big-endian host: emit a little-endian copy without mutating the
+            // tensor's own storage.
+            const auto* src = static_cast<const uint8_t*>(contiguous.data_ptr());
+            std::vector<uint8_t> le(src, src + nbytes);
+            convert_endianness(le.data(), nbytes, contiguous.dtype());
+            file.write(reinterpret_cast<const char*>(le.data()),
+                       static_cast<std::streamsize>(nbytes));
+        } else {
+            file.write(static_cast<const char*>(contiguous.data_ptr()),
+                       static_cast<std::streamsize>(nbytes));
+        }
     }
 
     if (!file.good()) {
@@ -343,9 +415,10 @@ auto SafeTensorsSerializer::load(const std::string& path)
         throw std::runtime_error("SafeTensors: file too small: " + path);
     }
 
-    // Read header size
+    // Read header size (stored little-endian per spec)
     uint64_t header_size = 0;
     file.read(reinterpret_cast<char*>(&header_size), 8);
+    header_size = u64_host_le(header_size);
 
     // Validate header size
     if (header_size > 100 * 1024 * 1024) { // 100MB max header
@@ -472,6 +545,8 @@ auto SafeTensorsSerializer::load(const std::string& path)
         file.seekg(static_cast<std::streamoff>(data_section_start + meta.data_start));
         file.read(static_cast<char*>(tensor.data_ptr()),
                   static_cast<std::streamsize>(data_size));
+        // On-disk bytes are little-endian; normalize to host order (no-op on LE).
+        convert_endianness(tensor.data_ptr(), data_size, meta.dtype);
 
         result[name] = std::move(tensor);
     }
@@ -487,10 +562,11 @@ auto SafeTensorsSerializer::is_valid_file(const std::string& path) -> bool {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) return false;
 
-    // Read header size
+    // Read header size (stored little-endian per spec)
     uint64_t header_size = 0;
     file.read(reinterpret_cast<char*>(&header_size), 8);
     if (!file.good()) return false;
+    header_size = u64_host_le(header_size);
 
     // Sanity check: header shouldn't be impossibly large
     if (header_size > 100 * 1024 * 1024) return false;

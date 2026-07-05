@@ -625,12 +625,15 @@ __global__ void cdist_l2_kernel_impl(const T* x1, const T* x2,
 
     const T* a_b = x1 + b * P * M;
     const T* b_b = x2 + b * R * M;
-    T sum = T(0);
+    // F130: accumulate the sum of squared differences in double even for T=float
+    // so Float32 cdist(p=2) matches the CPU reference (which widens each diff to
+    // double). For T=double this is unchanged. Clamp to >=0 before sqrt like CPU.
+    double sum = 0.0;
     for (int64_t m = 0; m < M; ++m) {
-        T diff = a_b[p * M + m] - b_b[r * M + m];
+        double diff = static_cast<double>(a_b[p * M + m]) - static_cast<double>(b_b[r * M + m]);
         sum += diff * diff;
     }
-    output[(b * P + p) * R + r] = sqrt(sum);
+    output[(b * P + p) * R + r] = static_cast<T>(sqrt(sum > 0.0 ? sum : 0.0));
 }
 
 template <typename T>

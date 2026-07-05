@@ -17,6 +17,34 @@ namespace tenzor {
 namespace nn {
 namespace compression {
 
+namespace {
+
+// Distillation precision rule (F081): widen Float16/BFloat16 to Float32 for
+// numerical stability, but NEVER downcast Float64 — it is already more precise
+// than Float32. Both operands of every op must share a dtype, so the shared
+// "compute" dtype of a (student, teacher) pair is Float64 when either input is
+// Float64, otherwise Float32 (which also widens any F16/BF16 input). Mirrors
+// the widen logic in temperature_softmax().
+inline DType distill_shared_dtype(DType a, DType b) {
+    if (a == DType::Float64 || b == DType::Float64) return DType::Float64;
+    return DType::Float32;
+}
+
+// Student cast: autograd-aware (backward must reach the student params). No-op
+// when already at the target dtype so we don't insert a needless cast node.
+inline Variable cast_student(const Variable& v, DType target) {
+    return (v.tensor().dtype() == target) ? v : nn::variable_cast(v, target);
+}
+
+// Teacher cast: teacher is a frozen reference, so wrap detached (no gradients).
+inline Variable cast_teacher(const Variable& v, DType target) {
+    return (v.tensor().dtype() == target)
+        ? Variable(v.tensor(), false)
+        : Variable(v.tensor().to(target), false);
+}
+
+}  // namespace
+
 // =============================================================================
 // Temperature-Scaled Softmax
 // =============================================================================
@@ -108,15 +136,15 @@ auto distillation_loss(
     float T = config.temperature;
     float alpha = config.alpha;
 
-    // Only cast Float16 to Float32 for numerical stability.
+    // Widen F16/BF16 to F32 for numerical stability, but keep F64 as F64 (never
+    // downcast), and make student and teacher share a dtype so every op below
+    // has matching operands (F081).
     // Student side: autograd-aware cast so backward reaches the student params.
     // Teacher side: no-grad wrap (teacher is a frozen reference).
-    Variable student_logits_cast = nn::variable_cast(student_logits, DType::Float32);
-
-    auto teacher_dtype = teacher_logits.tensor().dtype();
-    Variable teacher_logits_cast = (teacher_dtype == DType::Float16)
-        ? Variable(teacher_logits.tensor().to(DType::Float32), false)
-        : Variable(teacher_logits.tensor(), false);  // Teacher never needs gradients
+    const DType compute_dtype = distill_shared_dtype(
+        student_logits.tensor().dtype(), teacher_logits.tensor().dtype());
+    Variable student_logits_cast = cast_student(student_logits, compute_dtype);
+    Variable teacher_logits_cast = cast_teacher(teacher_logits, compute_dtype);
 
     // Compute soft target loss (KL divergence)
     Variable soft_loss;
@@ -200,6 +228,11 @@ auto distillation_loss(
             targets_onehot = targets.value();
         }
 
+        // Match the one-hot target dtype to the (possibly F64) student compute
+        // dtype so CrossEntropyLoss's internal ops have matching operands.
+        if (targets_onehot.dtype() != student_logits_cast.tensor().dtype()) {
+            targets_onehot = targets_onehot.to(student_logits_cast.tensor().dtype());
+        }
         auto ce_loss = CrossEntropyLoss(Reduction::Mean);
         Variable hard_loss = ce_loss(student_logits_cast, targets_onehot);
 
@@ -267,10 +300,13 @@ auto feature_distillation_loss(
     const Variable& teacher_features,
     const std::string& loss_type
 ) -> Variable {
-    // Cast to Float32 for consistent dtype. Student needs autograd-aware cast
-    // so backward reaches the student params; teacher is a frozen reference.
-    Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
-    Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
+    // Widen F16/BF16 to F32 for consistent, stable dtype, but keep F64 as F64
+    // (never downcast). Student needs autograd-aware cast so backward reaches
+    // the student params; teacher is a frozen reference (F081).
+    const DType compute_dtype = distill_shared_dtype(
+        student_features.tensor().dtype(), teacher_features.tensor().dtype());
+    Variable student_fp32 = cast_student(student_features, compute_dtype);
+    Variable teacher_fp32 = cast_teacher(teacher_features, compute_dtype);
 
     if (loss_type == "mse") {
         // Mean squared error between features, reduced to a scalar via the
@@ -311,10 +347,13 @@ auto attention_transfer_loss(
     // flows back to the student parameters (the teacher branch is detached via
     // the requires_grad=false cast).
     //
-    // Cast to Float32 for consistent dtype. Student needs an autograd-aware
-    // cast so backward reaches the student params; teacher is a frozen ref.
-    Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
-    Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
+    // Widen F16/BF16 to F32 for a stable, consistent dtype, but keep F64 as F64
+    // (never downcast). Student needs an autograd-aware cast so backward reaches
+    // the student params; teacher is a frozen ref (F081).
+    const DType compute_dtype = distill_shared_dtype(
+        student_features.tensor().dtype(), teacher_features.tensor().dtype());
+    Variable student_fp32 = cast_student(student_features, compute_dtype);
+    Variable teacher_fp32 = cast_teacher(teacher_features, compute_dtype);
 
     const auto& in_shape = student_fp32.tensor().shape();
     const int64_t rank = static_cast<int64_t>(in_shape.size());
@@ -392,13 +431,24 @@ auto multi_teacher_distillation(
         weights.resize(teacher_logits_list.size(), 1.0f / teacher_logits_list.size());
     }
 
-    // Cast first teacher to Float32 and average teacher predictions
-    Variable avg_teacher(teacher_logits_list[0].tensor().to(DType::Float32), false);
+    // Pick a common teacher dtype: F64 if ANY teacher is F64 (never downcast),
+    // otherwise F32 (which widens any F16/BF16 teacher). All teachers cast to
+    // this shared dtype so the weighted average has matching operands (F081).
+    DType teacher_dtype = DType::Float32;
+    for (const auto& t : teacher_logits_list) {
+        if (t.tensor().dtype() == DType::Float64) {
+            teacher_dtype = DType::Float64;
+            break;
+        }
+    }
+
+    // Cast first teacher and average teacher predictions
+    Variable avg_teacher(teacher_logits_list[0].tensor().to(teacher_dtype), false);
     avg_teacher = avg_teacher * weights[0];
 
     for (size_t i = 1; i < teacher_logits_list.size(); ++i) {
-        // Cast each teacher to Float32 before adding
-        Variable teacher_fp32(teacher_logits_list[i].tensor().to(DType::Float32), false);
+        // Cast each teacher to the shared dtype before adding
+        Variable teacher_fp32(teacher_logits_list[i].tensor().to(teacher_dtype), false);
         avg_teacher = avg_teacher + (teacher_fp32 * weights[i]);
     }
 
@@ -433,12 +483,13 @@ auto kl_divergence(
     // p ∈ (0, eps], the error is bounded by p * |log(eps) - log(p)| which is
     // < 1e-10 * 23 ≈ 2e-9 — well below float precision.
 
-    Variable log_q = nn::variable_cast(log_predictions, DType::Float32);
-
-    auto target_dtype = targets.tensor().dtype();
-    Variable p = (target_dtype == DType::Float16)
-        ? Variable(targets.tensor().to(DType::Float32), false)
-        : Variable(targets.tensor(), false);
+    // Widen F16/BF16 to F32 but keep F64, and make log_q (student) and p
+    // (teacher) share a dtype so `p * (log_p - log_q)` has matching operands
+    // rather than a mixed F32/F64 op (F081).
+    const DType compute_dtype = distill_shared_dtype(
+        log_predictions.tensor().dtype(), targets.tensor().dtype());
+    Variable log_q = cast_student(log_predictions, compute_dtype);
+    Variable p = cast_teacher(targets, compute_dtype);
 
     constexpr float EPSILON = 1e-10f;
     auto p_safe = ::tenzor::clamp(p, EPSILON, 1.0f);   // autograd-aware (p has no grad)
@@ -451,20 +502,27 @@ auto kl_divergence(
     // [eps, 1] above already keeps every term finite.
     auto kl = p * (log_p - log_q);                     // autograd flows through log_q
 
-    // Apply reduction
+    // Apply reduction.
+    //
+    // KL(P||Q) is >= 0 by Gibbs' inequality, but the per-element terms
+    // p*(log p - log q) are individually signed and the REDUCED sum can land a
+    // few ULPs below zero (e.g. ~-2e-8) when P == Q numerically — here P and Q
+    // come from softmax/log_softmax of shift-equal logits, which are equal in
+    // exact arithmetic but not bit-identical across the two op paths. Enforce
+    // the mathematical invariant on the reduced scalar with relu (identity for
+    // any genuinely positive divergence, so gradients of real cases are
+    // unaffected). The elementwise ("none") result is left signed on purpose.
     if (reduction == "none") {
         return kl;
     } else if (reduction == "sum") {
-        // Sum all elements
-        return sum(kl);
+        return nn::relu(sum(kl));
     } else if (reduction == "mean") {
-        // Mean over all elements
-        return mean(kl);
+        return nn::relu(mean(kl));
     } else if (reduction == "batchmean") {
         // Sum over elements, divide by batch size
         auto total = sum(kl);
         int64_t batch_size = p.tensor().shape()[0];
-        return total / static_cast<float>(batch_size);
+        return nn::relu(total / static_cast<float>(batch_size));
     } else {
         throw std::runtime_error("Unknown reduction type: " + reduction);
     }
@@ -481,10 +539,13 @@ auto cosine_similarity_loss(
     // full per-sample feature vector. All ops are autograd-aware so the
     // gradient reaches the student params (teacher is a frozen reference).
     //
-    // Cast to Float32 for consistent dtype. Student needs an autograd-aware
-    // cast so backward reaches the student params; teacher is a frozen ref.
-    Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
-    Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
+    // Widen F16/BF16 to F32 for a stable, consistent dtype, but keep F64 as F64
+    // (never downcast). Student needs an autograd-aware cast so backward reaches
+    // the student params; teacher is a frozen ref (F081).
+    const DType compute_dtype = distill_shared_dtype(
+        student_features.tensor().dtype(), teacher_features.tensor().dtype());
+    Variable student_fp32 = cast_student(student_features, compute_dtype);
+    Variable teacher_fp32 = cast_teacher(teacher_features, compute_dtype);
 
     const auto& in_shape = student_fp32.tensor().shape();
     const int64_t rank = static_cast<int64_t>(in_shape.size());

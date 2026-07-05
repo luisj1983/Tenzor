@@ -7,12 +7,18 @@
 // exceed INT32_MAX for wide layers, so accumulate in int64 to avoid silent
 // wraparound, matching the CUDA quantized reference.
 // Each thread computes one output element: output[n][oc][oh][ow]
+//
+// F044: supports per-axis kernel size (rectangular), per-axis stride/padding/
+// dilation (asymmetric), and grouped convolution — matching the CPU/CUDA kernels.
+// F045: per-channel weight scale/zero-point (bindings 4/5) when per_channel != 0.
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer InputData { int8_t input_data[]; };
 layout(binding = 1) buffer WeightData { int8_t weight_data[]; };
 layout(binding = 2) buffer BiasData { float bias_data[]; };
 layout(binding = 3) buffer OutputData { float output_data[]; };
+layout(binding = 4) readonly buffer WeightScales { float weight_scales[]; };
+layout(binding = 5) readonly buffer WeightZeroPoints { int weight_zps[]; };
 
 layout(push_constant) uniform PushConstants {
     uint batch;
@@ -22,13 +28,20 @@ layout(push_constant) uniform PushConstants {
     uint w_in;
     uint h_out;
     uint w_out;
-    uint kernel_size;
-    uint stride;
-    uint padding;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
+    uint groups;
     float input_scale;
     float weight_scale;
     int input_zero_point;
     int weight_zero_point;
+    uint per_channel;       // 0 = per-tensor scalars, 1 = per-channel buffers
 } params;
 
 void main() {
@@ -43,20 +56,37 @@ void main() {
     uint oc = temp % params.out_channels;
     uint n  = temp / params.out_channels;
 
+    // Grouped convolution: each output channel reads only its group's input
+    // channels. Weight is laid out [out_channels, in_channels/groups, kh, kw].
+    uint in_ch_per_group  = params.in_channels / params.groups;
+    uint out_ch_per_group = params.out_channels / params.groups;
+    uint group            = oc / out_ch_per_group;
+    uint ic_start         = group * in_ch_per_group;
+
+    // Per-channel weight scale / zero-point (each output channel oc).
+    int w_zp = params.weight_zero_point;
+    float w_scale = params.weight_scale;
+    if (params.per_channel != 0u) {
+        w_scale = weight_scales[oc];
+        w_zp = weight_zps[oc];
+    }
+
     int64_t acc = 0;
     int64_t sum_x = 0;
     int64_t sum_w = 0;
     int pad_count = 0;
 
-    for (uint ic = 0; ic < params.in_channels; ++ic) {
-        for (uint kh = 0; kh < params.kernel_size; ++kh) {
-            for (uint kw = 0; kw < params.kernel_size; ++kw) {
-                int ih = int(oh * params.stride) - int(params.padding) + int(kh);
-                int iw = int(ow * params.stride) - int(params.padding) + int(kw);
+    for (uint icg = 0; icg < in_ch_per_group; ++icg) {
+        uint ic = ic_start + icg;  // absolute input channel
+        for (uint kh = 0; kh < params.kernel_h; ++kh) {
+            for (uint kw = 0; kw < params.kernel_w; ++kw) {
+                int ih = int(oh * params.stride_h) - int(params.pad_h) + int(kh * params.dil_h);
+                int iw = int(ow * params.stride_w) - int(params.pad_w) + int(kw * params.dil_w);
 
                 if (ih >= 0 && ih < int(params.h_in) && iw >= 0 && iw < int(params.w_in)) {
                     uint input_idx = ((n * params.in_channels + ic) * params.h_in + uint(ih)) * params.w_in + uint(iw);
-                    uint weight_idx = ((oc * params.in_channels + ic) * params.kernel_size + kh) * params.kernel_size + kw;
+                    // Weight uses the group-local input-channel index (icg).
+                    uint weight_idx = ((oc * in_ch_per_group + icg) * params.kernel_h + kh) * params.kernel_w + kw;
 
                     int64_t iv = int64_t(input_data[input_idx]);
                     int64_t wv = int64_t(weight_data[weight_idx]);
@@ -70,11 +100,12 @@ void main() {
         }
     }
 
-    // Zero-point correction for non-padded positions
-    uint K = params.in_channels * params.kernel_size * params.kernel_size;
+    // Zero-point correction for non-padded positions. K is the per-group
+    // receptive field (in_channels_per_group * kernel_h * kernel_w).
+    uint K = in_ch_per_group * params.kernel_h * params.kernel_w;
     acc = acc - int64_t(params.input_zero_point) * sum_w
-              - int64_t(params.weight_zero_point) * sum_x
-              + int64_t(params.input_zero_point) * int64_t(params.weight_zero_point)
+              - int64_t(w_zp) * sum_x
+              + int64_t(params.input_zero_point) * int64_t(w_zp)
                 * int64_t(int(K) - pad_count);
 
     // Padded taps contribute exactly 0 (input is padded with the input zero-point,
@@ -83,7 +114,7 @@ void main() {
     // added here — matching the CPU/CUDA references.
 
     // Dequantize to float and add bias
-    float result = float(acc) * params.input_scale * params.weight_scale;
+    float result = float(acc) * params.input_scale * w_scale;
     result += bias_data[oc];
 
     output_data[idx] = result;

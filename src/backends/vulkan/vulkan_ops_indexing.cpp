@@ -43,15 +43,15 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     const Tensor indices_packed = dispatchContiguous(indices);
 
     // Validate indices host-side so genuinely buggy user code raises the same
-    // std::out_of_range as the CPU reference (nn_kernels.cpp) instead of the
-    // shader silently writing zero rows. Negative indices are normalized
-    // (-1 -> num_embeddings-1) exactly as the CPU path and the shader do.
+    // std::out_of_range as the CPU reference (nn::Embedding, embedding.cpp:106)
+    // instead of the shader silently writing zero/wrapped rows. The CPU path
+    // throws on ANY index outside [0, num_embeddings) — it does NOT wrap
+    // negatives — so match that exactly here (and the now-consistent oneAPI
+    // backend) rather than the previous silent -1 -> num_embeddings-1 wrap.
     {
         Tensor idx_host = indices_packed.to(Device::cpu());
         auto check_range = [&](int64_t raw) {
-            int64_t v = raw;
-            if (v < 0) v += static_cast<int64_t>(num_embeddings);
-            if (v < 0 || v >= static_cast<int64_t>(num_embeddings)) {
+            if (raw < 0 || raw >= static_cast<int64_t>(num_embeddings)) {
                 throw std::out_of_range(
                     "Embedding index " + std::to_string(raw) + " out of range [0, " +
                     std::to_string(num_embeddings) + ")");

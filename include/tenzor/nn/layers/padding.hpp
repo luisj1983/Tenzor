@@ -168,6 +168,33 @@ private:
     int64_t padding_bottom_;
 };
 
+/**
+ * @brief 3D reflection padding layer.
+ *
+ * Pads using reflection of the input boundary on the last three dimensions
+ * (width, height, depth). Composed from the same autograd-aware slice/flip/cat
+ * primitives as ReflectionPad2d, so it is backend-agnostic.
+ *
+ * @code
+ * ReflectionPad3d pad({1, 1, 1, 1, 1, 1});  // left, right, top, bottom, front, back
+ * @endcode
+ */
+class ReflectionPad3d : public Module {
+public:
+    /**
+     * @param padding Six-element array: (left, right, top, bottom, front, back)
+     */
+    explicit ReflectionPad3d(std::vector<int64_t> padding);
+
+    /// Symmetric padding convenience constructor
+    explicit ReflectionPad3d(int64_t padding);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    std::vector<int64_t> padding_;  ///< [left, right, top, bottom, front, back]
+};
+
 // ============================================================================
 // Replication Padding
 // ============================================================================

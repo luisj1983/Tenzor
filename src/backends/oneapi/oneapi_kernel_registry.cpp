@@ -624,11 +624,13 @@ namespace oneapi {
 
     // ---- Fractional Max Pool + Max Unpool operations (kernels/pooling.cpp) ----
     auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w,
+                                             int64_t kernel_h, int64_t kernel_w,
                                              const Tensor* random_samples, sycl::queue& queue)
         -> std::pair<Tensor, Tensor>;
     auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                               const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
     auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
+                                             int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                                              const Tensor* random_samples, sycl::queue& queue)
         -> std::pair<Tensor, Tensor>;
     auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
@@ -810,12 +812,17 @@ namespace oneapi {
                                  float input_scale, int32_t input_zero_point,
                                  float weight_scale, int32_t weight_zero_point,
                                  float output_scale, int32_t output_zero_point,
-                                 sycl::queue& queue) -> Tensor;
+                                 sycl::queue& queue,
+                                 const Tensor* weight_scales = nullptr,
+                                 const Tensor* weight_zps = nullptr) -> Tensor;
     auto quantized_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                                 int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                                 int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w,
+                                 int64_t dil_h, int64_t dil_w, int64_t groups,
                                  float input_scale, int32_t input_zero_point,
                                  float weight_scale, int32_t weight_zero_point,
-                                 sycl::queue& queue) -> Tensor;
+                                 sycl::queue& queue,
+                                 const Tensor* weight_scales = nullptr,
+                                 const Tensor* weight_zps = nullptr) -> Tensor;
 
     // ---- Full-sequence RNN operations (kernels/rnn.cpp) ----
     auto lstm_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
@@ -3765,81 +3772,22 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return tenzor::dispatch(OpId::FusedAttention, fa_inputs, fa_attrs);
         }
 
-        if (score_mod_id == 2) {
-            int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-            if (window_size <= 0) {
-                throw std::invalid_argument(
-                    "FlexAttention OneAPI: ScoreModId=2 requires AttrKey::WindowSize > 0.");
-            }
-            const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
-            int64_t S_q = Q.shape()[Q.shape().size() - 2];
-            int64_t S_k = K.shape()[K.shape().size() - 2];
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
-            int64_t half = window_size / 2;
-            Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-            Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-            Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
-            Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
-            Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-            Tensor half_t = tenzor::full({1}, static_cast<double>(half),
-                                          abs_diff.dtype(), abs_diff.device());
-            Tensor outside = tenzor::gt(abs_diff, half_t);
-            // where-based masking, not scores + outside*(-inf): for kept
-            // positions outside is 0.0 and 0.0 * -inf = NaN, which would
-            // corrupt every kept score before softmax.
-            Tensor neg_inf = tenzor::full(scores_shape,
-                -std::numeric_limits<float>::infinity(),
-                scores.dtype(), scores.device());
-            scores = tenzor::where(outside, neg_inf, scores);
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {scores};
-            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-            Tensor output = tenzor::bmm(probs, V);
-            return std::vector<Tensor>{output, Tensor{}};
-        }
-
-        // F14: ScoreModId >= 3 routes through the process-wide score_mod
-        // registry populated by `tenzor::nn::register_score_mod` (the same
-        // mechanism the CPU FlexAttention uses for user-defined functors).
-        // Forward composes Q@K^T → user-functor → softmax → @V, mirroring
-        // the CPU path.
-        if (score_mod_id >= 3) {
-            auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-            if (!fn) {
-                throw std::runtime_error(
-                    "FlexAttention OneAPI: no user score_mod registered for ScoreModId=" +
-                    std::to_string(score_mod_id) +
-                    ". Register via tenzor::nn::register_score_mod(id, fn) before dispatch.");
-            }
-            const Tensor& Q = inputs[0]; const Tensor& K = inputs[1]; const Tensor& V = inputs[2];
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
-            // Block indices are placeholders (the contract signature accepts them
-            // for partition-aware functors; OneAPI dispatches the whole tile at
-            // once so all four are 0).
-            Tensor modified = fn(scores, /*b=*/0, /*h=*/0, /*q_start=*/0, /*kv_start=*/0);
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {modified};
-            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-            Tensor output = tenzor::bmm(probs, V);
-            return std::vector<Tensor>{output, Tensor{}};
+        // ScoreModId 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
+        // sliding_window_sym, user_lambda) and user-registered functors (>= 8)
+        // go through the shared, device-agnostic composed-ops forward. The
+        // tenzor:: ops inside dispatch to OneAPI automatically (Q/K/V live on
+        // OneAPI), so OneAPI runs bit-for-bit the same math as the CPU
+        // reference and every other backend (F018/F019/F023/F024). This also
+        // fixes the user-functor path that previously returned an empty LSE.
+        if (score_mod_id >= 2) {
+            return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
         }
 
         throw std::runtime_error(
             "FlexAttention OneAPI: ScoreModId=" + std::to_string(score_mod_id) +
-            " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window; "
-            "register user IDs >= 3 via tenzor::nn::register_score_mod).");
+            " not recognised (built-ins: 0=identity, 1=causal, 2=sliding_window, "
+            "3=relpos_bias, 4=alibi, 5=prefix_lm, 6=sliding_window_sym, "
+            "7=user_lambda; user IDs >= 8 via tenzor::nn::register_score_mod).");
     });
 
     table.register_kernel(OpId::FlexAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -3858,101 +3806,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         }
 
-        if (score_mod_id == 2 || score_mod_id >= 3) {
-            // Composed backward: inputs are [dO, Q, K, V, O, (L)] — exact same
-            // layout as FlashAttentionBackward expects. We replay the
-            // forward to recover the masked scores, then compute
-            // (dQ, dK, dV) via the standard chain.
-            const Tensor& dO = inputs[0];
-            const Tensor& Q = inputs[1];
-            const Tensor& K = inputs[2];
-            const Tensor& V = inputs[3];
-            // O = inputs[4] is the saved forward output; L = inputs[5] may
-            // be invalid (composed forward emits Tensor{}). Recompute
-            // attn_weights from scratch — cheap relative to the full bmm
-            // chain.
-            Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);
-            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
-            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
-                                           scores.dtype(), scores.device());
-            scores = scores * scale_t;
-
-            if (score_mod_id == 2) {
-                int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
-                if (window_size <= 0) {
-                    throw std::invalid_argument(
-                        "FlexAttentionBackward OneAPI: ScoreModId=2 requires AttrKey::WindowSize > 0.");
-                }
-                int64_t S_q = Q.shape()[Q.shape().size() - 2];
-                int64_t S_k = K.shape()[K.shape().size() - 2];
-                int64_t half = window_size / 2;
-                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
-                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
-                Tensor rows_2d = tenzor::reshape(rows.to(DType::Float32), std::vector<int64_t>{S_q, 1});
-                Tensor cols_2d = tenzor::reshape(cols.to(DType::Float32), std::vector<int64_t>{1, S_k});
-                Tensor abs_diff = tenzor::abs(tenzor::sub(rows_2d, cols_2d));
-                Tensor half_t = tenzor::full({1}, static_cast<double>(half),
-                                              abs_diff.dtype(), abs_diff.device());
-                Tensor outside = tenzor::gt(abs_diff, half_t);
-                // where-based masking must mirror the forward exactly: kept
-                // positions keep their finite score (mask false), masked
-                // positions get -inf. The additive outside*(-inf) form yields
-                // 0.0 * -inf = NaN on kept positions and would propagate NaN
-                // into dQ/dK/dV.
-                Tensor neg_inf = tenzor::full(scores_shape,
-                    -std::numeric_limits<float>::infinity(),
-                    scores.dtype(), scores.device());
-                scores = tenzor::where(outside, neg_inf, scores);
-            } else {
-                auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
-                if (!fn) {
-                    throw std::runtime_error(
-                        "FlexAttentionBackward OneAPI: no user score_mod registered for ScoreModId=" +
-                        std::to_string(score_mod_id));
-                }
-                scores = fn(scores, 0, 0, 0, 0);
-            }
-
-            // Recompute attention weights and forward output.
-            NewOpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            std::vector<Tensor> sm_in = {scores};
-            Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
-
-            // dV = attn^T @ dO
-            Tensor attn_t = tenzor::transpose(attn, -1, -2);
-            Tensor dV = tenzor::bmm(attn_t, dO);
-
-            // dAttn = dO @ V^T
-            Tensor Vt = tenzor::transpose(V, -1, -2);
-            Tensor dAttn = tenzor::bmm(dO, Vt);
-
-            // dScores = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
-            Tensor ad = tenzor::mul(attn, dAttn);
-            NewOpAttributes sum_attrs;
-            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-            sum_attrs.set(AttrKey::Keepdim, true);
-            std::vector<Tensor> sum_inputs = {ad};
-            Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
-            Tensor dScores = tenzor::mul(attn, tenzor::sub(dAttn, sum_ad));
-
-            // Apply scale to grad: dScores carries the mask gradient through
-            // (positions where scores were -inf produced attn==0, so the
-            // backward gradient for those positions is naturally zero via
-            // the multiplication by attn).
-            Tensor scale_t2 = tenzor::full(
-                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
-                static_cast<double>(scale), dScores.dtype(), dScores.device());
-            dScores = tenzor::mul(dScores, scale_t2);
-
-            // dQ = dScores @ K
-            Tensor dQ = tenzor::bmm(dScores, K);
-            // dK = dScores^T @ Q
-            Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
-            Tensor dK = tenzor::bmm(dScores_t, Q);
-
-            return {dQ, dK, dV};
+        if (score_mod_id >= 2) {
+            // ScoreModId 2-7 and user functors (>= 8): shared, device-agnostic
+            // composed backward (replays forward, softmax-attention chain rule).
+            // Same helper as the CPU reference and every other backend, so
+            // forward/backward stay mutually consistent (F018/F023/F024).
+            return tenzor::nn::flex_attention_score_mod_backward(inputs, attrs);
         }
 
         throw std::runtime_error(
@@ -5264,13 +5123,6 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::QuantizedLinear,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        if (inputs.size() >= 4) {
-            throw std::invalid_argument(
-                "QuantizedLinear (GPU): per-channel weight scale/zero-point "
-                "(inputs[3]/[4]) is not supported by this backend kernel; use "
-                "per-tensor quantization (scalar WeightScaleQ/WeightZeroPoint) — "
-                "JIT-041.");
-        }
             float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
@@ -5282,10 +5134,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             // is out of bounds (JIT-043). Matches the CPU kernel.
             const Tensor* bias =
                 (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
+            // Per-channel weight scale/zero-point (inputs[3]/[4]), mirroring the
+            // CPU per-channel kernel (F045).
+            const Tensor* wscales =
+                (inputs.size() > 3 && inputs[3].numel() > 1) ? &inputs[3] : nullptr;
+            const Tensor* wzps =
+                (inputs.size() > 4 && inputs[4].numel() > 0) ? &inputs[4] : nullptr;
             return {oneapi::quantized_linear_kernel(inputs[0], inputs[1], bias,
                                                      input_scale, input_zp,
                                                      weight_scale, weight_zp,
-                                                     output_scale, output_zp, get_q(inputs))};
+                                                     output_scale, output_zp, get_q(inputs),
+                                                     wscales, wzps)};
         });
 
     table.register_kernel(OpId::QuantizedConv2d,
@@ -5294,24 +5153,25 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
             const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            // Phase 2.1: OneAPI quantized_conv2d_kernel is scalar-only; reject asymmetric.
-            if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
-                throw std::invalid_argument(
-                    "QuantizedConv2d (OneAPI): backend kernel only supports symmetric stride/padding/dilation; "
-                    "got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                    ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                    ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
-            }
+            // F044: per-axis stride/padding/dilation, rectangular kernels and
+            // groups are all handled natively by the kernel indexing now.
             float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
             int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
             float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
             int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
             const Tensor* bias =
                 (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;  // JIT-043
+            // Per-channel weight scale/zero-point (inputs[3]/[4]) (F045).
+            const Tensor* wscales =
+                (inputs.size() > 3 && inputs[3].numel() > 1) ? &inputs[3] : nullptr;
+            const Tensor* wzps =
+                (inputs.size() > 4 && inputs[4].numel() > 0) ? &inputs[4] : nullptr;
             return {oneapi::quantized_conv2d_kernel(inputs[0], inputs[1], bias,
-                                                     stride[0], padding[0], dilation[0], groups,
+                                                     stride[0], stride[1], padding[0], padding[1],
+                                                     dilation[0], dilation[1], groups,
                                                      input_scale, input_zp,
-                                                     weight_scale, weight_zp, get_q(inputs))};
+                                                     weight_scale, weight_zp, get_q(inputs),
+                                                     wscales, wzps)};
         });
 
     // =========================================================================
@@ -6219,8 +6079,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
+        // F109: PyTorch uses kernel_size-wide (overlapping) windows.
+        const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        auto [output, indices] = oneapi::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples, get_q(inputs));
+        auto [output, indices] = oneapi::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, kernel_h, kernel_w, samples, get_q(inputs));
         return std::vector<Tensor>{output, indices};
     });
 
@@ -6250,8 +6113,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         int64_t out_w = (ratio_w > 0.0)
             ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
             : attrs.get_int(AttrKey::OutputSizeW, 1);
+        // F109: PyTorch uses kernel_size-wide (overlapping) windows.
+        const int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, attrs.get_int(AttrKey::KernelSize, 1));
+        const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, attrs.get_int(AttrKey::KernelSize, 1));
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        auto [output, indices] = oneapi::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples, get_q(inputs));
+        auto [output, indices] = oneapi::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples, get_q(inputs));
         return std::vector<Tensor>{output, indices};
     });
 

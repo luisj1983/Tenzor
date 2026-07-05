@@ -567,15 +567,25 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
         shader_name = "batchnorm2d_mean_var_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "batchnorm2d_mean_var_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        // batchnorm2d_mean_var_bf16.comp is a deterministic one-workgroup-per-
+        // channel tree reduction (mirroring the F32/F16 paths). BFloat16 inputs
+        // must select it — the previous default fell through to the F32 shader
+        // and bound the raw packed-BF16 buffer to a float shader (garbage/OOB).
+        shader_name = "batchnorm2d_mean_var_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Materialize input to a packed offset-0 buffer before binding.
     const Tensor input_c = dispatchContiguous(input);
 
-    // Create output tensors - statistics are always Float32 (for F16 inputs) or same dtype
-    // For F16: accumulation in Float32 for numerical stability, output as Float32
-    DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
+    // Create output tensors - statistics are always Float32 (for F16/BF16 inputs)
+    // or same dtype. The F16/BF16 mean_var shaders accumulate and write stats in
+    // Float32 (declared `float mean_data[]` etc.), so the stats tensors MUST be
+    // Float32 for those dtypes — otherwise the shader's float writes would land
+    // in a half-width buffer.
+    DType stats_dtype = (input.dtype() == DType::Float16 ||
+                         input.dtype() == DType::BFloat16) ? DType::Float32 : input.dtype();
     std::vector<int64_t> stats_shape = {channels};
     Tensor mean(stats_shape, stats_dtype, input.device());
     Tensor variance(stats_shape, stats_dtype, input.device());
@@ -594,8 +604,9 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
-    if (input.dtype() == DType::Float16) {
-        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Round up to 4-byte boundary for uint32 shader access
+        // (2 Float16/BFloat16 elements packed per uint32).
         size_t input_pairs = (input.numel() + 1) / 2;
         buffer_size_input = input_pairs * 4;
     }
@@ -637,13 +648,10 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        // The F32 and F64 shaders are deterministic one-workgroup-per-channel
-        // tree reductions (see batchnorm2d_mean_var.comp / *_f64.comp); the f16
-        // variant still uses one-thread-per-element atomics.
-        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var" ||
-                               shader_name == "batchnorm2d_mean_var_f64")
-            ? static_cast<uint32_t>(channels)
-            : static_cast<uint32_t>(div_wg_checked(input.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
+        // All four dtype shaders (F32/F64/F16/BF16) are now deterministic
+        // one-workgroup-per-channel tree reductions, so dispatch one workgroup
+        // per channel for every dtype.
+        uint32_t workgroups = static_cast<uint32_t>(channels);
         checkSparseRowDispatch(device_id, "batchnorm", workgroups);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -700,11 +708,8 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        // Same deterministic per-channel dispatch as the mean pass.
-        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var" ||
-                               shader_name == "batchnorm2d_mean_var_f64")
-            ? static_cast<uint32_t>(channels)
-            : static_cast<uint32_t>(div_wg_checked(input.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
+        // Same deterministic per-channel dispatch as the mean pass (all dtypes).
+        uint32_t workgroups = static_cast<uint32_t>(channels);
         checkSparseRowDispatch(device_id, "batchnorm", workgroups);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 

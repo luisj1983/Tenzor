@@ -183,7 +183,11 @@ void main() {
         double S[Bc];
         for (int j = 0; j < Bc; ++j) {
             int k_row = k_start + j;
-            bool causally_masked = (causal != 0) && (k_row > q_row);
+            // F021: bottom-right causal alignment (matches the MHA/GQA manual
+            // BMM path and PyTorch). k_row <= q_row + (seq_k - seq_q); offset 0
+            // for self-attention, lets a KV-cache query (seq_q < seq_k) see all
+            // preceding keys instead of only key 0.
+            bool causally_masked = (causal != 0) && (k_row > q_row + (seq_k - seq_q));
             if (k_row < seq_k && !causally_masked) {
                 double s = 0.0LF;
                 for (int d = 0; d < head_dim; ++d) {

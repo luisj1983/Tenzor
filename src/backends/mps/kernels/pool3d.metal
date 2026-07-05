@@ -59,7 +59,7 @@ kernel void maxpool3d_forward_kernel(
                 if (id_w < 0 || id_w >= int(in_w)) continue;
                 uint src = ((b * channels + c) * in_d + uint(id_d)) * in_h * in_w + uint(id_h) * in_w + uint(id_w);
                 float v = input[src];
-                if (v > max_val) {
+                if (isnan(v) || v > max_val) {
                     max_val = v;
                     max_idx = int(src);
                 }
@@ -217,11 +217,11 @@ kernel void adaptive_avgpool3d_forward_kernel(
     uint b = id / (out_w * out_h * out_d * channels);
 
     uint d_start = od * in_d / out_d;
-    uint d_end = (od + 1) * in_d / out_d;
+    uint d_end = ((od + 1) * in_d + out_d - 1) / out_d;
     uint h_start = oh * in_h / out_h;
-    uint h_end = (oh + 1) * in_h / out_h;
+    uint h_end = ((oh + 1) * in_h + out_h - 1) / out_h;
     uint w_start = ow * in_w / out_w;
-    uint w_end = (ow + 1) * in_w / out_w;
+    uint w_end = ((ow + 1) * in_w + out_w - 1) / out_w;
 
     float sum = 0.0f;
     uint count = 0;
@@ -257,11 +257,11 @@ kernel void adaptive_maxpool3d_forward_kernel(
     uint b = id / (out_w * out_h * out_d * channels);
 
     uint d_start = od * in_d / out_d;
-    uint d_end = (od + 1) * in_d / out_d;
+    uint d_end = ((od + 1) * in_d + out_d - 1) / out_d;
     uint h_start = oh * in_h / out_h;
-    uint h_end = (oh + 1) * in_h / out_h;
+    uint h_end = ((oh + 1) * in_h + out_h - 1) / out_h;
     uint w_start = ow * in_w / out_w;
-    uint w_end = (ow + 1) * in_w / out_w;
+    uint w_end = ((ow + 1) * in_w + out_w - 1) / out_w;
 
     float max_val = -INFINITY;
     int max_idx = 0;
@@ -270,7 +270,7 @@ kernel void adaptive_maxpool3d_forward_kernel(
             for (uint ww = w_start; ww < w_end; ++ww) {
                 uint idx = ((b * channels + c) * in_d + dd) * in_h * in_w + hh * in_w + ww;
                 float v = input[idx];
-                if (v > max_val) { max_val = v; max_idx = int(idx); }
+                if (isnan(v) || v > max_val) { max_val = v; max_idx = int(idx); }
             }
         }
     }
@@ -489,8 +489,42 @@ kernel void max_unpool3d_forward_kernel(
 }
 
 // ============================================================================
-// FractionalMaxPool2d
+// FractionalMaxPool2d / FractionalMaxPool3d
+//
+// NOTE (R14): these Metal kernels are currently DEAD CODE. MPS registers the
+// FractionalMaxPool{2,3}d ops via the Accelerate (CPU round-trip) path in
+// mps_kernel_registry.mm; nothing looks these functions up by name or dispatches
+// them. They are kept — and updated to the F109 overlapping-kernel_size-window
+// algorithm — so they mirror the CPU reference exactly
+// (src/backends/cpu/kernels/pooling.cpp, fractional_maxpool{2,3}d_impl):
+//   * windows are `pool`(==kernel)-wide and OVERLAP; the start comes from
+//     frac_pool_start (Ben Graham / ATen generate_intervals), NOT the old
+//     disjoint adaptive-ratio partition that ignored kernel size and the
+//     samples buffer;
+//   * the stored index is LOCAL to the (n,c) plane (h*W+w / (d*H+h)*W+w),
+//     matching the CPU forward and the backward scatter below;
+//   * NaN is propagated (a window containing NaN -> output NaN, argmax at the
+//     NaN) via `isnan(v) || v > max_val`, matching the CPU/ROCm/Vulkan backends.
+// Any future wiring of these shaders MUST keep them in sync with the CPU F109
+// kernel (samples layout [N,C,2] for 2d, [N,C,3] for 3d).
 // ============================================================================
+
+// F109 fractional-pool window start along one axis (mirrors CPU frac_pool_start):
+//   alpha = (in - pool) / (out - 1);  start(i) = floor((i+u)*alpha) - floor(u*alpha)
+//   start(out-1) = in - pool; then clamp to [0, in - pool].
+static inline uint frac_pool_start(uint i, uint in_size, uint out_size,
+                                   uint pool, float sample) {
+    int start;
+    if (out_size <= 1u || i == out_size - 1u) {
+        start = int(in_size) - int(pool);
+    } else {
+        float alpha = float(int(in_size) - int(pool)) / float(int(out_size) - 1);
+        start = int((float(i) + sample) * alpha) - int(sample * alpha);
+    }
+    if (start < 0) start = 0;
+    if (start > int(in_size) - int(pool)) start = int(in_size) - int(pool);
+    return uint(start);
+}
 
 kernel void fractional_maxpool2d_forward_kernel(
     device const float* input    [[buffer(0)]],
@@ -503,6 +537,8 @@ kernel void fractional_maxpool2d_forward_kernel(
     constant uint& in_w          [[buffer(7)]],
     constant uint& out_h         [[buffer(8)]],
     constant uint& out_w         [[buffer(9)]],
+    constant uint& kernel_h      [[buffer(10)]],
+    constant uint& kernel_w      [[buffer(11)]],
     uint id                      [[thread_position_in_grid]])
 {
     uint ow = id % out_w;
@@ -510,32 +546,28 @@ kernel void fractional_maxpool2d_forward_kernel(
     uint c = (id / (out_w * out_h)) % channels;
     uint b = id / (out_w * out_h * channels);
 
-    // Compute pooling region from samples
-    uint h_start = uint(float(oh * in_h) / float(out_h));
-    uint h_end = uint(float((oh + 1) * in_h) / float(out_h));
-    uint w_start = uint(float(ow * in_w) / float(out_w));
-    uint w_end = uint(float((ow + 1) * in_w) / float(out_w));
-    if (h_end > in_h) h_end = in_h;
-    if (w_end > in_w) w_end = in_w;
-    if (h_start >= h_end) h_start = h_end - 1;
-    if (w_start >= w_end) w_start = w_end - 1;
+    // Per-(b,c) random samples: layout [N, C, 2] (h, w) in (0,1).
+    float sample_h = samples[(b * channels + c) * 2 + 0];
+    float sample_w = samples[(b * channels + c) * 2 + 1];
+
+    // F109: overlapping windows of width == kernel_size.
+    uint h_start = frac_pool_start(oh, in_h, out_h, kernel_h, sample_h);
+    uint w_start = frac_pool_start(ow, in_w, out_w, kernel_w, sample_w);
+    uint h_end = min(h_start + kernel_h, in_h);
+    uint w_end = min(w_start + kernel_w, in_w);
 
     float max_val = -INFINITY;
-    int max_idx = 0;
+    int max_idx = int(h_start * in_w + w_start);   // LOCAL index within the (b,c) plane
     for (uint hh = h_start; hh < h_end; ++hh) {
         for (uint ww = w_start; ww < w_end; ++ww) {
-            uint idx = ((b * channels + c) * in_h + hh) * in_w + ww;
-            float v = input[idx];
-            if (v > max_val) { max_val = v; max_idx = int(idx); }
+            uint gidx = ((b * channels + c) * in_h + hh) * in_w + ww;
+            float v = input[gidx];
+            if (isnan(v) || v > max_val) { max_val = v; max_idx = int(hh * in_w + ww); }
         }
     }
     output[id] = max_val;
     indices[id] = max_idx;
 }
-
-// ============================================================================
-// FractionalMaxPool3d
-// ============================================================================
 
 kernel void fractional_maxpool3d_forward_kernel(
     device const float* input    [[buffer(0)]],
@@ -550,6 +582,9 @@ kernel void fractional_maxpool3d_forward_kernel(
     constant uint& out_d         [[buffer(9)]],
     constant uint& out_h         [[buffer(10)]],
     constant uint& out_w         [[buffer(11)]],
+    constant uint& kernel_d      [[buffer(12)]],
+    constant uint& kernel_h      [[buffer(13)]],
+    constant uint& kernel_w      [[buffer(14)]],
     uint id                      [[thread_position_in_grid]])
 {
     uint ow = id % out_w;
@@ -558,24 +593,27 @@ kernel void fractional_maxpool3d_forward_kernel(
     uint c = (id / (out_w * out_h * out_d)) % channels;
     uint b = id / (out_w * out_h * out_d * channels);
 
-    uint d_start = od * in_d / out_d;
-    uint d_end = (od + 1) * in_d / out_d;
-    uint h_start = oh * in_h / out_h;
-    uint h_end = (oh + 1) * in_h / out_h;
-    uint w_start = ow * in_w / out_w;
-    uint w_end = (ow + 1) * in_w / out_w;
-    if (d_end > in_d) d_end = in_d;
-    if (h_end > in_h) h_end = in_h;
-    if (w_end > in_w) w_end = in_w;
+    // Per-(b,c) random samples: layout [N, C, 3] (d, h, w) in (0,1).
+    float sample_d = samples[(b * channels + c) * 3 + 0];
+    float sample_h = samples[(b * channels + c) * 3 + 1];
+    float sample_w = samples[(b * channels + c) * 3 + 2];
+
+    // F109: overlapping windows of width == kernel_size.
+    uint d_start = frac_pool_start(od, in_d, out_d, kernel_d, sample_d);
+    uint h_start = frac_pool_start(oh, in_h, out_h, kernel_h, sample_h);
+    uint w_start = frac_pool_start(ow, in_w, out_w, kernel_w, sample_w);
+    uint d_end = min(d_start + kernel_d, in_d);
+    uint h_end = min(h_start + kernel_h, in_h);
+    uint w_end = min(w_start + kernel_w, in_w);
 
     float max_val = -INFINITY;
-    int max_idx = 0;
+    int max_idx = int((d_start * in_h + h_start) * in_w + w_start);  // LOCAL index within the (b,c) plane
     for (uint dd = d_start; dd < d_end; ++dd) {
         for (uint hh = h_start; hh < h_end; ++hh) {
             for (uint ww = w_start; ww < w_end; ++ww) {
-                uint idx = ((b * channels + c) * in_d + dd) * in_h * in_w + hh * in_w + ww;
-                float v = input[idx];
-                if (v > max_val) { max_val = v; max_idx = int(idx); }
+                uint gidx = ((b * channels + c) * in_d + dd) * in_h * in_w + hh * in_w + ww;
+                float v = input[gidx];
+                if (isnan(v) || v > max_val) { max_val = v; max_idx = int((dd * in_h + hh) * in_w + ww); }
             }
         }
     }
@@ -583,15 +621,21 @@ kernel void fractional_maxpool3d_forward_kernel(
     indices[id] = max_idx;
 }
 
-// Fractional backward uses same pattern as maxpool backward (index scatter)
+// Fractional backward: index scatter. Indices are LOCAL to each (n,c) plane
+// (matching the F109 forwards above), so add the plane base offset. out_spatial
+// = product of the output spatial dims; in_plane = product of the input spatial
+// dims. (id / out_spatial) yields the flat (n*C+c) plane index for 2d and 3d.
 kernel void fractional_maxpool_backward_kernel(
     device const float* grad_out [[buffer(0)]],
     device const int* indices    [[buffer(1)]],
     device atomic_float* grad_in [[buffer(2)]],
+    constant uint& out_spatial   [[buffer(3)]],
+    constant uint& in_plane      [[buffer(4)]],
     uint id                      [[thread_position_in_grid]])
 {
-    int idx = indices[id];
-    atomic_fetch_add_explicit(&grad_in[idx], grad_out[id], memory_order_relaxed);
+    uint plane = id / out_spatial;
+    uint dst = plane * in_plane + uint(indices[id]);
+    atomic_fetch_add_explicit(&grad_in[dst], grad_out[id], memory_order_relaxed);
 }
 
 // ============================================================================
@@ -639,6 +683,50 @@ kernel void cdist_kernel(
 // GridSample (bilinear interpolation, 2D)
 // ============================================================================
 
+// grid_sample helpers — mirror the CPU reference
+// (src/backends/cpu/kernels/grid_sample.cpp) so all backends agree.
+// mode: 0=bilinear, 1=nearest, 2=bicubic.
+// padding_mode: 0=zeros, 1=border, 2=reflection.
+static inline float gs_denormalize(float coord, int size, bool align_corners) {
+    if (align_corners) return (coord + 1.0f) * 0.5f * float(size - 1);
+    return ((coord + 1.0f) * float(size) - 1.0f) * 0.5f;
+}
+
+static inline float gs_reflect(float coord, int size, bool align_corners) {
+    if (size <= 1) return 0.0f;
+    float twice_low  = align_corners ? 0.0f : -1.0f;
+    float twice_high = align_corners ? float(2 * (size - 1)) : float(2 * size - 1);
+    float mn = twice_low * 0.5f;
+    float span = (twice_high - twice_low) * 0.5f;
+    float cc = fabs(coord - mn);
+    float extra = fmod(cc, span);
+    int flips = int(floor(cc / span));
+    float reflected = ((flips % 2) == 0) ? (extra + mn) : (span - extra + mn);
+    return clamp(reflected, 0.0f, float(size - 1));
+}
+
+static inline float gs_apply_padding(float coord, int size, uint padding_mode, bool align_corners) {
+    if (padding_mode == 1u) {          // border
+        coord = clamp(coord, 0.0f, float(size - 1));
+    } else if (padding_mode == 2u) {   // reflection
+        coord = gs_reflect(coord, size, align_corners);
+    }
+    // padding_mode == 0 (zeros): no-op; OOB handled at sampling.
+    return coord;
+}
+
+// Catmull-Rom cubic weights (a = -0.5), matching CPU cubic_weights.
+static inline void gs_cubic_weights(float t, thread float* w) {
+    const float a = -0.5f;
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float u = 1.0f - t;
+    w[0] = ((a * t - 2.0f * a) * t + a) * t;
+    w[1] = ((a + 2.0f) * t3 - (a + 3.0f) * t2 + 1.0f);
+    w[2] = ((a + 2.0f) * u * u * u - (a + 3.0f) * u * u + 1.0f);
+    w[3] = ((a * u - 2.0f * a) * u + a) * u;
+}
+
 kernel void grid_sample_kernel(
     device const float* input    [[buffer(0)]],
     device const float* grid     [[buffer(1)]],
@@ -650,6 +738,8 @@ kernel void grid_sample_kernel(
     constant uint& out_h         [[buffer(7)]],
     constant uint& out_w         [[buffer(8)]],
     constant uint& align_corners [[buffer(9)]],
+    constant uint& mode          [[buffer(10)]],
+    constant uint& padding_mode  [[buffer(11)]],
     uint id                      [[thread_position_in_grid]])
 {
     uint ow = id % out_w;
@@ -662,28 +752,58 @@ kernel void grid_sample_kernel(
     float gx = grid[grid_idx];
     float gy = grid[grid_idx + 1];
 
-    // Unnormalize
-    float ix, iy;
-    if (align_corners) {
-        ix = (gx + 1.0f) * 0.5f * float(in_w - 1);
-        iy = (gy + 1.0f) * 0.5f * float(in_h - 1);
-    } else {
-        ix = (gx + 1.0f) * float(in_w) * 0.5f - 0.5f;
-        iy = (gy + 1.0f) * float(in_h) * 0.5f - 0.5f;
-    }
+    bool ac = (align_corners != 0u);
+    int W = int(in_w), H = int(in_h);
+    float ix = gs_denormalize(gx, W, ac);
+    float iy = gs_denormalize(gy, H, ac);
 
-    int ix0 = int(floor(ix)), iy0 = int(floor(iy));
-    int ix1 = ix0 + 1, iy1 = iy0 + 1;
-    float wx1 = ix - float(ix0), wy1 = iy - float(iy0);
-    float wx0 = 1.0f - wx1, wy0 = 1.0f - wy1;
-
-    auto safe_get = [&](int h, int w) -> float {
-        if (h < 0 || h >= int(in_h) || w < 0 || w >= int(in_w)) return 0.0f;
-        return input[((b * channels + c) * in_h + uint(h)) * in_w + uint(w)];
+    // Read a single channel-plane value at (y, x); caller guarantees bounds.
+    auto ch_at = [&](int y, int x) -> float {
+        return input[((b * channels + c) * in_h + uint(y)) * in_w + uint(x)];
     };
 
-    float val = wy0 * (wx0 * safe_get(iy0, ix0) + wx1 * safe_get(iy0, ix1)) +
-                wy1 * (wx0 * safe_get(iy1, ix0) + wx1 * safe_get(iy1, ix1));
+    float val = 0.0f;
+    if (mode == 1u) {
+        // nearest
+        int nx = int(round(gs_apply_padding(ix, W, padding_mode, ac)));
+        int ny = int(round(gs_apply_padding(iy, H, padding_mode, ac)));
+        if (ny >= 0 && ny < H && nx >= 0 && nx < W) val = ch_at(ny, nx);
+    } else if (mode == 2u) {
+        // bicubic (4x4 Catmull-Rom)
+        float px = gs_apply_padding(ix, W, padding_mode, ac);
+        float py = gs_apply_padding(iy, H, padding_mode, ac);
+        int ix_floor = int(floor(px)), iy_floor = int(floor(py));
+        float tx = px - float(ix_floor), ty = py - float(iy_floor);
+        float wx[4], wy[4];
+        gs_cubic_weights(tx, wx);
+        gs_cubic_weights(ty, wy);
+        for (int dy = -1; dy <= 2; ++dy) {
+            for (int dx = -1; dx <= 2; ++dx) {
+                int yy = iy_floor + dy, xx = ix_floor + dx;
+                float sample;
+                if (padding_mode == 0u) {
+                    sample = (yy < 0 || yy >= H || xx < 0 || xx >= W) ? 0.0f : ch_at(yy, xx);
+                } else {
+                    yy = clamp(yy, 0, H - 1);
+                    xx = clamp(xx, 0, W - 1);
+                    sample = ch_at(yy, xx);
+                }
+                val += wy[dy + 1] * wx[dx + 1] * sample;
+            }
+        }
+    } else {
+        // bilinear (mode == 0)
+        float px = gs_apply_padding(ix, W, padding_mode, ac);
+        float py = gs_apply_padding(iy, H, padding_mode, ac);
+        int x0 = int(floor(px)), y0 = int(floor(py));
+        int x1 = x0 + 1, y1 = y0 + 1;
+        float wx1 = px - float(x0), wy1 = py - float(y0);
+        float wx0 = 1.0f - wx1, wy0 = 1.0f - wy1;
+        if (y0 >= 0 && y0 < H && x0 >= 0 && x0 < W) val += wy0 * wx0 * ch_at(y0, x0);
+        if (y0 >= 0 && y0 < H && x1 >= 0 && x1 < W) val += wy0 * wx1 * ch_at(y0, x1);
+        if (y1 >= 0 && y1 < H && x0 >= 0 && x0 < W) val += wy1 * wx0 * ch_at(y1, x0);
+        if (y1 >= 0 && y1 < H && x1 >= 0 && x1 < W) val += wy1 * wx1 * ch_at(y1, x1);
+    }
     output[id] = val;
 }
 
@@ -789,12 +909,15 @@ kernel void affine_grid_kernel(
 // BoxIoU / NMS
 // ============================================================================
 
+// iou_type: 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU. Mirrors CPU box_iou_kernel
+// (src/backends/cpu/kernels/vision.cpp) so all backends agree numerically.
 kernel void box_iou_kernel(
     device const float* boxes1   [[buffer(0)]],
     device const float* boxes2   [[buffer(1)]],
     device float* output         [[buffer(2)]],
     constant uint& N             [[buffer(3)]],
     constant uint& M             [[buffer(4)]],
+    constant uint& iou_type      [[buffer(5)]],
     uint id                      [[thread_position_in_grid]])
 {
     uint j = id % M;
@@ -813,7 +936,40 @@ kernel void box_iou_kernel(
     float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
     float union_area = area1 + area2 - inter_area;
 
-    output[id] = (union_area > 0.0f) ? (inter_area / union_area) : 0.0f;
+    const float eps = 1e-7f;
+    float iou = (union_area > 0.0f) ? (inter_area / union_area) : 0.0f;
+
+    if (iou_type == 1u) {
+        // GIoU
+        float enclose_x1 = min(x1_1, x1_2), enclose_y1 = min(y1_1, y1_2);
+        float enclose_x2 = max(x2_1, x2_2), enclose_y2 = max(y2_1, y2_2);
+        float enclose_area = (enclose_x2 - enclose_x1) * (enclose_y2 - enclose_y1);
+        iou = iou - (enclose_area - union_area) / max(enclose_area, eps);
+    } else if (iou_type == 2u || iou_type == 3u) {
+        // DIoU (2) / CIoU (3)
+        float cx1 = (x1_1 + x2_1) * 0.5f, cy1 = (y1_1 + y2_1) * 0.5f;
+        float cx2 = (x1_2 + x2_2) * 0.5f, cy2 = (y1_2 + y2_2) * 0.5f;
+        float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+
+        float enc_x1 = min(x1_1, x1_2), enc_y1 = min(y1_1, y1_2);
+        float enc_x2 = max(x2_1, x2_2), enc_y2 = max(y2_1, y2_2);
+        float enc_w = enc_x2 - enc_x1, enc_h = enc_y2 - enc_y1;
+        float diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+
+        float result = iou - center_dist_sq / (diag_dist_sq + eps);
+        if (iou_type == 3u) {
+            float w1 = x2_1 - x1_1, h1 = y2_1 - y1_1;
+            float w2 = x2_2 - x1_2, h2 = y2_2 - y1_2;
+            const float four_over_pi_sq = 4.0f / (3.14159265358979323846f * 3.14159265358979323846f);
+            float diff = atan(w2 / (h2 + eps)) - atan(w1 / (h1 + eps));
+            float v = four_over_pi_sq * diff * diff;
+            float alpha = v / (1.0f - iou + v + eps);
+            result = result - alpha * v;
+        }
+        iou = result;
+    }
+
+    output[id] = iou;
 }
 
 // ============================================================================

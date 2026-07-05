@@ -510,9 +510,19 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
     Tensor batch_mean, batch_var;
 
     if (training_) {
+        // cuDNN's batch-norm primitives clamp epsilon up to CUDNN_BN_MIN_EPSILON
+        // (1e-5); a smaller value would either be rejected or silently raised, so
+        // the fused cuDNN training path cannot honor a user eps < 1e-5. ROCm/CPU
+        // and the hand-written CUDA kernels accept any eps > 0. To keep CUDA
+        // matching every other backend for small eps, skip the fused cuDNN path
+        // when eps < 1e-5 and take the standard training path below, which
+        // normalizes via the native CUDA BatchNorm2dForwardAffine kernel and
+        // computes invstd = 1/sqrt(var + eps) with the exact user eps.
+        constexpr double kCudnnBnMinEpsilon = 1e-5;
         // Check if we can use fused cuDNN training path (CUDA + affine + track_running_stats)
         bool use_fused_training = use_gpu && affine_ && track_running_stats_ &&
-                                  cached_weight_ && cached_bias_;
+                                  cached_weight_ && cached_bias_ &&
+                                  eps_ >= kCudnnBnMinEpsilon;
 
         if (use_fused_training) {
             // ================================================================
@@ -564,15 +574,23 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             // saved_mean, saved_inv_var}); guard before indexing.
             check_norm_outputs(fused_results, "BatchNorm2dFusedTraining", /*min_required=*/5);
 
-            // Update running stats from cuDNN (store back as Float32 for storage efficiency)
-            rm_var_ptr->tensor() = fused_results[1].to(DType::Float32);
-            rv_var_ptr->tensor() = fused_results[2].to(DType::Float32);
             batch_mean = fused_results[3];  // saved_mean for backward
             batch_var = fused_results[4];   // saved_inv_var for backward
-            // Increment num_batches_tracked on the buffer's native device —
-            // host-staging a single int64 each forward used to round-trip
-            // through CPU. Adding via tenzor::add stays on-device.
-            {
+
+            // The cuDNN fused kernel computes the running-stats update with the
+            // unbiased (Bessel-corrected) variance internally, dividing by
+            // (m - 1). For a single-element batch (N*H*W < 2) that divisor is 0,
+            // so the returned running_var is +inf/NaN and would permanently
+            // poison the buffer. The standard (non-fused) path skips the update
+            // in that degenerate case; mirror it here so all backends agree.
+            int64_t running_stats_batch_size = N * spatial_size;
+            if (running_stats_batch_size >= 2) {
+                // Update running stats from cuDNN (store back as Float32 for storage efficiency)
+                rm_var_ptr->tensor() = fused_results[1].to(DType::Float32);
+                rv_var_ptr->tensor() = fused_results[2].to(DType::Float32);
+                // Increment num_batches_tracked on the buffer's native device —
+                // host-staging a single int64 each forward used to round-trip
+                // through CPU. Adding via tenzor::add stays on-device.
                 auto& nbt = buffers_["num_batches_tracked"]->tensor();
                 if (nbt.device().type == Device::Type::CPU) {
                     nbt.data<int64_t>()[0]++;
