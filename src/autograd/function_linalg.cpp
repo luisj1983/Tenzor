@@ -429,6 +429,21 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& S = saved_tensors_[1];        // S, (..., K)
     const auto& Vh = saved_tensors_[2];       // Vh, (..., K, N)
 
+    // F003: the complex SVD backward omits the gauge (imaginary-diagonal)
+    // correction that is required when differentiating through the singular
+    // VECTORS (the skew_U/skew_V diagonal, nonzero only for complex). The
+    // singular-VALUE gradient is unaffected (its contribution is diag(grad_S),
+    // and the skew terms vanish when grad_U/grad_Vh are zero). So allow the
+    // S-only path (output_slot_ == 1) and reject vector/combined complex paths
+    // rather than emit a silently-wrong gauge-dependent gradient.
+    if (U.is_complex() && output_slot_ != 1) {
+        throw std::runtime_error(
+            "SvdBackward: gradient through the singular vectors (U/V) is not "
+            "supported for complex inputs — the complex SVD backward omits the "
+            "gauge (imaginary-diagonal) correction term. Only differentiating "
+            "through the singular values (S) alone is supported for complex SVD.");
+    }
+
     // audit-2026-05-03 — when output_slot_ is set, only one of {U, S, Vh}
     // received an upstream gradient (engine collapse safe). Re-route the
     // single grad to its proper slot.
@@ -629,6 +644,18 @@ auto QrBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
     // grad_R would be re-interpreted in column-major and yield a transposed
     // analytical gradient (the "ana[j,i] = num[i,j]" failure mode seen in
     // gradcheck when we hand it a non-contiguous input).
+    // The QR forward uses LAPACK geqrf, whose Householder gauge leaves R's
+    // diagonal complex and implicitly defined. Under that gauge the complex QR
+    // backward is ill-defined, and the real copyltu formula below silently
+    // returns a gauge-dependent (wrong) gradient for complex inputs. Reject it
+    // loudly rather than emit a wrong gradient (no test/consumer relies on
+    // complex QR autograd; only the complex QR forward is exercised).
+    if (saved_tensors_[1].is_complex()) {
+        throw std::runtime_error(
+            "QrBackward: autograd is not supported for complex inputs — the LAPACK "
+            "QR (geqrf) gauge makes the complex QR backward ill-defined. Avoid "
+            "differentiating through a complex qr().");
+    }
     const auto Q = saved_tensors_[0].contiguous();   // Q, (..., M, N)
     const auto R = saved_tensors_[1].contiguous();   // R, (..., N, N)
     // audit — when output_slot_ is set, only one of {Q, R} received an
@@ -651,30 +678,27 @@ auto QrBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
     const auto grad_Q = grad_Q_t.contiguous();   // dL/dQ, (..., M, N)
     const auto grad_R = grad_R_t.contiguous();   // dL/dR, (..., N, N)
 
-    auto ndim = R.ndim();
-    auto Rt = transpose(R, ndim - 2, ndim - 1);
-
     // audit-2026-05-03 — corrected to PyTorch's convention:
     //   M = R · grad_R^T - grad_Q^T · Q
     // Previous code had `matmul(Qt, grad_Q)` = Q^T · grad_Q which is the
     // TRANSPOSE of grad_Q^T · Q — the formula's copyltu pattern then fired
     // on the wrong triangle, breaking the QR-Q gradcheck on every backend.
-    auto grad_Rt = transpose(grad_R, ndim - 2, ndim - 1);
+    auto grad_Rt = transpose(grad_R, grad_R.ndim() - 2, grad_R.ndim() - 1);
     auto grad_Qt = transpose(grad_Q, grad_Q.ndim() - 2, grad_Q.ndim() - 1);
     auto M = sub(matmul(R, grad_Rt), matmul(grad_Qt, Q));
 
-    // copyltu(M) = tril(M) + tril(M, -1)^T
+    // copyltu(M) = tril(M) + tril(M, -1)^T  (symmetrize lower triangle).
     auto M_tril = tril(M);
     auto M_strict_lower = tril(M, -1);
-    auto M_strict_lower_t = transpose(M_strict_lower, ndim - 2, ndim - 1);
+    auto M_strict_lower_t = transpose(M_strict_lower, M_strict_lower.ndim() - 2,
+                                      M_strict_lower.ndim() - 1);
     auto copyltu_M = add(M_tril, M_strict_lower_t);
 
     // dL/dA = (grad_Q + Q @ copyltu_M) @ R^{-T}
     auto Q_copyltu = matmul(Q, copyltu_M);
     auto rhs = add(grad_Q, Q_copyltu);
 
-    // Solve R^T @ X^T = rhs^T  =>  X = (R^{-T} @ rhs^T)^T...
-    // Actually: rhs @ R^{-T} = solve(R, rhs^T)^T
+    // rhs @ R^{-T} = solve(R, rhs^T)^T
     auto rhs_t = transpose(rhs, rhs.ndim() - 2, rhs.ndim() - 1);
     auto solve_result = tenzor::linalg::solve(R, rhs_t);
     auto grad_A = transpose(solve_result, solve_result.ndim() - 2, solve_result.ndim() - 1);
@@ -1074,6 +1098,17 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // (grad_U, grad_S, grad_Vh), so the engine summing per-slot input grads
     // reconstructs the full gradient and second-order graphs chain through).
     // A legacy combined path (output_slot_ < 0) keeps all three.
+    // F003: complex SVD backward omits the gauge (imaginary-diagonal) correction
+    // for the singular-vector gradient; only the singular-value (S) path is
+    // correct. Reject vector/combined complex paths (see SvdBackward::backward).
+    if (saved_tensors_[0].is_complex() && output_slot_ != 1) {
+        throw std::runtime_error(
+            "SvdBackward: gradient through the singular vectors (U/V) is not "
+            "supported for complex inputs — the complex SVD backward omits the "
+            "gauge (imaginary-diagonal) correction term. Only differentiating "
+            "through the singular values (S) alone is supported for complex SVD.");
+    }
+
     Variable grad_U_var, grad_S_var, grad_Vh_var;
     if (output_slot_ == 0) {
         grad_U_var  = grad_outputs[0];
@@ -1201,6 +1236,14 @@ auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     //   copyltu(M) = tril(M) + tril(M, -1)^T
     //   dL/dA = (grad_Q + Q @ copyltu(M)) @ R^{-T}
 
+    // Complex QR autograd is ill-defined under the LAPACK geqrf gauge (see the
+    // tensor QrBackward::backward). Reject rather than return a wrong gradient.
+    if (saved_tensors_[1].is_complex()) {
+        throw std::runtime_error(
+            "QrBackward: autograd is not supported for complex inputs — the LAPACK "
+            "QR (geqrf) gauge makes the complex QR backward ill-defined. Avoid "
+            "differentiating through a complex qr().");
+    }
     auto Q = Variable(saved_tensors_[0], false);
     auto R = Variable(saved_tensors_[1], false);
 
@@ -1225,12 +1268,6 @@ auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     }
 
     auto ndim = saved_tensors_[1].ndim();
-
-    // M = R @ grad_R^T - grad_Q^T @ Q  (PyTorch convention). The previous code
-    // used matmul(Q^T, grad_Q) = Q^T·grad_Q, the TRANSPOSE of grad_Q^T·Q, so
-    // copyltu then symmetrised the wrong triangle, giving a wrong first-order
-    // grad_A under create_graph (gradgradcheck through qr's Q factor). Mirror
-    // the corrected tensor backward().
     auto grad_Rt_var = tenzor::transpose(grad_R_var, ndim - 2, ndim - 1);
     auto grad_Qt_var = tenzor::transpose(grad_Q_var,
                           saved_tensors_[0].ndim() - 2, saved_tensors_[0].ndim() - 1);
@@ -1246,7 +1283,6 @@ auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     auto Q_copyltu = tenzor::matmul(Q, copyltu_M);
     auto rhs = grad_Q_var + Q_copyltu;
 
-    // rhs @ R^{-T} = solve(R, rhs^T)^T
     auto rhs_t = tenzor::transpose(rhs, rhs.tensor().ndim() - 2, rhs.tensor().ndim() - 1);
     auto solve_result = tenzor::solve(R, rhs_t);
     auto grad_A = tenzor::transpose(solve_result, solve_result.tensor().ndim() - 2, solve_result.tensor().ndim() - 1);
@@ -1385,9 +1421,10 @@ auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
     int64_t n = L.shape().back();
     auto eye_n = tenzor::eye(n, std::nullopt, L.dtype(), L.device());
 
-    // Φ = tril(L^T grad_L, -1) + triu(grad_U U^T, 0)
-    auto LT = transpose(L, -1, -2);
-    auto UT = transpose(U, -1, -2);
+    // Φ = tril(Lᴴ grad_L, -1) + triu(grad_U Uᴴ, 0). Conjugate transpose (adjoint)
+    // so the formula generalizes to complex A; for real A adjoint() == transpose.
+    auto LT = adjoint(L);
+    auto UT = adjoint(U);
     auto phi_lower = tril(matmul(LT, grad_L), -1);
     auto phi_upper = triu(matmul(grad_U, UT), 0);
     auto phi = add(phi_lower, phi_upper);
@@ -1406,9 +1443,9 @@ auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
         return tenzor::linalg::solve_triangular(T, eye_n, upper, uni);
     };
     auto L_inv = run_solve(L, /*upper=*/false, /*unitriangular=*/true);
-    auto LT_inv = transpose(L_inv, -1, -2);
+    auto LT_inv = adjoint(L_inv);   // L^{-H} (real: L^{-T})
     auto U_inv = run_solve(U, /*upper=*/true, /*unitriangular=*/false);
-    auto UT_inv = transpose(U_inv, -1, -2);
+    auto UT_inv = adjoint(U_inv);   // U^{-H} (real: U^{-T})
 
     auto grad_A = matmul(matmul(LT_inv, phi), UT_inv);
 
@@ -1476,8 +1513,15 @@ auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
                 }
             };
 
+            // Row-permutation swaps whole elements, so dispatch on the true
+            // element type — a complex grad_A read as `float` would swap half of
+            // each complex number at the wrong stride and corrupt the gradient.
             if (g_cpu.dtype() == DType::Float64) {
                 process_batch(g_cpu.data<double>());
+            } else if (g_cpu.dtype() == DType::Complex64) {
+                process_batch(g_cpu.data<std::complex<float>>());
+            } else if (g_cpu.dtype() == DType::Complex128) {
+                process_batch(g_cpu.data<std::complex<double>>());
             } else {
                 process_batch(g_cpu.data<float>());
             }
@@ -1517,7 +1561,6 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
 
     const Tensor& L_t = L.tensor();
     const Tensor& U_t = U.tensor();
-    auto ndim = L_t.ndim();
 
     // Pad grad_outputs to length 2 (only one factor differentiated -> the
     // other slot is OOB). Mirrors SvdBackward's Variable-path guard.
@@ -1535,20 +1578,22 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
                         : Variable(zeros_like(U_t), false);
     }
 
-    // Φ = tril(L^T grad_L, -1) + triu(grad_U U^T, 0)
-    auto LT = tenzor::transpose(L, ndim - 2, ndim - 1);
-    auto UT = tenzor::transpose(U, ndim - 2, ndim - 1);
+    // Φ = tril(Lᴴ grad_L, -1) + triu(grad_U Uᴴ, 0). Conjugate transpose (adjoint_var)
+    // so the formula generalizes to complex A; real → plain transpose.
+    auto LT = adjoint_var(L);
+    auto UT = adjoint_var(U);
     auto phi_lower = tenzor::tril(tenzor::matmul(LT, grad_L_var), -1);
     auto phi_upper = tenzor::triu(tenzor::matmul(grad_U_var, UT), 0);
     auto phi = phi_lower + phi_upper;
 
-    // L^{-T} · Φ : solve(L^T, Φ) since (L^T) X = Φ  =>  X = L^{-T} Φ.
+    // L^{-H} · Φ : solve(Lᴴ, Φ) since (Lᴴ) X = Φ  =>  X = L^{-H} Φ.
     auto Linv_phi = tenzor::solve(LT, phi);
 
-    // (·) · U^{-T} : X U^T = RHS  =>  U X^T = RHS^T  =>  X^T = solve(U, RHS^T).
-    auto rhs_t = tenzor::transpose(Linv_phi, ndim - 2, ndim - 1);
+    // (·) · U^{-H} : Y = RHS U^{-H}  =>  Y^H = U^{-1} RHS^H = solve(U, RHS^H)  =>
+    // grad_A = adjoint(solve(U, adjoint(RHS))). Real → transpose as before.
+    auto rhs_t = adjoint_var(Linv_phi);
     auto solve_u = tenzor::solve(U, rhs_t);
-    auto grad_A = tenzor::transpose(solve_u, ndim - 2, ndim - 1);
+    auto grad_A = adjoint_var(solve_u);
 
     // Apply P^T (= P^{-1}) if pivots were saved. Build a constant permutation
     // matrix and left-multiply; this keeps the graph in grad_A intact so
@@ -1624,6 +1669,10 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
 
             if (L_t.dtype() == DType::Float64) {
                 build_pt(pt.data<double>());
+            } else if (L_t.dtype() == DType::Complex64) {
+                build_pt(pt.data<std::complex<float>>());
+            } else if (L_t.dtype() == DType::Complex128) {
+                build_pt(pt.data<std::complex<double>>());
             } else {
                 build_pt(pt.data<float>());
             }
@@ -1656,9 +1705,7 @@ auto CholeskySolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
     const auto& X = saved_tensors_[0];      // solution X, (..., N, K)
     const auto& L = saved_tensors_[1];      // Cholesky factor, (..., N, N)
 
-    auto ndim = X.ndim();
-
-    // grad_B = cholesky_solve(grad_X, L, upper) = A^{-1} grad_X  (A = L L^T lower)
+    // grad_B = cholesky_solve(grad_X, L, upper) = A^{-1} grad_X  (A = L L^H lower)
     auto grad_B = tenzor::linalg::cholesky_solve(grad_X, L, upper_);
 
     // grad_A = -grad_B @ X^T  (from X = A^{-1} B). For A = L L^T the factor
@@ -1669,8 +1716,10 @@ auto CholeskySolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
     // Matches torch.cholesky_solve_backward. The previous code used grad_X in
     // the outer product and applied A^{-1} (cholesky_solve) to S instead of
     // right-multiplying by L, giving a systematically mis-scaled grad_L.
-    auto Xt = transpose(X, ndim - 2, ndim - 1);
-    auto grad_Bt = transpose(grad_B, ndim - 2, ndim - 1);
+    // Complex Hermitian A = L Lᴴ: use the conjugate transpose (adjoint) so
+    // `common` is Hermitian; for real inputs adjoint() is a plain transpose.
+    auto Xt = adjoint(X);
+    auto grad_Bt = adjoint(grad_B);
     auto common = add(matmul(grad_B, Xt), matmul(X, grad_Bt));
 
     if (!upper_) {
@@ -1699,16 +1748,14 @@ auto CholeskySolveBackward::backward_with_variables(std::vector<Variable> grad_o
     auto X = Variable(saved_tensors_[0], false);
     auto L = Variable(saved_tensors_[1], false);
 
-    int64_t ndim = X.tensor().ndim();
-
     // grad_B = cholesky_solve(grad_X, L, upper) — Variable-level.
     auto grad_B = tenzor::cholesky_solve(grad_X, L, upper_);
 
-    // common = grad_B @ X^T + X @ grad_B^T  (symmetrised; uses grad_B, not grad_X)
+    // common = grad_B @ Xᴴ + X @ grad_Bᴴ  (symmetrised; uses grad_B, not grad_X)
     // grad_L (lower) = -tril(common @ L);  grad_U (upper) = -triu(U @ common).
-    // Mirrors the corrected Tensor-level backward / torch.cholesky_solve_backward.
-    auto Xt = tenzor::transpose(X, ndim - 2, ndim - 1);
-    auto grad_Bt = tenzor::transpose(grad_B, ndim - 2, ndim - 1);
+    // Conjugate transpose (adjoint_var) for complex Hermitian A = L Lᴴ; real → transpose.
+    auto Xt = adjoint_var(X);
+    auto grad_Bt = adjoint_var(grad_B);
     auto common = tenzor::matmul(grad_B, Xt) + tenzor::matmul(X, grad_Bt);
 
     Variable grad_L = upper_
@@ -2045,14 +2092,16 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         // gaps are resolvable in the working precision.
         const double mach = (W_real.dtype() == DType::Float64)
             ? 2.220446049250313e-16 : 1.1920929e-7;
-        double w_scale = 0.0;
-        {
-            auto wmax = tenzor::max(tenzor::abs(W_real));
-            w_scale = (wmax.dtype() == DType::Float64)
-                ? wmax.item<double>() : static_cast<double>(wmax.item<float>());
-        }
-        const double eps_value = std::sqrt(mach) * (1.0 + std::abs(w_scale));
-        auto eps_t = tenzor::full({1}, eps_value, W_real.dtype(), W_real.device());
+        // Per-matrix spectral scale: reduce |W| over the trailing eigenvalue dim
+        // only (keepdim), so eps is computed independently for each matrix in a
+        // batch. The previous code reduced over the ENTIRE tensor, letting one
+        // large-spectrum matrix inflate eps for every other matrix and bias the
+        // eigenvector-rotation gradient of well-conditioned matrices low near
+        // degeneracy. Mirrors the SvdBackward/EighBackward per-matrix construction.
+        const double rel_eps = std::sqrt(mach);
+        auto w_max = tenzor::max(tenzor::abs(W_real), W_real.ndim() - 1, /*keepdim=*/true);  // (..., 1)
+        w_max = unsqueeze(w_max, w_max.ndim());                       // (..., 1, 1)
+        auto eps_t = add(mul(w_max, rel_eps), rel_eps);               // sqrt(mach)*(|W|max+1)
         auto denom = tenzor::add(tenzor::mul(diff, diff), tenzor::mul(eps_t, eps_t));
         auto F = tenzor::mul(tenzor::div(diff, denom), off_diag_mask);
 

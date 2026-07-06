@@ -139,11 +139,15 @@ void main() {
                 res_bits = floatBitsToUint(val_a - rounded * val_b);
                 break;
             }
-            case 26: // minimum (binary)
-                res_bits = floatBitsToUint(min(val_a, val_b));
+            case 26: // minimum (binary) — NaN-propagating (torch.minimum): NaN
+                     // in either operand → NaN. GLSL min() suppresses NaN; no
+                     // fast-math, so `x != x` is a reliable NaN test.
+                res_bits = floatBitsToUint((val_a != val_a || val_b != val_b)
+                    ? uintBitsToFloat(0x7fc00000u) : min(val_a, val_b));
                 break;
-            case 27: // maximum (binary)
-                res_bits = floatBitsToUint(max(val_a, val_b));
+            case 27: // maximum (binary) — NaN-propagating (torch.maximum).
+                res_bits = floatBitsToUint((val_a != val_a || val_b != val_b)
+                    ? uintBitsToFloat(0x7fc00000u) : max(val_a, val_b));
                 break;
             case 33: // hypot (binary)
                 res_bits = floatBitsToUint(sqrt(val_a * val_a + val_b * val_b));

@@ -1305,9 +1305,17 @@ auto VulkanBackend::dispatchMaxPool1dBackward(const Tensor& grad_output, const T
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants { uint32_t n_elements, grad_input_size; } pc;
+    struct PushConstants { uint32_t n_elements, grad_input_size, out_plane, in_plane; } pc;
     pc.n_elements = static_cast<uint32_t>(grad_out_numel);
     pc.grad_input_size = static_cast<uint32_t>(grad_in_numel);
+    // F043: per-(n,c) plane sizes let the backward shader rebuild global
+    // argmax offsets from the plane-local indices the forward now stores
+    // (nc = idx / out_plane; global = nc * in_plane + plane_local).
+    {
+        int64_t nc_planes = grad_output.shape()[0] * grad_output.shape()[1];
+        pc.out_plane = static_cast<uint32_t>(grad_out_numel / nc_planes);
+        pc.in_plane  = static_cast<uint32_t>(grad_in_numel / nc_planes);
+    }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -1607,9 +1615,17 @@ auto VulkanBackend::dispatchAdaptiveMaxPool1dBackward(const Tensor& grad_output,
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants { uint32_t n_elements, grad_input_size; } pc;
+    struct PushConstants { uint32_t n_elements, grad_input_size, out_plane, in_plane; } pc;
     pc.n_elements = static_cast<uint32_t>(grad_out_numel);
     pc.grad_input_size = static_cast<uint32_t>(grad_in_numel);
+    // F043: per-(n,c) plane sizes let the backward shader rebuild global
+    // argmax offsets from the plane-local indices the forward now stores
+    // (nc = idx / out_plane; global = nc * in_plane + plane_local).
+    {
+        int64_t nc_planes = grad_output.shape()[0] * grad_output.shape()[1];
+        pc.out_plane = static_cast<uint32_t>(grad_out_numel / nc_planes);
+        pc.in_plane  = static_cast<uint32_t>(grad_in_numel / nc_planes);
+    }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -1822,9 +1838,17 @@ auto VulkanBackend::dispatchMaxPool3dBackward(const Tensor& grad_output, const T
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants { uint32_t n_elements, grad_input_size; } pc;
+    struct PushConstants { uint32_t n_elements, grad_input_size, out_plane, in_plane; } pc;
     pc.n_elements = static_cast<uint32_t>(grad_out_numel);
     pc.grad_input_size = static_cast<uint32_t>(grad_in_numel);
+    // F043: per-(n,c) plane sizes let the backward shader rebuild global
+    // argmax offsets from the plane-local indices the forward now stores
+    // (nc = idx / out_plane; global = nc * in_plane + plane_local).
+    {
+        int64_t nc_planes = grad_output.shape()[0] * grad_output.shape()[1];
+        pc.out_plane = static_cast<uint32_t>(grad_out_numel / nc_planes);
+        pc.in_plane  = static_cast<uint32_t>(grad_in_numel / nc_planes);
+    }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -2184,9 +2208,17 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3dBackward(const Tensor& grad_output,
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants { uint32_t n_elements, grad_input_size; } pc;
+    struct PushConstants { uint32_t n_elements, grad_input_size, out_plane, in_plane; } pc;
     pc.n_elements = static_cast<uint32_t>(grad_out_numel);
     pc.grad_input_size = static_cast<uint32_t>(grad_in_numel);
+    // F043: per-(n,c) plane sizes let the backward shader rebuild global
+    // argmax offsets from the plane-local indices the forward now stores
+    // (nc = idx / out_plane; global = nc * in_plane + plane_local).
+    {
+        int64_t nc_planes = grad_output.shape()[0] * grad_output.shape()[1];
+        pc.out_plane = static_cast<uint32_t>(grad_out_numel / nc_planes);
+        pc.in_plane  = static_cast<uint32_t>(grad_in_numel / nc_planes);
+    }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());

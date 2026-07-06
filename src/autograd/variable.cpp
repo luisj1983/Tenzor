@@ -68,14 +68,17 @@ auto Variable::set_data_view(Tensor data) -> void {
     impl_->data_ = std::move(data);
 }
 
-auto Variable::grad() const -> const std::optional<Tensor>& {
+auto Variable::grad() const -> std::optional<Tensor> {
     if (!impl_) {
         throw std::runtime_error("Cannot access grad of uninitialized Variable");
     }
     // Serialize against concurrent gradient accumulation when thread_safe_ is
     // enabled, matching has_grad()/set_grad()/mutable_grad(); reading grad_
     // (and the metadata flags) unlocked while a backward worker writes it is a
-    // data race.
+    // data race. Return BY VALUE: the optional<Tensor> (a cheap handle copy) is
+    // constructed from impl_->grad_ while the lock is still held, so the caller
+    // never touches grad_ unlocked. Returning a reference (the previous
+    // behaviour) leaked grad_ past the lock's scope, defeating the guard.
     std::unique_lock<std::mutex> lock;
     if (impl_->thread_safe_.load(std::memory_order_acquire)) {
         lock = std::unique_lock<std::mutex>(*impl_->grad_mutex_);

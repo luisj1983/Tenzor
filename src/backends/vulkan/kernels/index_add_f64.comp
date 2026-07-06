@@ -50,6 +50,7 @@ void main() {
     uint o = tid / (params.inner * params.idx_n);
 
     int dest_idx = idx_data[k];
+    if (dest_idx < 0) dest_idx += int(params.dim_size);  // wrap negatives (match CPU/OneAPI)
     if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
 
     uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;

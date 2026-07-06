@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -76,16 +77,31 @@ auto RoPE::forward(const Variable& input, int64_t offset) -> Variable {
         sin_slice = sin_slice.to(input.tensor().device());
     }
 
-    // Convert to input dtype
-    if (input.tensor().dtype() != cos_slice.dtype()) {
-        cos_slice = cos_slice.to(input.tensor().dtype());
-        sin_slice = sin_slice.to(input.tensor().dtype());
+    // Rotation convention: this class uses the HALF-SPLIT (NeoX / LLaMA-HF /
+    // GPT-NeoX) layout — the pair for rotation is (x[:half], x[half:]). This is
+    // DISTINCT from nn::RotaryPositionEmbedding (hrm.cpp), which uses the
+    // INTERLEAVED (GPT-J) layout (adjacent-element pairs). The two produce
+    // numerically different rotations from the same inv_freq table; do not mix a
+    // model's weights/positions across the two conventions.
+    //
+    // F121: for Float16/BFloat16 input, run the rotation in Float32 (PyTorch
+    // applies RoPE in fp32 and casts back). Computing x*cos ± x*sin in half loses
+    // angle precision and makes cross-backend parity depend on each backend's
+    // half-precision Mul/Add rounding. Keep cos/sin in Float32 and widen the
+    // input (autograd-aware) to Float32, then cast the rotated result back.
+    const DType in_dtype = input.tensor().dtype();
+    const bool is_half = (in_dtype == DType::Float16 || in_dtype == DType::BFloat16);
+    const DType work_dtype = is_half ? DType::Float32 : in_dtype;
+    if (cos_slice.dtype() != work_dtype) {
+        cos_slice = cos_slice.to(work_dtype);
+        sin_slice = sin_slice.to(work_dtype);
     }
+    Variable in_work = is_half ? tenzor::nn::variable_cast(input, DType::Float32) : input;
 
     // Split input into pairs: x1 = x[..., :half_dim], x2 = x[..., half_dim:]
     int64_t last_dim = static_cast<int64_t>(shape.size()) - 1;
-    auto x1 = tenzor::slice(input, last_dim, 0, half_dim);
-    auto x2 = tenzor::slice(input, last_dim, half_dim, head_dim);
+    auto x1 = tenzor::slice(in_work, last_dim, 0, half_dim);
+    auto x2 = tenzor::slice(in_work, last_dim, half_dim, head_dim);
 
     // Apply rotation: out1 = x1 * cos - x2 * sin, out2 = x2 * cos + x1 * sin
     Variable cos_var(cos_slice, false);
@@ -94,8 +110,10 @@ auto RoPE::forward(const Variable& input, int64_t offset) -> Variable {
     auto out1 = x1 * cos_var - x2 * sin_var;
     auto out2 = x2 * cos_var + x1 * sin_var;
 
-    // Concatenate back along last dimension
-    return tenzor::cat({out1, out2}, last_dim);
+    // Concatenate back along last dimension, narrowing back to the input dtype.
+    auto out = tenzor::cat({out1, out2}, last_dim);
+    if (is_half) out = tenzor::nn::variable_cast(out, in_dtype);
+    return out;
 }
 
 } // namespace tenzor::nn

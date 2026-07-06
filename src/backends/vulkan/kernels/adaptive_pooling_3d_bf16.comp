@@ -97,7 +97,7 @@ void main() {
                 if (params.pool_type == 0) {
                     if (isnan(value) || value > result) {
                         result = value;
-                        max_idx = int(input_idx);
+                        max_idx = int(input_idx % (params.in_depth * params.in_height * params.in_width));  // plane-local (F043)
                     }
                 } else {
                     result += value;

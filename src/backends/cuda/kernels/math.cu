@@ -5010,18 +5010,22 @@ auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64
             grad_output.data<double>(), grad_input.data<double>(),
             N, C, H_in, W_in, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());
-    } else if (grad_output.dtype() == DType::Float16) {
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        // Half/bfloat16: overlapping input pixels each receive many atomicAdds
+        // (global-average pooling upsamples one output cell to the whole plane),
+        // so accumulating in half drifts vs the f32 CPU reference. Widen grad_output
+        // to f32, accumulate into an f32 grad_input buffer, then narrow back
+        // (mirrors ROCm/OneAPI).
+        DType orig = grad_output.dtype();
+        Tensor grad_out_f32 = grad_output.to(DType::Float32);
+        Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
+        CUDA_CHECK(cudaMemsetAsync(grad_input_f32.data_ptr(), 0,
+                                   grad_input_f32.numel() * sizeof(float), stream));
         adaptive_avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __half*>(grad_output.data_ptr()),
-            reinterpret_cast<__half*>(grad_input.data_ptr()),
+            grad_out_f32.data<float>(), grad_input_f32.data<float>(),
             N, C, H_in, W_in, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());
-    } else if (grad_output.dtype() == DType::BFloat16) {
-        adaptive_avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
-            N, C, H_in, W_in, H_out, W_out);
-        CUDA_CHECK(cudaGetLastError());
+        return grad_input_f32.to(orig);
     } else {
         throw std::runtime_error("adaptive_avg_pool2d_backward: unsupported dtype");
     }
@@ -5061,14 +5065,16 @@ __global__ void adaptive_max_pool2d_forward_kernel(
     int64_t w_end = ((w_out + 1) * W_in + W_out - 1) / W_out;
 
     T max_val = input[((n * C + c) * H_in + h_start) * W_in + w_start];
-    int64_t max_idx = ((n * C + c) * H_in + h_start) * W_in + w_start;
+    // Store the per-channel argmax in [0, H_in*W_in) (PyTorch/CPU convention),
+    // not the global flat index; backward re-adds the (n,c) plane offset.
+    int64_t max_idx = h_start * W_in + w_start;
 
     for (int64_t h = h_start; h < h_end; ++h) {
         for (int64_t w = w_start; w < w_end; ++w) {
             int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
             if (adaptive_maxpool2d_is_nan(input[input_idx]) || input[input_idx] > max_val) {
                 max_val = input[input_idx];
-                max_idx = input_idx;
+                max_idx = h * W_in + w;
             }
         }
     }
@@ -5122,15 +5128,28 @@ auto adaptive_max_pool2d_forward(const Tensor& input, int64_t output_h, int64_t 
 
 template<typename T>
 __global__ void adaptive_max_pool2d_backward_kernel(
-    const T* grad_output, const int64_t* indices,
-    T* grad_input, int64_t total_output) {
+    const T* grad_output, const int64_t* indices, T* grad_input,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in,
+    int64_t H_out, int64_t W_out) {
 
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total_output) return;
-    atomicAdd(&grad_input[indices[idx]], grad_output[idx]);
+    int64_t total = N * C * H_out * W_out;
+    if (idx >= total) return;
+
+    // Decode the output element's (n, c) to locate its input plane. indices
+    // store the per-channel argmax in [0, H_in*W_in) (PyTorch/CPU convention),
+    // so re-add the (n,c) plane offset to reach the global grad_input slot.
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (W_out * H_out * C);
+    int64_t input_idx = (n * C + c) * (H_in * W_in) + indices[idx];
+    atomicAdd(&grad_input[input_idx], grad_output[idx]);
 }
 
 auto adaptive_max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor {
+    int64_t N = input_shape[0], C = input_shape[1], H_in = input_shape[2], W_in = input_shape[3];
+    auto go_shape = grad_output.shape();
+    int64_t H_out = go_shape[2], W_out = go_shape[3];
+
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
     CUDA_CHECK(cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream));
 
@@ -5140,24 +5159,29 @@ auto adaptive_max_pool2d_backward(const Tensor& grad_output, const Tensor& indic
 
     if (grad_output.dtype() == DType::Float32) {
         adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
-            grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(), total);
+            grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
+            N, C, H_in, W_in, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());
     } else if (grad_output.dtype() == DType::Float64) {
         adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
-            grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(), total);
+            grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
+            N, C, H_in, W_in, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());
-    } else if (grad_output.dtype() == DType::Float16) {
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        // Half/bfloat16: multiple output cells can share a saved argmax (common
+        // with upsampling adaptive-max), so their contributions accumulate at the
+        // same input slot. Accumulate in an f32 buffer to match CPU float
+        // accumulation, then narrow back.
+        DType orig = grad_output.dtype();
+        Tensor grad_out_f32 = grad_output.to(DType::Float32);
+        Tensor grad_input_f32(input_shape, DType::Float32, grad_output.device());
+        CUDA_CHECK(cudaMemsetAsync(grad_input_f32.data_ptr(), 0,
+                                   grad_input_f32.numel() * sizeof(float), stream));
         adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __half*>(grad_output.data_ptr()),
-            indices.data<int64_t>(),
-            reinterpret_cast<__half*>(grad_input.data_ptr()), total);
+            grad_out_f32.data<float>(), indices.data<int64_t>(), grad_input_f32.data<float>(),
+            N, C, H_in, W_in, H_out, W_out);
         CUDA_CHECK(cudaGetLastError());
-    } else if (grad_output.dtype() == DType::BFloat16) {
-        adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
-            indices.data<int64_t>(),
-            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()), total);
-        CUDA_CHECK(cudaGetLastError());
+        return grad_input_f32.to(orig);
     } else {
         throw std::runtime_error("adaptive_max_pool2d_backward: unsupported dtype");
     }

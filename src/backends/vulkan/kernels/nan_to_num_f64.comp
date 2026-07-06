@@ -19,9 +19,16 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.num_elements) return;
     double x = input_buf.data[idx];
-    if (isnan(x)) {
+    // F149: driver isinf()/isnan() unreliable — detect via IEEE-754 bit patterns.
+    // unpackDouble2x32 -> (low, high); exp all 1s with mantissa 0 => Inf, else NaN.
+    uvec2 parts = unpackDouble2x32(x);
+    uint hi = parts.y & 0x7FFFFFFFu;
+    uint lo = parts.x;
+    bool is_inf = (hi == 0x7FF00000u) && (lo == 0u);
+    bool is_nan = (hi > 0x7FF00000u) || ((hi == 0x7FF00000u) && (lo != 0u));
+    if (is_nan) {
         output_buf.data[idx] = pc.nan_val;
-    } else if (isinf(x)) {
+    } else if (is_inf) {
         output_buf.data[idx] = (x > 0.0) ? pc.posinf_val : pc.neginf_val;
     } else {
         output_buf.data[idx] = x;

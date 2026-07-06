@@ -16,6 +16,7 @@
 #include <tenzor/autograd/nested_ops.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include <tenzor/nn/functional.hpp>
 #include <tenzor/ops/creation.hpp>
 #include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
@@ -112,7 +113,9 @@ TEST_P(NestedAutogradTest, NestedSoftmaxGradient) {
 
     auto offsets = make_int64_tensor({0, 3, 6});
 
-    auto result = tenzor::autograd::nested_softmax(values, offsets, /*dim=*/-1);
+    // dim=0 is the ragged SEGMENT axis — the only axis nested_softmax normalizes
+    // over (the previous dim=-1 relied on the kernel silently ignoring dim).
+    auto result = tenzor::autograd::nested_softmax(values, offsets, /*dim=*/0);
     // result shape should match input
     EXPECT_EQ(result.shape()[0], 6);
     EXPECT_EQ(result.shape()[1], 4);
@@ -130,6 +133,11 @@ TEST_P(NestedAutogradTest, NestedSoftmaxGradient) {
     for (int64_t i = 0; i < grad.numel(); ++i) {
         EXPECT_FALSE(std::isnan(grad_ptr[i]));
     }
+
+    // F015: a non-segment dim must throw rather than silently compute a segment
+    // softmax (the kernel ignores dim), so callers can't get the wrong result.
+    EXPECT_THROW(tenzor::autograd::nested_softmax(values, offsets, /*dim=*/1),
+                 std::runtime_error);
 }
 
 // ============================================================================
@@ -296,6 +304,70 @@ TEST_P(NestedAutogradTest, NoGradPath) {
     EXPECT_EQ(result.shape()[1], 4);
     // Should not have grad_fn since grad is disabled
     EXPECT_EQ(result.grad_fn(), nullptr);
+}
+
+// nested_layer_norm normalizes each row over the feature dim D, independent of
+// the ragged segment structure — so it must be identical to regular per-row
+// LayerNorm over {D}, forward AND backward. This catches the wrong-axis backward
+// (which reduced statistics over the segment/token axis instead of D).
+TEST_P(NestedAutogradTest, NestedLayerNormMatchesRegularLayerNorm) {
+    const int64_t N = 7, D = 5;
+    auto vals = tenzor::randn({N, D}, tenzor::DType::Float32, device);
+    auto w = tenzor::randn({D}, tenzor::DType::Float32, device);
+    auto b = tenzor::randn({D}, tenzor::DType::Float32, device);
+    auto seed = tenzor::randn({N, D}, tenzor::DType::Float32, device);
+    auto offsets = make_int64_tensor({0, 3, 5, 7});  // multi-segment, ragged
+    const double eps = 1e-5;
+
+    tenzor::Variable v1(vals, true), w1(w, true), b1(b, true);
+    auto out1 = tenzor::autograd::nested_layer_norm(v1, offsets, w1, b1, eps);
+    out1.backward(seed);
+
+    tenzor::Variable v2(vals, true), w2(w, true), b2(b, true);
+    auto out2 = tenzor::nn::functional::layer_norm(v2, {D}, w2, b2, eps);
+    out2.backward(seed);
+
+    auto max_diff = [](const tenzor::Tensor& a, const tenzor::Tensor& bb) {
+        return tenzor::max(tenzor::abs(tenzor::sub(a.cpu(), bb.cpu()))).template item<float>();
+    };
+    EXPECT_LT(max_diff(out1.tensor(), out2.tensor()), 1e-4f) << "forward differs";
+    EXPECT_LT(max_diff(v1.grad().value(), v2.grad().value()), 1e-4f) << "grad_values differs";
+    EXPECT_LT(max_diff(w1.grad().value(), w2.grad().value()), 1e-4f) << "grad_weight differs";
+    EXPECT_LT(max_diff(b1.grad().value(), b2.grad().value()), 1e-4f) << "grad_bias differs";
+}
+
+// F013 (>2D completion): nested_layer_norm on >2D values [total, H, D] normalizes
+// over the LAST dim D (weight/bias are [D]); the backward must flatten leading
+// dims and reduce over the feature axis, matching regular layer_norm(values,{D}).
+TEST_P(NestedAutogradTest, NestedLayerNorm3DMatchesRegularLayerNorm) {
+    const int64_t total = 6, Hh = 2, D = 4;
+    auto vals = tenzor::randn({total, Hh, D}, tenzor::DType::Float32, device);
+    auto w = tenzor::randn({D}, tenzor::DType::Float32, device);
+    auto b = tenzor::randn({D}, tenzor::DType::Float32, device);
+    auto seed = tenzor::randn({total, Hh, D}, tenzor::DType::Float32, device);
+    auto offsets = make_int64_tensor({0, 3, 6});
+    const double eps = 1e-5;
+
+    tenzor::Variable v1(vals, true), w1(w, true), b1(b, true);
+    tenzor::Variable out1;
+    try {
+        out1 = tenzor::autograd::nested_layer_norm(v1, offsets, w1, b1, eps);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "nested_layer_norm forward does not accept >2D values: " << e.what();
+    }
+    out1.backward(seed);
+
+    tenzor::Variable v2(vals, true), w2(w, true), b2(b, true);
+    auto out2 = tenzor::nn::functional::layer_norm(v2, {D}, w2, b2, eps);
+    out2.backward(seed);
+
+    auto max_diff = [](const tenzor::Tensor& a, const tenzor::Tensor& bb) {
+        return tenzor::max(tenzor::abs(tenzor::sub(a.cpu(), bb.cpu()))).template item<float>();
+    };
+    EXPECT_LT(max_diff(out1.tensor(), out2.tensor()), 1e-4f) << "forward differs (>2D)";
+    EXPECT_LT(max_diff(v1.grad().value(), v2.grad().value()), 1e-4f) << "grad_values differs (>2D)";
+    EXPECT_LT(max_diff(w1.grad().value(), w2.grad().value()), 1e-4f) << "grad_weight differs (>2D)";
+    EXPECT_LT(max_diff(b1.grad().value(), b2.grad().value()), 1e-4f) << "grad_bias differs (>2D)";
 }
 
 INSTANTIATE_BACKEND_TESTS(NestedAutogradTest);

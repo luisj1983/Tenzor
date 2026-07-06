@@ -5261,46 +5261,66 @@ __global__ void logical_xor_kernel_f16(const __half* a, const __half* b, uint8_t
 // Element-wise Min/Max Kernels
 // ============================================================================
 
-// NaN semantics: match the CPU reference (minimum_typed uses `a < b ? a : b`,
-// which propagates a NaN in the SECOND operand: min(5,NaN)=NaN). fminf/fmin
-// instead return the non-NaN operand, diverging on backend-parity tests.
+// NaN semantics: match the CPU reference (minimum_typed / maximum_typed are
+// NaN-propagating like torch.minimum/torch.maximum: if EITHER operand is NaN
+// the result is NaN). A plain `a < b ? a : b` only propagates a NaN in the
+// SECOND operand and drops a NaN first operand, diverging on backend-parity
+// tests. This backend builds with -ffast-math, so `isnan`/`a != a` fold to
+// false; detect NaN via the IEEE-754 bit pattern (is_nan_bits) and emit a
+// canonical qNaN (make_qnan<T>) instead.
 __global__ void minimum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = (a[idx] < b[idx]) ? a[idx] : b[idx];
+        output[idx] = (tenzor::rocm::is_nan_bits(a[idx]) || tenzor::rocm::is_nan_bits(b[idx]))
+            ? tenzor::rocm::make_qnan<float>()
+            : ((a[idx] < b[idx]) ? a[idx] : b[idx]);
     }
 }
 
 __global__ void minimum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = (a[idx] < b[idx]) ? a[idx] : b[idx];
+        output[idx] = (tenzor::rocm::is_nan_bits(a[idx]) || tenzor::rocm::is_nan_bits(b[idx]))
+            ? tenzor::rocm::make_qnan<double>()
+            : ((a[idx] < b[idx]) ? a[idx] : b[idx]);
     }
 }
 
 __global__ void minimum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = tenzor::rocm::safe_h2f(a[idx]);
-        float vb = tenzor::rocm::safe_h2f(b[idx]);
-        output[idx] = tenzor::rocm::safe_f2h((va < vb) ? va : vb);
+        if (tenzor::rocm::is_nan_bits(a[idx]) || tenzor::rocm::is_nan_bits(b[idx])) {
+            output[idx] = tenzor::rocm::make_qnan<__half>();
+        } else {
+            float va = tenzor::rocm::safe_h2f(a[idx]);
+            float vb = tenzor::rocm::safe_h2f(b[idx]);
+            output[idx] = tenzor::rocm::safe_f2h((va < vb) ? va : vb);
+        }
     }
 }
 
 __global__ void maximum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = (a[idx] > b[idx]) ? a[idx] : b[idx];
+        output[idx] = (tenzor::rocm::is_nan_bits(a[idx]) || tenzor::rocm::is_nan_bits(b[idx]))
+            ? tenzor::rocm::make_qnan<float>()
+            : ((a[idx] > b[idx]) ? a[idx] : b[idx]);
     }
 }
 
 __global__ void maximum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = (a[idx] > b[idx]) ? a[idx] : b[idx];
+        output[idx] = (tenzor::rocm::is_nan_bits(a[idx]) || tenzor::rocm::is_nan_bits(b[idx]))
+            ? tenzor::rocm::make_qnan<double>()
+            : ((a[idx] > b[idx]) ? a[idx] : b[idx]);
     }
 }
 
 __global__ void maximum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float va = tenzor::rocm::safe_h2f(a[idx]);
-        float vb = tenzor::rocm::safe_h2f(b[idx]);
-        output[idx] = tenzor::rocm::safe_f2h((va > vb) ? va : vb);
+        if (tenzor::rocm::is_nan_bits(a[idx]) || tenzor::rocm::is_nan_bits(b[idx])) {
+            output[idx] = tenzor::rocm::make_qnan<__half>();
+        } else {
+            float va = tenzor::rocm::safe_h2f(a[idx]);
+            float vb = tenzor::rocm::safe_h2f(b[idx]);
+            output[idx] = tenzor::rocm::safe_f2h((va > vb) ? va : vb);
+        }
     }
 }
 
@@ -8950,6 +8970,24 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, hipStream_
 // Kthvalue kernel — k-th smallest value along a dimension
 // ============================================================================
 
+// F142: NaN treated as the LARGEST value (bit-pattern check — this backend's
+// -ffast-math makes `x != x` unreliable). Integer T has no NaN.
+template<typename T> __device__ __forceinline__ bool kth_is_nan(T x) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double> ||
+                  std::is_same_v<T, __half> || std::is_same_v<T, hip_bfloat16>) {
+        return tenzor::rocm::is_nan_bits(x);
+    } else {
+        return false;
+    }
+}
+// Does `a` sort strictly before `b`? (ascending, NaN-as-largest.)
+template<typename T> __device__ __forceinline__ bool kth_before(T a, T b) {
+    bool an = kth_is_nan(a), bn = kth_is_nan(b);
+    if (bn) return !an;      // anything non-NaN precedes NaN; NaN vs NaN not before
+    if (an) return false;    // NaN never precedes a non-NaN
+    return a < b;
+}
+
 template<typename T>
 __global__ void kthvalue_hip_kernel(
     const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
@@ -8964,12 +9002,14 @@ __global__ void kthvalue_hip_kernel(
         for (int64_t i = 0; i < dim_size; ++i)
             ws[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
 
-        // Partial selection sort to find k-th smallest
+        // Partial selection sort to find k-th smallest (NaN-as-largest, so NaN
+        // sorts last — matches the CPU nan_less reference). kth_before is a
+        // fast-math-safe, NaN-aware "sorts strictly before".
         for (int64_t i = 0; i < k; ++i) {
             int64_t min_idx = i;
             T min_val = ws[i];
             for (int64_t j = i + 1; j < dim_size; ++j) {
-                if (ws[j] < min_val) {
+                if (kth_before(ws[j], min_val)) {
                     min_val = ws[j];
                     min_idx = j;
                 }
@@ -8983,9 +9023,13 @@ __global__ void kthvalue_hip_kernel(
         T kth_val = ws[k - 1];
         values[slice_idx] = kth_val;
 
+        // Find the first index holding the k-th value. F142: `orig == kth_val` is
+        // false when kth_val is NaN (NaN != NaN, and doubly so under fast-math),
+        // which left indices[] uninitialized; match NaN-to-NaN explicitly.
+        const bool kth_nan = kth_is_nan(kth_val);
         for (int64_t i = 0; i < dim_size; ++i) {
             T orig = input[outer * dim_size * inner_size + i * inner_size + inner];
-            if (orig == kth_val) {
+            if (orig == kth_val || (kth_nan && kth_is_nan(orig))) {
                 indices[slice_idx] = i;
                 break;
             }
@@ -9069,6 +9113,17 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
 // Quantile/Nanquantile/Nanmedian — NaN-aware quantile kernels
 // ============================================================================
 
+// Strict-greater under NaN-as-largest ordering (NaN sorts LAST, any sign),
+// matching CPU nan_greater/nan_less. This backend builds with -ffast-math, so
+// `a > b` and `a != a` fold NaN away; detect NaN via the IEEE-754 bit pattern.
+template<typename T>
+__device__ inline bool nan_gt_bits(T a, T b) {
+    bool na = tenzor::rocm::is_nan_bits(a);
+    bool nb = tenzor::rocm::is_nan_bits(b);
+    if (na || nb) return na && !nb;   // NaN > finite; nothing > NaN
+    return a > b;
+}
+
 template<typename T>
 __global__ void nanquantile_hip_kernel(
     const T* __restrict__ input, T* __restrict__ output,
@@ -9098,11 +9153,11 @@ __global__ void nanquantile_hip_kernel(
             return;
         }
 
-        // Insertion sort
+        // Insertion sort (NaN-as-largest so NaN sorts LAST, matching CPU)
         for (int64_t i = 1; i < count; ++i) {
             T key = ws[i];
             int64_t j = i - 1;
-            while (j >= 0 && ws[j] > key) {
+            while (j >= 0 && nan_gt_bits(ws[j], key)) {
                 ws[j + 1] = ws[j];
                 --j;
             }
@@ -9133,11 +9188,11 @@ __global__ void quantile_hip_kernel(
         for (int64_t i = 0; i < dim_size; ++i)
             ws[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
 
-        // Insertion sort
+        // Insertion sort (NaN-as-largest so NaN sorts LAST, matching CPU)
         for (int64_t i = 1; i < dim_size; ++i) {
             T key = ws[i];
             int64_t j = i - 1;
-            while (j >= 0 && ws[j] > key) {
+            while (j >= 0 && nan_gt_bits(ws[j], key)) {
                 ws[j + 1] = ws[j];
                 --j;
             }

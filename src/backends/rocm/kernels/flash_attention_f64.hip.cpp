@@ -147,7 +147,9 @@ __global__ void flash_attention_v2_kernel_f64_hip(
         // o_acc += NaN*0 = NaN, poisoning the whole row and logsumexp. A fully
         // masked tile contributes nothing, so skip it. The condition is uniform
         // across the block, so it does not desync the __syncthreads() below.
-        if (causal && kv_start > q_row) {
+        // F040: bottom-right causal alignment — query q_row attends keys up to
+        // kv_pos <= q_row + (seq_len_k - seq_len_q), matching the FP32 forward.
+        if (causal && kv_start > q_row + (seq_len_k - seq_len_q)) {
             continue;
         }
 
@@ -179,7 +181,7 @@ __global__ void flash_attention_v2_kernel_f64_hip(
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
             double score;
             int kv_pos = kv_start + j;
-            if (j < kv_end_actual && !(causal && kv_pos > q_row)) {
+            if (j < kv_end_actual && !(causal && kv_pos > q_row + (seq_len_k - seq_len_q))) {
                 score = 0.0;
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     score += Q_shared[d] * K_tile[j * K_STRIDE + d];
@@ -210,7 +212,7 @@ __global__ void flash_attention_v2_kernel_f64_hip(
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
             double score;
             int kv_pos = kv_start + j;
-            if (j < kv_end_actual && !(causal && kv_pos > q_row)) {
+            if (j < kv_end_actual && !(causal && kv_pos > q_row + (seq_len_k - seq_len_q))) {
                 score = 0.0;
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     score += Q_shared[d] * K_tile[j * K_STRIDE + d];
@@ -308,23 +310,25 @@ __global__ void flash_attention_backward_prepass_f64_hip(
     const double* __restrict__ K,     // [batch_heads, seq_len, HEAD_DIM]
     const double* __restrict__ O,     // [batch_heads, seq_len, HEAD_DIM]
     const double* __restrict__ dO,    // [batch_heads, seq_len, HEAD_DIM]
-    double* __restrict__ lse_scratch, // [batch_heads, seq_len]
-    double* __restrict__ D_scratch,   // [batch_heads, seq_len]
-    const int seq_len,
+    double* __restrict__ lse_scratch, // [batch_heads, seq_len_q]
+    double* __restrict__ D_scratch,   // [batch_heads, seq_len_q]
+    const int seq_len_q,
+    const int seq_len_k,
     const double scale,
     const bool causal
 ) {
     const int row        = blockIdx.x;
     const int batch_head = blockIdx.y;
-    if (row >= seq_len) return;
+    if (row >= seq_len_q) return;
     const int tid = threadIdx.x;
 
     const double NEG_INF = -__longlong_as_double(0x7ff0000000000000LL);
 
-    const double* Q_base  = Q  + batch_head * seq_len * HEAD_DIM;
-    const double* K_base  = K  + batch_head * seq_len * HEAD_DIM;
-    const double* O_base  = O  + batch_head * seq_len * HEAD_DIM;
-    const double* dO_base = dO + batch_head * seq_len * HEAD_DIM;
+    // Q/O/dO stride by seq_len_q (query axis); K by seq_len_k (key axis).
+    const double* Q_base  = Q  + batch_head * seq_len_q * HEAD_DIM;
+    const double* K_base  = K  + batch_head * seq_len_k * HEAD_DIM;
+    const double* O_base  = O  + batch_head * seq_len_q * HEAD_DIM;
+    const double* dO_base = dO + batch_head * seq_len_q * HEAD_DIM;
 
     // Shared: cache the Q-row [HEAD_DIM], plus a reduction scratch [BLOCK_SIZE].
     extern __shared__ double smem_f64_pre[];
@@ -336,7 +340,11 @@ __global__ void flash_attention_backward_prepass_f64_hip(
     }
     __syncthreads();
 
-    const int k_limit = causal ? (row + 1) : seq_len;
+    // F040: bottom-right causal alignment. Query at absolute position `row`
+    // attends keys kv_pos <= row + (seq_len_k - seq_len_q).
+    const int k_limit = causal
+        ? min(row + 1 + (seq_len_k - seq_len_q), seq_len_k)
+        : seq_len_k;
 
     // Pass 1: per-row max of S_row,k = scale * (Q_row · K_k).
     double m_local = NEG_INF;
@@ -396,8 +404,8 @@ __global__ void flash_attention_backward_prepass_f64_hip(
 
     if (tid == 0) {
         const bool valid = (m_row > NEG_INF) && (l_row > 0.0);
-        lse_scratch[batch_head * seq_len + row] = valid ? (m_row + log(l_row)) : NEG_INF;
-        D_scratch[batch_head * seq_len + row]   = reduce[0];
+        lse_scratch[batch_head * seq_len_q + row] = valid ? (m_row + log(l_row)) : NEG_INF;
+        D_scratch[batch_head * seq_len_q + row]   = reduce[0];
     }
 }
 
@@ -422,9 +430,10 @@ __global__ void flash_attention_backward_kernel_f64_hip(
     double* __restrict__ dQ,          // accumulated via atomicAdd
     double* __restrict__ dK,          // one block per KV tile → no race
     double* __restrict__ dV,          // one block per KV tile → no race
-    const double* __restrict__ lse_scratch, // [batch_heads, seq_len], precomputed
-    const double* __restrict__ D_scratch,   // [batch_heads, seq_len], precomputed
-    const int seq_len,
+    const double* __restrict__ lse_scratch, // [batch_heads, seq_len_q], precomputed
+    const double* __restrict__ D_scratch,   // [batch_heads, seq_len_q], precomputed
+    const int seq_len_q,
+    const int seq_len_k,
     const double scale,
     const bool causal
 ) {
@@ -432,19 +441,23 @@ __global__ void flash_attention_backward_kernel_f64_hip(
     const int batch_head  = blockIdx.y;
     const int tid         = threadIdx.x;
 
-    const int kv_start = kv_tile_idx * Bc;
-    if (kv_start >= seq_len) return;
-    const int actual_Bc = min(Bc, seq_len - kv_start);
+    // F040: bottom-right causal offset (query axis seq_len_q, key axis seq_len_k).
+    const int causal_offset = seq_len_k - seq_len_q;
 
-    const double* Q_base  = Q  + batch_head * seq_len * HEAD_DIM;
-    const double* K_base  = K  + batch_head * seq_len * HEAD_DIM;
-    const double* V_base  = V  + batch_head * seq_len * HEAD_DIM;
-    const double* dO_base = dO + batch_head * seq_len * HEAD_DIM;
-    double* dQ_base = dQ + batch_head * seq_len * HEAD_DIM;
-    double* dK_base = dK + batch_head * seq_len * HEAD_DIM;
-    double* dV_base = dV + batch_head * seq_len * HEAD_DIM;
-    const double* lse_base = lse_scratch + batch_head * seq_len;
-    const double* D_base   = D_scratch   + batch_head * seq_len;
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len_k) return;
+    const int actual_Bc = min(Bc, seq_len_k - kv_start);
+
+    // Q/dO/dQ stride by seq_len_q; K/V/dK/dV by seq_len_k; scratch by seq_len_q.
+    const double* Q_base  = Q  + batch_head * seq_len_q * HEAD_DIM;
+    const double* K_base  = K  + batch_head * seq_len_k * HEAD_DIM;
+    const double* V_base  = V  + batch_head * seq_len_k * HEAD_DIM;
+    const double* dO_base = dO + batch_head * seq_len_q * HEAD_DIM;
+    double* dQ_base = dQ + batch_head * seq_len_q * HEAD_DIM;
+    double* dK_base = dK + batch_head * seq_len_k * HEAD_DIM;
+    double* dV_base = dV + batch_head * seq_len_k * HEAD_DIM;
+    const double* lse_base = lse_scratch + batch_head * seq_len_q;
+    const double* D_base   = D_scratch   + batch_head * seq_len_q;
 
     extern __shared__ double smem_f64_bwd[];
     double* K_tile  = smem_f64_bwd;
@@ -479,14 +492,14 @@ __global__ void flash_attention_backward_kernel_f64_hip(
         dv_acc[e] = 0.0;
     }
 
-    const int num_q_tiles = (seq_len + Br - 1) / Br;
+    const int num_q_tiles = (seq_len_q + Br - 1) / Br;
 
     for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
         const int q_start = q_tile_idx * Br;
-        if (q_start >= seq_len) break;
-        const int actual_Br = min(Br, seq_len - q_start);
+        if (q_start >= seq_len_q) break;
+        const int actual_Br = min(Br, seq_len_q - q_start);
 
-        if (causal && (q_start + actual_Br - 1) < kv_start) continue;
+        if (causal && (q_start + actual_Br - 1) + causal_offset < kv_start) continue;
 
         // Load Q_i / dO_i tiles.
         for (int i = tid; i < actual_Br * HEAD_DIM; i += BLOCK_SIZE) {
@@ -546,7 +559,7 @@ __global__ void flash_attention_backward_kernel_f64_hip(
             int j = idx % Bc;
             double p = 0.0;
             if (i < actual_Br && j < actual_Bc) {
-                if (causal && (q_start + i) < (kv_start + j)) {
+                if (causal && (q_start + i) + causal_offset < (kv_start + j)) {
                     p = 0.0;
                 } else {
                     p = exp(S_tile[i * Bc + j] - l_tile[i]);
@@ -745,12 +758,13 @@ auto flash_attention_backward_hip_f64(
         throw std::runtime_error("flash_attention_backward_hip_f64: requires Float64 inputs");
     }
     int64_t batch_heads = Q.shape()[0];
-    int64_t seq_len     = Q.shape()[1];
+    int64_t seq_len_q   = Q.shape()[1];
     int64_t head_dim    = Q.shape()[2];
+    int64_t seq_len_k   = K.shape()[1];
 
-    Tensor dQ = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, Q.device(), stream);
-    Tensor dK = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device(), stream);
-    Tensor dV = create_hip_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device(), stream);
+    Tensor dQ = create_hip_zeros_f64({batch_heads, seq_len_q, head_dim}, DType::Float64, Q.device(), stream);
+    Tensor dK = create_hip_zeros_f64({batch_heads, seq_len_k, head_dim}, DType::Float64, K.device(), stream);
+    Tensor dV = create_hip_zeros_f64({batch_heads, seq_len_k, head_dim}, DType::Float64, V.device(), stream);
 
     // Br=Bc=8 keeps the FP64 backward shared-memory request under the 64 KiB LDS
     // cap for every supported head_dim (up to 128): with Br=Bc=32 head_dim>=64
@@ -760,7 +774,7 @@ auto flash_attention_backward_hip_f64(
     constexpr int Bc = 8;
     constexpr int BLOCK_SIZE = 256;
 
-    int num_kv_tiles = static_cast<int>((seq_len + Bc - 1) / Bc);
+    int num_kv_tiles = static_cast<int>((seq_len_k + Bc - 1) / Bc);
     dim3 grid(num_kv_tiles, static_cast<int>(batch_heads));
     dim3 threads(BLOCK_SIZE);
 
@@ -772,8 +786,8 @@ auto flash_attention_backward_hip_f64(
     // Computed once by the pre-pass kernel and consumed by every KV-tile block
     // of the backward kernel (eliminates the O(num_kv_tiles) redundant LSE/D
     // recomputation while preserving full double precision).
-    Tensor lse_scratch = create_hip_zeros_f64({batch_heads, seq_len}, DType::Float64, Q.device(), stream);
-    Tensor D_scratch   = create_hip_zeros_f64({batch_heads, seq_len}, DType::Float64, Q.device(), stream);
+    Tensor lse_scratch = create_hip_zeros_f64({batch_heads, seq_len_q}, DType::Float64, Q.device(), stream);
+    Tensor D_scratch   = create_hip_zeros_f64({batch_heads, seq_len_q}, DType::Float64, Q.device(), stream);
     double* lse_ptr = lse_scratch.data<double>();
     double* d_ptr   = D_scratch.data<double>();
 
@@ -785,10 +799,11 @@ auto flash_attention_backward_hip_f64(
     double* dq_ptr = dQ.data<double>();
     double* dk_ptr = dK.data<double>();
     double* dv_ptr = dV.data<double>();
-    int sl = static_cast<int>(seq_len);
+    int sq = static_cast<int>(seq_len_q);
+    int sk = static_cast<int>(seq_len_k);
 
-    // Pre-pass: grid = (seq_len, batch_heads), one block per q-row.
-    dim3 pre_grid(static_cast<int>(seq_len), static_cast<int>(batch_heads));
+    // Pre-pass: grid = (seq_len_q, batch_heads), one block per q-row.
+    dim3 pre_grid(static_cast<int>(seq_len_q), static_cast<int>(batch_heads));
     auto compute_pre_smem = [](int hd) -> size_t {
         return (static_cast<size_t>(hd) + BLOCK_SIZE) * sizeof(double);
     };
@@ -798,43 +813,43 @@ auto flash_attention_backward_hip_f64(
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_prepass_f64_hip<16, BLOCK_SIZE>),
                 pre_grid, threads, compute_pre_smem(16), stream,
-                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sl, scale, causal);
+                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 32:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_prepass_f64_hip<32, BLOCK_SIZE>),
                 pre_grid, threads, compute_pre_smem(32), stream,
-                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sl, scale, causal);
+                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 48:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_prepass_f64_hip<48, BLOCK_SIZE>),
                 pre_grid, threads, compute_pre_smem(48), stream,
-                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sl, scale, causal);
+                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 64:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_prepass_f64_hip<64, BLOCK_SIZE>),
                 pre_grid, threads, compute_pre_smem(64), stream,
-                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sl, scale, causal);
+                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 80:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_prepass_f64_hip<80, BLOCK_SIZE>),
                 pre_grid, threads, compute_pre_smem(80), stream,
-                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sl, scale, causal);
+                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 96:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_prepass_f64_hip<96, BLOCK_SIZE>),
                 pre_grid, threads, compute_pre_smem(96), stream,
-                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sl, scale, causal);
+                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 128:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_prepass_f64_hip<128, BLOCK_SIZE>),
                 pre_grid, threads, compute_pre_smem(128), stream,
-                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sl, scale, causal);
+                q_ptr, k_ptr, o_ptr, do_ptr, lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         default:
             throw std::runtime_error(
@@ -856,49 +871,49 @@ auto flash_attention_backward_hip_f64(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<16, Br, Bc, BLOCK_SIZE>),
                 grid, threads, compute_smem(16), stream,
                 q_ptr, k_ptr, v_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
-                lse_ptr, d_ptr, sl, scale, causal);
+                lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 32:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<32, Br, Bc, BLOCK_SIZE>),
                 grid, threads, compute_smem(32), stream,
                 q_ptr, k_ptr, v_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
-                lse_ptr, d_ptr, sl, scale, causal);
+                lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 48:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<48, Br, Bc, BLOCK_SIZE>),
                 grid, threads, compute_smem(48), stream,
                 q_ptr, k_ptr, v_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
-                lse_ptr, d_ptr, sl, scale, causal);
+                lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 64:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<64, Br, Bc, BLOCK_SIZE>),
                 grid, threads, compute_smem(64), stream,
                 q_ptr, k_ptr, v_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
-                lse_ptr, d_ptr, sl, scale, causal);
+                lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 80:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<80, Br, Bc, BLOCK_SIZE>),
                 grid, threads, compute_smem(80), stream,
                 q_ptr, k_ptr, v_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
-                lse_ptr, d_ptr, sl, scale, causal);
+                lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 96:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<96, Br, Bc, BLOCK_SIZE>),
                 grid, threads, compute_smem(96), stream,
                 q_ptr, k_ptr, v_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
-                lse_ptr, d_ptr, sl, scale, causal);
+                lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         case 128:
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_backward_kernel_f64_hip<128, Br, Bc, BLOCK_SIZE>),
                 grid, threads, compute_smem(128), stream,
                 q_ptr, k_ptr, v_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr,
-                lse_ptr, d_ptr, sl, scale, causal);
+                lse_ptr, d_ptr, sq, sk, scale, causal);
             break;
         default:
             throw std::runtime_error(

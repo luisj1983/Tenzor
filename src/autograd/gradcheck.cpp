@@ -665,6 +665,15 @@ auto gradgradcheck_detailed(
         // Compare H.diagonal to h_direct. Extract diagonal from row-major
         // (n, n) H.
         auto H_cpu = H.to(Device::cpu());
+        // F014: hessian() narrows H back to the INPUT dtype, so for a
+        // Float16/BFloat16 input H is half. The reads below take the
+        // `data<double>()` branch for any non-Float32 dtype, which throws on a
+        // half tensor and is reported as "Exception during gradgradcheck" — a
+        // false failure. Widen a half H to Float64 up front so every non-Float32
+        // read is a valid double read (mirrors compare_gradients' handling).
+        if (H_cpu.dtype() == DType::Float16 || H_cpu.dtype() == DType::BFloat16) {
+            H_cpu = H_cpu.to(DType::Float64);
+        }
         int64_t total = n;
         result.total_elements = total;
         result.numerical_grad.reserve(std::min<int64_t>(total, 10));

@@ -1595,6 +1595,13 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             Tensor as_i32 = input_raw.to(Device::cpu()).to(DType::Int32).to(input_raw.device());
             return argmax_kernel(as_i32, dim, keepdim, queue);
         }
+        if (dt == DType::UInt32) {
+            // UInt32 exceeds Int32's range and Float32's exact-integer range, but
+            // is exact in Float64 (< 2^53) and order-preserving. Widen ON DEVICE
+            // (32-bit casts are safe, unlike the 16-bit case above) and run the
+            // native Float64 argmax; argmax indices are invariant under the widen.
+            return argmax_kernel(input_raw.to(DType::Float64), dim, keepdim, queue);
+        }
     }
     // Ensure contiguous input: the shape-derived offset math below assumes row-major
     // contiguous layout, so a non-contiguous view must be materialized first.
@@ -1783,6 +1790,13 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             Tensor as_i32 = input_raw.to(Device::cpu()).to(DType::Int32).to(input_raw.device());
             return argmin_kernel(as_i32, dim, keepdim, queue);
         }
+        if (dt == DType::UInt32) {
+            // UInt32 exceeds Int32's range and Float32's exact-integer range, but
+            // is exact in Float64 (< 2^53) and order-preserving. Widen ON DEVICE
+            // (32-bit casts are safe, unlike the 16-bit case above) and run the
+            // native Float64 argmin; argmin indices are invariant under the widen.
+            return argmin_kernel(input_raw.to(DType::Float64), dim, keepdim, queue);
+        }
     }
     // Ensure contiguous input: the shape-derived offset math below assumes row-major
     // contiguous layout, so a non-contiguous view must be materialized first.
@@ -1949,6 +1963,31 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
 // ============================================================================
 // Sort kernel - sort along a dimension, returns (values, indices)
 // ============================================================================
+
+// F143: NaN-aware sort comparators (NaN as the LARGEST value, sign-agnostic).
+// std::less / std::greater order NaN by raw bits under oneDPL's radix path, so a
+// negative-sign NaN sorts before -inf (first) while CPU/CUDA/Vulkan put every NaN
+// last (ascending). sycl::isnan is reliable in this backend (no fast-math).
+// Integer T has no NaN, so the check is compiled out.
+template<typename T> struct OneapiNanLess {
+    bool operator()(const T& a, const T& b) const {
+        if constexpr (std::is_floating_point_v<T>) {
+            bool an = sycl::isnan(a), bn = sycl::isnan(b);
+            if (an || bn) return !an && bn;   // finite < NaN; NaN < nothing
+        }
+        return a < b;
+    }
+};
+template<typename T> struct OneapiNanGreater {
+    bool operator()(const T& a, const T& b) const {
+        if constexpr (std::is_floating_point_v<T>) {
+            bool an = sycl::isnan(a), bn = sycl::isnan(b);
+            if (an || bn) return an && !bn;   // NaN > finite; nothing > NaN
+        }
+        return a > b;
+    }
+};
+
 auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue& queue)
     -> std::pair<Tensor, Tensor> {
     auto shape_span = input.shape();
@@ -1960,6 +1999,17 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue&
     Tensor indices(shape, DType::Int64, input.device());
     int64_t numel = input.numel();
     if (numel == 0) return {values, indices};
+
+    // F137: the inner_size==1 fast path memcpy's input.data() as a flat
+    // contiguous buffer and the dim!=last path transposes (producing a
+    // non-contiguous view) then recurses — both read the raw storage in
+    // PHYSICAL order while indexing by LOGICAL shape. A non-contiguous input
+    // (e.g. a transpose/permute, or the internal transpose-recurse) was sorted
+    // on mis-ordered data. CPU/CUDA/ROCm materialize contiguous() first;
+    // contiguify here so OneAPI matches.
+    if (!input.is_contiguous()) {
+        return sort_kernel(contiguous_kernel(input, queue), dim, descending, queue);
+    }
 
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
@@ -1990,10 +2040,10 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue&
                 int64_t* slice_idx = idx_ptr + o * dim_size;
                 if (descending) {
                     ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
-                                              slice_idx, std::greater<T>());
+                                              slice_idx, OneapiNanGreater<T>());
                 } else {
                     ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
-                                              slice_idx);
+                                              slice_idx, OneapiNanLess<T>());
                 }
             }
         };
@@ -2108,10 +2158,10 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool
                 int64_t* slice_idx = tmp_idx + o * dim_size;
                 if (largest) {
                     ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
-                                              slice_idx, std::greater<T>());
+                                              slice_idx, OneapiNanGreater<T>());
                 } else {
                     ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
-                                              slice_idx);
+                                              slice_idx, OneapiNanLess<T>());
                 }
                 // Copy first k elements to output
                 queue.memcpy(out_val_ptr + o * k, slice_vals, k * sizeof(T)).wait();
@@ -2459,6 +2509,9 @@ class AnyKernelFloat32;
 class AnyKernelFloat64;
 class AnyKernelFloat16;
 class AnyKernelBFloat16;
+class AnyKernelInt8;
+class AnyKernelInt16;
+class AnyKernelUInt8;
 class AnyKernelInt32;
 class AnyKernelInt64;
 class AnyKernelBool;
@@ -2539,11 +2592,34 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 [=](sycl::id<1> idx, auto& flag) {
                     if (in_ptr[idx]) flag.combine(1);
                 });
+        } else if (in_cont.dtype() == DType::Int8) {
+            const int8_t* in_ptr = get_data_ptr<const int8_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] != 0) flag.combine(1);
+                });
+        } else if (in_cont.dtype() == DType::Int16) {
+            const int16_t* in_ptr = get_data_ptr<const int16_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] != 0) flag.combine(1);
+                });
+        } else if (in_cont.dtype() == DType::UInt8) {
+            const uint8_t* in_ptr = get_data_ptr<const uint8_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] != 0) flag.combine(1);
+                });
         } else {
             sycl::free(flag_buf, queue);
             throw std::runtime_error("Unsupported dtype for any reduction");
         }
 
+        // F145: the reduction parallel_for above is ASYNC; reading flag_buf
+        // without first waiting raced the kernel and returned the host-set
+        // initial 0 — so `any` full-reduction wrongly returned false and `all`
+        // wrongly returned true (int16 only passed by timing luck). Wait first.
+        queue.wait();
         bool result = (flag_buf[0] != 0);
         queue.memcpy(out_ptr, &result, sizeof(bool)).wait();
         sycl::free(flag_buf, queue);
@@ -2638,6 +2714,42 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
                 out_ptr[outer_idx * inner_size + inner_idx] = found;
             });
+        } else if (in_cont.dtype() == DType::Int8) {
+            const int8_t* in_ptr = get_data_ptr<const int8_t>(in_cont);
+            queue.parallel_for<AnyKernelInt8>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] != 0) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            });
+        } else if (in_cont.dtype() == DType::Int16) {
+            const int16_t* in_ptr = get_data_ptr<const int16_t>(in_cont);
+            queue.parallel_for<AnyKernelInt16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] != 0) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            });
+        } else if (in_cont.dtype() == DType::UInt8) {
+            const uint8_t* in_ptr = get_data_ptr<const uint8_t>(in_cont);
+            queue.parallel_for<AnyKernelUInt8>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] != 0) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            });
         } else {
             throw std::runtime_error("Unsupported dtype for any reduction");
         }
@@ -2655,6 +2767,9 @@ class AllKernelFloat32;
 class AllKernelFloat64;
 class AllKernelFloat16;
 class AllKernelBFloat16;
+class AllKernelInt8;
+class AllKernelInt16;
+class AllKernelUInt8;
 class AllKernelInt32;
 class AllKernelInt64;
 class AllKernelBool;
@@ -2735,11 +2850,34 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 [=](sycl::id<1> idx, auto& flag) {
                     if (!in_ptr[idx]) flag.combine(0);
                 });
+        } else if (in_cont.dtype() == DType::Int8) {
+            const int8_t* in_ptr = get_data_ptr<const int8_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] == 0) flag.combine(0);
+                });
+        } else if (in_cont.dtype() == DType::Int16) {
+            const int16_t* in_ptr = get_data_ptr<const int16_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] == 0) flag.combine(0);
+                });
+        } else if (in_cont.dtype() == DType::UInt8) {
+            const uint8_t* in_ptr = get_data_ptr<const uint8_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] == 0) flag.combine(0);
+                });
         } else {
             sycl::free(flag_buf, queue);
             throw std::runtime_error("Unsupported dtype for all reduction");
         }
 
+        // F145: the reduction parallel_for above is ASYNC; reading flag_buf
+        // without first waiting raced the kernel and returned the host-set
+        // initial 0 — so `any` full-reduction wrongly returned false and `all`
+        // wrongly returned true (int16 only passed by timing luck). Wait first.
+        queue.wait();
         bool result = (flag_buf[0] != 0);
         queue.memcpy(out_ptr, &result, sizeof(bool)).wait();
         sycl::free(flag_buf, queue);
@@ -2831,6 +2969,42 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 bool all_nonzero = true;
                 for (int64_t d = 0; d < dim_size; ++d) {
                     if (!in_ptr[base_offset + d * inner_size]) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            });
+        } else if (in_cont.dtype() == DType::Int8) {
+            const int8_t* in_ptr = get_data_ptr<const int8_t>(in_cont);
+            queue.parallel_for<AllKernelInt8>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] == 0) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            });
+        } else if (in_cont.dtype() == DType::Int16) {
+            const int16_t* in_ptr = get_data_ptr<const int16_t>(in_cont);
+            queue.parallel_for<AllKernelInt16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] == 0) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            });
+        } else if (in_cont.dtype() == DType::UInt8) {
+            const uint8_t* in_ptr = get_data_ptr<const uint8_t>(in_cont);
+            queue.parallel_for<AllKernelUInt8>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] == 0) { all_nonzero = false; break; }
                 }
                 out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
             });
@@ -3103,13 +3277,35 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
                 base_offset += coord * d_strides[d];
             }
 
-            // Selection-based median: count rank of each element
+            // Selection-based median with NaN-aware ordering: NaN is treated as
+            // the LARGEST value (sorts last), matching the CPU median (nan_less,
+            // reduction.cpp) and the ROCm median fix. A plain `<` never counts
+            // NaN, so it sinks to rank 0; for a majority-NaN slice no element
+            // reaches rank==mid, the loop ends WITHOUT writing, and val_ptr[o] is
+            // left uninitialized. Under NaN-as-largest with a j<i tie-break the
+            // rank is a permutation of [0, dim_size), so exactly one index gets
+            // rank==mid (a NaN when mid falls in the NaN region) and the write
+            // always happens. mid = (dim_size-1)/2 matches the CPU lower median.
+            auto is_nan_v = [](T v) -> bool {
+                if constexpr (std::is_floating_point_v<T>) return sycl::isnan(v);
+                else return false;
+            };
             for (int64_t i = 0; i < dim_size; ++i) {
                 T val_i = in_ptr[base_offset + i * d_strides[normalized_dim]];
+                bool i_nan = is_nan_v(val_i);
                 int64_t rank = 0;
                 for (int64_t j = 0; j < dim_size; ++j) {
                     T val_j = in_ptr[base_offset + j * d_strides[normalized_dim]];
-                    if (val_j < val_i || (val_j == val_i && j < i)) {
+                    bool j_nan = is_nan_v(val_j);
+                    // before(val_j, val_i): does val_j sort strictly before val_i
+                    // under NaN-as-largest ordering?
+                    bool before;
+                    if (i_nan)      before = !j_nan;      // NaN slot: only finite precede
+                    else if (j_nan) before = false;       // NaN never precedes a finite
+                    else            before = val_j < val_i;
+                    // same equivalence class: both NaN, or numerically equal
+                    bool same = (i_nan && j_nan) || (!i_nan && !j_nan && val_j == val_i);
+                    if (before || (same && j < i)) {
                         rank++;
                     }
                 }
@@ -3226,6 +3422,12 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             int64_t best_idx = 0;
             int64_t best_count = 0;
 
+            // F132: match the CPU/CUDA mode tie-break EXACTLY. On equal counts,
+            // pick the SMALLEST modal VALUE (not the smallest index) and report
+            // the HIGHEST original index of that value's run. Previously OneAPI
+            // tied to the smallest index, returning a different modal value (e.g.
+            // [7,7,3,3] -> 7 where CPU/CUDA give 3); ModeBackward masks by the
+            // returned VALUE, so gradients diverged on any count tie.
             for (int64_t i = 0; i < dim_size; ++i) {
                 T val_i = in_ptr[base_offset + i * d_strides[normalized_dim]];
                 int64_t count = 0;
@@ -3234,7 +3436,10 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                         count++;
                     }
                 }
-                if (count > best_count || (count == best_count && i < best_idx)) {
+                bool better = (count > best_count)
+                    || (count == best_count && val_i < best_val)
+                    || (count == best_count && val_i == best_val && i > best_idx);
+                if (better) {
                     best_count = count;
                     best_val = val_i;
                     best_idx = i;

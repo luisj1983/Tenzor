@@ -67,7 +67,7 @@ void main() {
             float val = float(readF16Element(input_idx));
             if (val > max_val || val != val) {
                 max_val = val;
-                max_idx = int(input_idx);
+                max_idx = int(input_idx % params.in_length);  // plane-local (F043)
             }
         }
     }

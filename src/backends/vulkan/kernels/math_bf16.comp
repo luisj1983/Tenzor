@@ -205,13 +205,15 @@ void main() {
             res1 = float(fa1 - r1 * fb1);
             break;
         }
-        case 26: // minimum (binary)
-            res0 = float(min(fa0, fb0));
-            res1 = float(min(fa1, fb1));
+        case 26: // minimum (binary) — NaN-propagating (torch.minimum): NaN in
+                 // either operand → NaN. GLSL min() suppresses NaN; branch in
+                 // float space (no fast-math, so `x != x` is reliable).
+            res0 = (fa0 != fa0 || fb0 != fb0) ? uintBitsToFloat(0x7fc00000u) : float(min(fa0, fb0));
+            res1 = (fa1 != fa1 || fb1 != fb1) ? uintBitsToFloat(0x7fc00000u) : float(min(fa1, fb1));
             break;
-        case 27: // maximum (binary)
-            res0 = float(max(fa0, fb0));
-            res1 = float(max(fa1, fb1));
+        case 27: // maximum (binary) — NaN-propagating (torch.maximum).
+            res0 = (fa0 != fa0 || fb0 != fb0) ? uintBitsToFloat(0x7fc00000u) : float(max(fa0, fb0));
+            res1 = (fa1 != fa1 || fb1 != fb1) ? uintBitsToFloat(0x7fc00000u) : float(max(fa1, fb1));
             break;
         case 28: // rsqrt (unary)
             res0 = float(inversesqrt(fa0));

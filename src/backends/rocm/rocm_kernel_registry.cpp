@@ -671,10 +671,10 @@ namespace rocm {
     auto maxpool1d_backward_hip(const Tensor& grad_output, const Tensor& indices,
                                 const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
     auto avgpool1d_forward_hip(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
-                               std::array<int64_t, 1> padding, hipStream_t stream) -> Tensor;
+                               std::array<int64_t, 1> padding, bool count_include_pad, hipStream_t stream) -> Tensor;
     auto avgpool1d_backward_hip(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride, std::array<int64_t, 1> padding,
-                                hipStream_t stream) -> Tensor;
+                                bool count_include_pad, hipStream_t stream) -> Tensor;
     auto adaptive_maxpool1d_forward_hip(const Tensor& input, int64_t output_size,
                                         hipStream_t stream) -> std::pair<Tensor, Tensor>;
     auto adaptive_maxpool1d_backward_hip(const Tensor& grad_output, const Tensor& indices,
@@ -1009,6 +1009,7 @@ namespace rocm {
     auto embedding_bag_backward_kernel(const Tensor& grad_output,
                                        const Tensor& indices,
                                        const Tensor& offsets,
+                                       const Tensor& max_indices,
                                        const OpAttributes& attrs,
                                        hipStream_t stream) -> Tensor;
 
@@ -1650,8 +1651,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
             AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        // PyTorch/library default is count_include_pad=true (divide by full window).
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         return rocm::avgpool1d_forward_hip(inputs[0],
-            kernel_size, stride, padding, get_hip_stream(attrs));
+            kernel_size, stride, padding, count_include_pad, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1661,8 +1664,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_1d(attrs,
             AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
+        // PyTorch/library default is count_include_pad=true (divide by full window).
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         return rocm::avgpool1d_backward_hip(inputs[0], input_shape,
-            kernel_size, stride, padding, get_hip_stream(attrs));
+            kernel_size, stride, padding, count_include_pad, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2094,7 +2099,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [logits, targets]
         std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
-        bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, false);
+        // F039: default matches CPU/CUDA (true) — an unset ComputeGrad must not
+        // change the returned output COUNT between backends.
+        bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, true);
         const Tensor& logits = inputs[0];
         const Tensor& targets = inputs[1];
 
@@ -2116,11 +2123,22 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
             Tensor lf32 = is_half ? lf.to(DType::Float32) : lf;
             auto [loss, grad_logits] = rocm::fused_softmax_cross_entropy_grad_hip(lf32, tf);
-            if (is_half) grad_logits = grad_logits.to(orig_dtype);
-            if (is3d) {
+            // F039: the raw grad kernel returns an UNREDUCED per-sample loss and an
+            // UNSCALED grad. Apply the reduction (matches CPU/CUDA): mean -> scalar
+            // loss and grad scaled by 1/num_rows; sum -> scalar loss, grad unscaled;
+            // none -> per-sample loss, grad unscaled. Without this a reduction="mean"
+            // call diverged from CPU in both loss shape and gradient magnitude.
+            const int64_t num_rows = lf32.shape()[0];
+            if (reduction == "mean") {
+                grad_logits = grad_logits / static_cast<double>(num_rows);
+                loss = tenzor::mean(loss);
+            } else if (reduction == "sum") {
+                loss = tenzor::sum(loss, std::nullopt, false);
+            } else if (is3d) {  // "none"
                 loss = tenzor::reshape(loss, std::vector<int64_t>{N, T});
-                grad_logits = tenzor::reshape(grad_logits, std::vector<int64_t>{N, T, C});
             }
+            if (is_half) grad_logits = grad_logits.to(orig_dtype);
+            if (is3d) grad_logits = tenzor::reshape(grad_logits, std::vector<int64_t>{N, T, C});
             return std::vector<Tensor>{loss, grad_logits};
         }
 
@@ -3183,9 +3201,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // EmbeddingBagBackward Operation
     // ========================================================================
     table.register_kernel(OpId::EmbeddingBagBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_output, indices (Int64), offsets]
+        // inputs: [grad_output, indices (Int64), offsets, max_indices (max mode only)]
+        const Tensor empty;
+        const Tensor& max_indices = inputs.size() > 3 ? inputs[3] : empty;
         return std::vector<Tensor>{rocm::embedding_bag_backward_kernel(
-            inputs[0], inputs[1], inputs[2], attrs, get_hip_stream(attrs))};
+            inputs[0], inputs[1], inputs[2], max_indices, attrs, get_hip_stream(attrs))};
     });
 
     // ========================================================================
@@ -3525,22 +3545,33 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return rocm::rocm_sparse_add_kernel(sp, inputs[3]);
         });
 
-    // SparseSoftmax: row-wise softmax on CSR sparse tensor values
+    // SparseSoftmax: row-wise softmax on CSR sparse tensor values.
+    // F096: there is no native ROCm CSR softmax, and sparse::sparse_softmax
+    // re-dispatches OpId::SparseSoftmax for any non-CPU device (has_kernel true)
+    // → unbounded recursion / stack overflow. Relocate the CSR tensor to CPU,
+    // compute there, then move the result values back to the original device.
     table.register_single_output_kernel(OpId::SparseSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto shape = attrs.get_int_list(AttrKey::Shape);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            Device dev = inputs[2].device();
+            auto sp = SparseTensor::sparse_csr(inputs[0].to(Device::cpu()),
+                                               inputs[1].to(Device::cpu()),
+                                               inputs[2].to(Device::cpu()), shape);
             auto result = sparse::sparse_softmax(sp);
-            return result.values();
+            return result.values().to(dev);
         });
 
-    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values
+    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values.
+    // F097: same recursion hazard as F096 — relocate to CPU and move back.
     table.register_single_output_kernel(OpId::SparseLogSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto shape = attrs.get_int_list(AttrKey::Shape);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            Device dev = inputs[2].device();
+            auto sp = SparseTensor::sparse_csr(inputs[0].to(Device::cpu()),
+                                               inputs[1].to(Device::cpu()),
+                                               inputs[2].to(Device::cpu()), shape);
             auto result = sparse::sparse_log_softmax(sp);
-            return result.values();
+            return result.values().to(dev);
         });
 
     // =========================================================================

@@ -1383,13 +1383,20 @@ class Conv2dBackwardBiasSeparateReductionFloat16;
 
 // Separate conv2d_backward_input that takes input_shape instead of input tensor.
 // Audit J.2: per-axis stride/padding/dilation, matches CPU backend API.
-auto conv2d_backward_input_im2col(const Tensor& grad_output, const Tensor& weight,
+auto conv2d_backward_input_im2col(const Tensor& grad_output_in, const Tensor& weight_in,
                            const std::vector<int64_t>& input_shape,
                            int64_t stride_h, int64_t stride_w,
                            int64_t padding_h, int64_t padding_w,
                            int64_t dilation_h, int64_t dilation_w,
                            int64_t groups,
                            sycl::queue& queue) -> Tensor {
+    // The im2col/col2im path indexes operands as dense NCHW/OIHW; a
+    // channels_last / permuted / sliced grad_output or weight would be read at
+    // wrong offsets. Force contiguous first (the oneDNN F32 sibling does the
+    // same), then reuse the original names below.
+    Tensor grad_output = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    Tensor weight = weight_in.is_contiguous() ? weight_in : weight_in.contiguous();
+
     auto weight_shape = weight.shape();
     auto grad_output_shape = grad_output.shape();
 
@@ -1596,13 +1603,19 @@ auto conv2d_backward_input_im2col(const Tensor& grad_output, const Tensor& weigh
 
 // Separate conv2d_backward_weight that takes weight_shape instead of weight tensor.
 // Audit J.2: per-axis stride/padding/dilation, matches CPU backend API.
-auto conv2d_backward_weight_im2col(const Tensor& grad_output, const Tensor& input,
+auto conv2d_backward_weight_im2col(const Tensor& grad_output_in, const Tensor& input_in,
                             const std::vector<int64_t>& weight_shape,
                             int64_t stride_h, int64_t stride_w,
                             int64_t padding_h, int64_t padding_w,
                             int64_t dilation_h, int64_t dilation_w,
                             int64_t groups,
                             sycl::queue& queue) -> Tensor {
+    // The im2col path indexes operands as dense NCHW; a non-contiguous
+    // input/grad_output would be read at wrong offsets. Force contiguous first
+    // (matching the oneDNN F32 sibling), then reuse the original names below.
+    Tensor grad_output = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+
     auto input_shape = input.shape();
     auto grad_output_shape = grad_output.shape();
 
@@ -1781,9 +1794,12 @@ auto conv2d_backward_weight_im2col(const Tensor& grad_output, const Tensor& inpu
             }
         }
 
-        // Convert accumulated float values back to half
+        // Convert accumulated float values back to half. Use saturate_to_half
+        // (not sycl::half()) so overflow clamps to ±65504 instead of producing
+        // inf — matching the F16 backward_input (1574) and backward_bias (1859)
+        // narrows.
         queue.parallel_for(sycl::range<1>(total_weight_size), [=](sycl::id<1> i) {
-            grad_weight_ptr[i] = sycl::half(grad_weight_float_ptr[i]);
+            grad_weight_ptr[i] = saturate_to_half(grad_weight_float_ptr[i]);
         });
     }
     else if (input.dtype() == DType::BFloat16) {
@@ -1801,7 +1817,10 @@ auto conv2d_backward_weight_im2col(const Tensor& grad_output, const Tensor& inpu
 }
 
 // Separate conv2d_backward_bias
-auto conv2d_backward_bias_im2col(const Tensor& grad_output, sycl::queue& queue) -> Tensor {
+auto conv2d_backward_bias_im2col(const Tensor& grad_output_in, sycl::queue& queue) -> Tensor {
+    // Bias grad sums grad_output over N/H/W using dense NCHW indexing; force
+    // contiguous so a permuted/sliced grad_output is read correctly.
+    Tensor grad_output = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
     auto grad_output_shape = grad_output.shape();
     const int64_t N = grad_output_shape[0];
     const int64_t C = grad_output_shape[1];

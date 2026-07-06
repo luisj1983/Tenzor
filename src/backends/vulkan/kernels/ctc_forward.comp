@@ -93,8 +93,12 @@ void main() {
     uint beta_base  = n * pc.T_max * pc.L_max;
     uint post_base  = n * pc.T_max * pc.C;
 
-    // Degenerate case: zero loss, zero grad.
-    if (T_n <= 0 || S_n <= 0 || uint(L_n) > pc.L_max) {
+    // Degenerate case: zero loss, zero grad. Also reject T_n > T_max (matching
+    // CUDA/OneAPI): the forward recurrence indexes alpha/beta (sized T_max*L_max)
+    // at t up to T_n-1 and writes grad_out, so an input_length exceeding the
+    // log_probs time dim would otherwise scatter out of bounds (device heap
+    // corruption). The Vulkan host does no per-sample length validation.
+    if (T_n <= 0 || S_n <= 0 || uint(T_n) > pc.T_max || uint(L_n) > pc.L_max) {
         if (tid == 0) loss_out[n] = 0.0;
         for (uint idx = tid; idx < pc.T_max * pc.C; idx += nthreads) {
             uint t = idx / pc.C;

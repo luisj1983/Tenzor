@@ -2939,6 +2939,12 @@ class FlipKernelFloat32;
 class FlipKernelFloat64;
 class FlipKernelFloat16;
 class FlipKernelBFloat16;
+// F134: flip is a pure element permutation independent of numeric
+// interpretation, so integer/bool dtypes are handled by element byte-width.
+class FlipKernelBytes8;
+class FlipKernelBytes4;
+class FlipKernelBytes2;
+class FlipKernelBytes1;
 
 auto flip_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
@@ -3019,7 +3025,55 @@ auto flip_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor
             out_ptr[flat] = in_ptr[src_idx];
         });
     } else {
-        throw std::runtime_error("flip: unsupported dtype");
+        // F134: integer / bool dtypes. flip only permutes elements (bit-preserving
+        // copy, independent of numeric interpretation), so dispatch by element
+        // byte-width via the raw device pointer — this avoids get_data_ptr's exact
+        // dtype check so UInt*/Bool work too. Matches CPU/CUDA/ROCm, which support
+        // flip for every dtype; OneAPI previously threw "unsupported dtype" for
+        // Int64/Int32/Int16/Int8/UInt*/Bool (a hard cross-backend divergence,
+        // e.g. flipping an Int64 index tensor).
+        const size_t esz = dtype_size(input.dtype());
+        const void* in_raw = in_cont.data_ptr();
+        void* out_raw = output.data_ptr();
+        if (esz == 8) {
+            auto* ip = static_cast<const int64_t*>(in_raw);
+            auto* op = static_cast<int64_t*>(out_raw);
+            queue.parallel_for<FlipKernelBytes8>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                const int64_t flat = idx;
+                const int64_t o = flat / (dim_size * inner_size);
+                const int64_t r = flat % (dim_size * inner_size);
+                op[flat] = ip[o * dim_size * inner_size + (dim_size - 1 - r / inner_size) * inner_size + r % inner_size];
+            });
+        } else if (esz == 4) {
+            auto* ip = static_cast<const int32_t*>(in_raw);
+            auto* op = static_cast<int32_t*>(out_raw);
+            queue.parallel_for<FlipKernelBytes4>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                const int64_t flat = idx;
+                const int64_t o = flat / (dim_size * inner_size);
+                const int64_t r = flat % (dim_size * inner_size);
+                op[flat] = ip[o * dim_size * inner_size + (dim_size - 1 - r / inner_size) * inner_size + r % inner_size];
+            });
+        } else if (esz == 2) {
+            auto* ip = static_cast<const int16_t*>(in_raw);
+            auto* op = static_cast<int16_t*>(out_raw);
+            queue.parallel_for<FlipKernelBytes2>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                const int64_t flat = idx;
+                const int64_t o = flat / (dim_size * inner_size);
+                const int64_t r = flat % (dim_size * inner_size);
+                op[flat] = ip[o * dim_size * inner_size + (dim_size - 1 - r / inner_size) * inner_size + r % inner_size];
+            });
+        } else if (esz == 1) {
+            auto* ip = static_cast<const int8_t*>(in_raw);
+            auto* op = static_cast<int8_t*>(out_raw);
+            queue.parallel_for<FlipKernelBytes1>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                const int64_t flat = idx;
+                const int64_t o = flat / (dim_size * inner_size);
+                const int64_t r = flat % (dim_size * inner_size);
+                op[flat] = ip[o * dim_size * inner_size + (dim_size - 1 - r / inner_size) * inner_size + r % inner_size];
+            });
+        } else {
+            throw std::runtime_error("flip: unsupported dtype");
+        }
     }
 
     // Drain the parallel_for before the function-local in_cont destructs (UAF)

@@ -616,6 +616,13 @@ static auto flash_attention_backward_typed(
     auto k_shape = K.shape();
     int64_t M = k_shape[2];      // key/value sequence length
 
+    // F025: bottom-right causal alignment — MUST match the forward
+    // (flash_attention_forward_typed uses causal_offset = M - N). The backward
+    // previously masked with j > i (top-left, offset 0), so for seq_q != seq_k
+    // (cached-KV / cross-attention) it differentiated a differently-masked
+    // softmax than the forward, giving wrong dQ/dK/dV. Mask/zero j > i + offset.
+    const int64_t causal_offset = M - N;
+
     const bool apply_dropout    = dropout_p > T(0) && philox_seed != 0;
     const T    dropout_scale    = apply_dropout ? T(1) / (T(1) - dropout_p) : T(1);
     const uint32_t rng_seed     = static_cast<uint32_t>(philox_seed);
@@ -681,10 +688,10 @@ static auto flash_attention_backward_typed(
             }
 #endif
 
-            // Step 2: causal mask
+            // Step 2: causal mask (bottom-right aligned — F025)
             if (causal) {
                 for (int64_t i = 0; i < N; ++i) {
-                    for (int64_t j = i + 1; j < M; ++j) {
+                    for (int64_t j = std::max<int64_t>(0, i + causal_offset + 1); j < M; ++j) {
                         S[i * M + j] = -std::numeric_limits<T>::infinity();
                     }
                 }
@@ -828,7 +835,7 @@ static auto flash_attention_backward_typed(
 
             if (causal) {
                 for (int64_t i = 0; i < N; ++i) {
-                    for (int64_t j = i + 1; j < M; ++j) {
+                    for (int64_t j = std::max<int64_t>(0, i + causal_offset + 1); j < M; ++j) {
                         dS[i * M + j] = T(0);
                     }
                 }
@@ -925,6 +932,7 @@ static auto flash_attention_backward_half(
     int64_t D = q_shape[3];
     auto k_shape = K.shape();
     int64_t M = k_shape[2];
+    const int64_t causal_offset = M - N;  // F025: bottom-right causal alignment
 
     const bool apply_dropout = dropout_p > 0.0f && philox_seed != 0;
     const float dropout_scale = apply_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
@@ -980,7 +988,7 @@ static auto flash_attention_backward_half(
             // Step 2: causal mask
             if (causal) {
                 for (int64_t i = 0; i < N; ++i) {
-                    for (int64_t j = i + 1; j < M; ++j) {
+                    for (int64_t j = std::max<int64_t>(0, i + causal_offset + 1); j < M; ++j) {
                         S[i * M + j] = -std::numeric_limits<float>::infinity();
                     }
                 }
@@ -1071,7 +1079,7 @@ static auto flash_attention_backward_half(
             }
             if (causal) {
                 for (int64_t i = 0; i < N; ++i) {
-                    for (int64_t j = i + 1; j < M; ++j) {
+                    for (int64_t j = std::max<int64_t>(0, i + causal_offset + 1); j < M; ++j) {
                         dS[i * M + j] = 0.0f;
                     }
                 }

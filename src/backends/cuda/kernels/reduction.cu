@@ -5040,6 +5040,25 @@ __global__ void iota_kernel(int64_t* output, int64_t n) {
     }
 }
 
+// F141: remap NaN -> +INF into a separate KEY buffer. cub::DeviceRadixSort orders
+// raw bits, so a negative-sign NaN would sort below -inf; remapping every NaN to
+// +inf clusters all NaN as the maximum (last ascending / first descending),
+// matching CPU/PyTorch and the segmented argsort path (argsort_gather_kernel).
+// Only keys are remapped — the emitted indices still reference the original
+// values. Integer T has no NaN and is copied verbatim.
+template<typename T>
+__global__ void argsort_remap_nan_kernel(const T* __restrict__ in,
+                                         T* __restrict__ out, int64_t n) {
+    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x) {
+        T v = in[i];
+        if constexpr (std::is_floating_point_v<T>) {
+            if (v != v) v = static_cast<T>(INFINITY);
+        }
+        out[i] = v;
+    }
+}
+
 // CUB-based argsort for larger arrays
 template<typename T>
 static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool descending, cudaStream_t stream = nullptr) {
@@ -5069,23 +5088,37 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
     backend::CachedMemoryGuard d_keys_out_guard(n * sizeof(T));
     auto* d_keys_out = static_cast<T*>(d_keys_out_guard.get());
 
+    // F141: sort NaN-remapped keys (see argsort_remap_nan_kernel) so NaN clusters
+    // as the maximum regardless of sign bit. For integer T there is no NaN, so we
+    // sort d_input directly (no extra buffer/copy).
+    backend::CachedMemoryGuard d_keys_in_guard(
+        std::is_floating_point_v<T> ? n * sizeof(T) : size_t(0));
+    const T* d_sort_input = d_input;
+    if constexpr (std::is_floating_point_v<T>) {
+        T* d_keys_in = static_cast<T*>(d_keys_in_guard.get());
+        argsort_remap_nan_kernel<T><<<init_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+            d_input, d_keys_in, n);
+        CUDA_CHECK(cudaGetLastError());
+        d_sort_input = d_keys_in;
+    }
+
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
 
     if (descending) {
         cub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+            d_sort_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
         backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
         d_temp_storage = d_temp_storage_guard.get();
         cub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+            d_sort_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
     } else {
         cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+            d_sort_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
         backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
         d_temp_storage = d_temp_storage_guard.get();
         cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+            d_sort_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
     }
 }
 

@@ -162,7 +162,10 @@ __global__ void flash_attention_v2_kernel_f64(
         for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
             int kv_pos = k_start + j;
             double score;
-            if (causal && kv_pos > query_idx) {
+            // Bottom-right causal alignment (matches FP32 + Vulkan-F64): a query
+            // at absolute row `query_idx` attends keys up to
+            // query_idx + (seq_len_k - seq_len_q).
+            if (causal && kv_pos > query_idx + (seq_len_k - seq_len_q)) {
                 score = -INFINITY;
             } else {
                 score = 0.0;
@@ -279,7 +282,8 @@ __global__ void flash_attention_backward_kernel_f64(
     double* __restrict__ dQ,          // accumulated via atomicAdd
     double* __restrict__ dK,          // one block per KV tile → no race
     double* __restrict__ dV,          // one block per KV tile → no race
-    const int seq_len,
+    const int seq_len_q,
+    const int seq_len_k,
     const double scale,
     const bool causal
 ) {
@@ -287,18 +291,23 @@ __global__ void flash_attention_backward_kernel_f64(
     const int batch_head  = blockIdx.y;
     const int tid         = threadIdx.x;
 
-    const int kv_start = kv_tile_idx * Bc;
-    if (kv_start >= seq_len) return;
-    const int actual_Bc = min(Bc, seq_len - kv_start);
+    // Bottom-right causal alignment (matches the forward kernel + FP32 path):
+    // query row r attends keys up to r + (seq_len_k - seq_len_q).
+    const int causal_offset = seq_len_k - seq_len_q;
 
-    const double* Q_base  = Q  + batch_head * seq_len * HEAD_DIM;
-    const double* K_base  = K  + batch_head * seq_len * HEAD_DIM;
-    const double* V_base  = V  + batch_head * seq_len * HEAD_DIM;
-    const double* O_base  = O  + batch_head * seq_len * HEAD_DIM;
-    const double* dO_base = dO + batch_head * seq_len * HEAD_DIM;
-    double* dQ_base = dQ + batch_head * seq_len * HEAD_DIM;
-    double* dK_base = dK + batch_head * seq_len * HEAD_DIM;
-    double* dV_base = dV + batch_head * seq_len * HEAD_DIM;
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len_k) return;
+    const int actual_Bc = min(Bc, seq_len_k - kv_start);
+
+    // Q/O/dO/dQ stride by seq_len_q; K/V/dK/dV stride by seq_len_k.
+    const double* Q_base  = Q  + batch_head * seq_len_q * HEAD_DIM;
+    const double* K_base  = K  + batch_head * seq_len_k * HEAD_DIM;
+    const double* V_base  = V  + batch_head * seq_len_k * HEAD_DIM;
+    const double* O_base  = O  + batch_head * seq_len_q * HEAD_DIM;
+    const double* dO_base = dO + batch_head * seq_len_q * HEAD_DIM;
+    double* dQ_base = dQ + batch_head * seq_len_q * HEAD_DIM;
+    double* dK_base = dK + batch_head * seq_len_k * HEAD_DIM;
+    double* dV_base = dV + batch_head * seq_len_k * HEAD_DIM;
 
     extern __shared__ double smem_bwd_f64[];
     double* K_tile  = smem_bwd_f64;
@@ -331,14 +340,14 @@ __global__ void flash_attention_backward_kernel_f64(
         dv_acc[e] = 0.0;
     }
 
-    const int num_q_tiles = (seq_len + Br - 1) / Br;
+    const int num_q_tiles = (seq_len_q + Br - 1) / Br;
 
     for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
         const int q_start = q_tile_idx * Br;
-        if (q_start >= seq_len) break;
-        const int actual_Br = min(Br, seq_len - q_start);
+        if (q_start >= seq_len_q) break;
+        const int actual_Br = min(Br, seq_len_q - q_start);
 
-        if (causal && (q_start + actual_Br - 1) < kv_start) continue;
+        if (causal && (q_start + actual_Br - 1) + causal_offset < kv_start) continue;
 
         // Load Q_i / dO_i tiles.
         for (int i = tid; i < actual_Br * HEAD_DIM; i += BLOCK_SIZE) {
@@ -401,8 +410,8 @@ __global__ void flash_attention_backward_kernel_f64(
         for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
             double m_row = -INFINITY;
             // First pass: find max.
-            for (int k = 0; k < seq_len; ++k) {
-                if (causal && k > (q_start + row)) break;  // upper-tri zeroed below
+            for (int k = 0; k < seq_len_k; ++k) {
+                if (causal && k > (q_start + row) + causal_offset) break;  // upper-tri zeroed below
                 double dot = 0.0;
                 const double* Kk = K_base + k * HEAD_DIM;
                 for (int d = 0; d < HEAD_DIM; ++d) {
@@ -413,8 +422,8 @@ __global__ void flash_attention_backward_kernel_f64(
             }
             // Second pass: sum of exp(score - m).
             double l_row = 0.0;
-            for (int k = 0; k < seq_len; ++k) {
-                if (causal && k > (q_start + row)) break;
+            for (int k = 0; k < seq_len_k; ++k) {
+                if (causal && k > (q_start + row) + causal_offset) break;
                 double dot = 0.0;
                 const double* Kk = K_base + k * HEAD_DIM;
                 for (int d = 0; d < HEAD_DIM; ++d) {
@@ -436,7 +445,7 @@ __global__ void flash_attention_backward_kernel_f64(
             int j = idx % Bc;
             double p = 0.0;
             if (i < actual_Br && j < actual_Bc) {
-                if (causal && (q_start + i) < (kv_start + j)) {
+                if (causal && (q_start + i) + causal_offset < (kv_start + j)) {
                     p = 0.0;
                 } else {
                     p = exp(S_tile[i * Bc + j] - l_tile[i]);
@@ -598,18 +607,19 @@ auto flash_attention_backward_cuda_f64(
         throw std::runtime_error("flash_attention_backward_cuda_f64: requires Float64 inputs");
     }
     int64_t batch_heads = Q.shape()[0];
-    int64_t seq_len     = Q.shape()[1];
+    int64_t seq_len_q   = Q.shape()[1];
     int64_t head_dim    = Q.shape()[2];
+    int64_t seq_len_k   = K.shape()[1];
 
-    Tensor dQ = make_cuda_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, Q.device());
-    Tensor dK = make_cuda_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device());
-    Tensor dV = make_cuda_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device());
+    Tensor dQ = make_cuda_zeros_f64({batch_heads, seq_len_q, head_dim}, DType::Float64, Q.device());
+    Tensor dK = make_cuda_zeros_f64({batch_heads, seq_len_k, head_dim}, DType::Float64, K.device());
+    Tensor dV = make_cuda_zeros_f64({batch_heads, seq_len_k, head_dim}, DType::Float64, V.device());
 
     constexpr int Br = 32;
     constexpr int Bc = 32;
     constexpr int BLOCK_SIZE = 256;
 
-    int num_kv_tiles = static_cast<int>((seq_len + Bc - 1) / Bc);
+    int num_kv_tiles = static_cast<int>((seq_len_k + Bc - 1) / Bc);
     dim3 grid(num_kv_tiles, batch_heads);
     dim3 threads(BLOCK_SIZE);
 
@@ -625,14 +635,15 @@ auto flash_attention_backward_cuda_f64(
     double* dq_ptr = dQ.data<double>();
     double* dk_ptr = dK.data<double>();
     double* dv_ptr = dV.data<double>();
-    int sl = static_cast<int>(seq_len);
+    int sq = static_cast<int>(seq_len_q);
+    int sk = static_cast<int>(seq_len_k);
 
     auto launch = [&](auto kernel_fn, int hd) {
         size_t smem = compute_smem(hd);
         maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
         kernel_fn<<<grid, threads, smem>>>(q_ptr, k_ptr, v_ptr, o_ptr, do_ptr,
                                             dq_ptr, dk_ptr, dv_ptr,
-                                            sl, scale, causal);
+                                            sq, sk, scale, causal);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     };
 

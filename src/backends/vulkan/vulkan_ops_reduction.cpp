@@ -16,6 +16,13 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input_orig, int64_t dim, bool k
         input.dtype() == DType::Bool) {
         return dispatchArgmax(input.to(DType::Int32), dim, keepdim);
     }
+    // UInt32 exceeds Int32's range (and Float32's exact-integer range), so it
+    // can't reuse the i32 shader. Widen to Float64 (exact for all uint32 < 2^53,
+    // order-preserving) on the SAME device and use the native f64 argmax shader;
+    // argmax indices are invariant under a monotonic widen.
+    if (input.dtype() == DType::UInt32) {
+        return dispatchArgmax(input.to(DType::Float64), dim, keepdim);
+    }
     // Compute output shape first
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
@@ -38,9 +45,10 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input_orig, int64_t dim, bool k
         }
     }
 
-    // Handle empty tensors - no GPU work needed
+    // argmax has no identity element; a zero-size reduction has no answer. Match
+    // CPU/CUDA/ROCm/OneAPI, which throw rather than return a bogus/zero index.
     if (input.numel() == 0) {
-        return Tensor(out_shape, DType::Int64, input.device());
+        throw std::runtime_error("argmax: cannot compute argmax of empty tensor");
     }
 
     int32_t device_id = input.device().index;
@@ -138,6 +146,13 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input_orig, int64_t dim, bool k
         input.dtype() == DType::Bool) {
         return dispatchArgmin(input.to(DType::Int32), dim, keepdim);
     }
+    // UInt32 exceeds Int32's range (and Float32's exact-integer range), so it
+    // can't reuse the i32 shader. Widen to Float64 (exact for all uint32 < 2^53,
+    // order-preserving) on the SAME device and use the native f64 argmin shader;
+    // argmin indices are invariant under a monotonic widen.
+    if (input.dtype() == DType::UInt32) {
+        return dispatchArgmin(input.to(DType::Float64), dim, keepdim);
+    }
     // Compute output shape first
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
@@ -160,9 +175,10 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input_orig, int64_t dim, bool k
         }
     }
 
-    // Handle empty tensors - no GPU work needed
+    // argmin has no identity element; a zero-size reduction has no answer. Match
+    // CPU/CUDA/ROCm/OneAPI, which throw rather than return a bogus/zero index.
     if (input.numel() == 0) {
-        return Tensor(out_shape, DType::Int64, input.device());
+        throw std::runtime_error("argmin: cannot compute argmin of empty tensor");
     }
 
     int32_t device_id = input.device().index;
@@ -441,6 +457,14 @@ auto VulkanBackend::dispatchProd(const Tensor& input_orig, int64_t dim, bool kee
     // then downcast. Without this, BFloat16 buffers are silently reinterpreted
     // as Float32 by the generic prod_reduction shader, producing garbage.
     DType orig_dtype = input.dtype();
+    // F146: there is no complex prod shader; the generic prod_reduction shader
+    // reads the interleaved complex buffer as plain floats and produces garbage.
+    // Fail loud so the op layer (src/ops/reduction.cpp prod) catches it and
+    // computes the complex product via its same-device polar decomposition
+    // (|Πz|=Π|z|, arg=Σarg) — matching ROCm/OneAPI, whose prod kernels also throw.
+    if (is_complex_type(orig_dtype)) {
+        throw std::runtime_error("prod: complex dtype not supported by the Vulkan prod shader");
+    }
     Tensor prod_input = input;
     if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
         prod_input = input.to(DType::Float32);
@@ -587,8 +611,13 @@ auto VulkanBackend::dispatchBooleanReduction(const std::string& op_name,
         return dispatchFull(out_shape, identity ? 1.0f : 0.0f, DType::Bool);
     }
 
-    // BFloat16: upcast to Float32
-    if (input.dtype() == DType::BFloat16) {
+    // The boolean_reduction shader reads the input buffer as 4-byte float (the
+    // _f64 variant as 8-byte double). Narrow dtypes — Int8/UInt8/Bool (1 byte)
+    // and Int16/UInt16/Float16/BFloat16 (2 bytes) — would be misread at the
+    // wrong element width, so widen them to Float32 on the SAME device (no CPU
+    // fallback). any/all are pure nonzero tests: a nonzero value stays nonzero
+    // and zero stays zero under the widen, so the result is exact.
+    if (input.dtype_size() < 4) {
         auto input_f32 = input.to(DType::Float32);
         return dispatchBooleanReduction(op_name, input_f32, dim, keepdim);
     }
@@ -1117,7 +1146,12 @@ auto VulkanBackend::dispatchFlip(const Tensor& input_orig, int64_t dim) -> Tenso
     }
 
     int32_t device_id = input.device().index;
-    bool is_float64 = (input.dtype() == DType::Float64);
+    // F133: route Int64 through the 8-byte flip_f64 shader. flip is a pure
+    // element permutation (result[idx]=a[src]) with no arithmetic, so an 8-byte
+    // move preserves the Int64 bit pattern exactly. The default "flip" shader
+    // uses a 4-byte `float` buffer, so an Int64 tensor was half-read/misindexed
+    // (Int32 coincidentally works as a 4-byte move; only 8-byte Int64 broke).
+    bool is_float64 = (input.dtype() == DType::Float64 || input.dtype() == DType::Int64);
     bool is_float16 = (input.dtype() == DType::Float16);
     bool is_bfloat16 = (input.dtype() == DType::BFloat16);
 
@@ -1215,7 +1249,10 @@ auto VulkanBackend::dispatchRoll(const Tensor& input_orig, int64_t shift, int64_
     bool is_bfloat16 = (input.dtype() == DType::BFloat16);
 
     int32_t device_id = input.device().index;
-    bool is_float64 = (input.dtype() == DType::Float64);
+    // F133: route Int64 through the 8-byte roll_f64 shader (pure element move,
+    // bit-preserving). The default "roll" shader uses a 4-byte `float` buffer,
+    // so Int64 was half-read/misindexed (Int32 works as a 4-byte move).
+    bool is_float64 = (input.dtype() == DType::Float64 || input.dtype() == DType::Int64);
 
     std::string shader_name = is_float64 ? "roll_f64" : is_float16 ? "roll_f16" : is_bfloat16 ? "roll_bf16" : "roll";
     auto* pipeline = getPipeline(shader_name, device_id);

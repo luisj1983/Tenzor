@@ -94,6 +94,49 @@ template<> __device__ __forceinline__ bool hip_gt(const __half& a, const __half&
 template<> __device__ __forceinline__ bool hip_lt(const __half& a, const __half& b) { return __hlt(a, b); }
 template<> __device__ __forceinline__ bool hip_eq(const __half& a, const __half& b) { return __heq(a, b); }
 
+// F139: NaN detection via IEEE-754 bit patterns. ROCm's __half/float NaN
+// intrinsics (isnan / __hisnan) canonicalise unreliably (see reference note),
+// so test the bit pattern directly. Integer types are never NaN.
+template<typename T> __device__ __forceinline__ bool topk_isnan(const T&) { return false; }
+__device__ __forceinline__ bool topk_isnan(const float& x) {
+    unsigned b = __float_as_uint(x); return (b & 0x7FFFFFFFu) > 0x7F800000u;
+}
+__device__ __forceinline__ bool topk_isnan(const double& x) {
+    unsigned long long b = __double_as_longlong(x);
+    return (b & 0x7FFFFFFFFFFFFFFFULL) > 0x7FF0000000000000ULL;
+}
+__device__ __forceinline__ bool topk_isnan(const __half& x) {
+    unsigned short b = __half_as_ushort(x); return (b & 0x7FFFu) > 0x7C00u;
+}
+
+// NaN-aware comparisons for TopK: NaN is treated as the LARGEST value (matches
+// CPU/CUDA/OneAPI/Vulkan sort/topk — NaN goes to the top for largest, and is
+// never selected as a smallest). Plain a>b/a<b return false for NaN, so NaN was
+// silently never selected on ROCm — diverging topk on inputs containing NaN.
+template<typename T> __device__ __forceinline__ bool nan_gt(const T& a, const T& b) {
+    bool an = topk_isnan(a), bn = topk_isnan(b);
+    if (an) return !bn;      // NaN beats any non-NaN; NaN vs NaN -> not greater
+    if (bn) return false;    // b is NaN (largest), a is not
+    return hip_gt(a, b);
+}
+template<typename T> __device__ __forceinline__ bool nan_lt(const T& a, const T& b) {
+    bool an = topk_isnan(a), bn = topk_isnan(b);
+    if (an) return false;    // NaN is largest, never "less"
+    if (bn) return true;     // b is NaN (largest), a (non-NaN) is less
+    return hip_lt(a, b);
+}
+// F143: thrust comparator functors so the full sort orders NaN as the LARGEST
+// value regardless of sign bit. thrust::less / thrust::greater on arithmetic keys
+// are bit-order (radix): a positive NaN sorts after +inf (last, OK) but a
+// NEGATIVE-sign NaN sorts below -inf (first), diverging from CPU/CUDA/Vulkan
+// which put every NaN last (ascending) via a sign-agnostic bit-pattern check.
+template<typename T> struct NanLessFunctor {
+    __device__ bool operator()(const T& a, const T& b) const { return nan_lt(a, b); }
+};
+template<typename T> struct NanGreaterFunctor {
+    __device__ bool operator()(const T& a, const T& b) const { return nan_gt(a, b); }
+};
+
 // ============================================================================
 // TopK kernel using parallel block-wide selection
 // ============================================================================
@@ -146,7 +189,7 @@ __global__ void topk_slice_kernel(
             if (consumed) continue;
 
             if (!has_candidate ||
-                (largest ? hip_gt(val, best_val) : hip_lt(val, best_val)) ||
+                (largest ? nan_gt(val, best_val) : nan_lt(val, best_val)) ||
                 (hip_eq(val, best_val) && i < best_pos)) {
                 best_val = val;
                 best_pos = i;
@@ -169,10 +212,10 @@ __global__ void topk_slice_kernel(
                     right_wins = false;
                 } else {
                     right_wins = largest ?
-                        (hip_gt(s_cand_vals[tid + stride], s_cand_vals[tid]) ||
+                        (nan_gt(s_cand_vals[tid + stride], s_cand_vals[tid]) ||
                          (hip_eq(s_cand_vals[tid + stride], s_cand_vals[tid]) &&
                           s_cand_pos[tid + stride] < s_cand_pos[tid])) :
-                        (hip_lt(s_cand_vals[tid + stride], s_cand_vals[tid]) ||
+                        (nan_lt(s_cand_vals[tid + stride], s_cand_vals[tid]) ||
                          (hip_eq(s_cand_vals[tid + stride], s_cand_vals[tid]) &&
                           s_cand_pos[tid + stride] < s_cand_pos[tid]));
                 }
@@ -202,8 +245,8 @@ __global__ void topk_slice_kernel(
         for (int64_t j = tid; 2 * j + (phase & 1) + 1 < k; j += nthreads) {
             int64_t i = 2 * j + (phase & 1);
             bool should_swap = largest ?
-                hip_lt(s_topk_vals[i], s_topk_vals[i + 1]) :
-                hip_gt(s_topk_vals[i], s_topk_vals[i + 1]);
+                nan_lt(s_topk_vals[i], s_topk_vals[i + 1]) :
+                nan_gt(s_topk_vals[i], s_topk_vals[i + 1]);
             if (should_swap) {
                 T tmp_v = s_topk_vals[i];
                 s_topk_vals[i] = s_topk_vals[i + 1];
@@ -311,17 +354,19 @@ static void sort_1d_thrust(const T* input, T* values, int64_t* indices_out,
     thrust::sequence(policy, thrust::device_pointer_cast(indices_out),
                      thrust::device_pointer_cast(indices_out + n), int64_t(0));
 
+    // F143: NaN-aware comparators (NaN as largest, sign-agnostic) — see functors.
     if (descending) {
         thrust::sort_by_key(policy,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
             thrust::device_pointer_cast(indices_out),
-            thrust::greater<T>());
+            NanGreaterFunctor<T>());
     } else {
         thrust::sort_by_key(policy,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
-            thrust::device_pointer_cast(indices_out));
+            thrust::device_pointer_cast(indices_out),
+            NanLessFunctor<T>());
     }
 }
 

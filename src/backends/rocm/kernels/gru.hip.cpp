@@ -279,8 +279,11 @@ __global__ void gru_cell_backward_fused(
         grad_new_input[idx] = dn_input;
         grad_new_hidden[idx] = dn_hidden;
 
-        // Gradient for previous hidden also comes from new gate hidden part
-        dh_prev += dn_hidden;  // This will be added to dh_prev from z_t path
+        // F094: grad_h_prev is ONLY the direct z_t path (dh * z_t). The reset-path
+        // recurrent gradient (dn_hidden) is already carried in grad_new_hidden, and
+        // the registry forms grad_hx = matmul(d_gates_hh, w_hh) + grad_h_prev; adding
+        // dn_hidden here too double-counted it whenever W_hn != I. Matches
+        // CPU/CUDA/OneAPI/Vulkan which set grad_h_prev = dh * z_t only.
         grad_h_prev[idx] = dh_prev;
     }
 }
@@ -396,8 +399,10 @@ __global__ void gru_cell_backward_fused_fp16(
         grad_new_input[idx] = tenzor::rocm::safe_f2h(dn_input);
         grad_new_hidden[idx] = tenzor::rocm::safe_f2h(dn_hidden_val);
 
-        // Gradient for previous hidden also comes from new gate hidden part
-        dh_prev_val += dn_hidden_val;
+        // F095: grad_h_prev is ONLY the direct z_t path (dh * z_t); dn_hidden is
+        // already carried in grad_new_hidden and re-added by the registry via
+        // matmul(d_gates_hh, w_hh). Dropping the += fixes the double-count (also
+        // covers BFloat16, which routes through this f32 template).
         grad_h_prev[idx] = tenzor::rocm::safe_f2h(dh_prev_val);
     }
 }

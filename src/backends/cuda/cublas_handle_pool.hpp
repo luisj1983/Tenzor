@@ -37,13 +37,22 @@ class CuBLASHandlePool {
 public:
     /// Returns a per-thread cuBLAS handle, optionally bound to the given stream.
     /// Each thread owns its own handle, so no data race on cublasSetStream.
-    static cublasHandle_t get(cudaStream_t stream = nullptr) {
+    ///
+    /// When @p force_precise_f32 is true, the handle's math mode is forced to
+    /// CUBLAS_DEFAULT_MATH (exact IEEE FP32) regardless of the global
+    /// allow_tf32() toggle. This mirrors the cuDNN backward path's
+    /// prefer_precise_f32 gate and is used by the native conv2d/ConvTranspose
+    /// backward GEMMs so their gradients match CPU/other-backend exact FP32
+    /// instead of dropping mantissa bits to TF32 on Ampere+. The math-mode
+    /// change is tracked, so the next unforced get() re-applies the TF32 mode.
+    static cublasHandle_t get(cudaStream_t stream = nullptr,
+                              bool force_precise_f32 = false) {
         ensure_initialized();
         if (stream != last_stream()) {
             CUBLAS_CHECK(cublasSetStream(handle(), stream));
             last_stream() = stream;
         }
-        apply_math_mode();
+        apply_math_mode(force_precise_f32);
         return handle();
     }
 
@@ -94,7 +103,7 @@ private:
     // Re-apply the handle math mode from the (runtime-toggleable, thread-local)
     // allow_tf32() setting. Only issues a cublasSetMathMode when the desired
     // mode actually changes, and only on SM>=8 where TF32 op math is available.
-    static void apply_math_mode() {
+    static void apply_math_mode(bool force_precise_f32 = false) {
 #if CUDA_VERSION >= 11000
         auto& g = guard();
         if (!g.sm_checked) {
@@ -108,7 +117,8 @@ private:
         if (!g.sm_ge_80) {
             return;  // pre-Ampere: no TF32 path, default math only
         }
-        const int want = ::tenzor::cuda::matmul::allow_tf32() ? 1 : 0;
+        const int want =
+            (!force_precise_f32 && ::tenzor::cuda::matmul::allow_tf32()) ? 1 : 0;
         if (g.applied_tf32 != want) {
             CUBLAS_CHECK(cublasSetMathMode(
                 g.handle,

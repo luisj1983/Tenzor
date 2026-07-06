@@ -15,6 +15,8 @@ layout(binding = 2) buffer GradInput { uint grad_input[]; };     // Packed F16, 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
     uint grad_input_size;
+    uint out_plane;   // per-(n,c) output plane size (F043)
+    uint in_plane;    // per-(n,c) input plane size (F043)
 } params;
 
 // Convert half to float
@@ -76,8 +78,11 @@ void main() {
     float grad = half_to_float(grad_half);
 
     // Indices are Int32, one per output element.
-    int target_idx = indices_data[idx];
-
+    // F043: forward stores PLANE-LOCAL argmax; rebuild the global
+    // grad_input offset via the per-(n,c) plane base.
+    int plane_local = indices_data[idx];
+    uint nc = idx / params.out_plane;
+    int target_idx = int(nc * params.in_plane) + plane_local;
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
         atomicAddF16(uint(target_idx), grad);
     }

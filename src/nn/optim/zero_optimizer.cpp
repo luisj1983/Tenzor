@@ -3044,7 +3044,7 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
         } else {
             for (const auto& param : bucket.params) {
                 if (param->has_grad()) {
-                    auto& grad_opt = param->grad();
+                    const auto grad_opt = param->grad();
                     if (grad_opt.has_value()) {
                         local_grads.push_back(grad_opt.value());
                     }
@@ -4623,7 +4623,7 @@ auto ZeROStage3Optimizer::scatter_parameter_gradient(Tensor* param) -> void {
         return;  // No gradient to scatter
     }
 
-    auto& grad_opt = param_var->grad();
+    const auto grad_opt = param_var->grad();
     if (!grad_opt.has_value()) {
         return;  // Gradient not computed
     }

@@ -5,6 +5,15 @@
 // Audit Q.4: replaces the previous CPU shuttle in function_vision.cpp.
 // Float32 only — host dispatcher promotes/demotes via dispatchCast.
 //
+// F072 (KNOWN VULKAN CONSTRAINT): this backward (and affine_grid backward,
+// affine_grid_backward.comp) is computed in Float32 for every dtype. CPU/CUDA/
+// ROCm/OneAPI have native Float64 backward paths, so a Float64 grid_sample /
+// affine_grid gradcheck on Vulkan is evaluated in FP32 and truncated and will
+// NOT match the CPU FP64 reference to tight tolerance. There is no FP64
+// grid_sample/affine_grid backward shader variant; relax the Vulkan tolerance
+// for Float64 grid_sample/affine_grid or add an FP64 shader if exact FP64
+// gradients are required.
+//
 // One thread per (n, h_out, w_out) output spatial location. Each thread
 // loops over channels, scatters grad_input via atomicAdd (overlapping
 // neighbours under bilinear) and writes the single (n,h,w,:) entry of

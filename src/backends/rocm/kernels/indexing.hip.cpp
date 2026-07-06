@@ -931,7 +931,8 @@ __global__ void take_kernel(
     const int64_t* indices,
     T* output,
     int64_t input_size,
-    int64_t indices_size
+    int64_t indices_size,
+    int* error_flag
 ) {
     HIP_KERNEL_LOOP(idx, indices_size) {
         int64_t index = indices[idx];
@@ -941,12 +942,13 @@ __global__ void take_kernel(
             index += input_size;
         }
 
-        // Bounds checking. For an out-of-range index, write a defined value
-        // rather than leaving output[idx] uninitialized — that leaked stale
+        // Bounds checking. F085: flag an out-of-range index so the host can throw
+        // (matches CPU/CUDA), and write a defined value rather than leaking stale
         // device memory into the result for hostile/buggy indices.
         if (index >= 0 && index < input_size) {
             output[idx] = input[index];
         } else {
+            atomicExch(error_flag, 1);
             output[idx] = T(0);
         }
     }
@@ -2439,10 +2441,25 @@ auto masked_select_hip(
 }
 
 auto take_hip(
-    const Tensor& input,
-    const Tensor& indices,
+    const Tensor& input_arg,
+    const Tensor& indices_arg,
     hipStream_t stream
 ) -> Tensor {
+    // F085: take reads input by flat storage index, so a non-contiguous
+    // (transposed/sliced) view must be materialised first (matches CPU/CUDA);
+    // likewise the index tensor is read linearly.
+    Tensor input   = input_arg.is_contiguous()   ? input_arg   : input_arg.contiguous();
+    Tensor indices = indices_arg.is_contiguous() ? indices_arg : indices_arg.contiguous();
+
+    // F085: Float16/BFloat16 — widen to Float32, take, narrow back (take is a
+    // pure value copy; CPU/CUDA support half, ROCm previously else-threw).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor out_f32 = take_hip(input_f32, indices, stream);
+        return out_f32.to(orig);
+    }
+
     int64_t input_size = input.numel();
     int64_t indices_size = indices.numel();
 
@@ -2451,6 +2468,12 @@ auto take_hip(
     int threads = 256;
     int blocks = (indices_size + threads - 1) / threads;
 
+    // F085: device-side OOB error flag so an out-of-range index throws (matches
+    // CPU/CUDA) instead of silently returning 0.
+    int* d_error_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_error_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(take_kernel<float>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -2458,7 +2481,8 @@ auto take_hip(
             indices.data<int64_t>(),
             output.data<float>(),
             input_size,
-            indices_size
+            indices_size,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
@@ -2468,7 +2492,8 @@ auto take_hip(
             indices.data<int64_t>(),
             output.data<double>(),
             input_size,
-            indices_size
+            indices_size,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
@@ -2478,7 +2503,8 @@ auto take_hip(
             indices.data<int64_t>(),
             output.data<int32_t>(),
             input_size,
-            indices_size
+            indices_size,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
@@ -2488,14 +2514,27 @@ auto take_hip(
             indices.data<int64_t>(),
             output.data<int64_t>(),
             input_size,
-            indices_size
+            indices_size,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else {
+        HIP_CHECK(hipFree(d_error_flag));
         throw std::runtime_error("take_hip: Unsupported dtype");
     }
 
     HIP_POST_LAUNCH_CHECK();
+
+    // Check for out-of-bounds index errors (matches CPU/CUDA which throw).
+    int host_error = 0;
+    HIP_CHECK(hipMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_error_flag));
+    if (host_error != 0) {
+        throw std::out_of_range("take: index out of range");
+    }
+
     return output;
 }
 
@@ -2598,38 +2637,50 @@ __global__ void scatter_add_kernel_impl(
     const IndexT* indices,
     const T* src,
     T* output,
-    int64_t outer_size,
+    int ndim,
+    int dim,
     int64_t dim_size,
-    int64_t inner_size,
-    int64_t index_dim_size,
     int64_t total_scatter,
+    GatherScatterMeta meta,
     int* error_flag) {
 
     HIP_KERNEL_LOOP(idx, total_scatter) {
-        int64_t inner_idx = idx % inner_size;
-        int64_t temp = idx / inner_size;
-        int64_t index_pos = temp % index_dim_size;
-        int64_t outer_idx = temp / index_dim_size;
-
-        int64_t index_offset = outer_idx * index_dim_size * inner_size +
-                               index_pos * inner_size + inner_idx;
-        int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
+        // F076: decode the flat index/src position per-dimension from the index
+        // strides, then re-linearise against the output's contiguous strides,
+        // substituting the scattered coordinate on the `dim` axis. The previous
+        // collapsed outer/inner formula mis-addressed whenever index.size(d) <
+        // self.size(d) on a non-dim axis (the gather-backward case in 3D+).
+        int64_t scatter_idx = static_cast<int64_t>(indices[idx]);
         if (scatter_idx < 0) scatter_idx += dim_size;
         if (scatter_idx < 0 || scatter_idx >= dim_size) {
             atomicExch(error_flag, 1);
             return;
         }
 
-        int64_t output_offset = outer_idx * dim_size * inner_size +
-                                scatter_idx * inner_size +
-                                inner_idx;
+        int64_t rem = idx;
+        int64_t output_offset = 0;
+        for (int d = 0; d < ndim; ++d) {
+            int64_t coord = rem / meta.idx_strides[d];
+            rem %= meta.idx_strides[d];
+            if (d == dim) {
+                output_offset += scatter_idx * meta.self_strides[d];
+            } else {
+                output_offset += coord * meta.self_strides[d];
+            }
+        }
 
         atomicAddHelper(&output[output_offset], src[idx]);
     }
 }
 
-auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
-                        const Tensor& src, hipStream_t stream) -> Tensor {
+auto scatter_add_kernel(const Tensor& input_arg, int64_t dim, const Tensor& index_arg,
+                        const Tensor& src_arg, hipStream_t stream) -> Tensor {
+    // F079: the kernel addresses input/index/src with contiguous strides, so a
+    // transposed/sliced view must be materialised first (matches CPU/CUDA).
+    Tensor input = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
+    Tensor index = index_arg.is_contiguous() ? index_arg : index_arg.contiguous();
+    Tensor src   = src_arg.is_contiguous()   ? src_arg   : src_arg.contiguous();
+
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
@@ -2641,6 +2692,9 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     // rather than reading past the input / src on the device.
     if (index.ndim() != ndim) {
         throw std::invalid_argument("scatter_add: index rank must match self rank");
+    }
+    if (ndim > MAX_GATHER_SCATTER_DIMS) {
+        throw std::runtime_error("scatter_add: ndim exceeds MAX_GATHER_SCATTER_DIMS");
     }
     for (int64_t k = 0; k < ndim; ++k) {
         if (k < src.ndim() && index.shape()[k] > src.shape()[k]) {
@@ -2659,12 +2713,23 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 
     if (total_input == 0) return output;
 
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= input.shape()[i];
     int64_t dim_size = input.shape()[dim];
-    int64_t index_dim_size = index.shape()[dim];
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= input.shape()[i];
+    int ndim_i = static_cast<int>(ndim);
+    int dim_i = static_cast<int>(dim);
+
+    // F076: per-dim metadata — index strides (to decode each flat scatter
+    // position) and the OUTPUT's contiguous strides (to re-linearise every
+    // non-dim coordinate and the substituted scatter index on the `dim` axis).
+    GatherScatterMeta meta{};
+    {
+        int64_t is = 1, ss = 1;
+        for (int d = ndim_i - 1; d >= 0; --d) {
+            meta.idx_strides[d] = is;
+            meta.self_strides[d] = ss;
+            is *= index.shape()[d];
+            ss *= input.shape()[d];
+        }
+    }
 
     bool idx_is_int32 = (index.dtype() == DType::Int32);
 
@@ -2689,13 +2754,13 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             hipLaunchKernelGGL((scatter_add_kernel_impl<T, int32_t>), \
                 dim3(blocks), dim3(threads), 0, stream, \
                 index.data<int32_t>(), src.data<T>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                ndim_i, dim_i, dim_size, total_scatter, meta, \
                 d_error_flag); \
         else \
             hipLaunchKernelGGL((scatter_add_kernel_impl<T, int64_t>), \
                 dim3(blocks), dim3(threads), 0, stream, \
                 index.data<int64_t>(), src.data<T>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                ndim_i, dim_i, dim_size, total_scatter, meta, \
                 d_error_flag); \
         HIP_POST_LAUNCH_CHECK();
 
@@ -2719,14 +2784,14 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     hipLaunchKernelGGL((scatter_add_kernel_impl<float, int32_t>),
                         dim3(blocks_f32), dim3(threads), 0, stream,
                         index.data<int32_t>(), src_f32.data<float>(), output_f32.data<float>(),
-                        outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                        ndim_i, dim_i, dim_size, total_scatter, meta,
                         d_error_flag);
                     HIP_POST_LAUNCH_CHECK();
                 } else {
                     hipLaunchKernelGGL((scatter_add_kernel_impl<float, int64_t>),
                         dim3(blocks_f32), dim3(threads), 0, stream,
                         index.data<int64_t>(), src_f32.data<float>(), output_f32.data<float>(),
-                        outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                        ndim_i, dim_i, dim_size, total_scatter, meta,
                         d_error_flag);
                     HIP_POST_LAUNCH_CHECK();
                 }
@@ -3092,9 +3157,38 @@ __global__ void embedding_bag_backward_kernel_hip(
     }
 }
 
+// F071 Max-mode backward: the forward emits, per (bag, feature), the GLOBAL
+// element index into `indices` that achieved the maximum (or -1 for an empty
+// bag). The gradient flows only to that winning row, mirroring CPU/CUDA. The
+// previous code had no max branch, so max mode fell through to the sum kernel
+// and scatter-added the full gradient into EVERY row of each bag — wrong grad.
+template<typename T>
+__global__ void embedding_bag_backward_max_kernel_hip(
+    const T* grad_output,
+    const int64_t* max_indices,   // [num_bags, embedding_dim]
+    const int64_t* indices,       // [total_elements]
+    T* grad_weight,
+    int64_t num_bags,
+    int64_t embedding_dim,
+    int64_t total_elements,
+    int64_t num_embeddings)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        int64_t elem = max_indices[bag * embedding_dim + j];
+        if (elem < 0 || elem >= total_elements) continue;  // empty bag / OOB
+        int64_t row = indices[elem];
+        if (row < 0 || row >= num_embeddings) continue;
+        atomicAdd(&grad_weight[row * embedding_dim + j],
+                  grad_output[bag * embedding_dim + j]);
+    }
+}
+
 auto embedding_bag_backward_kernel(const Tensor& grad_output,
                                    const Tensor& indices,
                                    const Tensor& offsets,
+                                   const Tensor& max_indices,
                                    const OpAttributes& attrs,
                                    hipStream_t stream) -> Tensor {
     int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
@@ -3117,7 +3211,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
     // FP16/BF16: upcast to Float32 (indices stays Int64)
     if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         auto go_f32 = grad_output.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, attrs, stream);
+        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, max_indices, attrs, stream);
         return result.to(grad_output.dtype());
     }
 
@@ -3130,6 +3224,40 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
     // checks make it a no-op and the pre-initialized outputs are returned.
     int threads = std::max(1, std::min(static_cast<int>(embedding_dim), 256));
     int blocks = std::max(1, static_cast<int>(num_bags));
+
+    // F071 Max mode: route the gradient only to the per-feature argmax row using
+    // the max_indices saved by the forward (matches CPU/CUDA).
+    if (mode == "max") {
+        if (!max_indices.is_valid() || max_indices.numel() == 0) {
+            throw std::runtime_error(
+                "embedding_bag_backward: mode=\"max\" requires the per-feature "
+                "argmax indices (4th input) produced by EmbeddingBagForward.");
+        }
+        if (max_indices.dtype() != DType::Int64) {
+            throw std::runtime_error("embedding_bag_backward: max_indices must be Int64");
+        }
+        switch (grad_output.dtype()) {
+            case DType::Float32:
+                hipLaunchKernelGGL(embedding_bag_backward_max_kernel_hip<float>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    grad_output.data<float>(), max_indices.data<int64_t>(), indices.data<int64_t>(),
+                    grad_weight.data<float>(), num_bags, embedding_dim, total_elements, num_embeddings);
+                HIP_POST_LAUNCH_CHECK();
+                break;
+            case DType::Float64:
+                hipLaunchKernelGGL(embedding_bag_backward_max_kernel_hip<double>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    grad_output.data<double>(), max_indices.data<int64_t>(), indices.data<int64_t>(),
+                    grad_weight.data<double>(), num_bags, embedding_dim, total_elements, num_embeddings);
+                HIP_POST_LAUNCH_CHECK();
+                break;
+            default:
+                throw std::runtime_error("embedding_bag_backward: unsupported dtype");
+        }
+        HIP_POST_LAUNCH_CHECK();
+        return grad_weight;
+    }
+
     bool is_mean = (mode == "mean");
 
     switch (grad_output.dtype()) {
@@ -4014,8 +4142,21 @@ __global__ void mask_to_int64_hip_kernel(const bool* __restrict__ mask, int64_t*
     }
 }
 
-auto masked_scatter_hip(const Tensor& input, const Tensor& mask,
+auto masked_scatter_hip(const Tensor& input, const Tensor& mask_arg,
                         const Tensor& source, hipStream_t stream) -> Tensor {
+    // F086: accept a non-Bool (floating/int) mask by normalizing to Bool, as the
+    // CPU reference does; the kernel reads mask as bool.
+    Tensor mask = (mask_arg.dtype() == DType::Bool) ? mask_arg : mask_arg.to(DType::Bool);
+
+    // F086: Float16/BFloat16 — widen input+source to Float32, scatter, narrow
+    // back (pure value copy; CPU supports half, ROCm previously else-threw).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor out_f32 = masked_scatter_hip(input.to(DType::Float32), mask,
+                                            source.to(DType::Float32), stream);
+        return out_f32.to(orig);
+    }
+
     int64_t numel = input.numel();
     int64_t source_numel = source.numel();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),

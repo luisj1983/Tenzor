@@ -1708,12 +1708,12 @@ auto adaptive_avgpool2d_backward(
             N, C, H_in, W_in, H_out, W_out);
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float16) {
-        hipLaunchKernelGGL(adaptive_avgpool2d_backward_kernel<__half>,
-            dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-            reinterpret_cast<__half*>(grad_input.data<Float16>()),
-            N, C, H_in, W_in, H_out, W_out);
-        HIP_POST_LAUNCH_CHECK();
+        // F052: never accumulate the many overlapping adaptive-avg contributions
+        // in native __half — widen to Float32, compute, narrow back (matches the
+        // adaptive_avgpool2d_backward_hip sibling and CPU float accumulation).
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool2d_backward(grad_output_f32, H_in, W_in, stream);
+        return result_f32.to(DType::Float16);
     } else if (grad_output.dtype() == DType::BFloat16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);
         auto result_f32 = adaptive_avgpool2d_backward(grad_output_f32, H_in, W_in, stream);
@@ -1985,7 +1985,8 @@ __global__ void avgpool1d_forward_kernel(
     T* output,
     int64_t N, int64_t C, int64_t L,
     int64_t L_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     int64_t total_elements = N * C * L_out;
 
@@ -2007,7 +2008,10 @@ __global__ void avgpool1d_forward_kernel(
             }
         }
 
-        output[idx] = count > 0 ? sum / static_cast<T>(count) : T(0);
+        // F047: divide by the full window when count_include_pad (PyTorch
+        // default), otherwise by the in-bounds count. Matches 2d/3d + CPU.
+        int64_t divisor = count_include_pad ? kernel_size : count;
+        output[idx] = divisor > 0 ? sum / static_cast<T>(divisor) : T(0);
     }
 }
 
@@ -2016,7 +2020,8 @@ __global__ void avgpool1d_forward_kernel_fp16(
     __half* output,
     int64_t N, int64_t C, int64_t L,
     int64_t L_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     int64_t total_elements = N * C * L_out;
 
@@ -2038,13 +2043,16 @@ __global__ void avgpool1d_forward_kernel_fp16(
             }
         }
 
-        output[idx] = tenzor::rocm::safe_f2h(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+        // F047: full-window divisor when count_include_pad, else in-bounds count.
+        int64_t divisor = count_include_pad ? kernel_size : count;
+        output[idx] = tenzor::rocm::safe_f2h(divisor > 0 ? sum / static_cast<float>(divisor) : 0.0f);
     }
 }
 
 auto avgpool1d_forward_hip(
     const Tensor& input,
     std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a, std::array<int64_t, 1> padding_a,
+    bool count_include_pad,
     hipStream_t stream
 ) -> Tensor {
     // Q.6: per-axis std::array<int64_t, 1> signature.
@@ -2069,24 +2077,24 @@ auto avgpool1d_forward_hip(
         hipLaunchKernelGGL(avgpool1d_forward_kernel<float>,
             dim3(blocks), dim3(threads), 0, stream,
             input.data<float>(), output.data<float>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(avgpool1d_forward_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
             input.data<double>(), output.data<double>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(avgpool1d_forward_kernel_fp16,
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
-        auto result_f32 = avgpool1d_forward_hip(input_f32, kernel_size_a, stride_a, padding_a, stream);
+        auto result_f32 = avgpool1d_forward_hip(input_f32, kernel_size_a, stride_a, padding_a, count_include_pad, stream);
         return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("avgpool1d_forward_hip: unsupported dtype");
@@ -2106,7 +2114,8 @@ __global__ void avgpool1d_backward_kernel_impl(
     T* grad_input,
     int64_t N, int64_t C, int64_t L,
     int64_t L_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     int64_t total = N * C * L_out;
 
@@ -2123,7 +2132,9 @@ __global__ void avgpool1d_backward_kernel_impl(
             if (l >= 0 && l < L) count++;
         }
 
-        T grad_val = grad_output[idx] / static_cast<T>(count);
+        // F047: divisor matches the forward — full window when count_include_pad.
+        int64_t divisor = count_include_pad ? kernel_size : count;
+        T grad_val = grad_output[idx] / static_cast<T>(divisor);
 
         for (int64_t k = 0; k < kernel_size; ++k) {
             int64_t l = l_start + k;
@@ -2140,7 +2151,8 @@ __global__ void avgpool1d_backward_kernel_fp16(
     float* grad_input_f32,
     int64_t N, int64_t C, int64_t L,
     int64_t L_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     int64_t total = N * C * L_out;
 
@@ -2157,7 +2169,9 @@ __global__ void avgpool1d_backward_kernel_fp16(
             if (l >= 0 && l < L) count++;
         }
 
-        float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(count);
+        // F047: divisor matches the forward — full window when count_include_pad.
+        int64_t divisor = count_include_pad ? kernel_size : count;
+        float grad_val = tenzor::rocm::safe_h2f(grad_output[idx]) / static_cast<float>(divisor);
 
         for (int64_t k = 0; k < kernel_size; ++k) {
             int64_t l = l_start + k;
@@ -2173,6 +2187,7 @@ auto avgpool1d_backward_hip(
     const Tensor& grad_output,
     const std::vector<int64_t>& input_shape,
     std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a, std::array<int64_t, 1> padding_a,
+    bool count_include_pad,
     hipStream_t stream
 ) -> Tensor {
     // Q.6: per-axis std::array<int64_t, 1> signature.
@@ -2199,14 +2214,14 @@ auto avgpool1d_backward_hip(
         hipLaunchKernelGGL(avgpool1d_backward_kernel_impl<float>,
             dim3(blocks), dim3(threads), 0, stream,
             grad_output.data<float>(), grad_input.data<float>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float64) {
         HIP_CHECK(hipMemsetAsync(grad_input.data<double>(), 0, input_numel * sizeof(double), stream));
         hipLaunchKernelGGL(avgpool1d_backward_kernel_impl<double>,
             dim3(blocks), dim3(threads), 0, stream,
             grad_output.data<double>(), grad_input.data<double>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float16) {
         Tensor grad_input_f32(input_shape, DType::Float32, grad_output.device());
@@ -2216,7 +2231,7 @@ auto avgpool1d_backward_hip(
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const __half*>(grad_output.data<Float16>()),
             grad_input_f32.data<float>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         HIP_POST_LAUNCH_CHECK();
 
         int convert_blocks = (input_numel + threads - 1) / threads;
@@ -2228,7 +2243,7 @@ auto avgpool1d_backward_hip(
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::BFloat16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);
-        auto result_f32 = avgpool1d_backward_hip(grad_output_f32, input_shape, kernel_size_a, stride_a, padding_a, stream);
+        auto result_f32 = avgpool1d_backward_hip(grad_output_f32, input_shape, kernel_size_a, stride_a, padding_a, count_include_pad, stream);
         return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("avgpool1d_backward_hip: unsupported dtype");

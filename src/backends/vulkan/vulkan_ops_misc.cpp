@@ -1611,17 +1611,15 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
         throw std::invalid_argument("roi_align_backward requires 4D grad_output (num_rois, C, output_h, output_w)");
     }
 
-    // Compute the backward in Float32 for every non-Float32 dtype, then cast the
-    // result. Two bugs are fixed at once:
-    //  - rois-dtype mismatch: the dtype-specific shaders read the Float32 rois
-    //    buffer with the grad value dtype → garbage coordinates.
-    //  - the f64 backward shader scatters with a NON-atomic `+=`, so concurrent
-    //    threads writing the same feature pixel race and drop the vast majority
-    //    of contributions (gradients came back ~80x too small). The f32 shader
-    //    uses a correct atomicAdd. The f64 shader already computes its gradient
-    //    scale in Float32 internally, so routing through the f32 path loses no
-    //    real precision while making the accumulation race-free.
-    if (grad_output.dtype() != DType::Float32) {
+    // Float16/BFloat16: widen-narrow through the Float32 shader (matches the
+    // other backends' half handling and avoids the dtype-specific shaders
+    // reading the Float32 rois buffer at the wrong stride). Float64 is NOT
+    // widened here: roi_align_backward_f64.comp accumulates in full double
+    // precision via a race-free uint64-CAS atomicAdd (see that shader), so it
+    // dispatches natively below to match CPU/CUDA/ROCm/OneAPI double accumulation
+    // instead of being truncated to Float32.
+    if (grad_output.dtype() != DType::Float32 &&
+        grad_output.dtype() != DType::Float64) {
         Tensor gf_f32 = dispatchROIAlignBackward(
             dispatchCast(grad_output, DType::Float32),
             dispatchCast(rois, DType::Float32), attrs);
@@ -3720,12 +3718,16 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2dBackward(const Tensor& grad_output,
         uint32_t channels;
         uint32_t in_h;
         uint32_t in_w;
+        uint32_t out_plane;  // F043: out_h * out_w, per-(n,c) output plane
     } pc;
     pc.n_elements = static_cast<uint32_t>(n_elements);
     pc.grad_input_size = static_cast<uint32_t>(grad_input_size);
     pc.channels = static_cast<uint32_t>(C);
     pc.in_h = static_cast<uint32_t>(H_in);
     pc.in_w = static_cast<uint32_t>(W_in);
+    // F043: forward now stores plane-local argmax; backward rebuilds the global
+    // offset as nc * (in_h*in_w) + plane_local, with nc = idx / out_plane.
+    pc.out_plane = static_cast<uint32_t>(N * C > 0 ? n_elements / (N * C) : 0);
 
     size_t elem = grad_output.dtype_size();
     // For F16: round buffer sizes up to 4-byte boundary for packed uint32 access
@@ -3773,6 +3775,15 @@ auto VulkanBackend::dispatchCumSum(const Tensor& input, int64_t dim) -> Tensor {
         throw std::runtime_error("cumsum: dimension out of range (got " +
                                  std::to_string(dim) + " for tensor with " +
                                  std::to_string(ndim) + " dimensions)");
+    }
+
+    // F135: the cumsum shaders bind input.data_ptr() and index it with
+    // shape-derived (logical) offsets, so a non-contiguous input (e.g. a
+    // transpose/permute) is read in the wrong physical order. CPU/CUDA/ROCm/
+    // OneAPI all materialize contiguous() first; Vulkan did not, diverging on
+    // strided inputs. Recurse once on a contiguous copy.
+    if (!input.is_contiguous()) {
+        return dispatchCumSum(input.contiguous(), dim);
     }
 
     // No native int shaders — the default path reads int bytes as float and
@@ -3866,6 +3877,13 @@ auto VulkanBackend::dispatchCumProd(const Tensor& input, int64_t dim) -> Tensor 
         throw std::runtime_error("cumprod: dimension out of range (got " +
                                  std::to_string(dim) + " for tensor with " +
                                  std::to_string(ndim) + " dimensions)");
+    }
+
+    // F135: cumprod shaders index input.data_ptr() with shape-derived (logical)
+    // offsets, so a non-contiguous input is read in the wrong physical order.
+    // Materialize a contiguous copy first (matches CPU/CUDA/ROCm/OneAPI).
+    if (!input.is_contiguous()) {
+        return dispatchCumProd(input.contiguous(), dim);
     }
 
     // Same int-dtype fall-through issue as dispatchCumSum: the default float
@@ -4584,8 +4602,11 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
-    // Float16: upcast to Float32 for scatter_add (atomic accumulation in F32)
-    if (self.dtype() == DType::Float16) {
+    // Float16/BFloat16: upcast to Float32 for scatter_add so duplicate-index
+    // accumulation happens in a true F32 accumulator and narrows once. The
+    // native bf16 CAS shader rounded the accumulator through bf16 on every
+    // step, diverging from CPU/OneAPI (accumulate in F32, narrow once).
+    if (self.dtype() == DType::Float16 || self.dtype() == DType::BFloat16) {
         DType orig_dtype = self.dtype();
         auto self_f32 = self.to(DType::Float32);
         auto src_f32 = src.to(DType::Float32);
@@ -4671,15 +4692,33 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
         synchronize(device_id);
     }
 
-    // Compute scatter parameters
+    // Compute scatter parameters. The shader decodes each flat index position
+    // with the INDEX tensor's own contiguous strides and recomposes the output
+    // offset with the SELF strides (matching CPU scatter_add_kernel). A single
+    // collapsed inner_size derived from self mis-decodes whenever index is
+    // smaller than self on a non-scatter axis (gather-backward in 3D+).
     uint32_t dim_size = static_cast<uint32_t>(self_shape[dim]);
-    uint32_t inner_size = 1;
-    for (int64_t d = dim + 1; d < ndim; ++d) {
-        inner_size *= static_cast<uint32_t>(self_shape[d]);
+    auto index_shape = index.shape();
+    if (index_shape.size() > 8 || self_shape.size() > 8) {
+        throw std::runtime_error(
+            "VulkanBackend::dispatchScatterAdd: rank > 8 is not supported");
     }
 
-    auto src_shape = src.shape();
-    uint32_t src_dim_size = static_cast<uint32_t>(src_shape[dim]);
+    // Contiguous (row-major) strides for the index and self tensors.
+    uint32_t index_strides[8] = {0};
+    uint32_t self_strides[8] = {0};
+    {
+        int64_t acc = 1;
+        for (int64_t d = static_cast<int64_t>(index_shape.size()) - 1; d >= 0; --d) {
+            index_strides[d] = static_cast<uint32_t>(acc);
+            acc *= index_shape[d];
+        }
+        acc = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            self_strides[d] = static_cast<uint32_t>(acc);
+            acc *= self_shape[d];
+        }
+    }
 
     // Buffers
     const void* buf_src = src.data_ptr();
@@ -4699,15 +4738,21 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
 
     struct PushConstants {
         uint32_t n;
+        uint32_t ndim;
+        uint32_t dim;
         uint32_t dim_size;
-        uint32_t inner_size;
-        uint32_t src_dim_size;
+        uint32_t index_strides[8];
+        uint32_t self_strides[8];
     } push_constants;
 
     push_constants.n = static_cast<uint32_t>(index.numel());
+    push_constants.ndim = static_cast<uint32_t>(ndim);
+    push_constants.dim = static_cast<uint32_t>(dim);
     push_constants.dim_size = dim_size;
-    push_constants.inner_size = inner_size;
-    push_constants.src_dim_size = src_dim_size;
+    for (int d = 0; d < 8; ++d) {
+        push_constants.index_strides[d] = index_strides[d];
+        push_constants.self_strides[d] = self_strides[d];
+    }
 
     uint32_t workgroups = div_wg_checked(index.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -4880,19 +4925,61 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
         synchronize(device_id);
     }
 
-    // Compute index op parameters.
-    // Phase 7.6 2D scatter fix: idx_n must be the index tensor's size along
-    // the scatter dim, NOT the total numel. For 1D scatter these are equal.
+    // Compute scatter parameters. The reduce and init passes decode each flat
+    // index position with the INDEX tensor's own contiguous strides and
+    // recompose the output offset with the SELF strides (matching CPU). The old
+    // collapsed outer*idx_n*inner decode used self-derived inner and
+    // over-dispatched, reading idx/src out of bounds whenever index was smaller
+    // than self on a non-scatter axis.
     uint32_t dim_size = static_cast<uint32_t>(self_shape[dim]);
-    uint32_t idx_n = (index.shape().size() > static_cast<size_t>(dim))
-                   ? static_cast<uint32_t>(index.shape()[dim])
-                   : static_cast<uint32_t>(index.numel());
-    uint32_t outer = 1, inner = 1;
-    for (int64_t d = 0; d < dim; ++d) outer *= static_cast<uint32_t>(self_shape[d]);
-    for (int64_t d = dim + 1; d < ndim; ++d) inner *= static_cast<uint32_t>(self_shape[d]);
+    auto index_shape = index.shape();
+    if (index_shape.size() > 8 || self_shape.size() > 8) {
+        throw std::runtime_error("VulkanBackend::dispatchScatterReduce: rank > 8 is not supported");
+    }
+    uint32_t sr_index_strides[8] = {0};
+    uint32_t sr_self_strides[8] = {0};
+    {
+        int64_t acc = 1;
+        for (int64_t d = static_cast<int64_t>(index_shape.size()) - 1; d >= 0; --d) {
+            sr_index_strides[d] = static_cast<uint32_t>(acc);
+            acc *= index_shape[d];
+        }
+        acc = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            sr_self_strides[d] = static_cast<uint32_t>(acc);
+            acc *= self_shape[d];
+        }
+    }
+    uint32_t n_idx = static_cast<uint32_t>(index.numel());
+    if (n_idx == 0) return output;
 
-    uint32_t total = outer * idx_n * inner;
-    if (total == 0) return output;
+    // Push-constant layout shared by the init and main reduce passes (matches
+    // scatter_reduce{,_init}{,_f64,_i32}.comp).
+    struct ScatterReducePC {
+        uint32_t n;
+        uint32_t ndim;
+        uint32_t dim;
+        uint32_t dim_size;
+        uint32_t mode;
+        uint32_t pad0;
+        uint32_t pad1;
+        uint32_t pad2;
+        uint32_t index_strides[8];
+        uint32_t self_strides[8];
+    };
+    auto fill_sr_pc = [&](uint32_t pc_mode) {
+        ScatterReducePC pc{};
+        pc.n = n_idx;
+        pc.ndim = static_cast<uint32_t>(ndim);
+        pc.dim = static_cast<uint32_t>(dim);
+        pc.dim_size = dim_size;
+        pc.mode = pc_mode;
+        for (int d = 0; d < 8; ++d) {
+            pc.index_strides[d] = sr_index_strides[d];
+            pc.self_strides[d] = sr_self_strides[d];
+        }
+        return pc;
+    };
 
     // Phase 7.6 SumNoIncludeSelf fix: for !include_self, run the init
     // shader on every position that the subsequent scatter will touch,
@@ -4911,20 +4998,9 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
         VkDescriptorSet init_ds = allocateAndWriteDescriptorSet(
             device_id, init_pipeline, init_bindings, init_sizes);
 
-        struct InitPC {
-            uint32_t outer;
-            uint32_t dim_size;
-            uint32_t idx_n;
-            uint32_t inner;
-            uint32_t mode;
-        } init_pc;
-        init_pc.outer = outer;
-        init_pc.dim_size = dim_size;
-        init_pc.idx_n = idx_n;
-        init_pc.inner = inner;
-        init_pc.mode = mode;
+        ScatterReducePC init_pc = fill_sr_pc(mode);
 
-        uint32_t init_groups = div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+        uint32_t init_groups = div_wg_checked(n_idx, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         VkCommandBuffer init_cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(init_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, init_pipeline->pipeline());
         vkCmdBindDescriptorSets(init_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -4965,21 +5041,9 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
-        uint32_t outer;
-        uint32_t dim_size;
-        uint32_t idx_n;
-        uint32_t inner;
-        uint32_t mode;
-    } push_constants;
+    ScatterReducePC push_constants = fill_sr_pc(mode);
 
-    push_constants.outer = outer;
-    push_constants.dim_size = dim_size;
-    push_constants.idx_n = idx_n;
-    push_constants.inner = inner;
-    push_constants.mode = mode;
-
-    uint32_t workgroups = div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+    uint32_t workgroups = div_wg_checked(n_idx, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -5047,11 +5111,12 @@ auto VulkanBackend::dispatchIndexAdd(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
-    // Validate index VALUES host-side. PyTorch index_add_ requires every index in
-    // [0, dim_size) and raises on violation (it does NOT wrap negatives, unlike
-    // gather/index_select). The shader silently skips out-of-range/negative
-    // indices, which would diverge from the CPU reference's throw. Mirror the
-    // dispatchEmbedding readback-and-throw validation.
+    // Validate index VALUES host-side. CPU (math.cpp) and OneAPI WRAP negative
+    // indices (di += dim_size) before the range check, only throwing if the
+    // index is still out of bounds after wrapping. Mirror that here so a
+    // wrappable negative index succeeds on Vulkan exactly as on CPU/OneAPI
+    // instead of hard-throwing. The shader (index_add*.comp) applies the same
+    // wrap so the accumulation lands in the wrapped row.
     {
         int64_t ndim_self = static_cast<int64_t>(self_shape.size());
         int64_t norm_dim = dim < 0 ? dim + ndim_self : dim;
@@ -5060,7 +5125,8 @@ auto VulkanBackend::dispatchIndexAdd(const Tensor& self, int64_t dim,
         Tensor idx_i64 = idx_host.dtype() == DType::Int64 ? idx_host : idx_host.to(DType::Int64);
         const int64_t* ip = idx_i64.data<int64_t>();
         for (int64_t i = 0; i < idx_i64.numel(); ++i) {
-            if (ip[i] < 0 || ip[i] >= dim_size) {
+            int64_t di = ip[i] < 0 ? ip[i] + dim_size : ip[i];
+            if (di < 0 || di >= dim_size) {
                 throw std::out_of_range(
                     "index_add_(): index " + std::to_string(ip[i]) +
                     " is out of bounds for dimension " + std::to_string(norm_dim) +
@@ -5241,10 +5307,11 @@ auto VulkanBackend::dispatchIndexCopy(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
-    // Validate index VALUES host-side: PyTorch index_copy_ requires every index
-    // in [0, dim_size) and raises on violation (no negative wrapping). The shader
-    // silently skips out-of-range indices, diverging from the CPU throw. Mirror
-    // the dispatchEmbedding readback-and-throw validation.
+    // Validate index VALUES host-side. CPU (math.cpp) and OneAPI WRAP negative
+    // indices (di += dim_size) before the range check, only throwing if still
+    // out of bounds after wrapping. Mirror that here (and in index_copy*.comp,
+    // which applies the same wrap) so a wrappable negative index succeeds on
+    // Vulkan as on CPU/OneAPI instead of hard-throwing.
     {
         int64_t ndim_self = static_cast<int64_t>(self_shape.size());
         int64_t norm_dim = dim < 0 ? dim + ndim_self : dim;
@@ -5253,7 +5320,8 @@ auto VulkanBackend::dispatchIndexCopy(const Tensor& self, int64_t dim,
         Tensor idx_i64 = idx_host.dtype() == DType::Int64 ? idx_host : idx_host.to(DType::Int64);
         const int64_t* ip = idx_i64.data<int64_t>();
         for (int64_t i = 0; i < idx_i64.numel(); ++i) {
-            if (ip[i] < 0 || ip[i] >= dim_size) {
+            int64_t di = ip[i] < 0 ? ip[i] + dim_size : ip[i];
+            if (di < 0 || di >= dim_size) {
                 throw std::out_of_range(
                     "index_copy_(): index " + std::to_string(ip[i]) +
                     " is out of bounds for dimension " + std::to_string(norm_dim) +
@@ -5528,8 +5596,18 @@ auto VulkanBackend::dispatchIndexFill(const Tensor& self, int64_t dim,
 // NanToNum: native Vulkan dispatch using nan_to_num.comp shader
 // ============================================================================
 auto VulkanBackend::dispatchNanToNum(const Tensor& input,
-                                     float nan_val, float posinf_val,
-                                     float neginf_val) -> Tensor {
+                                     double nan_val, double posinf_val,
+                                     double neginf_val) -> Tensor {
+    // F149: replacement values arrive as DOUBLE (op default posinf = DBL_MAX =
+    // "largest finite"). For the fp32 shader they must be clamped into the float
+    // range — a plain cast overflows DBL_MAX -> +Inf, so the shader "replaced"
+    // Inf with Inf (a no-op). The fp64 shader uses the doubles directly (DBL_MAX
+    // is finite), matching CPU/CUDA/ROCm/OneAPI.
+    auto clamp_to_float = [](double v) -> float {
+        if (v >= static_cast<double>(std::numeric_limits<float>::max())) return std::numeric_limits<float>::max();
+        if (v <= static_cast<double>(std::numeric_limits<float>::lowest())) return std::numeric_limits<float>::lowest();
+        return static_cast<float>(v);
+    };
     if (input.numel() == 0) {
         auto s = input.shape();
         return Tensor(std::vector<int64_t>(s.begin(), s.end()), input.dtype(), input.device());
@@ -5578,14 +5656,14 @@ auto VulkanBackend::dispatchNanToNum(const Tensor& input,
     union { PushConstantsF32 f32; PushConstantsF64 f64; } pc = {};
     if (is_f64) {
         pc.f64.num_elements = static_cast<uint32_t>(input.numel());
-        pc.f64.nan_val      = static_cast<double>(nan_val);
-        pc.f64.posinf_val   = static_cast<double>(posinf_val);
-        pc.f64.neginf_val   = static_cast<double>(neginf_val);
+        pc.f64.nan_val      = nan_val;
+        pc.f64.posinf_val   = posinf_val;   // DBL_MAX default stays finite in double
+        pc.f64.neginf_val   = neginf_val;
     } else {
         pc.f32.num_elements = static_cast<uint32_t>(input.numel());
-        pc.f32.nan_val      = nan_val;
-        pc.f32.posinf_val   = posinf_val;
-        pc.f32.neginf_val   = neginf_val;
+        pc.f32.nan_val      = static_cast<float>(nan_val);
+        pc.f32.posinf_val   = clamp_to_float(posinf_val);
+        pc.f32.neginf_val   = clamp_to_float(neginf_val);
     }
 
     size_t buf_size = input.numel() * input.dtype_size();

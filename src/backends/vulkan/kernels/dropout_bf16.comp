@@ -10,7 +10,8 @@ layout(binding = 2) buffer Mask { uint mask_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
-    uint seed;
+    uint seed_lo;
+    uint seed_hi;
     uint offset;
     float p;
     float scale;
@@ -92,8 +93,8 @@ void main() {
 
     // Generate random numbers for both elements
     uint element_idx0 = elem0 + params.offset;
-    uvec4 ctr0 = uvec4(element_idx0, element_idx0 >> 16, 0, 0);
-    uvec2 key = uvec2(params.seed, params.seed ^ 0xDEADBEEF);
+    uvec4 ctr0 = uvec4(element_idx0, 0u, 0u, 0u);
+    uvec2 key = uvec2(params.seed_lo, params.seed_hi);
     uvec4 rand_vals = philox4x32(ctr0, key);
 
     float rand0 = uint_to_float01(rand_vals.x);

@@ -90,8 +90,10 @@ float compute_op(float val_a, float val_b) {
         case 23: res = atan(fa, fb); break;
         case 24: res = fa - trunc(fa / fb) * fb; break;
         case 25: res = fa - round(fa / fb) * fb; break;
-        case 26: res = min(fa, fb); break;
-        case 27: res = max(fa, fb); break;
+        // NaN-propagating (torch.minimum/maximum): NaN in either operand → NaN.
+        // GLSL min()/max() suppress NaN; no fast-math, so `x != x` is reliable.
+        case 26: res = (fa != fa || fb != fb) ? uintBitsToFloat(0x7fc00000u) : min(fa, fb); break;
+        case 27: res = (fa != fa || fb != fb) ? uintBitsToFloat(0x7fc00000u) : max(fa, fb); break;
         case 33: res = sqrt(fa * fa + fb * fb); break;
         case 34: {
             uint bits_a = floatBitsToUint(fa) & 0x7FFFFFFFu;

@@ -301,14 +301,20 @@ auto VulkanBackend::dispatchDropout(const Tensor& input, float p, bool training)
 
     struct PushConstants {
         uint32_t n_elements;
-        uint32_t seed;
+        uint32_t seed_lo;
+        uint32_t seed_hi;
         uint32_t offset;
         float p;
         float scale;
     } push_constants;
 
+    // Thread the full 64-bit global seed as two 32-bit words (lo/hi) into the
+    // Philox key. Previously only the low 32 bits were passed, dropping the high
+    // half of the seed and weakly seeding the counter.
+    uint64_t global_seed = static_cast<uint64_t>(::tenzor::get_global_seed());
     push_constants.n_elements = static_cast<uint32_t>(numel);
-    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
+    push_constants.seed_lo = static_cast<uint32_t>(global_seed & 0xFFFFFFFFull);
+    push_constants.seed_hi = static_cast<uint32_t>(global_seed >> 32);
     push_constants.offset = 0;
     push_constants.p = p;
     push_constants.scale = scale;

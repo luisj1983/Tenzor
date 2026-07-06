@@ -39,14 +39,23 @@ void main() {
         uint idx = base + i * params.inner_size;
         float val = input_data[idx];
 
-        // Count how many elements are strictly less than val
-        uint less_count = 0;
-        // Count how many elements equal to val appear before position i
-        uint equal_before = 0;
+        // F142: rank with NaN treated as the LARGEST value (sorts last), matching
+        // the CPU reference (nan_less) and sort/median/topk. Plain `other < val`
+        // is false both ways for NaN, so NaN was mis-ranked (treated as smallest)
+        // and diverged from CPU on inputs containing NaN.
+        bool val_nan = isnan(val);
+        uint less_count = 0;      // elements that sort strictly before val
+        uint equal_before = 0;    // equal-rank elements appearing before position i
         for (uint j = 0; j < params.dim_size; j++) {
             float other = input_data[base + j * params.inner_size];
-            if (other < val) less_count++;
-            else if (other == val && j < i) equal_before++;
+            bool other_nan = isnan(other);
+            bool other_before;
+            bool tie;
+            if (val_nan) { other_before = !other_nan; tie = other_nan; }
+            else if (other_nan) { other_before = false; tie = false; }
+            else { other_before = (other < val); tie = (other == val); }
+            if (other_before) less_count++;
+            else if (tie && j < i) equal_before++;
         }
 
         // This element is the (less_count + equal_before + 1)-th smallest

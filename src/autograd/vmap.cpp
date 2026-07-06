@@ -107,11 +107,29 @@ void init_builtin_batching_rules() {
         return func(batched_input);
     };
 
+    // F021: binary / multi-operand element-wise ops (Add/Sub/Mul/Div/Pow,
+    // Where, MaskedFill) capture the OTHER, UNBATCHED (slice-shaped) operand in
+    // `func`. Raw passthrough right-aligns the batched input against that
+    // operand, which only coincides with the correct result when batch_dim == 0.
+    // For batch_dim != 0 the batch axis sits in the middle of the batched input
+    // and right-aligned broadcasting either throws (batch size != the feature
+    // dim it now aligns against) or silently mixes the batch axis into a feature
+    // axis. Fall back to per-slice loop-and-stack, which calls `func` on each
+    // unbatched slice (correct for any batch_dim). Truly UNARY element-wise ops
+    // keep the raw passthrough above.
+    auto binary_passthrough_rule = [](const std::function<Variable(const Variable&)>& func,
+                                      const Variable& batched_input,
+                                      int64_t batch_dim) -> Variable {
+        if (batch_dim == 0) {
+            return func(batched_input);
+        }
+        return vmap_loop_and_stack(func, batched_input, batch_dim);
+    };
+
     // Register passthrough for all element-wise activations and math ops.
     // These ops apply independently to each element, so batching is trivial.
     for (const auto& name : {
-        // Core arithmetic
-        "AddBackward", "SubBackward", "MulBackward", "DivBackward",
+        // Core arithmetic (UNARY only; binary Add/Sub/Mul/Div are below)
         "NegBackward",
         // Activations
         "ReLUBackward", "SigmoidBackward", "TanhBackward",
@@ -124,7 +142,7 @@ void init_builtin_batching_rules() {
         "SinhBackward", "CoshBackward",
         "Log2Backward", "Log10Backward", "Log1pBackward",
         "Exp2Backward", "Expm1Backward",
-        "ReciprocalBackward", "PowBackward", "ClampBackward",
+        "ReciprocalBackward", "ClampBackward",
         "ErfBackward", "ErfcBackward",
         // Special math
         "GammaBackward", "LgammaBackward", "DigammaBackward",
@@ -134,12 +152,20 @@ void init_builtin_batching_rules() {
         register_batching_rule(name, passthrough_rule);
     }
 
+    // F021: binary element-wise ops that capture the other operand — must handle
+    // batch_dim != 0 via loop-and-stack (see binary_passthrough_rule above).
+    for (const auto& name : {
+        "AddBackward", "SubBackward", "MulBackward", "DivBackward", "PowBackward"
+    }) {
+        register_batching_rule(name, binary_passthrough_rule);
+    }
+
     // Audit A.3: also register the OpId-keyed passthrough for the opted-in
     // arithmetic + activation + math Functions (see A.2 commits). The vmap
     // dispatch path tries the OpId registry first, so these are the
     // primary hit-path entries for the corresponding Backward classes.
     for (OpId op : {
-        OpId::Add, OpId::Sub, OpId::Mul, OpId::Div, OpId::Neg,
+        OpId::Neg,
         OpId::Gelu, OpId::Elu, OpId::Selu, OpId::Mish, OpId::Softplus,
         OpId::Exp, OpId::Log, OpId::Sqrt, OpId::Abs,
         OpId::Sin, OpId::Cos, OpId::Tan,
@@ -147,11 +173,16 @@ void init_builtin_batching_rules() {
         OpId::Sinh, OpId::Cosh,
         OpId::Log2, OpId::Log10, OpId::Log1p,
         OpId::Exp2, OpId::Expm1,
-        OpId::Reciprocal, OpId::Pow,
+        OpId::Reciprocal,
         OpId::Erf, OpId::Lgamma, OpId::Digamma,
         OpId::Conj, OpId::Real, OpId::Imag,
     }) {
         register_batching_rule(op, passthrough_rule);
+    }
+
+    // F021: binary element-wise ops — batch_dim-aware passthrough.
+    for (OpId op : {OpId::Add, OpId::Sub, OpId::Mul, OpId::Div, OpId::Pow}) {
+        register_batching_rule(op, binary_passthrough_rule);
     }
 
     // Softmax/LogSoftmax: operates on a specific dim, dispatch via the
@@ -282,7 +313,7 @@ void init_builtin_batching_rules() {
     // loop-and-stack fallback runs func per slice so both the concat dim and the
     // captured operands line up with each unbatched sample.
     register_batching_rule("CatBackward", multi_input_dim_loop_rule);
-    register_batching_rule("WhereBackward", passthrough_rule);
+    register_batching_rule("WhereBackward", binary_passthrough_rule);  // F021: captures x/y operands
 
     // ====================================================================
     // Fused ops
@@ -478,7 +509,7 @@ void init_builtin_batching_rules() {
     };
     register_batching_rule("NarrowBackward", narrow_rule);
     register_batching_rule("IndexBackward", passthrough_rule);
-    register_batching_rule("MaskedFillBackward", passthrough_rule);
+    register_batching_rule("MaskedFillBackward", binary_passthrough_rule);  // F021: captures mask/value
     register_batching_rule("MaskedSelectBackward", passthrough_rule);
     auto roll_dim_rule = dim_shifted_passthrough(AttrKey::Dim);
     register_batching_rule("RollBackward", roll_dim_rule);

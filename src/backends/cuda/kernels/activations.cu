@@ -633,6 +633,20 @@ __global__ void sigmoid_backward_kernel(const T* grad_output, const T* input,
     }
 }
 
+// Specialization for __half: widen to float so the sigmoid and grad expression
+// are computed in FP32 (matches tanh/gelu half kernels and CPU/other backends).
+// Evaluating 1/(1+exp(-x)) and s*(1-s) in FP16 loses most significant bits of
+// (1-s) near saturation.
+template<>
+__global__ void sigmoid_backward_kernel<__half>(const __half* grad_output, const __half* input,
+                                                 __half* grad_input, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float s = 1.0f / (1.0f + expf(-x));
+        grad_input[idx] = float2half_sat(__half2float(grad_output[idx]) * s * (1.0f - s));
+    }
+}
+
 // Swish activation: swish(x) = x * sigmoid(x)
 template<typename T>
 __global__ void swish_forward_kernel(const T* input, T* output, int64_t n) {
@@ -654,6 +668,20 @@ __global__ void swish_backward_cuda_kernel(const T* grad_output, const T* input,
         //               = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
         T grad = sigmoid_x * (T(1) + x * (T(1) - sigmoid_x));
         grad_input[idx] = grad_output[idx] * grad;
+    }
+}
+
+// Specialization for __half: widen to float so the sigmoid and grad expression
+// are computed in FP32 (matches tanh/gelu half kernels and CPU/other backends).
+template<>
+__global__ void swish_backward_cuda_kernel<__half>(const __half* grad_output, const __half* input,
+                                                    __half* grad_input, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float s = 1.0f / (1.0f + expf(-x));
+        // sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+        float grad = s * (1.0f + x * (1.0f - s));
+        grad_input[idx] = float2half_sat(__half2float(grad_output[idx]) * grad);
     }
 }
 
@@ -3847,6 +3875,45 @@ __global__ void dropout_backward_kernel_f16(
     }
 }
 
+// Float64 dropout: apply the inverted-dropout scale in exact double precision,
+// matching the CPU backend, instead of narrowing the input/grad through the
+// Float32 scale-mask. The keep decision uses the same Float32 cuRAND draw as the
+// other dtypes (so the drop pattern is identical), but the scale is recomputed
+// in double and the Float32 mask is treated purely as a keep flag (nonzero =>
+// kept) rather than as a float scale to multiply by.
+__global__ void dropout_forward_kernel_f64(
+    const double* __restrict__ input,
+    double* __restrict__ output,
+    float* __restrict__ mask,
+    int64_t n,
+    float p,
+    double scale,
+    uint64_t seed) {
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        curandStatePhilox4_32_10_t state;
+        curand_init(seed, idx, 0, &state);
+
+        float rand_val = curand_uniform(&state);
+        bool keep = rand_val >= p;
+        mask[idx] = keep ? static_cast<float>(scale) : 0.0f;
+        output[idx] = keep ? input[idx] * scale : 0.0;
+    }
+}
+
+__global__ void dropout_backward_kernel_f64(
+    const double* __restrict__ grad_output,
+    const float* __restrict__ mask,
+    double* __restrict__ grad_input,
+    int64_t n,
+    double scale) {
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        // mask is a keep flag (nonzero => kept); apply the exact double scale.
+        grad_input[idx] = (mask[idx] != 0.0f) ? grad_output[idx] * scale : 0.0;
+    }
+}
+
 // Dropout forward: returns {output, mask}
 auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStream_t stream)
     -> std::pair<Tensor, Tensor> {
@@ -3895,12 +3962,15 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
                 n, p, scale, seed);
             CUDA_CHECK(cudaGetLastError());
             break;
-        case DType::Float64:
-            dropout_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
+        case DType::Float64: {
+            // Exact double scale (matches CPU), not the narrowed float scale.
+            double scale_d = 1.0 / (1.0 - static_cast<double>(p));
+            dropout_forward_kernel_f64<<<num_blocks, block_size, 0, stream>>>(
                 input.data<double>(), output.data<double>(), mask.data<float>(),
-                n, p, scale, seed);
+                n, p, scale_d, seed);
             CUDA_CHECK(cudaGetLastError());
             break;
+        }
         case DType::Float16:
             dropout_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
@@ -3949,12 +4019,15 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
                 n, scale);
             CUDA_CHECK(cudaGetLastError());
             break;
-        case DType::Float64:
-            dropout_backward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
+        case DType::Float64: {
+            // Exact double scale (matches CPU), not the narrowed float scale.
+            double scale_d = 1.0 / (1.0 - static_cast<double>(p));
+            dropout_backward_kernel_f64<<<num_blocks, block_size, 0, stream>>>(
                 grad_output.data<double>(), mask.data<float>(), grad_input.data<double>(),
-                n, scale);
+                n, scale_d);
             CUDA_CHECK(cudaGetLastError());
             break;
+        }
         case DType::Float16:
             dropout_backward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_output.data_ptr()),
@@ -4454,7 +4527,10 @@ __global__ void count_non_nan_all_f32(const float* input, int64_t* output, int64
 __global__ void nanmean_div_f32(const float* sum, const int64_t* count, float* output) {
     if (threadIdx.x == 0) {
         int64_t c = count[0];
-        output[0] = (c > 0) ? sum[0] / static_cast<float>(c) : 0.0f;
+        // F148: an all-NaN slice (count==0) yields NaN (0/0), matching PyTorch,
+        // the CUDA dim path (nanmean_along_dim_kernel), OneAPI and Vulkan. The
+        // previous 0.0f made the full-reduce disagree with CUDA's own dim path.
+        output[0] = (c > 0) ? sum[0] / static_cast<float>(c) : __int_as_float(0x7fc00000);
     }
 }
 
@@ -4816,6 +4892,53 @@ __global__ void index_fill_f32(float* output, const int64_t* index, float value,
     output[(o * dim_size + ix) * inner + j] = value;
 }
 
+// Native integer index_add/index_copy. Routing Int32/Int64 through a Float32
+// round-trip (as the fallback below does) loses precision for large Int64
+// magnitudes (>2^24), diverging from the exact CPU integer path. These typed
+// kernels keep integer arithmetic exact.
+__device__ __forceinline__ void index_add_atomic(int32_t* addr, int32_t val) {
+    atomicAdd(addr, val);
+}
+__device__ __forceinline__ void index_add_atomic(int64_t* addr, int64_t val) {
+    // No signed 64-bit atomicAdd; two's-complement add via the unsigned overload
+    // yields the correct signed sum.
+    atomicAdd(reinterpret_cast<unsigned long long*>(addr),
+              static_cast<unsigned long long>(val));
+}
+
+template<typename T>
+__global__ void index_add_typed(T* output, const T* source, const int64_t* index,
+                                 int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                 int* error_flag) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;
+    if (ix < 0 || ix >= dim_size) { atomicExch(error_flag, 1); return; }
+    index_add_atomic(&output[(o * dim_size + ix) * inner + j],
+                     source[(o * idx_n + k) * inner + j]);
+}
+
+template<typename T>
+__global__ void index_copy_typed(T* output, const T* source, const int64_t* index,
+                                  int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                  int* error_flag) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;
+    if (ix < 0 || ix >= dim_size) { atomicExch(error_flag, 1); return; }
+    output[(o * dim_size + ix) * inner + j] = source[(o * idx_n + k) * inner + j];
+}
+
 Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
     int64_t dim = attrs.get_int(AttrKey::Dim, 0);
@@ -4835,6 +4958,29 @@ Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& at
         CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
         dim3 grid((total + 255) / 256), block(256);
         index_add_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner, error_buf.as<int>());
+        CUDA_CHECK(cudaGetLastError());
+        int host_error = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_error) {
+            throw std::out_of_range("index_add: index out of range for dim of size " +
+                                    std::to_string(dim_size));
+        }
+    } else if (total > 0 && (output.dtype() == DType::Int32 || output.dtype() == DType::Int64)) {
+        // Exact native integer path (avoids Float32 round-trip precision loss).
+        CudaBuffer error_buf(sizeof(int));
+        CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+        dim3 grid((total + 255) / 256), block(256);
+        if (output.dtype() == DType::Int32) {
+            index_add_typed<int32_t><<<grid, block, 0, stream>>>(
+                output.data<int32_t>(), inputs[2].data<int32_t>(), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else {
+            index_add_typed<int64_t><<<grid, block, 0, stream>>>(
+                output.data<int64_t>(), inputs[2].data<int64_t>(), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        }
         CUDA_CHECK(cudaGetLastError());
         int host_error = 0;
         CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
@@ -5072,6 +5218,29 @@ Tensor index_copy_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
         CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
         dim3 grid((total + 255) / 256), block(256);
         index_copy_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner, error_buf.as<int>());
+        CUDA_CHECK(cudaGetLastError());
+        int host_error = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_error) {
+            throw std::out_of_range("index_copy: index out of range for dim of size " +
+                                    std::to_string(dim_size));
+        }
+    } else if (total > 0 && (output.dtype() == DType::Int32 || output.dtype() == DType::Int64)) {
+        // Exact native integer path (avoids Float32 round-trip precision loss).
+        CudaBuffer error_buf(sizeof(int));
+        CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+        dim3 grid((total + 255) / 256), block(256);
+        if (output.dtype() == DType::Int32) {
+            index_copy_typed<int32_t><<<grid, block, 0, stream>>>(
+                output.data<int32_t>(), inputs[2].data<int32_t>(), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else {
+            index_copy_typed<int64_t><<<grid, block, 0, stream>>>(
+                output.data<int64_t>(), inputs[2].data<int64_t>(), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        }
         CUDA_CHECK(cudaGetLastError());
         int host_error = 0;
         CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),

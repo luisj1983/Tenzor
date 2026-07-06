@@ -338,6 +338,60 @@ __global__ void csr_sparse_add_kernel(
     }
 }
 
+// F103: generic CSR SpMM/SpMV kernels for dtypes rocSPARSE cannot handle
+// (Int32/Int64). One thread per output element accumulates that row's nnz
+// against the dense operand — mirrors CUDA's cuda_spmm_generic/cuda_spmv_generic.
+template<typename T>
+__global__ void csr_spmm_generic_kernel(
+    const int64_t* __restrict__ crow_ptr,
+    const int64_t* __restrict__ col_ptr,
+    const T* __restrict__ val_ptr,
+    const T* __restrict__ dense_ptr,
+    T* __restrict__ out_ptr,
+    int64_t M, int64_t N, int64_t K)
+{
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    const int64_t total = M * N;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += stride) {
+        int64_t row = idx / N;
+        int64_t n = idx % N;
+        T acc = T(0);
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            int64_t c = col_ptr[j];
+            if (c < 0 || c >= K) continue;
+            acc += val_ptr[j] * dense_ptr[c * N + n];
+        }
+        out_ptr[idx] = acc;
+    }
+}
+
+template<typename T>
+__global__ void csr_spmv_generic_kernel(
+    const int64_t* __restrict__ crow_ptr,
+    const int64_t* __restrict__ col_ptr,
+    const T* __restrict__ val_ptr,
+    const T* __restrict__ vec_ptr,
+    T* __restrict__ out_ptr,
+    int64_t M, int64_t K)
+{
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         row < M; row += stride) {
+        T acc = T(0);
+        int64_t row_start = crow_ptr[row];
+        int64_t row_end = crow_ptr[row + 1];
+        for (int64_t j = row_start; j < row_end; ++j) {
+            int64_t c = col_ptr[j];
+            if (c < 0 || c >= K) continue;
+            acc += val_ptr[j] * vec_ptr[c];
+        }
+        out_ptr[row] = acc;
+    }
+}
+
 // ============================================================================
 // SpSV LRU cache: amortises rocsparse_spsv preprocess across calls.
 //
@@ -640,8 +694,34 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         auto result_f32 = rocm_spmm_kernel(sparse_f32, dense_f32);
         return result_f32.to(dtype);
     }
+    // F103: Int32/Int64 SpMM via the generic CSR kernel (rocSPARSE has no integer
+    // SpMM); CPU/CUDA compute these, so ROCm now matches instead of throwing.
+    if (dtype == DType::Int32 || dtype == DType::Int64) {
+        hipStream_t stream = nullptr;
+        auto csr = ensure_csr_on_gpu(sparse, stream);
+        auto dense_gpu = (dense.device().type != Device::Type::ROCm)
+                         ? dense.to(Device::rocm()).contiguous() : dense.contiguous();
+        auto result = zeros({M, N}, dtype, Device::rocm());
+        auto crow = csr.crow_indices().contiguous();
+        auto col = csr.col_indices().contiguous();
+        auto vals = csr.values().contiguous();
+        int threads = 256;
+        int64_t blocks64 = (M * N + threads - 1) / threads;
+        int blocks = static_cast<int>(blocks64 > 2147483647LL ? 2147483647LL : blocks64);
+        if (dtype == DType::Int32) {
+            csr_spmm_generic_kernel<int32_t><<<blocks, threads, 0, stream>>>(
+                crow.data<int64_t>(), col.data<int64_t>(), vals.data<int32_t>(),
+                dense_gpu.data<int32_t>(), result.data<int32_t>(), M, N, K);
+        } else {
+            csr_spmm_generic_kernel<int64_t><<<blocks, threads, 0, stream>>>(
+                crow.data<int64_t>(), col.data<int64_t>(), vals.data<int64_t>(),
+                dense_gpu.data<int64_t>(), result.data<int64_t>(), M, N, K);
+        }
+        HIP_CHECK_SPARSE(hipGetLastError());
+        return result;
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("rocm_spmm: only Float32/Float64/Float16/BFloat16 supported, got "
+        throw std::runtime_error("rocm_spmm: only Float32/Float64/Float16/BFloat16/Int32/Int64 supported, got "
             + std::string(dtype_name(dtype)));
     }
 
@@ -826,8 +906,34 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         auto result_f32 = rocm_spmv_kernel(sparse_f32, vec_f32);
         return result_f32.to(dtype);
     }
+    // F103: Int32/Int64 SpMV via the generic CSR kernel (rocSPARSE has no integer
+    // SpMV); CPU/CUDA compute these, so ROCm now matches instead of throwing.
+    if (dtype == DType::Int32 || dtype == DType::Int64) {
+        hipStream_t stream = nullptr;
+        auto csr = ensure_csr_on_gpu(sparse, stream);
+        auto vec_gpu = (vec.device().type != Device::Type::ROCm)
+                       ? vec.to(Device::rocm()).contiguous() : vec.contiguous();
+        auto result = zeros({M}, dtype, Device::rocm());
+        auto crow = csr.crow_indices().contiguous();
+        auto col = csr.col_indices().contiguous();
+        auto vals = csr.values().contiguous();
+        int threads = 256;
+        int64_t blocks64 = (M + threads - 1) / threads;
+        int blocks = static_cast<int>(blocks64 > 2147483647LL ? 2147483647LL : blocks64);
+        if (dtype == DType::Int32) {
+            csr_spmv_generic_kernel<int32_t><<<blocks, threads, 0, stream>>>(
+                crow.data<int64_t>(), col.data<int64_t>(), vals.data<int32_t>(),
+                vec_gpu.data<int32_t>(), result.data<int32_t>(), M, K);
+        } else {
+            csr_spmv_generic_kernel<int64_t><<<blocks, threads, 0, stream>>>(
+                crow.data<int64_t>(), col.data<int64_t>(), vals.data<int64_t>(),
+                vec_gpu.data<int64_t>(), result.data<int64_t>(), M, K);
+        }
+        HIP_CHECK_SPARSE(hipGetLastError());
+        return result;
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("rocm_spmv: only Float32/Float64/Float16/BFloat16 supported, got "
+        throw std::runtime_error("rocm_spmv: only Float32/Float64/Float16/BFloat16/Int32/Int64 supported, got "
             + std::string(dtype_name(dtype)));
     }
 
@@ -1542,6 +1648,18 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
         throw std::runtime_error("rocm_sparse_add: shape mismatch");
 
     DType dtype = dense.dtype();
+
+    // F101: Float16/BFloat16 — widen the sparse values + dense to Float32, add,
+    // narrow back (mirrors CUDA's widen-to-F32; the CSR add is a pure sum).
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto csr_w = ensure_csr_on_gpu(sparse);
+        SparseTensor sp_f32 = SparseTensor::sparse_csr(
+            csr_w.crow_indices(), csr_w.col_indices(),
+            csr_w.values().to(DType::Float32), sparse.shape(), /*validate=*/false);
+        Tensor res_f32 = rocm_sparse_add_kernel(sp_f32, dense.to(DType::Float32));
+        return res_f32.to(dtype);
+    }
+
     auto csr = ensure_csr_on_gpu(sparse);
     auto dense_gpu = (dense.device().type != Device::Type::ROCm)
                      ? dense.to(Device::rocm()).contiguous() : dense.contiguous();
@@ -1566,8 +1684,18 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
         csr_sparse_add_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
             result.data<double>(), M, K);
+    } else if (dtype == DType::Int32) {
+        // F101: integer sparse-add (CPU supports Int32/Int64). One thread per row,
+        // so the += needs no atomics.
+        csr_sparse_add_kernel<int32_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int32_t>(),
+            result.data<int32_t>(), M, K);
+    } else if (dtype == DType::Int64) {
+        csr_sparse_add_kernel<int64_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int64_t>(),
+            result.data<int64_t>(), M, K);
     } else {
-        throw std::runtime_error("rocm_sparse_add: only Float32 and Float64 supported");
+        throw std::runtime_error("rocm_sparse_add: only Float32/Float64/Float16/BFloat16/Int32/Int64 supported");
     }
     HIP_CHECK_SPARSE(hipGetLastError());
     return result;
@@ -1767,6 +1895,21 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         return ::tenzor::view_as_complex(stacked);
     }
 
+    // F109: Float16/BFloat16 via widen-narrow through Float32 — this no-rocSPARSE
+    // fallback has no half-precision CSR SpMM kernel, so half sparse matmul would
+    // otherwise depend on whether rocSPARSE was compiled in. Mirrors the
+    // rocSPARSE-branch widen so behavior matches regardless of build config.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
+            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                       sparse_f32_vals, sparse.shape());
+        auto dense_f32 = dense.to(DType::Float32);
+        auto result_f32 = rocm_spmm_kernel(sparse_f32, dense_f32);
+        return result_f32.to(dtype);
+    }
+
     auto csr = ensure_csr_on_gpu(sparse);
 
     auto dense_gpu = (dense.device().type != Device::Type::ROCm)
@@ -1794,8 +1937,20 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         csr_spmm_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
             dense_gpu.data<double>(), result.data<double>(), M, N, K);
+    } else if (dtype == DType::Int32) {
+        // F103: Int32/Int64 SpMM in the no-rocSPARSE fallback too — CPU/CUDA
+        // compute these, so ROCm must match regardless of build config. The
+        // generic multiply-accumulate kernel is dtype-templated and works for
+        // integers (exact, no rounding).
+        csr_spmm_kernel<int32_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int32_t>(),
+            dense_gpu.data<int32_t>(), result.data<int32_t>(), M, N, K);
+    } else if (dtype == DType::Int64) {
+        csr_spmm_kernel<int64_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int64_t>(),
+            dense_gpu.data<int64_t>(), result.data<int64_t>(), M, N, K);
     } else {
-        throw std::runtime_error("rocm_spmm: only Float32 and Float64 supported, got "
+        throw std::runtime_error("rocm_spmm: only Float32/Float64/Float16/BFloat16/Int32/Int64 supported, got "
             + std::string(dtype_name(dtype)));
     }
     HIP_CHECK_SPARSE(hipGetLastError());
@@ -1856,6 +2011,20 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         return ::tenzor::view_as_complex(stacked);
     }
 
+    // F109: Float16/BFloat16 via widen-narrow through Float32 (no half CSR SpMV
+    // kernel in this fallback; mirrors the rocSPARSE-branch widen so half sparse
+    // matvec works regardless of whether rocSPARSE was compiled in).
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto sparse_f32_vals = sparse.values().to(DType::Float32);
+        SparseTensor sparse_f32 = (sparse.layout() == SparseLayout::COO)
+            ? SparseTensor::sparse_coo(sparse.indices(), sparse_f32_vals, sparse.shape())
+            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                       sparse_f32_vals, sparse.shape());
+        auto vec_f32 = vec.to(DType::Float32);
+        auto result_f32 = rocm_spmv_kernel(sparse_f32, vec_f32);
+        return result_f32.to(dtype);
+    }
+
     auto csr = ensure_csr_on_gpu(sparse);
 
     auto vec_gpu = (vec.device().type != Device::Type::ROCm)
@@ -1883,8 +2052,17 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         csr_spmv_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
             vec_gpu.data<double>(), result.data<double>(), M, K);
+    } else if (dtype == DType::Int32) {
+        // F103: Int32/Int64 SpMV in the no-rocSPARSE fallback (see rocm_spmm).
+        csr_spmv_kernel<int32_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int32_t>(),
+            vec_gpu.data<int32_t>(), result.data<int32_t>(), M, K);
+    } else if (dtype == DType::Int64) {
+        csr_spmv_kernel<int64_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int64_t>(),
+            vec_gpu.data<int64_t>(), result.data<int64_t>(), M, K);
     } else {
-        throw std::runtime_error("rocm_spmv: only Float32 and Float64 supported, got "
+        throw std::runtime_error("rocm_spmv: only Float32/Float64/Float16/BFloat16/Int32/Int64 supported, got "
             + std::string(dtype_name(dtype)));
     }
     HIP_CHECK_SPARSE(hipGetLastError());
@@ -1901,6 +2079,18 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
         throw std::runtime_error("rocm_sparse_add: shape mismatch");
 
     DType dtype = dense.dtype();
+
+    // F101: Float16/BFloat16 — widen the sparse values + dense to Float32, add,
+    // narrow back (mirrors CUDA's widen-to-F32; the CSR add is a pure sum).
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto csr_w = ensure_csr_on_gpu(sparse);
+        SparseTensor sp_f32 = SparseTensor::sparse_csr(
+            csr_w.crow_indices(), csr_w.col_indices(),
+            csr_w.values().to(DType::Float32), sparse.shape(), /*validate=*/false);
+        Tensor res_f32 = rocm_sparse_add_kernel(sp_f32, dense.to(DType::Float32));
+        return res_f32.to(dtype);
+    }
+
     auto csr = ensure_csr_on_gpu(sparse);
     auto dense_gpu = (dense.device().type != Device::Type::ROCm)
                      ? dense.to(Device::rocm()).contiguous() : dense.contiguous();
@@ -1925,8 +2115,18 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
         csr_sparse_add_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
             result.data<double>(), M, K);
+    } else if (dtype == DType::Int32) {
+        // F101: integer sparse-add (CPU supports Int32/Int64). One thread per row,
+        // so the += needs no atomics.
+        csr_sparse_add_kernel<int32_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int32_t>(),
+            result.data<int32_t>(), M, K);
+    } else if (dtype == DType::Int64) {
+        csr_sparse_add_kernel<int64_t><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<int64_t>(),
+            result.data<int64_t>(), M, K);
     } else {
-        throw std::runtime_error("rocm_sparse_add: only Float32 and Float64 supported");
+        throw std::runtime_error("rocm_sparse_add: only Float32/Float64/Float16/BFloat16/Int32/Int64 supported");
     }
     HIP_CHECK_SPARSE(hipGetLastError());
     return result;

@@ -291,13 +291,16 @@ __global__ void grid_sample_nearest_kernel(
         iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
+    // rint = round-half-to-even (default rounding mode), matching CPU
+    // std::nearbyint / PyTorch-ATen (roundf is half-away-from-zero and
+    // selects a different pixel at exactly-half coordinates).
     int64_t nx, ny;
     if constexpr (std::is_same_v<T, float>) {
-        nx = static_cast<int64_t>(roundf(ix));
-        ny = static_cast<int64_t>(roundf(iy));
+        nx = static_cast<int64_t>(rintf(ix));
+        ny = static_cast<int64_t>(rintf(iy));
     } else {
-        nx = static_cast<int64_t>(round(ix));
-        ny = static_cast<int64_t>(round(iy));
+        nx = static_cast<int64_t>(rint(ix));
+        ny = static_cast<int64_t>(rint(iy));
     }
 
     T val = T(0);
@@ -577,17 +580,20 @@ __global__ void grid_sample_bilinear_backward_kernel(
         sum_dy += dy_v;
     }
 
-    // Apply the padding (coordinate-transform) derivative to grad_grid:
-    //  - zeros (0):  out-of-domain samples contribute 0.
+    // Apply the padding (coordinate-transform) derivative to grad_grid,
+    // matching the CPU reference / PyTorch grid_sampler_2d backward:
+    //  - zeros (0):  do NOT apply a whole-point in-bounds gate. The per-corner
+    //                safe_get()/safe_scatter() already zero OOB neighbours, so
+    //                sum_dx/sum_dy contain only in-bounds contributions. The
+    //                bands ix in [-1,0) and (W-1,W) (likewise iy) have exactly
+    //                one in-bounds neighbour and a genuine non-zero grad the old
+    //                whole-point !in_bounds gate incorrectly zeroed.
     //  - border (1): clamp derivative is 0 where the unclamped coord is outside
     //                [0, size-1] (clamped coord is constant there), else 1.
     //  - reflection (2): multiply by the fold sign (+/-1).
     T scale_x = dix_dgx;
     T scale_y = diy_dgy;
-    if (padding_mode == 0) {
-        if (!in_bounds_ix) scale_x = T(0);
-        if (!in_bounds_iy) scale_y = T(0);
-    } else if (padding_mode == 1) {
+    if (padding_mode == 1) {
         if (!in_bounds_ix) scale_x = T(0);
         if (!in_bounds_iy) scale_y = T(0);
     } else if (padding_mode == 2) {
@@ -638,13 +644,16 @@ __global__ void grid_sample_nearest_backward_kernel(
         iy = reflect_coord<T>(iy, H_in, align_corners);
     }
 
+    // rint = round-half-to-even (default rounding mode), matching CPU
+    // std::nearbyint / PyTorch-ATen (roundf is half-away-from-zero and
+    // selects a different pixel at exactly-half coordinates).
     int64_t nx, ny;
     if constexpr (std::is_same_v<T, float>) {
-        nx = static_cast<int64_t>(roundf(ix));
-        ny = static_cast<int64_t>(roundf(iy));
+        nx = static_cast<int64_t>(rintf(ix));
+        ny = static_cast<int64_t>(rintf(iy));
     } else {
-        nx = static_cast<int64_t>(round(ix));
-        ny = static_cast<int64_t>(round(iy));
+        nx = static_cast<int64_t>(rint(ix));
+        ny = static_cast<int64_t>(rint(iy));
     }
 
     // grad_grid: zero for nearest (non-differentiable).
@@ -777,11 +786,13 @@ __global__ void grid_sample_bicubic_backward_kernel(
     }
 
     // Apply the padding (coordinate-transform) derivative, matching bilinear
-    // backward: zeros/border zero the per-axis scale where the unclamped coord
-    // is out of bounds; reflection multiplies by the fold sign.
+    // backward / CPU: zeros (0) applies NO whole-point gate (per-corner fetch
+    // already zeros OOB neighbours, so sum_dx/sum_dy hold only in-bounds
+    // contributions); border (1) zeros the per-axis scale where the unclamped
+    // coord is out of bounds; reflection (2) multiplies by the fold sign.
     T scale_x = dix_dgx;
     T scale_y = diy_dgy;
-    if (padding_mode == 0 || padding_mode == 1) {
+    if (padding_mode == 1) {
         if (!in_bounds_ix) scale_x = T(0);
         if (!in_bounds_iy) scale_y = T(0);
     } else if (padding_mode == 2) {

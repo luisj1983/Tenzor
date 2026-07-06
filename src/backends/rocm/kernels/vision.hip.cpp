@@ -296,32 +296,36 @@ __global__ void interpolate_bilinear_backward_kernel_hip(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        float y, x;
+        // F055: compute coords/weights in double when T==double so the source
+        // coordinate floors to the same pixel and the weights keep full precision
+        // (mirrors the ROCm Float64 forward and CUDA backward).
+        using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
+        Compute y, x;
         if (align_corners) {
-            y = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
-            x = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+            y = (out_h > 1) ? oh * static_cast<Compute>(in_h - 1) / (out_h - 1) : Compute(0);
+            x = (out_w > 1) ? ow * static_cast<Compute>(in_w - 1) / (out_w - 1) : Compute(0);
         } else {
-            float scale_h = static_cast<float>(in_h) / out_h;
-            float scale_w = static_cast<float>(in_w) / out_w;
-            y = (oh + 0.5f) * scale_h - 0.5f;
-            x = (ow + 0.5f) * scale_w - 0.5f;
+            Compute scale_h = static_cast<Compute>(in_h) / out_h;
+            Compute scale_w = static_cast<Compute>(in_w) / out_w;
+            y = (oh + Compute(0.5)) * scale_h - Compute(0.5);
+            x = (ow + Compute(0.5)) * scale_w - Compute(0.5);
         }
-        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
-        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+        y = fmax(Compute(0), fmin(y, static_cast<Compute>(in_h - 1)));
+        x = fmax(Compute(0), fmin(x, static_cast<Compute>(in_w - 1)));
 
         int64_t y0 = static_cast<int64_t>(y);
         int64_t x0 = static_cast<int64_t>(x);
         int64_t y1 = min(y0 + 1, in_h - 1);
         int64_t x1 = min(x0 + 1, in_w - 1);
-        float fy = y - y0;
-        float fx = x - x0;
+        Compute fy = y - y0;
+        Compute fx = x - x0;
 
-        float w00 = (1.0f - fy) * (1.0f - fx);
-        float w01 = (1.0f - fy) * fx;
-        float w10 = fy * (1.0f - fx);
-        float w11 = fy * fx;
+        Compute w00 = (Compute(1) - fy) * (Compute(1) - fx);
+        Compute w01 = (Compute(1) - fy) * fx;
+        Compute w10 = fy * (Compute(1) - fx);
+        Compute w11 = fy * fx;
 
-        float g = static_cast<float>(grad_out[idx]);
+        Compute g = static_cast<Compute>(grad_out[idx]);
         int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
         atomicAdd(&grad_in[base_idx + y0 * in_w + x0], static_cast<T>(w00 * g));
         atomicAdd(&grad_in[base_idx + y0 * in_w + x1], static_cast<T>(w01 * g));

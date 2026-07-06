@@ -106,16 +106,21 @@ __global__ void add_bias_to_output_kernel(const T* __restrict__ bias, T* __restr
 }
 
 // Reduce grad_output (batch x features) over the batch dimension into
-// grad_bias[features] in a single grid-strided launch (one atomicAdd per
-// element) instead of launching one tiny kernel per batch row.
+// grad_bias[features]. F125: one thread per feature accumulates the column in a
+// fixed batch order and writes grad_bias[f] exactly once — a deterministic,
+// order-independent reduction (the previous float atomicAdd was nondeterministic
+// and non-reproducible). The sequential per-feature sum also mirrors the CPU
+// reference's sequential bias reduction.
 template<typename T>
 __global__ void sum_over_batch_kernel(const T* __restrict__ grad, T* __restrict__ grad_bias,
                                        int64_t batch, int64_t features) {
-    int64_t total = batch * features;
-    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-         idx < total; idx += blockDim.x * gridDim.x) {
-        int64_t f = idx % features;
-        atomicAdd(&grad_bias[f], grad[idx]);
+    for (int64_t f = blockIdx.x * blockDim.x + threadIdx.x;
+         f < features; f += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        T sum = T(0);
+        for (int64_t b = 0; b < batch; ++b) {
+            sum += grad[b * features + f];
+        }
+        grad_bias[f] = sum;
     }
 }
 
@@ -161,6 +166,9 @@ __global__ void embedding_kernel_hip(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        // F077: wrap negative token ids (matches CPU/CUDA) before the bounds check
+        // so a wrappable negative id reads its correct row instead of flagging OOB.
+        if (embedding_idx < 0) embedding_idx += num_embeddings;
         // Bounds check: an out-of-range index writes 0 (memory-safe) and flags
         // the error; the host throws std::out_of_range after sync, matching the
         // CPU reference and the CUDA backend.
@@ -188,6 +196,9 @@ __global__ void embedding_backward_kernel_hip(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        // F077: wrap negative token ids (idx += num_embeddings), matching CPU/CUDA,
+        // before the range check — a negative id must route grad to its wrapped row.
+        if (embedding_idx < 0) embedding_idx += num_embeddings;
         // Skip out-of-range indices to avoid OOB atomic writes.
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             continue;
@@ -213,6 +224,8 @@ __global__ void embedding_kernel_hip_fp16(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        // F077: wrap negative token ids before the bounds check (matches CPU/CUDA).
+        if (embedding_idx < 0) embedding_idx += num_embeddings;
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             output[tid] = __float2half(0.0f);
             atomicOr(error_flag, 1);
@@ -237,6 +250,8 @@ __global__ void embedding_backward_kernel_hip_fp16(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        // F077: wrap negative token ids before the range check (matches CPU/CUDA).
+        if (embedding_idx < 0) embedding_idx += num_embeddings;
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             continue;
         }
@@ -504,11 +519,20 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
     return output;
 }
 
-auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+auto linear_backward_kernel(const Tensor& grad_output_arg, const Tensor& input_arg, const Tensor& weight_arg,
                             hipStream_t stream) -> std::vector<Tensor> {
     // grad_output: [batch, out_features]
     // input: [batch, in_features]
     // weight: [out_features, in_features]
+
+    // F124: rocBLAS reads these with leading dimensions derived from the logical
+    // shape, so a non-contiguous view (e.g. the transposed per-timestep LSTM
+    // batch_first grad_output) would be read with the wrong strides and silently
+    // corrupt grad_weight/grad_input. Materialise contiguous copies first, as
+    // CPU/CUDA/OneAPI/Vulkan all do.
+    Tensor grad_output = grad_output_arg.is_contiguous() ? grad_output_arg : grad_output_arg.contiguous();
+    Tensor input       = input_arg.is_contiguous()       ? input_arg       : input_arg.contiguous();
+    Tensor weight      = weight_arg.is_contiguous()      ? weight_arg      : weight_arg.contiguous();
 
     // Float16: upcast to Float32 to prevent FP16 accumulation overflow in hgemm
     if (input.dtype() == DType::Float16) {
@@ -570,9 +594,9 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
             &beta,
             grad_weight.data<float>(), in_features));
 
-        // grad_bias = sum over batch dimension (single reduction launch)
-        HIP_CHECK(hipMemsetAsync(grad_bias.data<float>(), 0, out_features * sizeof(float), stream));
-        int num_blocks = get_num_blocks(batch_size * out_features);
+        // grad_bias = sum over batch dimension (F125: deterministic per-feature
+        // reduction — one thread per output feature, launch sized on out_features).
+        int num_blocks = get_num_blocks(out_features);
         hipLaunchKernelGGL(sum_over_batch_kernel<float>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             grad_output.data<float>(), grad_bias.data<float>(), batch_size, out_features);
@@ -598,8 +622,8 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
             &beta,
             grad_weight.data<double>(), in_features));
 
-        HIP_CHECK(hipMemsetAsync(grad_bias.data<double>(), 0, out_features * sizeof(double), stream));
-        int num_blocks = get_num_blocks(batch_size * out_features);
+        // F125: deterministic per-feature reduction (launch sized on out_features).
+        int num_blocks = get_num_blocks(out_features);
         hipLaunchKernelGGL(sum_over_batch_kernel<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             grad_output.data<double>(), grad_bias.data<double>(), batch_size, out_features);

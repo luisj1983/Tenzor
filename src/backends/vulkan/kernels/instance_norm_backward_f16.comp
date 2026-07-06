@@ -73,22 +73,11 @@ void main() {
     float mean = mean_data[nc_idx];
     float rstd = rstd_data[nc_idx];
 
-    bool zero_variance = (rstd > 100.0);
-
-    if (zero_variance) {
-        // Per-element atomic writes via writeF16: when `base` is odd (which
-        // happens for every other NC slice when spatial_size is odd) the
-        // packed 32-bit words straddle two slices and a plain store races
-        // with the neighbour.
-        for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
-            writeF16(base + i, 0.0);
-            if (params.affine > 0) {
-                float dy = readF16From(base + i, 0);
-                atomicAdd(grad_bias[c], dy);
-            }
-        }
-        return;
-    }
+    // NOTE: no rstd-magnitude clamp here. The previous `rstd > 100` "zero
+    // variance" guard zeroed grad_input for any legitimately small-but-valid
+    // variance, diverging from the CPU/CUDA/ROCm backends and the Float32
+    // shader (instance_norm_backward.comp). rstd is finite (1/sqrt(var+eps)),
+    // so the analytic formula below is well-defined even at var == 0.
 
     // Step 1: Compute reductions
     float local_sum_dy_w = 0.0;

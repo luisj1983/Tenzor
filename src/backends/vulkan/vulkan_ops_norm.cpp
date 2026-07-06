@@ -1529,8 +1529,17 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
     push_constants.embedding_dim = static_cast<uint32_t>(embedding_dim);
     push_constants.num_embeddings = static_cast<uint32_t>(num_embeddings);
 
-    // Total threads = num_indices * embedding_dim (one per element)
-    uint64_t total_threads = static_cast<uint64_t>(num_indices) * embedding_dim;
+    // Thread count depends on the fallback shader's accumulation strategy:
+    //  - Float64 fallback ("embedding_backward_f64") is OUTPUT-centric: one thread
+    //    per (grad_weight row, dim) loops over all indices and writes its own
+    //    element, so it is race-free WITHOUT int64 atomics (this device lacks
+    //    them). Dispatch over num_embeddings * embedding_dim.
+    //  - Float32 ("embedding_backward") is index-centric with uint-CAS float
+    //    atomics. Dispatch over num_indices * embedding_dim.
+    const bool is_f64_fallback = (grad_output.dtype() == DType::Float64);
+    uint64_t total_threads = is_f64_fallback
+        ? static_cast<uint64_t>(num_embeddings) * embedding_dim
+        : static_cast<uint64_t>(num_indices) * embedding_dim;
     uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(total_threads, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);

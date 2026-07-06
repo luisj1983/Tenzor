@@ -24,39 +24,46 @@ auto ComputationGraph::topological_sort(std::shared_ptr<GraphNode> root)
     -> std::vector<std::shared_ptr<GraphNode>> {
     std::vector<std::shared_ptr<GraphNode>> sorted;
     std::unordered_set<GraphNode*> visited;
-    std::unordered_set<GraphNode*> recursion_stack;
+    std::unordered_set<GraphNode*> on_stack;  // nodes on the current DFS path (cycle detection)
 
-    // DFS-based topological sort
-    std::function<void(std::shared_ptr<GraphNode>)> dfs;
-    dfs = [&](std::shared_ptr<GraphNode> node) {
-        if (!node) return;
+    if (!root) return sorted;
 
-        // Check for cycles
-        if (recursion_stack.count(node.get())) {
-            throw std::runtime_error("Cycle detected in computation graph");
+    // Iterative post-order DFS with an explicit stack — avoids one recursion
+    // frame per graph node, which overflowed the C++ stack on deep grad_fn
+    // chains (deep residual stacks). Mirrors BackwardEngine::topological_sort's
+    // iterative invariant. Each frame carries an `entered` flag: false = first
+    // visit (push children), true = children done (emit node, leave the path).
+    std::vector<std::pair<std::shared_ptr<GraphNode>, bool>> stack;
+    stack.emplace_back(root, false);
+
+    while (!stack.empty()) {
+        auto node = stack.back().first;
+        const bool entered = stack.back().second;
+        if (!node) { stack.pop_back(); continue; }
+
+        if (entered) {
+            on_stack.erase(node.get());
+            sorted.push_back(node);
+            stack.pop_back();
+            continue;
         }
 
-        // Already visited
-        if (visited.count(node.get())) {
-            return;
-        }
-
+        if (visited.count(node.get())) { stack.pop_back(); continue; }
         visited.insert(node.get());
-        recursion_stack.insert(node.get());
+        on_stack.insert(node.get());
+        stack.back().second = true;  // emit this node after its descendants
 
-        // Visit all next nodes
         for (const auto& next_weak : node->next_nodes) {
             auto next = next_weak.lock();
-            if (next) {
-                dfs(next);
+            if (!next) continue;
+            if (on_stack.count(next.get())) {
+                throw std::runtime_error("Cycle detected in computation graph");
+            }
+            if (!visited.count(next.get())) {
+                stack.emplace_back(next, false);
             }
         }
-
-        recursion_stack.erase(node.get());
-        sorted.push_back(node);
-    };
-
-    dfs(root);
+    }
     return sorted;
 }
 

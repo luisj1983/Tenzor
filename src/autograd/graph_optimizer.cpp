@@ -15,18 +15,23 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
     ComputationGraph graph;
     std::unordered_set<Function*> visited;
 
-    std::function<void(std::shared_ptr<Function>)> build_graph;
-    build_graph = [&](std::shared_ptr<Function> fn) {
-        if (!fn || visited.count(fn.get())) return;
-        visited.insert(fn.get());
-
-        auto node = graph.add_node(fn);
-
-        for (auto& next_fn : fn->next_functions()) {
-            if (next_fn) {
-                build_graph(next_fn);
-                auto next_node = graph.add_node(next_fn);
-                graph.connect(node, next_node);
+    // Iterative DFS (explicit stack) — one recursion frame per grad_fn node
+    // overflowed the C++ stack on deep chains (deep residual stacks). Mirrors
+    // the engine's iterative topological_sort invariant.
+    auto build_graph = [&](const std::shared_ptr<Function>& start) {
+        std::vector<std::shared_ptr<Function>> stack{start};
+        while (!stack.empty()) {
+            auto fn = stack.back();
+            stack.pop_back();
+            if (!fn || visited.count(fn.get())) continue;
+            visited.insert(fn.get());
+            auto node = graph.add_node(fn);
+            for (auto& next_fn : fn->next_functions()) {
+                if (next_fn) {
+                    auto next_node = graph.add_node(next_fn);
+                    graph.connect(node, next_node);
+                    if (!visited.count(next_fn.get())) stack.push_back(next_fn);
+                }
             }
         }
     };
@@ -51,17 +56,22 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
     {
         std::unordered_map<Function*, std::shared_ptr<Function>> reachable;
         std::unordered_map<Function*, int> consumers;
-        std::function<void(const std::shared_ptr<Function>&)> walk =
-            [&](const std::shared_ptr<Function>& fn) {
-                if (!fn || reachable.count(fn.get())) return;
+        // Iterative DFS (explicit stack) — avoids stack overflow on deep chains.
+        auto walk = [&](const std::shared_ptr<Function>& start) {
+            std::vector<std::shared_ptr<Function>> stack{start};
+            while (!stack.empty()) {
+                auto fn = stack.back();
+                stack.pop_back();
+                if (!fn || reachable.count(fn.get())) continue;
                 reachable[fn.get()] = fn;
                 for (const auto& nf : fn->next_functions()) {
                     if (nf) {
                         consumers[nf.get()]++;
-                        walk(nf);
+                        if (!reachable.count(nf.get())) stack.push_back(nf);
                     }
                 }
-            };
+            }
+        };
         if (root.grad_fn()) walk(root.grad_fn());
 
         auto is_transpose = [](const std::shared_ptr<Function>& f) {

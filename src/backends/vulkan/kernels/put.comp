@@ -34,7 +34,13 @@ void main() {
 
     int put_idx = indices[idx];
 
-    // Bounds check: skip out-of-range indices
+    // Wrap negative flat indices (Python-style), matching CPU put
+    // (indexing.cpp): idx += numel, for both replace and accumulate modes.
+    // The accumulate path is the gradient scatter for take/index_put backward,
+    // so dropping a wrappable negative index would drop that gradient.
+    if (put_idx < 0) put_idx += int(params.numel);
+
+    // Bounds check: skip genuinely out-of-range indices
     if (put_idx < 0 || put_idx >= int(params.numel)) return;
 
     float value = source_data[idx];

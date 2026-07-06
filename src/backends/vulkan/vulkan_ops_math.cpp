@@ -2842,6 +2842,18 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     // output buffer (VK_EXT_shader_atomic_float). Fail fast on devices that
     // don't advertise it.
     vulkan::ensure_atomic_float_supported(input.device().index, "col2im");
+
+    // F067: Float16/BFloat16 fold accumulates overlapping-window contributions.
+    // The dedicated half shaders round the running sum back to 16 bits after
+    // every atomic step, drifting from the CPU reference (accumulate in fp32,
+    // narrow once) for heavily-overlapping windows (stride < kernel). Route half
+    // through the base F32 shader (genuine float accumulator) and narrow once.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor out_f32 = dispatchCol2Im(input.to(DType::Float32), attrs);
+        return out_f32.to(orig);
+    }
+
     auto input_shape = input.shape();
     if (input_shape.size() != 3) {
         throw std::invalid_argument("col2im requires 3D input (N, C*K*K, L)");

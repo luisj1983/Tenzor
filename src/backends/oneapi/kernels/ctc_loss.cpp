@@ -288,7 +288,7 @@ std::vector<Tensor> ctc_loss_forward_impl(
             }
 
             Scalar per_sample_loss = -logZ;
-            bool is_inf = !sycl::isfinite(per_sample_loss);
+            bool is_inf = sycl::isinf(per_sample_loss);
             if (zero_infinity_c && is_inf) {
                 per_sample_loss = Scalar(0);
             }

@@ -104,12 +104,17 @@ void main() {
             for (uint col = 0u; col < n_cols; col++) {
                 bool present = (col_flag[col / 32u] & (1u << (col % 32u))) != 0u;
                 if (present) {
+                    // Write EVERY distinct product column, even when the summed
+                    // value cancels to exactly 0.0. The count pass sized
+                    // c_row_offsets from the set of present columns (col_flag),
+                    // so dropping exact-zero sums here would leave the reserved
+                    // tail slots as spurious (col=0, val=0) padding → malformed
+                    // CSR. Matches OneAPI spgemm, which keeps every distinct
+                    // column including zero sums.
                     float val = uintBitsToFloat(acc_bits[col]);
-                    if (val != 0.0) {
-                        c_col_indices[write_pos] = int(col);
-                        c_values[write_pos] = val;
-                        write_pos++;
-                    }
+                    c_col_indices[write_pos] = int(col);
+                    c_values[write_pos] = val;
+                    write_pos++;
                 }
             }
         }
@@ -122,6 +127,7 @@ void main() {
 
             for (uint col = 0u; col < n_cols; col++) {
                 float sum = 0.0;
+                bool found = false;
                 for (uint a = a_start; a < a_end; a++) {
                     uint a_col = uint(a_col_indices[a]);
                     float a_val = a_values[a];
@@ -130,10 +136,16 @@ void main() {
                     for (uint b = b_start; b < b_end; b++) {
                         if (uint(b_col_indices[b]) == col) {
                             sum += a_val * b_values[b];
+                            found = true;
                         }
                     }
                 }
-                if (sum != 0.0) {
+                // Emit every distinct product column (found), keeping exact-zero
+                // sums, so we never drop a real column into (col=0,val=0) tail
+                // padding. NOTE: this fallback's count pass uses a conservative
+                // upper bound (sum of B-row nnz), so a small amount of tail
+                // padding can still remain here; the dense path above is exact.
+                if (found) {
                     c_col_indices[write_pos] = int(col);
                     c_values[write_pos] = sum;
                     write_pos++;

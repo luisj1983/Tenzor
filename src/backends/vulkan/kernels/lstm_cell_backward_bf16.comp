@@ -124,8 +124,23 @@ void writeBF16GradCPrev(uint idx, float val) {
     }
 }
 
-float sigmoid(float x) {
-    return 1.0 / (1.0 + exp(-x));
+// Use exp()-based stable activations matching lstm_cell_backward.comp (f32)
+// exactly. The driver `tanh` intrinsic drifts >1e-3 from std::tanh and breaks
+// gradient parity on NVIDIA/Vulkan, and CPU widens half to f32 and uses exact
+// std::tanh, so the half backward must use the same stable formulation.
+precise float sigmoid_stable(float x) {
+    if (x >= 0.0) {
+        float e = exp(-x);
+        return 1.0 / (1.0 + e);
+    } else {
+        float e = exp(x);
+        return e / (1.0 + e);
+    }
+}
+
+// Stable tanh via sigmoid: tanh(x) = 2 * sigmoid(2x) - 1.
+precise float tanh_stable(float x) {
+    return 2.0 * sigmoid_stable(2.0 * x) - 1.0;
 }
 
 void main() {
@@ -147,12 +162,12 @@ void main() {
     uint o_idx = gate_base + 3 * H + h;
 
     // ---- Recompute forward gate activations ----
-    float i_gate = sigmoid(readBF16Gates(i_idx));
-    float f_gate = sigmoid(readBF16Gates(f_idx));
-    float g_gate = tanh(readBF16Gates(g_idx));
-    float o_gate = sigmoid(readBF16Gates(o_idx));
+    float i_gate = sigmoid_stable(readBF16Gates(i_idx));
+    float f_gate = sigmoid_stable(readBF16Gates(f_idx));
+    float g_gate = tanh_stable(readBF16Gates(g_idx));
+    float o_gate = sigmoid_stable(readBF16Gates(o_idx));
 
-    float tanh_c = tanh(readBF16COut(idx));
+    float tanh_c = tanh_stable(readBF16COut(idx));
 
     // ---- Backward through h_out = o * tanh(c_out) ----
     float dh = readBF16GradH(idx);

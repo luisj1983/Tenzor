@@ -15,12 +15,22 @@ layout(binding = 2) buffer Index  { int idx_data[]; };        // 1-D index tenso
 layout(binding = 3) buffer Counts { int count_data[]; };      // Count buffer (for mean mode)
 
 layout(push_constant) uniform PushConstants {
-    uint outer;         // Product of dims before target dim
-    uint dim_size;      // Size of target dim in output
-    uint idx_n;         // Number of indices
-    uint inner;         // Product of dims after target dim
-    uint mode;          // 0=sum, 1=prod, 2=mean, 3=amax, 4=amin
+    uint n;                 // index.numel()
+    uint ndim;              // <= 8
+    uint dim;               // normalized scatter dim
+    uint dim_size;          // self_shape[dim] (wrap + bounds)
+    uint mode;              // 0=sum, 1=prod, 2=mean, 3=amax, 4=amin
+    uint pad0;
+    uint pad1;
+    uint pad2;
+    uvec4 index_strides0;   // INDEX contiguous strides, dims 0..3
+    uvec4 index_strides1;   // dims 4..7
+    uvec4 self_strides0;    // SELF contiguous strides, dims 0..3
+    uvec4 self_strides1;    // dims 4..7
 } params;
+
+uint idxStride(uint d)  { return (d < 4u) ? params.index_strides0[d] : params.index_strides1[d - 4u]; }
+uint selfStride(uint d) { return (d < 4u) ? params.self_strides0[d]  : params.self_strides1[d - 4u]; }
 
 void atomicMulInt(uint pos, int val) {
     int old_val = out_data[pos];
@@ -34,25 +44,26 @@ void atomicMulInt(uint pos, int val) {
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
-    uint total = params.outer * params.idx_n * params.inner;
-    if (tid >= total) return;
+    if (tid >= params.n) return;
 
-    uint j = tid % params.inner;
-    uint k = (tid / params.inner) % params.idx_n;
-    uint o = tid / (params.inner * params.idx_n);
-
-    uint idx_pos = (o * params.idx_n + k) * params.inner + j;
-    int dest_idx = idx_data[idx_pos];
+    int dest_idx = idx_data[tid];
+    if (dest_idx < 0) dest_idx += int(params.dim_size);
     if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
 
-    uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;
+    // Per-dim decode of the flat index position, recomposed onto self strides.
+    uint temp = tid;
+    uint out_pos = 0u;
+    for (uint d = 0u; d < params.ndim; ++d) {
+        uint coord = temp / idxStride(d);
+        temp = temp % idxStride(d);
+        if (d == params.dim) {
+            out_pos += uint(dest_idx) * selfStride(d);
+        } else {
+            out_pos += coord * selfStride(d);
+        }
+    }
 
-    // Guard the computed output offset against the destination size before any
-    // atomic write. There is no single output_size push constant here; the total
-    // output element count is outer * dim_size * inner.
-    if (out_pos >= params.outer * params.dim_size * params.inner) return;
-
-    int val = src_data[idx_pos];
+    int val = src_data[tid];
 
     if (params.mode == 0u || params.mode == 2u) {
         atomicAdd(out_data[out_pos], val);

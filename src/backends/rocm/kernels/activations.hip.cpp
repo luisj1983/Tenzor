@@ -3042,6 +3042,7 @@ __global__ void index_add_f32_kernel(float* output, const float* source, const i
     // after synchronizing (matching the CPU reference, which throws
     // std::out_of_range).
     int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;  // F080: wrap negatives (matches CPU/CUDA)
     if (ix < 0 || ix >= dim_size) {
         atomicOr(error_flag, 1);
         return;
@@ -3063,6 +3064,7 @@ __global__ void index_copy_f32_kernel(float* output, const float* source, const 
     // out-of-range index would otherwise be an OOB write. The host throws after
     // synchronizing (matching the CPU reference, which throws std::out_of_range).
     int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;  // F080: wrap negatives (matches CPU/CUDA)
     if (ix < 0 || ix >= dim_size) {
         atomicOr(error_flag, 1);
         return;
@@ -3083,6 +3085,7 @@ __global__ void index_fill_f32_kernel(float* output, const int64_t* index, float
     // out-of-range index would otherwise be an OOB write. The host throws after
     // synchronizing (matching the CPU reference, which throws std::out_of_range).
     int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;  // F080: wrap negatives (matches CPU/CUDA)
     if (ix < 0 || ix >= dim_size) {
         atomicOr(error_flag, 1);
         return;

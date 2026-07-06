@@ -633,27 +633,6 @@ __global__ void sum_bias_grad_kernel(
     }
 }
 
-// FP16 bias gradient kernel
-__global__ void sum_bias_grad_kernel_f16(
-    const __half* grad_output,
-    __half* grad_bias,
-    int64_t batch,
-    int64_t channels,
-    int64_t spatial_size
-) {
-    int64_t c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c < channels) {
-        float sum = 0.0f;  // Use float for accumulation to avoid precision loss
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t s = 0; s < spatial_size; ++s) {
-                int64_t idx = b * (channels * spatial_size) + c * spatial_size + s;
-                sum += __half2float(grad_output[idx]);
-            }
-        }
-        grad_bias[c] = float2half_sat(sum);
-    }
-}
-
 // Float64 bias gradient kernel
 __global__ void sum_bias_grad_kernel_f64(
     const double* grad_output,
@@ -1084,236 +1063,6 @@ auto conv2d_forward_kernel(
 }
 
 // ============================================================================
-// FP16 Conv2d Backward with Tensor Cores
-// ============================================================================
-
-// Complete FP16 Conv2d backward pass using Tensor Core matmul
-auto conv2d_backward_f16(
-    const Tensor& grad_output_in,
-    const Tensor& input_in,
-    const Tensor& weight_in,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
-    int64_t groups,
-    bool compute_grad_input,
-    bool compute_grad_weight,
-    bool compute_grad_bias,
-    cudaStream_t stream
-) -> std::tuple<Tensor, Tensor, Tensor> {
-    // Kernels index with hard-coded contiguous NCHW arithmetic; materialize
-    // contiguous tensors so non-contiguous inputs are read correctly.
-    Tensor grad_output = grad_output_in.contiguous();
-    Tensor input = input_in.contiguous();
-    Tensor weight = weight_in.contiguous();
-    // Extract dimensions
-    auto input_shape = input.shape();
-    auto weight_shape = weight.shape();
-    auto grad_shape = grad_output.shape();
-
-    int64_t batch = input_shape[0];
-    int64_t in_channels = input_shape[1];
-    int64_t height = input_shape[2];
-    int64_t width = input_shape[3];
-
-    int64_t out_channels = weight_shape[0];
-    int64_t in_channels_per_group = weight_shape[1];
-    int64_t kernel_h = weight_shape[2];
-    int64_t kernel_w = weight_shape[3];
-
-    int64_t out_h = grad_shape[2];
-    int64_t out_w = grad_shape[3];
-
-    // Validate parameters
-    if (stride == 0 || groups == 0) {
-        throw std::invalid_argument("Conv2d backward: stride and groups cannot be zero");
-    }
-
-    // Initialize outputs
-    Tensor grad_input({batch, in_channels, height, width}, DType::Float16, input.device());
-    Tensor grad_weight({out_channels, in_channels_per_group, kernel_h, kernel_w}, DType::Float16, weight.device());
-    Tensor grad_bias({out_channels}, DType::Float16, weight.device());
-
-    if (compute_grad_input) {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_input.data<Float16>(), 0,
-                                   grad_input.numel() * sizeof(Float16), stream));
-    }
-    if (compute_grad_weight) {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_weight.data<Float16>(), 0,
-                                   grad_weight.numel() * sizeof(Float16), stream));
-    }
-    if (compute_grad_bias) {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_bias.data<Float16>(), 0,
-                                   grad_bias.numel() * sizeof(Float16), stream));
-    }
-
-    int64_t out_channels_per_group = out_channels / groups;
-    int64_t col_rows = batch * out_h * out_w;
-    int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
-
-    for (int64_t g = 0; g < groups; ++g) {
-        int64_t in_start = g * in_channels_per_group;
-        int64_t out_start = g * out_channels_per_group;
-
-        // Gradient w.r.t input
-        if (compute_grad_input) {
-            // Allocate col buffer
-            backend::CachedMemoryGuard grad_col_guard(col_rows * col_cols * sizeof(__half));
-            auto* grad_col = static_cast<__half*>(grad_col_guard.get());
-
-            // Compute grad_col = grad_output @ weight
-            // grad_output: (batch * out_h * out_w, out_channels_per_group)
-            // weight: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
-            // grad_col: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
-
-            // Gather this group's grad_output (true NCHW) into a contiguous
-            // channel-major (out_channels_per_group, batch*out_h*out_w) buffer.
-            // matmul_f16 below treats grad_out as (ocpg, col_rows) row-major;
-            // feeding the pointer-offset NCHW tensor directly collapses the
-            // batch stride for batch>1.
-            backend::CachedMemoryGuard grad_out_cm_guard(
-                out_channels_per_group * col_rows * sizeof(__half));
-            auto* grad_out_cm = static_cast<__half*>(grad_out_cm_guard.get());
-            {
-                dim3 g_grid, g_block;
-                compute_launch_config_1d(out_channels_per_group * col_rows, g_grid, g_block);
-                nchw_to_channel_major_grad_kernel<__half><<<g_grid, g_block, 0, stream>>>(
-                    reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-                    grad_out_cm,
-                    batch, out_h, out_w, out_channels, out_channels_per_group, out_start
-                );
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-            }
-
-            const __half* weight_ptr = reinterpret_cast<const __half*>(
-                weight.data<Float16>() + out_start * in_channels_per_group * kernel_h * kernel_w
-            );
-
-            // We need: grad_col = grad_output @ weight
-            // grad_output is (col_rows, out_channels_per_group), weight is (out_channels_per_group, col_cols)
-            // Result is (col_rows, col_cols)
-
-            // Compute: grad_col^T = weight^T @ grad_output^T
-            // This gives us (K, N) which is what we want transposed
-            matmul_f16(weight_ptr, grad_out_cm, grad_col, col_cols, col_rows, out_channels_per_group, stream);
-
-            // Apply col2im to accumulate gradients. The base pointer is the full
-            // NCHW grad_input; the group's channel offset and full channel count
-            // are threaded into the kernel so the batch stride stays correct.
-            dim3 grid, block;
-            int64_t total_output = batch * in_channels_per_group * height * width;
-            compute_launch_config_1d(total_output, grid, block);
-
-            __half* grad_input_ptr = reinterpret_cast<__half*>(
-                grad_input.data<Float16>()
-            );
-
-            col2im_kernel_f16<<<grid, block, 0, stream>>>(
-                grad_col,
-                grad_input_ptr,
-                batch,
-                in_channels_per_group,
-                height,
-                width,
-                kernel_h,
-                kernel_w,
-                stride, stride,
-                padding, padding,
-                dilation, dilation,
-                out_h,
-                out_w,
-                in_channels,
-                in_start
-            );
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-        }
-
-        // Gradient w.r.t weight
-        if (compute_grad_weight) {
-            // Apply im2col to input
-            backend::CachedMemoryGuard input_col_guard(col_rows * col_cols * sizeof(__half));
-            auto* input_col = static_cast<__half*>(input_col_guard.get());
-
-            dim3 grid, block;
-            int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
-            compute_launch_config_1d(total_elements, grid, block);
-
-            const __half* input_ptr = reinterpret_cast<const __half*>(
-                input.data<Float16>()
-            );
-
-            im2col_kernel_f16<<<grid, block, 0, stream>>>(
-                input_ptr,
-                input_col,
-                batch,
-                in_channels_per_group,
-                height,
-                width,
-                kernel_h,
-                kernel_w,
-                stride, stride,
-                padding, padding,
-                dilation, dilation,
-                out_h,
-                out_w,
-                in_channels,
-                in_start
-            );
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-
-            // Compute grad_weight = grad_output @ input_col
-            // grad_output: (out_channels_per_group, batch * out_h * out_w) channel-major
-            // input_col: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
-            // grad_weight: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
-
-            // Gather this group's grad_output (true NCHW) into a contiguous
-            // channel-major (ocpg, col_rows) buffer (see grad_input path).
-            backend::CachedMemoryGuard grad_out_cm_guard(
-                out_channels_per_group * col_rows * sizeof(__half));
-            auto* grad_out_cm = static_cast<__half*>(grad_out_cm_guard.get());
-            {
-                dim3 g_grid, g_block;
-                compute_launch_config_1d(out_channels_per_group * col_rows, g_grid, g_block);
-                nchw_to_channel_major_grad_kernel<__half><<<g_grid, g_block, 0, stream>>>(
-                    reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-                    grad_out_cm,
-                    batch, out_h, out_w, out_channels, out_channels_per_group, out_start
-                );
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-            }
-
-            __half* grad_weight_ptr = reinterpret_cast<__half*>(
-                grad_weight.data<Float16>() + out_start * in_channels_per_group * kernel_h * kernel_w
-            );
-
-            int64_t M = out_channels_per_group;
-            int64_t N = col_cols;
-            int64_t K = col_rows;
-
-            // Compute: grad_weight = grad_output @ input_col
-            matmul_f16(grad_out_cm, input_col, grad_weight_ptr, M, N, K, stream);
-        }
-    }
-
-    // Gradient w.r.t bias
-    if (compute_grad_bias) {
-        int64_t spatial_size = out_h * out_w;
-        const __half* grad_out_data = reinterpret_cast<const __half*>(grad_output.data<Float16>());
-        __half* grad_bias_data = reinterpret_cast<__half*>(grad_bias.data<Float16>());
-
-        dim3 grid, block;
-        compute_launch_config_1d(out_channels, grid, block);
-
-        sum_bias_grad_kernel_f16<<<grid, block, 0, stream>>>(
-            grad_out_data, grad_bias_data, batch, out_channels, spatial_size
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    }
-
-    return std::make_tuple(grad_input, grad_weight, grad_bias);
-}
-
-// ============================================================================
 // Conv2d Backward GPU Implementation
 // ============================================================================
 
@@ -1332,12 +1081,12 @@ auto conv2d_backward_kernel(
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
     // Route BOTH half-precision types through the verified Float32 im2col path
-    // (widen-narrow on-device, not a CPU fallback). BFloat16 has no dedicated
-    // kernel. Float16 has one (conv2d_backward_f16) but its grad_input GEMM
-    // treats the (out_channels_per_group, col_cols) weight as (col_cols,
-    // out_channels_per_group) — a reshape scramble whenever those two dims
-    // differ (i.e. essentially every real conv), producing wrong grad_input on
-    // the non-cuDNN path. The Float32 path builds correctly-shaped buffers.
+    // (widen-narrow on-device, not a CPU fallback). Neither Float16 nor
+    // BFloat16 has a correct dedicated backward kernel: the former native FP16
+    // path (conv2d_backward_f16) mis-shaped its grad_input GEMM — treating the
+    // (out_channels_per_group, col_cols) weight as (col_cols,
+    // out_channels_per_group), a reshape scramble whenever those dims differ —
+    // and has been removed. The Float32 path builds correctly-shaped buffers.
     if (input_in.dtype() == DType::BFloat16 || input_in.dtype() == DType::Float16) {
         const DType odt = input_in.dtype();
         auto [gi, gw, gb] = conv2d_backward_kernel(
@@ -1378,13 +1127,6 @@ auto conv2d_backward_kernel(
     }
     if (groups == 0) {
         throw std::invalid_argument("Conv2d backward: groups cannot be zero");
-    }
-
-    // Check dtype and dispatch to appropriate implementation
-    if (input.dtype() == DType::Float16) {
-        // FP16 path with Tensor Cores
-        return conv2d_backward_f16(grad_output, input, weight, stride, padding, dilation, groups,
-                                   compute_grad_input, compute_grad_weight, compute_grad_bias, stream);
     }
 
     // Float64 backward: mirror Float32 path with cublasDgemm + double types
@@ -1522,8 +1264,13 @@ auto conv2d_backward_kernel(
         TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_bias.data<float>(), 0, grad_bias.numel() * sizeof(float), stream));
     }
 
-    // Get cached cuBLAS handle (avoids per-call create/destroy overhead)
-    cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
+    // Get cached cuBLAS handle (avoids per-call create/destroy overhead).
+    // Force precise IEEE FP32 (DEFAULT_MATH) for the dgrad/wgrad GEMMs so the
+    // native backward matches CPU exact fp32 and the cuDNN backward path (which
+    // stays at DEFAULT_MATH), instead of dropping ~13 mantissa bits to TF32 on
+    // Ampere+ when allow_tf32() is on. [F064]
+    cublasHandle_t cublas_handle =
+        CuBLASHandlePool::get(stream, /*force_precise_f32=*/true);
 
     int64_t out_channels_per_group = out_channels / groups;
     int64_t col_rows = batch * out_h * out_w;

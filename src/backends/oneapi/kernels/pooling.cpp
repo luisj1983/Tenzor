@@ -255,7 +255,9 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                     float val = in_ptr[input_idx];
                     if (sycl::isnan(val) || val > max_val) {
                         max_val = val;
-                        max_idx = input_idx;
+                        // Plane-local argmax (matches CPU/CUDA/ROCm and feeds
+                        // max_unpool2d which expects h*W_in+w within the plane).
+                        max_idx = h_in * W_in + w_in;
                     }
                 }
             }
@@ -464,7 +466,7 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                         double val = in_ptr[input_idx];
                         if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
-                            max_idx = input_idx;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
                         }
                     }
                 }
@@ -503,7 +505,7 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                         float val = static_cast<float>(in_ptr[input_idx]);
                         if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
-                            max_idx = input_idx;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
                         }
                     }
                 }
@@ -542,7 +544,7 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                         float val = bf16_to_f32(in_ptr[input_idx]);
                         if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
-                            max_idx = input_idx;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
                         }
                     }
                 }
@@ -614,7 +616,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                         float val = in_ptr[input_idx];
                         if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
-                            max_idx = input_idx;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
                         }
                     }
                 }
@@ -653,7 +655,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                         double val = in_ptr[input_idx];
                         if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
-                            max_idx = input_idx;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
                         }
                     }
                 }
@@ -693,7 +695,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                         float val = static_cast<float>(in_ptr[input_idx]);
                         if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
-                            max_idx = input_idx;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
                         }
                     }
                 }
@@ -733,7 +735,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
                         float val = bf16_to_f32(in_ptr[input_idx]);
                         if (sycl::isnan(val) || val > max_val) {
                             max_val = val;
-                            max_idx = input_idx;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
                         }
                     }
                 }
@@ -1318,7 +1320,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     float val = in_ptr[idx];
-                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = h * W_in + w; }  // plane-local (per-channel, F044)
                 }
             }
 
@@ -1353,7 +1355,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     double val = in_ptr[idx];
-                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = h * W_in + w; }  // plane-local (per-channel, F044)
                 }
             }
 
@@ -1388,7 +1390,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     float val = static_cast<float>(in_ptr[idx]);
-                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = h * W_in + w; }  // plane-local (per-channel, F044)
                 }
             }
 
@@ -1423,7 +1425,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t idx = ((n * C + c) * H_in + h) * W_in + w;
                     float val = bf16_to_f32(in_ptr[idx]);
-                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = idx; }
+                    if (sycl::isnan(val) || val > max_val) { max_val = val; max_idx = h * W_in + w; }  // plane-local (per-channel, F044)
                 }
             }
 
@@ -1466,11 +1468,14 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
         const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<AdaptiveMaxPool2dBackwardKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
-            int64_t input_idx = idx_ptr[flat_idx];
-            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+            int64_t plane_idx = idx_ptr[flat_idx];  // plane-local (per-channel h*W_in+w)
+            if (plane_idx >= 0 && plane_idx < in_plane) {
+                const int64_t dst = (int64_t(flat_idx) / out_plane) * in_plane + plane_idx;
                 sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_ptr[dst]);
                 atomic_val.fetch_add(grad_out_ptr[flat_idx]);
             }
         });
@@ -1480,11 +1485,14 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
         const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<AdaptiveMaxPool2dBackwardKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
-            int64_t input_idx = idx_ptr[flat_idx];
-            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+            int64_t plane_idx = idx_ptr[flat_idx];  // plane-local
+            if (plane_idx >= 0 && plane_idx < in_plane) {
+                const int64_t dst = (int64_t(flat_idx) / out_plane) * in_plane + plane_idx;
                 sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_ptr[dst]);
                 atomic_val.fetch_add(grad_out_ptr[flat_idx]);
             }
         });
@@ -1499,11 +1507,14 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
         queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float));
         float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
 
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<AdaptiveMaxPool2dBackwardKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
-            int64_t input_idx = idx_ptr[flat_idx];
-            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+            int64_t plane_idx = idx_ptr[flat_idx];  // plane-local
+            if (plane_idx >= 0 && plane_idx < in_plane) {
+                const int64_t dst = (int64_t(flat_idx) / out_plane) * in_plane + plane_idx;
                 sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[input_idx]);
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[dst]);
                 atomic_val.fetch_add(static_cast<float>(grad_out_ptr[flat_idx]));
             }
         });
@@ -1524,11 +1535,14 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
         queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float));
         float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
 
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<AdaptiveMaxPool2dBackwardKernelBFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
-            int64_t input_idx = idx_ptr[flat_idx];
-            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+            int64_t plane_idx = idx_ptr[flat_idx];  // plane-local
+            if (plane_idx >= 0 && plane_idx < in_plane) {
+                const int64_t dst = (int64_t(flat_idx) / out_plane) * in_plane + plane_idx;
                 sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[input_idx]);
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[dst]);
                 atomic_val.fetch_add(bf16_to_f32(grad_out_ptr[flat_idx]));
             }
         });
@@ -2095,22 +2109,23 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 
         queue.fill(grad_in_ptr, 0.0f, input_size).wait();
 
-        // The forward stores max_idx as a full N*C*H*W flat index (see
-        // pooling.cpp:277: `max_idx = ((n*C+c)*H_in+h_in)*W_in+w_in`).
-        // The previous backward reinterpreted it per-channel via
-        // `h_in = max_idx / W_in` and then bounds-checked `h_in < H_in`,
-        // which rejected every idx for n>0 or c>0 — so gradients never
-        // reached the later batches/channels. Scatter directly with the
-        // full flat index instead.
+        // The forward stores a PLANE-LOCAL argmax (h_in*W_in+w_in within the
+        // (n,c) plane, matching CPU/CUDA/ROCm and max_unpool2d). Reconstruct the
+        // global destination as nc*(H_in*W_in) + plane_idx, where nc = n*C+c is
+        // recovered from the output flat index.
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat32>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
                 const float grad_val = grad_out_ptr[flat_idx];
-                const int64_t max_idx = idx_ptr[flat_idx];
+                const int64_t plane_idx = idx_ptr[flat_idx];
 
-                if (max_idx >= 0 && max_idx < input_size) {
+                if (plane_idx >= 0 && plane_idx < in_plane) {
+                    const int64_t nc = flat_idx / out_plane;
+                    const int64_t dst = nc * in_plane + plane_idx;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[max_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[dst]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -2121,15 +2136,19 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 
         queue.fill(grad_in_ptr, 0.0, input_size).wait();
 
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat64>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
                 const double grad_val = grad_out_ptr[flat_idx];
-                const int64_t max_idx = idx_ptr[flat_idx];
+                const int64_t plane_idx = idx_ptr[flat_idx];
 
-                if (max_idx >= 0 && max_idx < input_size) {
+                if (plane_idx >= 0 && plane_idx < in_plane) {
+                    const int64_t nc = flat_idx / out_plane;
+                    const int64_t dst = nc * in_plane + plane_idx;
                     sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[max_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[dst]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -2144,14 +2163,18 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 
         queue.fill(grad_in_float_ptr, 0.0f, input_size).wait();
 
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
                 const float grad_val = static_cast<float>(grad_out_ptr[flat_idx]);
-                const int64_t max_idx = idx_ptr[flat_idx];
-                if (max_idx >= 0 && max_idx < input_size) {
+                const int64_t plane_idx = idx_ptr[flat_idx];
+                if (plane_idx >= 0 && plane_idx < in_plane) {
+                    const int64_t nc = flat_idx / out_plane;
+                    const int64_t dst = nc * in_plane + plane_idx;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[max_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[dst]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -2171,14 +2194,18 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 
         queue.fill(grad_in_float_ptr, 0.0f, input_size).wait();
 
+        const int64_t in_plane = H_in * W_in;
+        const int64_t out_plane = H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelBFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
                 const float grad_val = bf16_to_f32(grad_out_ptr[flat_idx]);
-                const int64_t max_idx = idx_ptr[flat_idx];
-                if (max_idx >= 0 && max_idx < input_size) {
+                const int64_t plane_idx = idx_ptr[flat_idx];
+                if (plane_idx >= 0 && plane_idx < in_plane) {
+                    const int64_t nc = flat_idx / out_plane;
+                    const int64_t dst = nc * in_plane + plane_idx;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[max_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[dst]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -2231,7 +2258,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = in_ptr[idx];
-                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = li; }  // plane-local
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2251,7 +2278,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     double v = in_ptr[idx];
-                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = li; }  // plane-local
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2271,7 +2298,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = static_cast<float>(in_ptr[idx]);
-                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = li; }  // plane-local
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2291,7 +2318,7 @@ auto maxpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 if (li >= 0 && li < L_in) {
                     int64_t idx = (n * C + c) * L_in + li;
                     float v = bf16_to_f32(in_ptr[idx]);
-                    if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                    if (sycl::isnan(v) || v > mx) { mx = v; mi = li; }  // plane-local
                 }
             }
             int64_t oi = (n * C + c) * L_out + l;
@@ -2328,10 +2355,11 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
             h.depends_on(fill_evt);
             h.parallel_for<MaxPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
                 float gv = go[gid];
-                int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                int64_t mi = idx[gid];  // plane-local (li within the (n,c) plane)
+                if (mi >= 0 && mi < L_in) {
+                    const int64_t dst = (int64_t(gid) / L_out) * L_in + mi;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                                     sycl::access::address_space::global_space> ar(gi[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -2345,10 +2373,11 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
             h.depends_on(fill_evt);
             h.parallel_for<MaxPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
                 double gv = go[gid];
-                int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                int64_t mi = idx[gid];  // plane-local
+                if (mi >= 0 && mi < L_in) {
+                    const int64_t dst = (int64_t(gid) / L_out) * L_in + mi;
                     sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                                     sycl::access::address_space::global_space> ar(gi[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -2363,10 +2392,11 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
             h.depends_on(fill_evt);
             h.parallel_for<MaxPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
                 float gv = static_cast<float>(go[gid]);
-                int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                int64_t mi = idx[gid];  // plane-local
+                if (mi >= 0 && mi < L_in) {
+                    const int64_t dst = (int64_t(gid) / L_out) * L_in + mi;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                                     sycl::access::address_space::global_space> ar(acc[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -2388,10 +2418,11 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
             h.depends_on(fill_evt);
             h.parallel_for<MaxPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
                 float gv = bf16_to_f32(go[gid]);
-                int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                int64_t mi = idx[gid];  // plane-local
+                if (mi >= 0 && mi < L_in) {
+                    const int64_t dst = (int64_t(gid) / L_out) * L_in + mi;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                                     sycl::access::address_space::global_space> ar(acc[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -2410,8 +2441,12 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
 }
 
 auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a,
-                       std::array<int64_t, 1> padding_a, sycl::queue& queue) -> Tensor {
+                       std::array<int64_t, 1> padding_a, bool count_include_pad, sycl::queue& queue) -> Tensor {
     // Q.7: per-axis std::array<int64_t, 1> signature.
+    // count_include_pad=true (PyTorch default) divides by kernel_size (padding
+    // cells count in the divisor); =false divides by the in-bounds count. The
+    // 1d path previously always divided by the in-bounds count, diverging from
+    // CPU/CUDA at boundary windows with padding>0 (F048).
     const int64_t kernel_size = kernel_size_a[0];
     const int64_t stride      = stride_a[0];
     const int64_t padding     = padding_a[0];
@@ -2436,7 +2471,8 @@ auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) { sum += in_ptr[(n * C + c) * L_in + li]; count++; }
             }
-            out_ptr[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            out_ptr[(n * C + c) * L_out + l] = divisor > 0 ? sum / static_cast<float>(divisor) : 0.0f;
         });
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -2450,7 +2486,8 @@ auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) { sum += in_ptr[(n * C + c) * L_in + li]; count++; }
             }
-            out_ptr[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<double>(count) : 0.0;
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            out_ptr[(n * C + c) * L_out + l] = divisor > 0 ? sum / static_cast<double>(divisor) : 0.0;
         });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -2464,7 +2501,8 @@ auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) { sum += static_cast<float>(in_ptr[(n * C + c) * L_in + li]); count++; }
             }
-            out_ptr[(n * C + c) * L_out + l] = sycl::half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            out_ptr[(n * C + c) * L_out + l] = sycl::half(divisor > 0 ? sum / static_cast<float>(divisor) : 0.0f);
         });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -2478,7 +2516,8 @@ auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) { sum += bf16_to_f32(in_ptr[(n * C + c) * L_in + li]); count++; }
             }
-            out_ptr[(n * C + c) * L_out + l] = f32_to_bf16(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            out_ptr[(n * C + c) * L_out + l] = f32_to_bf16(divisor > 0 ? sum / static_cast<float>(divisor) : 0.0f);
         });
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool1d_forward");
@@ -2487,8 +2526,10 @@ auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size_a
 }
 
 auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a,
-                         std::array<int64_t, 1> padding_a, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor {
+                         std::array<int64_t, 1> padding_a, bool count_include_pad, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor {
     // Q.7: per-axis std::array<int64_t, 1> signature.
+    // Divisor must match the forward (F048): count_include_pad ? kernel_size :
+    // in-bounds count. Previously always divided by the in-bounds count.
     const int64_t kernel_size = kernel_size_a[0];
     const int64_t stride      = stride_a[0];
     const int64_t padding     = padding_a[0];
@@ -2515,7 +2556,8 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) count++;
             }
-            float gv = count > 0 ? go[gid] / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            float gv = divisor > 0 ? go[gid] / static_cast<float>(divisor) : 0.0f;
             for (int64_t k = 0; k < kernel_size; ++k) {
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) {
@@ -2537,7 +2579,8 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) count++;
             }
-            double gv = count > 0 ? go[gid] / static_cast<double>(count) : 0.0;
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            double gv = divisor > 0 ? go[gid] / static_cast<double>(divisor) : 0.0;
             for (int64_t k = 0; k < kernel_size; ++k) {
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) {
@@ -2560,7 +2603,8 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) count++;
             }
-            float gv = count > 0 ? static_cast<float>(go[gid]) / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            float gv = divisor > 0 ? static_cast<float>(go[gid]) / static_cast<float>(divisor) : 0.0f;
             for (int64_t k = 0; k < kernel_size; ++k) {
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) {
@@ -2585,7 +2629,8 @@ auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) count++;
             }
-            float gv = count > 0 ? bf16_to_f32(go[gid]) / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? kernel_size : count;
+            float gv = divisor > 0 ? bf16_to_f32(go[gid]) / static_cast<float>(divisor) : 0.0f;
             for (int64_t k = 0; k < kernel_size; ++k) {
                 int64_t li = l * stride - padding + k;
                 if (li >= 0 && li < L_in) {
@@ -2629,7 +2674,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 float v = in_ptr[idx];
-                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = i; }  // plane-local
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
@@ -2648,7 +2693,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 double v = in_ptr[idx];
-                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = i; }  // plane-local
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
@@ -2667,7 +2712,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 float v = static_cast<float>(in_ptr[idx]);
-                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = i; }  // plane-local
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = sycl::half(mx); idx_ptr[oi] = mi;
@@ -2686,7 +2731,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             for (int64_t i = start; i < end; ++i) {
                 int64_t idx = (n * C + c) * L_in + i;
                 float v = bf16_to_f32(in_ptr[idx]);
-                if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                if (sycl::isnan(v) || v > mx) { mx = v; mi = i; }  // plane-local
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = f32_to_bf16(mx); idx_ptr[oi] = mi;
@@ -2918,7 +2963,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = in_p[idx];
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
                 }
             }
@@ -2947,7 +2992,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         double v = in_p[idx];
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
                 }
             }
@@ -2976,7 +3021,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = static_cast<float>(in_p[idx]);
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
                 }
             }
@@ -3005,7 +3050,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                         if (wi < 0 || wi >= W_in) continue;
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = bf16_to_f32(in_p[idx]);
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
                 }
             }
@@ -3026,6 +3071,13 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
     const int64_t in_size = input_shape[0] * input_shape[1] * input_shape[2] * input_shape[3] * input_shape[4];
     const int64_t out_size = grad_output.numel();
 
+    // Forward stores a PLANE-LOCAL argmax ((di*H_in+hi)*W_in+wi within the
+    // (n,c) volume). Reconstruct the global destination as nc*in_plane +
+    // plane_idx, nc = gid / out_plane recovered from the output flat index.
+    const int64_t in_plane = input_shape[2] * input_shape[3] * input_shape[4];
+    const auto gshape3d = grad_output.shape();
+    const int64_t out_plane = gshape3d[2] * gshape3d[3] * gshape3d[4];
+
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
     // Audit II.5: chain sequential kernels through event deps so we
@@ -3039,10 +3091,11 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
         sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
             cgh.depends_on(fill_ev);
             cgh.parallel_for<MaxPool3dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-                float gv = go[gid]; int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                float gv = go[gid]; int64_t mi = idx[gid];  // plane-local
+                if (mi >= 0 && mi < in_plane) {
+                    const int64_t dst = (int64_t(gid) / out_plane) * in_plane + mi;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                                     sycl::access::address_space::global_space> ar(gi[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -3056,10 +3109,11 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
         sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
             cgh.depends_on(fill_ev);
             cgh.parallel_for<MaxPool3dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-                double gv = go[gid]; int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                double gv = go[gid]; int64_t mi = idx[gid];  // plane-local
+                if (mi >= 0 && mi < in_plane) {
+                    const int64_t dst = (int64_t(gid) / out_plane) * in_plane + mi;
                     sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                                     sycl::access::address_space::global_space> ar(gi[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -3074,10 +3128,11 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
         sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
             cgh.depends_on(fill_ev);
             cgh.parallel_for<MaxPool3dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-                float gv = static_cast<float>(go[gid]); int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                float gv = static_cast<float>(go[gid]); int64_t mi = idx[gid];  // plane-local
+                if (mi >= 0 && mi < in_plane) {
+                    const int64_t dst = (int64_t(gid) / out_plane) * in_plane + mi;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                                     sycl::access::address_space::global_space> ar(acc[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -3097,10 +3152,11 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
         sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
             cgh.depends_on(fill_ev);
             cgh.parallel_for<MaxPool3dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-                float gv = bf16_to_f32(go[gid]); int64_t mi = idx[gid];
-                if (mi >= 0 && mi < in_size) {
+                float gv = bf16_to_f32(go[gid]); int64_t mi = idx[gid];  // plane-local
+                if (mi >= 0 && mi < in_plane) {
+                    const int64_t dst = (int64_t(gid) / out_plane) * in_plane + mi;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                                     sycl::access::address_space::global_space> ar(acc[dst]);
                     ar.fetch_add(gv);
                 }
             });
@@ -3399,7 +3455,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = in_p[idx];
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
             out_p[gid] = mx; idx_p[gid] = mi;
         }).wait();
@@ -3422,7 +3478,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         double v = in_p[idx];
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
             out_p[gid] = mx; idx_p[gid] = mi;
         }).wait();
@@ -3445,7 +3501,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = static_cast<float>(in_p[idx]);
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
             out_p[gid] = sycl::half(mx); idx_p[gid] = mi;
         }).wait();
@@ -3468,7 +3524,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                     for (int64_t wi = ws; wi < we; ++wi) {
                         int64_t idx = ((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi;
                         float v = bf16_to_f32(in_p[idx]);
-                        if (sycl::isnan(v) || v > mx) { mx = v; mi = idx; }
+                        if (sycl::isnan(v) || v > mx) { mx = v; mi = (di * H_in + hi) * W_in + wi; }  // plane-local
                     }
             out_p[gid] = f32_to_bf16(mx); idx_p[gid] = mi;
         }).wait();

@@ -8,6 +8,7 @@
 
 #include "tenzor/nn/layers/hrm.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/nn/activations/activations.hpp"
@@ -316,17 +317,34 @@ auto RotaryPositionEmbedding::forward(const Variable& x, int64_t seq_offset) -> 
         throw std::runtime_error("RoPE: head_dim mismatch");
     }
 
-    // Move cache to same device as input
+    // Rotation convention: this class uses the INTERLEAVED (GPT-J) layout — the
+    // pair for rotation is adjacent elements (last dim reshaped to (half, 2)).
+    // This is DISTINCT from nn::RoPE (rope.cpp), which uses the HALF-SPLIT
+    // (NeoX / LLaMA-HF) layout. The two produce numerically different rotations
+    // from the same inv_freq table; do not mix conventions within a model.
+    //
+    // F121: for Float16/BFloat16 input, run the rotation in Float32 (matching
+    // PyTorch and the widen-narrow pattern used elsewhere) so angle precision and
+    // cross-backend parity don't depend on half-precision Mul/Add rounding.
     auto device = x.tensor().device();
+    const DType in_dtype = x.tensor().dtype();
+    const bool is_half = (in_dtype == DType::Float16 || in_dtype == DType::BFloat16);
+    const DType work_dtype = is_half ? DType::Float32 : in_dtype;
+
     auto cos_slice = cos_cache_.slice(0, seq_offset, seq_offset + seq_len).to(device);
     auto sin_slice = sin_cache_.slice(0, seq_offset, seq_offset + seq_len).to(device);
+    if (cos_slice.dtype() != work_dtype) {
+        cos_slice = cos_slice.to(work_dtype);
+        sin_slice = sin_slice.to(work_dtype);
+    }
+    Variable x_work = is_half ? tenzor::nn::variable_cast(x, DType::Float32) : x;
 
     // Build the entire rotation on the autograd Variable path so grad_fn is
     // preserved end-to-end. cos/sin are constant (no-grad) Variables.
     const int64_t half = head_dim / 2;
 
     // Reshape for rotation: treat last dim as (dim/2, 2) — autograd-aware.
-    auto x_reshaped = tenzor::reshape(x, {batch, seq_len, n_heads, half, 2});
+    auto x_reshaped = tenzor::reshape(x_work, {batch, seq_len, n_heads, half, 2});
 
     // Get x1 (index 0) and x2 (index 1) along the trailing pair axis (dim 4),
     // keeping grad_fn via autograd slice + squeeze.
@@ -349,7 +367,9 @@ auto RotaryPositionEmbedding::forward(const Variable& x, int64_t seq_offset) -> 
     // Stack back together along a new trailing pair axis, then flatten to
     // head_dim. cat of two (b,s,h,half,1) tensors along dim 4 -> (b,s,h,half,2).
     auto rotated = tenzor::cat({tenzor::unsqueeze(rot1, 4), tenzor::unsqueeze(rot2, 4)}, 4);
-    return tenzor::reshape(rotated, {batch, seq_len, n_heads, head_dim});
+    auto out = tenzor::reshape(rotated, {batch, seq_len, n_heads, head_dim});
+    if (is_half) out = tenzor::nn::variable_cast(out, in_dtype);  // narrow back
+    return out;
 }
 
 auto RotaryPositionEmbedding::forward_impl(const Variable& input) -> Variable {

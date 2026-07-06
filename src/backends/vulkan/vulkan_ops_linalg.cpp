@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"   // complex sparse CPU fallback (F104)
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/math.hpp"
@@ -2374,6 +2375,16 @@ auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor&
                                           dense_f32, M, K, N);
         return result.to(orig);
     }
+    // F104: no native complex sparse shader on Vulkan. Complex sparse routes
+    // GPU->CPU uniformly (matching the codebase's complex-linalg convention):
+    // compute on CPU with the native complex SpMM, then move the result back.
+    if (values.dtype() == DType::Complex64 || values.dtype() == DType::Complex128) {
+        auto sp_cpu = SparseTensor::sparse_csr(crow_indices.to(Device::cpu()),
+                                               col_indices.to(Device::cpu()),
+                                               values.to(Device::cpu()), {M, K});
+        Tensor result = sparse::spmm(sp_cpu, dense.to(Device::cpu()));
+        return result.to(values.device());
+    }
     if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
         throw std::runtime_error("Vulkan SpMM only supports F32/F64/F16/BF16, got " +
             std::string(dtype_name(values.dtype())));
@@ -2454,6 +2465,14 @@ auto VulkanBackend::dispatchSparseSpMV(const Tensor& crow_indices, const Tensor&
                                           vec_f32, M, K);
         return result.to(orig);
     }
+    // F104: complex sparse SpMV -> CPU fallback (no native complex shader).
+    if (values.dtype() == DType::Complex64 || values.dtype() == DType::Complex128) {
+        auto sp_cpu = SparseTensor::sparse_csr(crow_indices.to(Device::cpu()),
+                                               col_indices.to(Device::cpu()),
+                                               values.to(Device::cpu()), {M, K});
+        Tensor result = sparse::spmv(sp_cpu, vec.to(Device::cpu()));
+        return result.to(values.device());
+    }
     if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
         throw std::runtime_error("Vulkan SpMV only supports F32/F64/F16/BF16, got " +
             std::string(dtype_name(values.dtype())));
@@ -2516,6 +2535,22 @@ auto VulkanBackend::dispatchSparseSpMV(const Tensor& crow_indices, const Tensor&
 auto VulkanBackend::dispatchSparseToDense(const Tensor& crow_indices, const Tensor& col_indices,
                                            const Tensor& values, int64_t M, int64_t K,
                                            DType dtype) -> Tensor {
+    // Float16/BFloat16: widen values to Float32, compute, narrow back (matches
+    // OneAPI). The half front-ends widen before reaching here, but a raw OpId
+    // dispatch can still land a half tensor — handle it instead of throwing,
+    // consistent with Vulkan SpMM/SpMV which already widen half.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        Tensor out_f32 = dispatchSparseToDense(crow_indices, col_indices,
+            values.to(DType::Float32), M, K, DType::Float32);
+        return out_f32.to(dtype);
+    }
+    // F104: complex sparse -> dense on CPU (no native complex shader).
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        auto sp_cpu = SparseTensor::sparse_csr(crow_indices.to(Device::cpu()),
+                                               col_indices.to(Device::cpu()),
+                                               values.to(Device::cpu()), {M, K});
+        return sp_cpu.to_dense().to(values.device());
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
         throw std::runtime_error("Vulkan SparseToDense only supports Float32/Float64, got " +
             std::string(dtype_name(dtype)));
@@ -2577,6 +2612,22 @@ auto VulkanBackend::dispatchSparseToDense(const Tensor& crow_indices, const Tens
 auto VulkanBackend::dispatchSparseAdd(const Tensor& crow_indices, const Tensor& col_indices,
                                        const Tensor& values, const Tensor& dense,
                                        int64_t M, int64_t K) -> Tensor {
+    // Float16/BFloat16: widen values + dense to Float32, compute, narrow back
+    // (matches OneAPI; consistent with Vulkan SpMM/SpMV half handling).
+    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
+        DType orig = values.dtype();
+        Tensor out_f32 = dispatchSparseAdd(crow_indices, col_indices,
+            values.to(DType::Float32), dense.to(DType::Float32), M, K);
+        return out_f32.to(orig);
+    }
+    // F104: complex sparse + dense on CPU (no native complex shader).
+    if (values.dtype() == DType::Complex64 || values.dtype() == DType::Complex128) {
+        auto sp_cpu = SparseTensor::sparse_csr(crow_indices.to(Device::cpu()),
+                                               col_indices.to(Device::cpu()),
+                                               values.to(Device::cpu()), {M, K});
+        Tensor result = sparse::add(sp_cpu, dense.to(Device::cpu()));
+        return result.to(values.device());
+    }
     if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
         throw std::runtime_error("Vulkan SparseAdd only supports Float32/Float64, got " +
             std::string(dtype_name(values.dtype())));
@@ -2633,6 +2684,22 @@ auto VulkanBackend::dispatchDenseToSparse(const Tensor& dense) -> std::vector<Te
             std::to_string(dense.dim()) + "D");
     }
     DType dtype = dense.dtype();
+    // Float16/BFloat16: widen the dense input to Float32, compute the CSR, then
+    // narrow the values component back (indices stay integer). Matches OneAPI.
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto result = dispatchDenseToSparse(dense.to(DType::Float32));
+        result[2] = result[2].to(dtype);  // {crow, col, values} — narrow values
+        return result;
+    }
+    // F104: complex dense -> CSR on CPU (no native complex shader). Return the
+    // CSR components on the original device with Int64 indices, matching the
+    // Float32/Float64 return convention below.
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        auto sp_cpu = tenzor::to_sparse_csr(dense.to(Device::cpu()));
+        return { sp_cpu.crow_indices().to(DType::Int64).to(dense.device()),
+                 sp_cpu.col_indices().to(DType::Int64).to(dense.device()),
+                 sp_cpu.values().to(dense.device()) };
+    }
     if (dtype != DType::Float32 && dtype != DType::Float64) {
         throw std::runtime_error("Vulkan DenseToSparse only supports Float32/Float64, got " +
             std::string(dtype_name(dtype)));
@@ -3026,6 +3093,22 @@ auto VulkanBackend::dispatchSparseSpGEMM(const Tensor& a_crow, const Tensor& a_c
                                           const Tensor& b_crow, const Tensor& b_col,
                                           const Tensor& b_vals,
                                           int64_t M, int64_t K, int64_t N) -> std::vector<Tensor> {
+    // F104: complex CSR x CSR on CPU (no native complex shader). Return the CSR
+    // components on the original device with Int64 indices, matching the
+    // Float32/Float64 return convention below.
+    if (a_vals.dtype() == DType::Complex64 || a_vals.dtype() == DType::Complex128) {
+        Device dev = a_vals.device();
+        auto a_cpu = SparseTensor::sparse_csr(a_crow.to(Device::cpu()),
+                                              a_col.to(Device::cpu()),
+                                              a_vals.to(Device::cpu()), {M, K});
+        auto b_cpu = SparseTensor::sparse_csr(b_crow.to(Device::cpu()),
+                                              b_col.to(Device::cpu()),
+                                              b_vals.to(Device::cpu()), {K, N});
+        auto c_cpu = sparse::spgemm(a_cpu, b_cpu);
+        return { c_cpu.crow_indices().to(DType::Int64).to(dev),
+                 c_cpu.col_indices().to(DType::Int64).to(dev),
+                 c_cpu.values().to(dev) };
+    }
     if (a_vals.dtype() != DType::Float32 && a_vals.dtype() != DType::Float64) {
         throw std::runtime_error("Vulkan SpGEMM only supports Float32/Float64, got " +
             std::string(dtype_name(a_vals.dtype())));

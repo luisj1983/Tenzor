@@ -486,44 +486,59 @@ auto VulkanBackend::dispatchScatter(const Tensor& input_raw, int64_t dim, const 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Calculate scatter parameters
-    // Output (destination) tensor parameters
+    // Calculate scatter parameters. The shader decodes each flat index position
+    // with the INDEX tensor's own contiguous strides and recomposes the output
+    // offset with the SELF strides (matching CPU scatter_kernel). A collapsed
+    // inner/outer decode from the self shape mis-writes whenever index is
+    // smaller than self on a non-scatter axis.
     uint32_t output_dim_size = static_cast<uint32_t>(input_shape[dim]);
-    uint32_t inner_size = 1;
-    for (int64_t d = dim + 1; d < ndim; ++d) {
-        inner_size *= static_cast<uint32_t>(input_shape[d]);
-    }
-    uint32_t outer_size = 1;
-    for (int64_t d = 0; d < dim; ++d) {
-        outer_size *= static_cast<uint32_t>(input_shape[d]);
+    auto idx_shape = indices.shape();
+    if (idx_shape.size() > 8 || input_shape.size() > 8) {
+        throw std::runtime_error("VulkanBackend::dispatchScatter: rank > 8 is not supported");
     }
 
-    // Input (values) tensor dimension size
-    auto values_shape = values.shape();
-    uint32_t values_dim_size = static_cast<uint32_t>(values_shape[dim]);
+    // Contiguous (row-major) strides for the index and self/output tensors.
+    uint32_t index_strides[8] = {0};
+    uint32_t self_strides[8] = {0};
+    {
+        int64_t acc = 1;
+        for (int64_t d = static_cast<int64_t>(idx_shape.size()) - 1; d >= 0; --d) {
+            index_strides[d] = static_cast<uint32_t>(acc);
+            acc *= idx_shape[d];
+        }
+        acc = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            self_strides[d] = static_cast<uint32_t>(acc);
+            acc *= input_shape[d];
+        }
+    }
 
-    // Push constants for scatter shader
+    // Push constants for scatter shader (layout matches scatter*.comp).
     struct PushConstants {
         uint32_t input_size;
-        uint32_t output_size;
+        uint32_t ndim;
         uint32_t dim;
         uint32_t dim_size;
-        uint32_t input_dim_size;
-        uint32_t inner_size;
-        uint32_t outer_size;
+        uint32_t output_size;
         uint32_t reduction;
         uint32_t use_values;
+        uint32_t _pad;
+        uint32_t index_strides[8];
+        uint32_t self_strides[8];
     } push_constants;
 
     push_constants.input_size = static_cast<uint32_t>(indices.numel());
-    push_constants.output_size = static_cast<uint32_t>(output.numel());
+    push_constants.ndim = static_cast<uint32_t>(ndim);
     push_constants.dim = static_cast<uint32_t>(dim);
     push_constants.dim_size = output_dim_size;
-    push_constants.input_dim_size = values_dim_size;
-    push_constants.inner_size = inner_size;
-    push_constants.outer_size = outer_size;
+    push_constants.output_size = static_cast<uint32_t>(output.numel());
     push_constants.reduction = static_cast<uint32_t>(reduction);
     push_constants.use_values = 1;  // Use values buffer
+    push_constants._pad = 0;
+    for (int d = 0; d < 8; ++d) {
+        push_constants.index_strides[d] = index_strides[d];
+        push_constants.self_strides[d] = self_strides[d];
+    }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());

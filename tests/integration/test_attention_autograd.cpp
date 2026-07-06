@@ -20,6 +20,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "../grad_flow_helpers.hpp"
+#include "tenzor/autograd/gradcheck.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -437,6 +438,25 @@ TEST_P(AttentionAutogradTest, FlashAttentionFusedVsComposedBackwardEquivalence) 
     check_finite(dQ_comp, "dQ_comp");
     check_finite(dK_comp, "dK_comp");
     check_finite(dV_comp, "dV_comp");
+}
+
+// F025: causal flash-attention backward must use the SAME bottom-right causal
+// offset (M - N) as the forward. With seq_q != seq_k (cached-KV / cross-
+// attention) the old top-left backward mask differentiated a differently-masked
+// softmax than the forward computed, so gradcheck (analytic backward vs
+// finite-difference forward) fails. Float64 for FD precision.
+TEST_P(AttentionAutogradTest, FlashAttentionCausalCrossAttnGradcheck) {
+    const int64_t B = 1, H = 1, Nq = 3, Nk = 5, D = 4;  // seq_q != seq_k
+    tenzor::Variable K(tenzor::randn({B, H, Nk, D}, DType::Float64, device), false);
+    tenzor::Variable V(tenzor::randn({B, H, Nk, D}, DType::Float64, device), false);
+    tenzor::Variable Q(tenzor::randn({B, H, Nq, D}, DType::Float64, device), true);
+    const float scale = static_cast<float>(1.0 / std::sqrt(static_cast<double>(D)));
+    auto f = [&K, &V, scale](const tenzor::Variable& q) -> tenzor::Variable {
+        return tenzor::sum(tenzor::flash_attention(q, K, V, scale, /*causal=*/true));
+    };
+    bool ok = gradcheck(f, Q, 1e-6, 5e-3, 5e-3);
+    EXPECT_TRUE(ok) << "causal cross-attn (seq_q != seq_k) flash gradcheck failed on "
+                    << device.to_string();
 }
 
 INSTANTIATE_BACKEND_TESTS(AttentionAutogradTest);

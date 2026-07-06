@@ -321,6 +321,21 @@ TEST_F(GradCheckDirectTest, GradGradCheckLinearFunctionRuns) {
     });
 }
 
+// F014: gradgradcheck reads the analytic Hessian, which hessian() narrows back
+// to the INPUT dtype — so for a Float16/BFloat16 input H is half, and the
+// double-read path threw ("Exception during gradgradcheck"), a false failure.
+// It must run without throwing now (H is widened to Float64 before reading).
+TEST_F(GradCheckDirectTest, GradGradCheckFloat16DoesNotThrow) {
+    auto f = [](const Variable& x) -> Variable { return x * x; };  // f'' = 2
+    Tensor f32 = zeros({3}, DType::Float32, Device::cpu());
+    f32.data<float>()[0] = 1.0f; f32.data<float>()[1] = 2.0f; f32.data<float>()[2] = 0.5f;
+    Variable x(f32.to(DType::Float16), true);
+    EXPECT_NO_THROW({
+        bool r = gradgradcheck(f, x);
+        (void)r;
+    });
+}
+
 // Surface-level API test: gradgradcheck must return a bool and not throw
 // for well-formed inputs, regardless of correctness of the underlying result.
 TEST_F(GradCheckDirectTest, GradGradCheckQuadraticDoesNotCrash) {

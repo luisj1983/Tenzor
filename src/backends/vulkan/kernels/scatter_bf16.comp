@@ -27,16 +27,22 @@ layout(binding = 2) buffer Output { uint output_data[]; };     // Packed BF16 pa
 layout(binding = 3) buffer Values { uint values[]; };          // Packed BF16 pairs (values to scatter)
 
 layout(push_constant) uniform PushConstants {
-    uint input_size;       // Size of input/indices (in elements)
-    uint output_size;      // Total output size (in elements)
-    uint dim;              // Dimension to scatter along
-    uint dim_size;         // Size of the dimension being scattered to (output)
-    uint input_dim_size;   // Size of the dimension in input/values tensor
-    uint inner_size;       // Product of dimensions after dim
-    uint outer_size;       // Product of dimensions before dim
-    uint reduction;        // 0=none, 1=add, 2=multiply
-    uint use_values;       // 0=use input_data, 1=use values buffer
+    uint input_size;        // indices.numel() (== values.numel())
+    uint ndim;              // <= 8
+    uint dim;               // normalized scatter dim
+    uint dim_size;          // self_shape[dim] (wrap + bounds)
+    uint output_size;       // total output/self size (OOB guard)
+    uint reduction;         // 0=none, 1=add, 2=multiply
+    uint use_values;        // 0=use input_data, 1=use values buffer
+    uint _pad;
+    uvec4 index_strides0;   // INDEX contiguous strides, dims 0..3
+    uvec4 index_strides1;   // dims 4..7
+    uvec4 self_strides0;    // SELF contiguous strides, dims 0..3
+    uvec4 self_strides1;    // dims 4..7
 } params;
+
+uint idxStride(uint d)  { return (d < 4u) ? params.index_strides0[d] : params.index_strides1[d - 4u]; }
+uint selfStride(uint d) { return (d < 4u) ? params.self_strides0[d]  : params.self_strides1[d - 4u]; }
 
 // Read a single BFloat16 element from packed uint32 array
 float readBF16FromInput(uint element_idx) {
@@ -125,11 +131,6 @@ void main() {
         return;
     }
 
-    // Decompose input index based on VALUES tensor shape
-    uint outer_idx = idx / (params.inner_size * params.input_dim_size);
-    uint remainder = idx % (params.inner_size * params.input_dim_size);
-    uint inner_idx = remainder % params.inner_size;
-
     // Get the scatter destination index
     int scatter_idx = indices[idx];
     // Normalize negative indices like the CPU reference (idx += dim) before the
@@ -142,9 +143,17 @@ void main() {
     }
 
     // Compute output index
-    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
-                   uint(scatter_idx) * params.inner_size +
-                   inner_idx;
+    uint temp = idx;
+    uint out_idx = 0u;
+    for (uint d = 0u; d < params.ndim; ++d) {
+        uint coord = temp / idxStride(d);
+        temp = temp % idxStride(d);
+        if (d == params.dim) {
+            out_idx += uint(scatter_idx) * selfStride(d);
+        } else {
+            out_idx += coord * selfStride(d);
+        }
+    }
 
     // Guard the computed output offset against the destination size. The non-scatter
     // dims of the values/index tensor can exceed the output's, yielding out_idx >=

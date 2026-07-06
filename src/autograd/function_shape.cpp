@@ -507,7 +507,7 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
     attrs.set(AttrKey::InputShape,
               std::to_string(input_h_) + "," + std::to_string(input_w_));
     attrs.set(AttrKey::Mode, "bilinear");
-    attrs.set(AttrKey::AlignCorners, false);
+    attrs.set(AttrKey::AlignCorners, align_corners_);  // MUST match the forward's flag
 
     std::vector<Tensor> dispatch_inputs = {grad_output};
     auto results = tenzor::dispatch(OpId::InterpolateBackward, dispatch_inputs, attrs);
@@ -535,7 +535,7 @@ auto UpsampleBilinearBackward::backward_with_variables(std::vector<Variable> gra
         // to the incoming next-level grad (shape input_h × input_w) to produce
         // a tensor of shape output_h × output_w — completing the chain.
         auto adjoint = std::make_shared<UpsampleBilinearForwardAdjoint>(
-            input_h_, input_w_, output_h_, output_w_);
+            input_h_, input_w_, output_h_, output_w_, align_corners_);
         std::vector<std::shared_ptr<Function>> next_funcs;
         next_funcs.push_back(grad_out.grad_fn());
         adjoint->set_next_functions(std::move(next_funcs));
@@ -570,7 +570,7 @@ auto UpsampleBilinearForwardAdjoint::backward(std::vector<Tensor> grad_outputs)
     attrs.set(AttrKey::OutputSize,
               std::to_string(output_h_) + "," + std::to_string(output_w_));
     attrs.set(AttrKey::Mode, "bilinear");
-    attrs.set(AttrKey::AlignCorners, false);
+    attrs.set(AttrKey::AlignCorners, align_corners_);  // MUST match the forward's flag
     std::vector<Tensor> dispatch_inputs = {g};
     auto results = tenzor::dispatch(OpId::Interpolate, dispatch_inputs, attrs);
     return {results[0]};
@@ -586,7 +586,7 @@ auto UpsampleBilinearForwardAdjoint::backward_with_variables(
     Variable out(fwd_result[0], g.requires_grad());
     if (g.requires_grad() && is_grad_enabled()) {
         auto bwd = std::make_shared<UpsampleBilinearBackward>(
-            input_h_, input_w_, output_h_, output_w_);
+            input_h_, input_w_, output_h_, output_w_, align_corners_);
         std::vector<std::shared_ptr<Function>> next_funcs;
         next_funcs.push_back(g.grad_fn());
         bwd->set_next_functions(std::move(next_funcs));

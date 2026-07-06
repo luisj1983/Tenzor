@@ -1023,9 +1023,16 @@ auto kthvalue_impl(const T* data, int64_t dim_size,
             // deterministic (lowest-index-first among equal values), matching
             // sort_impl and PyTorch; plain std::nth_element would return an
             // arbitrary index on ties.
+            // F142: use nan_less (NaN-as-largest, bit-pattern) rather than plain
+            // `a<b`. `a.first < b.first` is FALSE both ways for NaN, so the old
+            // comparator violated strict-weak-ordering when any element was NaN —
+            // UNDEFINED BEHAVIOR in std::nth_element (arbitrary result). nan_less
+            // orders NaN last consistently with sort/median/topk, giving a
+            // well-defined kthvalue that every backend can match.
             std::nth_element(pairs.begin(), pairs.begin() + (k - 1), pairs.end(),
                 [](const auto& a, const auto& b) {
-                    if (a.first != b.first) return a.first < b.first;
+                    if (nan_less(a.first, b.first)) return true;
+                    if (nan_less(b.first, a.first)) return false;
                     return a.second < b.second;
                 });
 

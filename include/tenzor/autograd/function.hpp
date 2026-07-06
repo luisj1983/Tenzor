@@ -1508,8 +1508,10 @@ private:
  */
 class UpsampleBilinearBackward : public Function {
 public:
-    UpsampleBilinearBackward(int64_t input_h, int64_t input_w, int64_t output_h, int64_t output_w)
-        : input_h_(input_h), input_w_(input_w), output_h_(output_h), output_w_(output_w) {}
+    UpsampleBilinearBackward(int64_t input_h, int64_t input_w, int64_t output_h, int64_t output_w,
+                             bool align_corners = false)
+        : input_h_(input_h), input_w_(input_w), output_h_(output_h), output_w_(output_w),
+          align_corners_(align_corners) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
@@ -1523,6 +1525,7 @@ private:
     int64_t input_w_;   ///< Input width
     int64_t output_h_;  ///< Output height
     int64_t output_w_;  ///< Output width
+    bool align_corners_;  ///< Sampling geometry — MUST match the forward's flag
 };
 
 /**
@@ -1541,9 +1544,11 @@ private:
 class UpsampleBilinearForwardAdjoint : public Function {
 public:
     UpsampleBilinearForwardAdjoint(int64_t input_h, int64_t input_w,
-                                    int64_t output_h, int64_t output_w)
+                                    int64_t output_h, int64_t output_w,
+                                    bool align_corners = false)
         : input_h_(input_h), input_w_(input_w),
-          output_h_(output_h), output_w_(output_w) {}
+          output_h_(output_h), output_w_(output_w),
+          align_corners_(align_corners) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
@@ -1555,6 +1560,7 @@ private:
     int64_t input_w_;
     int64_t output_h_;
     int64_t output_w_;
+    bool align_corners_;  ///< Sampling geometry — MUST match the forward's flag
 };
 
 // =========================================================================

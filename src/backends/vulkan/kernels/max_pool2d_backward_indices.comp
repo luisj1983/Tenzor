@@ -7,7 +7,7 @@
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, H_out, W_out) flattened
-layout(binding = 1) buffer Indices { float indices[]; };          // Pre-computed max indices
+layout(binding = 1) buffer Indices { int indices[]; };            // Pre-computed max indices (Int32 from forward)
 layout(binding = 2) buffer GradInput { float grad_input[]; };     // (N, C, H, W) output
 
 layout(push_constant) uniform PushConstants {
@@ -28,7 +28,7 @@ void main() {
     float grad = grad_output[idx];
     // indices are plane-local (in_y*W + in_x); reconstruct the global input
     // offset via the per-(n,c) plane base.
-    int plane_local = int(indices[idx]);
+    int plane_local = indices[idx];
     uint nc = idx / params.out_plane;
     int target_idx = int(nc * params.in_plane) + plane_local;
 

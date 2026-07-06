@@ -2,12 +2,12 @@
 #extension GL_EXT_shader_atomic_float : enable
 
 // M14 Vulkan: nearest-mode interpolate backward via atomic-float scatter.
-// Mirrors the ROCm `interpolate_nearest_backward_kernel_hip` and CUDA
-// `interpolate_nearest_backward_kernel` (Wave H4 / M11 fixes).
 //
-// PyTorch nearest forward: oh -> floor(oh * in_h / out_h). No half-pixel
-// offset, no align_corners. The backward scatters each output pixel's
-// gradient back to that single source input pixel.
+// PyTorch nearest forward: oh -> floor(oh * in_h / out_h) computed in FLOAT.
+// No half-pixel offset, no align_corners. The backward scatters each output
+// pixel's gradient back to that single source input pixel, using the SAME
+// float-floor mapping as the forward (nearest_interpolate.comp) and as
+// CPU/CUDA/ROCm — not integer division, which can floor to a different pixel.
 
 layout(local_size_x_id = 0) in;
 
@@ -36,10 +36,14 @@ void main() {
     uint c  = temp % params.channels; temp /= params.channels;
     uint b  = temp;
 
-    uint y = (oh * params.in_h) / params.out_h;
-    uint x = (ow * params.in_w) / params.out_w;
-    if (y > params.in_h - 1u) y = params.in_h - 1u;
-    if (x > params.in_w - 1u) x = params.in_w - 1u;
+    // Match the nearest FORWARD (and CPU/CUDA/ROCm): float floor, not integer
+    // division. Integer arithmetic can select a different source pixel than the
+    // float-floor forward at near-integer products, sending grad to the wrong
+    // cell. Mirror nearest_interpolate.comp exactly.
+    uint y = min(uint(floor(float(oh) * float(params.in_h) / float(params.out_h))),
+                 params.in_h - 1u);
+    uint x = min(uint(floor(float(ow) * float(params.in_w) / float(params.out_w))),
+                 params.in_w - 1u);
 
     uint base_idx = b * (params.channels * params.in_h * params.in_w)
                   + c * (params.in_h * params.in_w);

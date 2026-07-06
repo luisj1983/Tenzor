@@ -371,13 +371,54 @@ auto unique(const Tensor& input,
 
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
+        // F136: the GPU Unique kernels (ROCm/OneAPI/Vulkan) always emit values in
+        // SORTED order, but the CPU reference returns them in FIRST-APPEARANCE
+        // order for sorted_output==false — a silent cross-backend divergence in
+        // the values tensor and the inverse mapping (PyTorch leaves sorted=false
+        // order unspecified, but Tenzor's backends must still agree). When the
+        // caller asked for unsorted output, get a deterministic sorted result +
+        // inverse from the backend, then permute it into first-occurrence order
+        // to match CPU.
+        const bool need_reorder = !sorted_output;
         OpAttributes attrs;
-        attrs.set(AttrKey::Sorted, sorted_output);
-        attrs.set(AttrKey::ReturnInverse, return_inverse);
-        attrs.set(AttrKey::ReturnCounts, return_counts);
+        attrs.set(AttrKey::Sorted, true);
+        attrs.set(AttrKey::ReturnInverse, need_reorder ? true : return_inverse);
+        attrs.set(AttrKey::ReturnCounts, need_reorder ? true : return_counts);
         std::vector<Tensor> inputs = {input};
         auto results = dispatch<OpId::Unique>(inputs, attrs);
-        return {results[0], results[1], results[2]};
+        if (!need_reorder) {
+            return {results[0], results[1], results[2]};
+        }
+        Tensor values = results[0];
+        Tensor inverse = results[1];
+        Tensor counts = results[2];
+        const int64_t U = values.shape().empty() ? 0 : values.shape()[0];
+        const int64_t N = inverse.numel();
+        if (U <= 1 || N == 0) {
+            // 0/1 unique value: order is already identical to first-appearance.
+            return {values,
+                    return_inverse ? inverse : Tensor{},
+                    return_counts ? counts : Tensor{}};
+        }
+        Tensor inverse_flat = inverse.reshape({N});
+        // first_occ[g] = min input position whose group is g (identity = N).
+        Tensor pos = arange(0.0, static_cast<double>(N), 1.0, DType::Int64, inverse.device());
+        Tensor init = full({U}, static_cast<double>(N), DType::Int64, values.device());
+        Tensor first_occ = scatter_reduce(init, 0, inverse_flat, pos, "amin", /*include_self=*/true);
+        Tensor perm = argsort(first_occ, 0, /*descending=*/false);   // groups by first occurrence
+        Tensor inv_perm = argsort(perm, 0, /*descending=*/false);    // inverse permutation
+        values = index_select(values, 0, perm);
+        if (return_counts) {
+            counts = index_select(counts, 0, perm);
+        }
+        Tensor new_inverse;
+        if (return_inverse) {
+            std::vector<int64_t> inv_shape(inverse.shape().begin(), inverse.shape().end());
+            new_inverse = index_select(inv_perm, 0, inverse_flat).reshape(inv_shape);
+        }
+        return {values,
+                return_inverse ? new_inverse : Tensor{},
+                return_counts ? counts : Tensor{}};
     }
 
     // Get contiguous flattened input

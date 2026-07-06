@@ -208,74 +208,63 @@ public:
         const Tensor weight = is_half ? weight_orig.to(DType::Float32) : weight_orig;
         const Tensor grad   = is_half ? grad_orig.to(DType::Float32)   : grad_orig;
 
-        // LayerNorm backward: standard formulas applied per-segment.
-        // For simplicity, we unbind by segment and apply the standard LN backward.
-        auto offsets_cpu = offsets_.device().type == Device::Type::CPU ? offsets_ : offsets_.to(Device::cpu());
-        const int64_t* off = offsets_cpu.data<int64_t>();
-        int64_t B = offsets_cpu.numel() - 1;
-        int64_t D = (input.shape().size() > 1) ? input.shape()[1] : 1;
+        // LayerNorm here normalizes each ROW (token) over the LAST dim D (the
+        // feature axis), independently per row and SEGMENT-AGNOSTIC (matching the
+        // forward kernel nested_layer_norm_kernel). The backward is therefore the
+        // standard per-row LN backward with all statistics reduced over dim=1; the
+        // ragged segment structure is irrelevant, so no per-segment loop is needed.
+        // grad_weight / grad_bias sum over ALL rows (dim=0).
+        //
+        // The previous implementation reduced the mean/var over dim=0 (the tokens
+        // of a segment) — the transpose of the forward's normalization — producing
+        // gradients for a different LN than the forward computed.
+        // Normalize over the LAST dim (matching the forward kernel, which uses
+        // values.shape().back() with total_rows = numel()/D to support >2D nested
+        // values, e.g. multi-head [total_len, H, D_feat]). Flatten ALL leading
+        // dims to a single row axis so the per-row LN backward reduces over the
+        // feature axis regardless of rank; reshape grad_input back at the end.
+        const int64_t ndim = static_cast<int64_t>(input.shape().size());
+        const int64_t D = (ndim > 0) ? input.shape()[ndim - 1] : 1;
+        const int64_t total = input.numel();
+        const int64_t rows = (D > 0) ? total / D : 0;
+        std::vector<int64_t> orig_shape(input.shape().begin(), input.shape().end());
 
-        int64_t total_len = (input.shape().size() > 0) ? input.shape()[0] : 0;
-        auto grad_weight = tenzor::zeros({D}, compute_dtype, weight.device());
-        auto grad_bias = tenzor::zeros({D}, compute_dtype, weight.device());
+        Tensor grad_input, grad_weight, grad_bias;
+        if (rows == 0) {
+            grad_input = tenzor::zeros_like(input);
+            grad_weight = tenzor::zeros({D}, compute_dtype, weight.device());
+            grad_bias = tenzor::zeros({D}, compute_dtype, weight.device());
+        } else {
+            auto in2d = tenzor::reshape(input, {rows, D});   // flatten leading dims → [rows, D]
+            auto g2d  = tenzor::reshape(grad,  {rows, D});
+            // Per-row statistics over the feature axis (dim=1).
+            auto mean = tenzor::mean(in2d, /*dim=*/1, /*keepdim=*/true);  // [rows, 1]
+            auto centered = tenzor::sub(in2d, mean.expand({rows, D}));
+            auto var = tenzor::mean(tenzor::mul(centered, centered), /*dim=*/1, /*keepdim=*/true);
+            auto inv_std = tenzor::reciprocal(tenzor::sqrt(tenzor::add(
+                var, tenzor::full({rows, 1}, static_cast<double>(eps_), var.dtype(), var.device()))));
+            auto normalized = tenzor::mul(centered, inv_std.expand({rows, D}));  // [rows, D]
 
-        // Collect per-segment grad_input rows to cat at the end. Using cat
-        // instead of std::memcpy is backend-safe; the previous memcpy approach
-        // was undefined behavior on GPU-resident tensors.
-        std::vector<Tensor> grad_input_parts;
-        grad_input_parts.reserve(B);
+            // grad_bias = sum_rows(grad); grad_weight = sum_rows(grad * normalized)
+            grad_bias = tenzor::sum(g2d, 0, false);                              // [D]
+            grad_weight = tenzor::sum(tenzor::mul(g2d, normalized), 0, false);   // [D]
 
-        for (int64_t b = 0; b < B; ++b) {
-            int64_t start = off[b];
-            int64_t end = off[b + 1];
-            if (start >= end) continue;
-
-            auto seg_in = input.slice(0, start, end);      // [L, D]
-            auto seg_grad = grad.slice(0, start, end);      // [L, D]
-            int64_t L = end - start;
-
-            // Compute mean and variance for this segment
-            auto seg_mean = tenzor::mean(seg_in, /*dim=*/0, /*keepdim=*/true);  // [1, D]
-            auto centered = tenzor::sub(seg_in, seg_mean.expand({L, D}));
-            auto var = tenzor::mean(tenzor::mul(centered, centered), /*dim=*/0, /*keepdim=*/true);
-            auto inv_std = tenzor::reciprocal(tenzor::sqrt(tenzor::add(var, tenzor::full({1, D}, static_cast<double>(eps_), var.dtype(), var.device()))));
-
-            auto normalized = tenzor::mul(centered, inv_std.expand({L, D}));
-
-            // grad_bias += sum(seg_grad, dim=0)
-            grad_bias = tenzor::add(grad_bias, tenzor::sum(seg_grad, 0, false));
-
-            // grad_weight += sum(seg_grad * normalized, dim=0)
-            grad_weight = tenzor::add(grad_weight, tenzor::sum(tenzor::mul(seg_grad, normalized), 0, false));
-
-            // grad_input for this segment:
-            // dx = (1/L) * inv_std * weight * (L * dout - sum(dout) - normalized * sum(dout * normalized))
-            auto dout_w = tenzor::mul(seg_grad, weight.unsqueeze(0).expand({L, D}));
-            auto sum_dout_w = tenzor::sum(dout_w, 0, true).expand({L, D});
-            auto sum_dout_w_norm = tenzor::sum(tenzor::mul(dout_w, normalized), 0, true).expand({L, D});
-
-            auto seg_grad_in = tenzor::mul(
-                inv_std.expand({L, D}),
+            // dx = inv_std/D * (D*dout_w - sum_j(dout_w) - normalized*sum_j(dout_w*normalized))
+            // with reductions over the feature axis (dim=1) and weight broadcast over rows.
+            auto dout_w = tenzor::mul(g2d, weight.unsqueeze(0).expand({rows, D}));
+            auto sum_dout_w = tenzor::sum(dout_w, 1, true).expand({rows, D});
+            auto sum_dout_w_norm = tenzor::sum(tenzor::mul(dout_w, normalized), 1, true).expand({rows, D});
+            auto grad_in_2d = tenzor::mul(
+                inv_std.expand({rows, D}),
                 tenzor::mul(
-                    tenzor::full({1}, 1.0 / static_cast<double>(L), var.dtype(), var.device()),
+                    tenzor::full({1}, 1.0 / static_cast<double>(D), var.dtype(), var.device()),
                     tenzor::sub(
-                        tenzor::mul(tenzor::full({1}, static_cast<double>(L), var.dtype(), var.device()), dout_w),
+                        tenzor::mul(tenzor::full({1}, static_cast<double>(D), var.dtype(), var.device()), dout_w),
                         tenzor::add(sum_dout_w, tenzor::mul(normalized, sum_dout_w_norm))
                     )
                 )
             );
-
-            grad_input_parts.push_back(seg_grad_in.contiguous());
-        }
-
-        Tensor grad_input;
-        if (grad_input_parts.empty()) {
-            grad_input = tenzor::zeros_like(input);
-        } else if (grad_input_parts.size() == 1 &&
-                   grad_input_parts[0].shape()[0] == total_len) {
-            grad_input = std::move(grad_input_parts[0]);
-        } else {
-            grad_input = tenzor::cat(std::span<const Tensor>(grad_input_parts), 0);
+            grad_input = tenzor::reshape(grad_in_2d, orig_shape);
         }
 
         // Narrow the Float32-widened gradients back to the original dtype so the
@@ -552,6 +541,19 @@ public:
 namespace autograd {
 
 auto nested_softmax(const Variable& values, const Tensor& offsets, int64_t dim) -> Variable {
+    // The nested-softmax kernel always normalizes over the ragged SEGMENT axis
+    // (dim 0) and silently IGNORES `dim`, so a caller passing a feature axis
+    // would get a segment softmax with no error. Reject non-segment dims loudly
+    // rather than compute a different softmax than requested.
+    const int64_t ndim = static_cast<int64_t>(values.tensor().shape().size());
+    const int64_t norm_dim = dim < 0 ? dim + ndim : dim;
+    if (norm_dim != 0) {
+        throw std::runtime_error(
+            "nested_softmax: only dim=0 (the ragged segment axis) is supported — "
+            "the kernel always normalizes over the segment axis and ignores other "
+            "dims. Got dim=" + std::to_string(dim) + ".");
+    }
+
     // Compute forward result
     auto result_tensor = nested_softmax_forward_impl(values.tensor(), offsets, dim);
 

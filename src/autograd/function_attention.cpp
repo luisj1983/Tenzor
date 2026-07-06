@@ -145,15 +145,15 @@ auto composed_attention_backward(const Tensor& dO,
         // and leaks gradient mass).
         int64_t S_q = S.shape()[1];
         int64_t S_k = S.shape()[2];
-        // Top-left causal alignment (query i attends keys 0..i: mask ki > qi),
-        // matching the CPU FlashAttention forward kernel and the CUDA/ROCm/
-        // OneAPI forwards (all use `kv_pos > query_idx`). triu offset 1 masks
-        // strictly above the diagonal == ki > qi for any S_q, S_k. Using the
-        // bottom-right `1 + (S_k - S_q)` offset here would differentiate a
-        // DIFFERENT masked softmax than the forward computed when S_q != S_k
-        // (causal cross-attention / cached-KV decode), yielding wrong dQ/dK/dV.
+        // F026: BOTTOM-RIGHT causal alignment — MUST match the forward, which
+        // masks ki > qi + (S_k - S_q) (flash_attention forward causal_offset =
+        // K.shape[2] - seq_len; GQA offset = seq_k - seq_q). The previous top-left
+        // offset (1) differentiated a DIFFERENT masked softmax than the forward
+        // computed whenever S_q != S_k (causal cross-attention / cached-KV
+        // decode), yielding wrong dQ/dK/dV. triu offset 1 + (S_k - S_q) masks
+        // col > row + (S_k - S_q), i.e. ki > qi + (S_k - S_q).
         Tensor mask = tenzor::triu(tenzor::ones({S_q, S_k}, S.dtype(), S.device()),
-                                   1);
+                                   1 + (S_k - S_q));
         Tensor neg_inf = tenzor::full({1}, -std::numeric_limits<float>::infinity(),
                                       S.dtype(), S.device());
         S = tenzor::where(mask, neg_inf, S);
@@ -565,11 +565,11 @@ auto composed_attention_backward_variable(const Variable& dO,
         auto S_shape = S.tensor().shape();
         int64_t S_q = S_shape[1];
         int64_t S_k = S_shape[2];
-        // Top-left causal alignment (mask ki > qi) matching the CPU/CUDA/ROCm/
-        // OneAPI forward kernels; see the Tensor-composed twin above.
+        // F026: BOTTOM-RIGHT causal alignment (mask ki > qi + (S_k - S_q)) to
+        // match the forward; see the Tensor-composed twin above.
         auto mask_t = ::tenzor::triu(
             ::tenzor::ones({S_q, S_k}, S.tensor().dtype(), S.tensor().device()),
-            1);
+            1 + (S_k - S_q));
         auto neg_inf_t = ::tenzor::full({1}, -std::numeric_limits<double>::infinity(),
                                          S.tensor().dtype(), S.tensor().device());
         Variable mask_v(mask_t, false);
@@ -863,13 +863,12 @@ auto flash_attention(const Variable& Q,
             // The additive form computes 0 * -inf = NaN at masked positions
             // and propagates NaN through softmax for certain dtype/backend
             // combinations. where() is the contract-compliant pattern.
-            // Top-left causal alignment (mask ki > qi) matching the CPU/CUDA/
-            // ROCm/OneAPI forward kernels and the composed-attention twin above.
-            // The bottom-right `1 + (S_k - S_q)` offset diverges whenever
-            // S_q != S_k (causal cross-attention / cached-KV decode), yielding
-            // wrong dQ/dK/dV on backends that hit this Float64 bypass.
+            // F026: BOTTOM-RIGHT causal alignment (mask ki > qi + (S_k - S_q))
+            // to match the forward; the previous top-left offset (1) diverged
+            // whenever S_q != S_k (causal cross-attention / cached-KV decode),
+            // yielding wrong dQ/dK/dV on backends that hit this Float64 bypass.
             auto mask_t = ::tenzor::triu(::tenzor::ones({S_q, S_k},
-                S.tensor().dtype(), S.tensor().device()), 1);
+                S.tensor().dtype(), S.tensor().device()), 1 + (S_k - S_q));
             auto neg_inf_t = ::tenzor::full({1},
                 -std::numeric_limits<double>::infinity(),
                 S.tensor().dtype(), S.tensor().device());

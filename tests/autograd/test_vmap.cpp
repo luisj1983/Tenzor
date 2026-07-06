@@ -128,6 +128,36 @@ TEST_F(VmapTest, VmapMatchesManualLoop) {
     EXPECT_LT(max_diff, 1e-5f);
 }
 
+// F021: vmap over a BINARY op (x * w, w a captured slice-shaped constant) with
+// the batch axis in the MIDDLE (in_dim=1). Raw passthrough would right-align w
+// against the wrong axis (throw or mix batch into a feature axis); the
+// batch_dim-aware rule must match a manual per-slice loop.
+TEST_F(VmapTest, VmapBinaryOpBatchDim1MatchesManualLoop) {
+    const int64_t D = 3, B = 4;
+    auto data = tenzor::zeros({D, B}, DType::Float32, Device::cpu());  // batch on axis 1
+    float* dp = data.data<float>();
+    for (int i = 0; i < D * B; ++i) dp[i] = static_cast<float>(i) * 0.1f + 0.5f;
+    auto w = tenzor::zeros({D}, DType::Float32, Device::cpu());        // unbatched-slice shape
+    float* wp = w.data<float>();
+    wp[0] = 1.5f; wp[1] = -0.5f; wp[2] = 2.0f;
+    Variable wv(w, false);
+
+    Variable input(data, false);
+    auto f = [&wv](const Variable& x) -> Variable { return x * wv; };  // autograd Mul
+    auto vmapped = vmap(f, input, /*in_dim=*/1);
+
+    std::vector<Tensor> manual;
+    for (int64_t b = 0; b < B; ++b) {
+        auto slice = tenzor::select(data, 1, b);   // [D]
+        manual.push_back(tenzor::mul(slice, w));
+    }
+    // vmap keeps the batch at the in_dim position (axis 1) → [D, B].
+    auto expected = tenzor::stack(std::span<const Tensor>(manual), 1);  // [D, B]
+    auto diff = tenzor::abs(tenzor::sub(vmapped.tensor(), expected));
+    float max_diff = *tenzor::max(diff).data<float>();
+    EXPECT_LT(max_diff, 1e-5f) << "vmap binary op with in_dim=1 mismatched manual loop";
+}
+
 // ============================================================================
 // Backend-parameterized variants (plan 4.1)
 //

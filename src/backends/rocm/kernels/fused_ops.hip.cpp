@@ -1509,10 +1509,11 @@ __global__ void flash_attention_backward_kernel_hip(
     const float* __restrict__ O,     // [batch_heads, seq_len, HEAD_DIM]
     const float* __restrict__ dO,    // [batch_heads, seq_len, HEAD_DIM]
     const float* __restrict__ L,     // [batch_heads, seq_len] logsumexp
-    float* __restrict__ dQ,          // [batch_heads, seq_len, HEAD_DIM] (atomicAdd)
-    float* __restrict__ dK,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
-    float* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
-    const int seq_len,
+    float* __restrict__ dQ,          // [batch_heads, seq_len_q, HEAD_DIM] (atomicAdd)
+    float* __restrict__ dK,          // [batch_heads, seq_len_k, HEAD_DIM] (one block per KV tile)
+    float* __restrict__ dV,          // [batch_heads, seq_len_k, HEAD_DIM] (one block per KV tile)
+    const int seq_len_q,
+    const int seq_len_k,
     const float scale,
     const bool causal,
     const float dropout_p,    // dropout probability used in the forward; 0 disables
@@ -1522,20 +1523,26 @@ __global__ void flash_attention_backward_kernel_hip(
     const int batch_head = blockIdx.y;
     const int tid = threadIdx.x;
 
-    const int kv_start = kv_tile_idx * Bc;
-    if (kv_start >= seq_len) return;
-    const int actual_Bc = min(Bc, seq_len - kv_start);
+    // F028: bottom-right causal alignment. Query at absolute position q_row
+    // attends keys kv_pos <= q_row + (seq_len_k - seq_len_q). Matches the ROCm
+    // forward flash_attention_v2_kernel_hip and the CPU/PyTorch convention.
+    const int causal_offset = seq_len_k - seq_len_q;
 
-    // Base pointers for this batch-head
-    const float* Q_base  = Q  + batch_head * seq_len * HEAD_DIM;
-    const float* K_base  = K  + batch_head * seq_len * HEAD_DIM;
-    const float* V_base  = V  + batch_head * seq_len * HEAD_DIM;
-    const float* O_base  = O  + batch_head * seq_len * HEAD_DIM;
-    const float* dO_base = dO + batch_head * seq_len * HEAD_DIM;
-    const float* L_base  = L  + batch_head * seq_len;
-    float* dQ_base = dQ + batch_head * seq_len * HEAD_DIM;
-    float* dK_base = dK + batch_head * seq_len * HEAD_DIM;
-    float* dV_base = dV + batch_head * seq_len * HEAD_DIM;
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len_k) return;
+    const int actual_Bc = min(Bc, seq_len_k - kv_start);
+
+    // Base pointers for this batch-head. Q/O/dO/dQ/L stride by seq_len_q;
+    // K/V/dK/dV stride by seq_len_k (cross-attention: seq_len_q != seq_len_k).
+    const float* Q_base  = Q  + batch_head * seq_len_q * HEAD_DIM;
+    const float* K_base  = K  + batch_head * seq_len_k * HEAD_DIM;
+    const float* V_base  = V  + batch_head * seq_len_k * HEAD_DIM;
+    const float* O_base  = O  + batch_head * seq_len_q * HEAD_DIM;
+    const float* dO_base = dO + batch_head * seq_len_q * HEAD_DIM;
+    const float* L_base  = L  + batch_head * seq_len_q;
+    float* dQ_base = dQ + batch_head * seq_len_q * HEAD_DIM;
+    float* dK_base = dK + batch_head * seq_len_k * HEAD_DIM;
+    float* dV_base = dV + batch_head * seq_len_k * HEAD_DIM;
 
     // Shared memory layout (no dK/dV tiles - those go directly to global)
     extern __shared__ float smem[];
@@ -1573,15 +1580,16 @@ __global__ void flash_attention_backward_kernel_hip(
     }
 
     // Iterate over Q tiles (row blocks)
-    const int num_q_tiles = (seq_len + Br - 1) / Br;
+    const int num_q_tiles = (seq_len_q + Br - 1) / Br;
 
     for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
         const int q_start = q_tile_idx * Br;
-        if (q_start >= seq_len) break;
-        const int actual_Br = min(Br, seq_len - q_start);
+        if (q_start >= seq_len_q) break;
+        const int actual_Br = min(Br, seq_len_q - q_start);
 
-        // For causal masking: skip if all Q rows come before all K cols
-        if (causal && (q_start + actual_Br - 1) < kv_start) {
+        // For causal masking: skip if all Q rows come before all K cols under
+        // the bottom-right offset (max attend pos = q_row + causal_offset).
+        if (causal && (q_start + actual_Br - 1) + causal_offset < kv_start) {
             continue;
         }
 
@@ -1649,7 +1657,7 @@ __global__ void flash_attention_backward_kernel_hip(
             int j = idx % Bc;
             float p = 0.0f;
             if (i < actual_Br && j < actual_Bc) {
-                if (causal && (q_start + i) < (kv_start + j)) {
+                if (causal && (q_start + i) + causal_offset < (kv_start + j)) {
                     p = 0.0f;
                 } else {
                     p = expf(S_tile[i * Bc + j] - l_tile[i]);
@@ -1788,7 +1796,8 @@ auto flash_attention_backward_hip(
     }
 
     int64_t batch_heads = Q.shape()[0];
-    int64_t seq_len = Q.shape()[1];
+    int64_t seq_len_q = Q.shape()[1];
+    int64_t seq_len_k = K.shape()[1];
     int64_t head_dim = Q.shape()[2];
 
     if (dtype != DType::Float32) {
@@ -1797,15 +1806,15 @@ auto flash_attention_backward_hip(
             "Supported: Float32, Float16, BFloat16");
     }
 
-    Tensor dQ = create_hip_zeros({batch_heads, seq_len, head_dim}, Q.dtype(), Q.device());
-    Tensor dK = create_hip_zeros({batch_heads, seq_len, head_dim}, K.dtype(), K.device());
-    Tensor dV = create_hip_zeros({batch_heads, seq_len, head_dim}, V.dtype(), V.device());
+    Tensor dQ = create_hip_zeros({batch_heads, seq_len_q, head_dim}, Q.dtype(), Q.device());
+    Tensor dK = create_hip_zeros({batch_heads, seq_len_k, head_dim}, K.dtype(), K.device());
+    Tensor dV = create_hip_zeros({batch_heads, seq_len_k, head_dim}, V.dtype(), V.device());
 
     constexpr int Br = 32;
     constexpr int Bc = 32;
     constexpr int BLOCK_SIZE = 256;
 
-    int num_kv_tiles = (seq_len + Bc - 1) / Bc;
+    int num_kv_tiles = (seq_len_k + Bc - 1) / Bc;
     dim3 grid(num_kv_tiles, batch_heads);
     dim3 threads(BLOCK_SIZE);
 
@@ -1824,7 +1833,8 @@ auto flash_attention_backward_hip(
     float* dq_ptr = dQ.data<float>();
     float* dk_ptr = dK.data<float>();
     float* dv_ptr = dV.data<float>();
-    int seq_len_int = static_cast<int>(seq_len);
+    int seq_len_q_int = static_cast<int>(seq_len_q);
+    int seq_len_k_int = static_cast<int>(seq_len_k);
 
     // Dispatch based on head_dim for optimal unrolling
     if (head_dim == 32) {
@@ -1833,7 +1843,7 @@ auto flash_attention_backward_hip(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<32, Br, Bc, BLOCK_SIZE>),
             grid, threads, smem, 0,
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal, dropout_p, rng_seed);
+            seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
     } else if (head_dim == 64) {
         size_t smem = compute_bwd_smem(64);
@@ -1841,7 +1851,7 @@ auto flash_attention_backward_hip(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<64, Br, Bc, BLOCK_SIZE>),
             grid, threads, smem, 0,
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal, dropout_p, rng_seed);
+            seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
     } else if (head_dim == 128) {
         size_t smem = compute_bwd_smem(128);
@@ -1849,7 +1859,7 @@ auto flash_attention_backward_hip(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<128, Br, Bc, BLOCK_SIZE>),
             grid, threads, smem, 0,
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal, dropout_p, rng_seed);
+            seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
     } else {
         throw std::runtime_error(
@@ -1981,11 +1991,18 @@ auto fused_attention_hip(
         std::vector<Tensor> mul_in = {scores, scale_t};
         scores = tenzor::dispatch(OpId::Mul, mul_in, empty)[0];
         if (causal) {
-            int64_t sl = sshape[sshape.size() - 1];
-            Tensor rows = tenzor::arange(0, sl, 1, DType::Int64, scores.device());
-            Tensor cols = tenzor::arange(0, sl, 1, DType::Int64, scores.device());
-            std::vector<int64_t> rshape{sl, 1};
-            std::vector<int64_t> cshape{1, sl};
+            // F026/F030: BOTTOM-RIGHT causal alignment + distinct S_q/S_k
+            // extents. The old code used sl = S_k for BOTH axes: a square
+            // [S_k, S_k] top-left mask that (a) crashed cross-attention when
+            // S_q != S_k (broadcast [S_k,S_k] against [BH,S_q,S_k]) and
+            // (b) ignored causal_offset = S_k - S_q used by the flash_attention
+            // forward. Row qi now maps to key position qi + (S_k - S_q).
+            int64_t S_q = sshape[sshape.size() - 2];
+            int64_t S_k = sshape[sshape.size() - 1];
+            Tensor rows = tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, scores.device());
+            Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, scores.device());
+            std::vector<int64_t> rshape{S_q, 1};
+            std::vector<int64_t> cshape{1, S_k};
             Tensor rows_2d = tenzor::reshape(rows, rshape);
             Tensor cols_2d = tenzor::reshape(cols, cshape);
             Tensor rows_f = rows_2d.to(DType::Float32);
@@ -2992,12 +3009,16 @@ __global__ void fused_rms_norm_backward_kernel_hip(
 
     T batch_rrms = rrms[b];
 
-    __shared__ T shared_sum[BLOCK_SZ];
+    // F038: accumulate the Float32 reduction in double to match ROCm LayerNorm
+    // backward and the CPU reference (Float64 input already has T=double).
+    __shared__ double shared_sum[BLOCK_SZ];
 
     // Compute sum(grad_out * x * weight) / norm_size for input gradient
-    T sum_grad_x_w = 0;
+    double sum_grad_x_w = 0;
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        sum_grad_x_w += batch_grad_out[i] * batch_in[i] * weight[i];
+        sum_grad_x_w += static_cast<double>(batch_grad_out[i])
+                      * static_cast<double>(batch_in[i])
+                      * static_cast<double>(weight[i]);
     }
 
     shared_sum[threadIdx.x] = sum_grad_x_w;
@@ -3010,7 +3031,7 @@ __global__ void fused_rms_norm_backward_kernel_hip(
         __syncthreads();
     }
 
-    T mean_grad_x_w = shared_sum[0] / norm_size;
+    double mean_grad_x_w = shared_sum[0] / static_cast<double>(norm_size);
 
     // Compute input gradient and accumulate weight gradient
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {

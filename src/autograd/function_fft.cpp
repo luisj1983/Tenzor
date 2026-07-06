@@ -1,6 +1,7 @@
 #include "tenzor/autograd/function.hpp"
 #include <cassert>
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -222,49 +223,65 @@ auto CumProdBackward::backward_with_variables(std::vector<Variable> grad_outputs
     // SECOND derivative across ≥2 zeros uses the closed form below (exact for
     // ≤1 zero; first-order remains exact for any zero count).
     const auto& input = saved_tensors_[0];
+    const DType orig_dtype = input.dtype();
+    const bool is_cplx = input.is_complex();
+    // Widen Float16/BFloat16 to Float32 for the cumsum/division working precision
+    // (mirror backward()'s work_dtype): the exact prefix-product/cumsum overflows
+    // and loses significance in half, diverging from the first-order path.
+    const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    const DType work_dtype = is_half ? DType::Float32 : orig_dtype;
+
     // GG.1: recompute cumprod from saved input Variable on the higher-order
     // path so output_var carries grad_fn back through the upstream forward.
-    // The saved output Tensor (saved_tensors_[1]) is still used by the
-    // Tensor-only backward(); here we recompute to preserve the chain.
     Variable output_var;
     if (has_saved_variables()) {
         output_var = tenzor::cumprod(saved_variables_[0], dim_);
     } else {
         output_var = Variable(saved_tensors_[1], false);
     }
+    if (is_half) output_var = tenzor::nn::variable_cast(output_var, DType::Float32);
+    Variable grad_v = is_half ? tenzor::nn::variable_cast(grad_outputs[0], DType::Float32)
+                              : grad_outputs[0];
 
-    auto prod_grad = output_var * grad_outputs[0];
+    // Complex Wirtinger convention (mirror backward()'s exact kernel): the
+    // accumulation is over conj(x_j), so use conj(output) as the factor and
+    // divide by conj(input). For real inputs conj is a no-op.
+    auto out_factor = is_cplx ? tenzor::conj(output_var) : output_var;
+    auto prod_grad = out_factor * grad_v;
     auto flipped = tenzor::flip(prod_grad, {dim_});
     auto cum = tenzor::cumsum(flipped, dim_);
     auto rev_cum = tenzor::flip(cum, {dim_});
 
     // CC.3: zero-safe division. Use ones (not eps) in the safe denominator —
     // eps is dtype-dependent and distorts F16 gradients before the mask zeroes
-    // them out.
-    // GG.1: on the higher-order path, build the safe denominator via Variable
-    // ops sourced from saved_variables_[0] so the division's chain through
-    // the input survives create_graph.
-    auto zero_t = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                        input.dtype(), input.device());
-    auto ones_t = ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                       input.dtype(), input.device());
-    auto zero_mask = eq(input, zero_t);  // mask is non-differentiable
+    // them out. Tensors are built at the working dtype so the where/division
+    // dtypes stay consistent after the half-widen.
+    auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto input_work = is_half ? input.to(DType::Float32) : input;
+    auto zero_t = zeros(shape, work_dtype, input.device());
+    auto ones_t = ones(shape, work_dtype, input.device());
+    auto zero_mask = eq(input_work, zero_t);  // mask is non-differentiable
     Variable mask_var(zero_mask, false);
     Variable ones_var(ones_t, false);
     Variable zero_var(zero_t, false);
 
-    Variable safe_input_var;
+    // GG.1: build the safe denominator via Variable ops sourced from
+    // saved_variables_[0] so the division's chain through the input survives
+    // create_graph.
+    Variable input_var;
     if (has_saved_variables()) {
-        safe_input_var = tenzor::where(mask_var, ones_var, saved_variables_[0]);
+        input_var = is_half ? tenzor::nn::variable_cast(saved_variables_[0], DType::Float32)
+                            : saved_variables_[0];
     } else {
-        auto safe_input = where(zero_mask, ones_t, input);
-        safe_input_var = Variable(safe_input, false);
+        input_var = Variable(input_work, false);
     }
+    auto safe_input_var = tenzor::where(mask_var, ones_var, input_var);
+    auto denom = is_cplx ? tenzor::conj(safe_input_var) : safe_input_var;
 
-    auto result = rev_cum / safe_input_var;
-
-    // Zero out positions where input was zero
-    return {tenzor::where(mask_var, zero_var, result)};
+    auto result = rev_cum / denom;
+    result = tenzor::where(mask_var, zero_var, result);  // zero where input was zero
+    if (is_half) result = tenzor::nn::variable_cast(result, orig_dtype);
+    return {result};
 }
 
 // ============================================================================

@@ -115,6 +115,28 @@ auto argsort(const Tensor& input, int64_t dim, bool descending) -> Tensor {
 }
 
 auto prod(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
+    // Complex prod on GPU backends without a native complex reduction kernel
+    // (ROCm/OneAPI/Vulkan throw "prod: unsupported dtype"). Compute via the EXACT
+    // polar decomposition |Πz| = Π|z|, arg(Πz) = Σ arg(z), using SAME-DEVICE real
+    // reductions — no CPU round-trip and no native complex kernel required. CPU
+    // and CUDA have native complex prod, so try the native dispatch first and only
+    // fall back when the backend reports the dtype unsupported (mirrors the
+    // native-then-composed pattern used by the attention backward).
+    if (is_complex_type(input.dtype()) && input.device().type != Device::Type::CPU) {
+        try {
+            NewOpAttributes cattrs;
+            if (dim.has_value()) cattrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "prod"));
+            cattrs.set(AttrKey::Keepdim, keepdim);
+            std::vector<Tensor> cinputs = {input};
+            return dispatch(OpId::Prod, cinputs, cattrs)[0];
+        } catch (const std::exception&) {
+            Tensor mag = abs(input);      // |z|  (real)
+            Tensor ang = angle(input);    // atan2(im, re)  (real)
+            Tensor pmag = prod(mag, dim, keepdim);   // Π|z|  (real prod, native)
+            Tensor sang = sum(ang, dim, keepdim);    // Σ arg  (real sum, native)
+            return complex(pmag * cos(sang), pmag * sin(sang));
+        }
+    }
     // Promote small integer types to Int64 to prevent overflow
     Tensor promoted = is_small_int_dtype(input.dtype()) ? input.to(DType::Int64) : input;
     NewOpAttributes attrs;

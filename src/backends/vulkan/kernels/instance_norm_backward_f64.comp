@@ -70,18 +70,12 @@ void main() {
     float64_t mean = mean_data[nc_idx];
     float64_t rstd = rstd_data[nc_idx];
 
-    bool zero_variance = (rstd > float64_t(100.0));
-
-    if (zero_variance) {
-        for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
-            grad_input[base + i] = float64_t(0.0);
-            if (params.affine > 0) {
-                float64_t dy = grad_output[base + i];
-                atomicAddF64Bias(c, dy);
-            }
-        }
-        return;
-    }
+    // NOTE: no rstd-magnitude clamp here. The previous `rstd > 100` "zero
+    // variance" guard zeroed grad_input for any legitimately small-but-valid
+    // variance, diverging from the CPU/CUDA/ROCm backends and the Float32
+    // shader (instance_norm_backward.comp). rstd is finite (1/sqrt(var+eps)),
+    // so the analytic formula below is well-defined even at var == 0. This is
+    // the gradcheck (Float64) path, so correctness at low variance matters.
 
     float64_t local_sum_dy_w = float64_t(0.0);
     float64_t local_sum_dy_w_xhat = float64_t(0.0);

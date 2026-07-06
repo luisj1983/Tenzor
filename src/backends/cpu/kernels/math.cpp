@@ -7492,7 +7492,8 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 if (!std::isnan(v)) { acc += static_cast<double>(v); count++; }
             }
             *result.data<scalar_t>() =
-                count > 0 ? static_cast<scalar_t>(acc / static_cast<double>(count)) : scalar_t(0);
+                count > 0 ? static_cast<scalar_t>(acc / static_cast<double>(count))
+                          : std::numeric_limits<scalar_t>::quiet_NaN();  // F148: all-NaN slice -> NaN (0/0), matches PyTorch and CUDA/ROCm dim / OneAPI / Vulkan
         });
         return result;
     }
@@ -7531,7 +7532,8 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 if (!std::isnan(v)) { acc += static_cast<double>(v); count++; }
             }
             out_data[idx] =
-                count > 0 ? static_cast<scalar_t>(acc / static_cast<double>(count)) : scalar_t(0);
+                count > 0 ? static_cast<scalar_t>(acc / static_cast<double>(count))
+                          : std::numeric_limits<scalar_t>::quiet_NaN();  // F148: all-NaN slice -> NaN (0/0), matches PyTorch and CUDA/ROCm dim / OneAPI / Vulkan
         }
     });
     return result;

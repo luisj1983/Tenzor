@@ -44,6 +44,7 @@ void main() {
 
     for (uint col = 0u; col < n_cols; col++) {
         float64_t sum = 0.0lf;
+        bool found = false;
         for (uint a = a_start; a < a_end; a++) {
             uint a_col = uint(a_col_indices[a]);
             float64_t a_val = a_values[a];
@@ -52,10 +53,16 @@ void main() {
             for (uint b = b_start; b < b_end; b++) {
                 if (uint(b_col_indices[b]) == col) {
                     sum += a_val * b_values[b];
+                    found = true;
                 }
             }
         }
-        if (sum != 0.0lf) {
+        // Write every distinct product column, even when the sum cancels to
+        // exactly 0. The count pass (sparse_spgemm_count) sizes c_row_offsets
+        // from the set of present columns, so dropping exact-zero sums would
+        // leave spurious (col=0,val=0) tail padding → malformed CSR. Matches
+        // OneAPI spgemm and the f32 fill shader.
+        if (found) {
             c_col_indices[write_pos] = int(col);
             c_values[write_pos] = sum;
             write_pos++;

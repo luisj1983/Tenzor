@@ -787,9 +787,11 @@ __global__ void group_norm_backward_hip_kernel(
     T mean_val = mean_saved[group_idx];
     T inv_std = inv_std_saved[group_idx];
 
-    // Pass 1: compute sum_dy and sum_dy_xhat
-    T local_sum_dy = T(0);
-    T local_sum_dy_xhat = T(0);
+    // Pass 1: compute sum_dy and sum_dy_xhat.
+    // F038: accumulate the Float32 reduction in double to match ROCm LayerNorm
+    // backward and the CPU reference (Float64 input already runs T=double).
+    double local_sum_dy = 0.0;
+    double local_sum_dy_xhat = 0.0;
 
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
         int64_t c_offset = i / HW;
@@ -799,15 +801,15 @@ __global__ void group_norm_backward_hip_kernel(
         T dy = grad_output[idx];
         if (weight) dy = dy * weight[c];
         T xhat = (input[idx] - mean_val) * inv_std;
-        local_sum_dy += dy;
-        local_sum_dy_xhat += dy * xhat;
+        local_sum_dy += static_cast<double>(dy);
+        local_sum_dy_xhat += static_cast<double>(dy) * static_cast<double>(xhat);
     }
 
     // Block-level reduction using existing warp_reduce_sum + shared memory
     // Max warps per block: 1024/32=32 (RDNA) or 1024/64=16 (CDNA)
     constexpr int MAX_WARPS = 32;
-    __shared__ T shared_dy[MAX_WARPS];
-    __shared__ T shared_dy_xhat[MAX_WARPS];
+    __shared__ double shared_dy[MAX_WARPS];
+    __shared__ double shared_dy_xhat[MAX_WARPS];
 
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
@@ -821,11 +823,11 @@ __global__ void group_norm_backward_hip_kernel(
     }
     __syncthreads();
 
-    T sum_dy, sum_dy_xhat;
+    double sum_dy, sum_dy_xhat;
     int num_warps = (blockDim.x + warpSize - 1) / warpSize;
     if (warp_id == 0) {
-        local_sum_dy = (lane < num_warps) ? shared_dy[lane] : T(0);
-        local_sum_dy_xhat = (lane < num_warps) ? shared_dy_xhat[lane] : T(0);
+        local_sum_dy = (lane < num_warps) ? shared_dy[lane] : 0.0;
+        local_sum_dy_xhat = (lane < num_warps) ? shared_dy_xhat[lane] : 0.0;
         local_sum_dy = warp_reduce_sum(local_sum_dy);
         local_sum_dy_xhat = warp_reduce_sum(local_sum_dy_xhat);
         if (lane == 0) {
@@ -837,7 +839,7 @@ __global__ void group_norm_backward_hip_kernel(
     sum_dy = shared_dy[0];
     sum_dy_xhat = shared_dy_xhat[0];
 
-    T inv_group_size = T(1) / T(group_size);
+    double inv_group_size = 1.0 / static_cast<double>(group_size);
 
     // Pass 2: compute grad_input
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
@@ -848,7 +850,9 @@ __global__ void group_norm_backward_hip_kernel(
         T dy = grad_output[idx];
         if (weight) dy = dy * weight[c];
         T xhat = (input[idx] - mean_val) * inv_std;
-        grad_input[idx] = inv_std * (dy - inv_group_size * (sum_dy + xhat * sum_dy_xhat));
+        grad_input[idx] = static_cast<T>(static_cast<double>(inv_std) *
+            (static_cast<double>(dy) - inv_group_size *
+                (sum_dy + static_cast<double>(xhat) * sum_dy_xhat)));
     }
 
     // Accumulate grad_weight and grad_bias (atomic since multiple samples contribute)

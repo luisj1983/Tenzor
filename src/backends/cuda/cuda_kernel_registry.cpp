@@ -1916,7 +1916,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             scores = tenzor::mul(scores, tenzor::full(ssh, scale_d, DType::Float64, scores.device()));
             if (causal_attr) {
                 int64_t S_q = ssh[ssh.size() - 2], S_k = ssh[ssh.size() - 1];
-                Tensor rows = tenzor::reshape(tenzor::arange(0, S_q, 1, DType::Int64, Q.device()), {S_q, 1});
+                // F026/F030: BOTTOM-RIGHT causal alignment (row qi -> key position
+                // qi + (S_k - S_q)); matches flash_attention forward causal_offset
+                // = S_k - S_q. Top-left (arange(0,S_q)) diverges when S_q != S_k.
+                Tensor rows = tenzor::reshape(tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, Q.device()), {S_q, 1});
                 Tensor cols = tenzor::reshape(tenzor::arange(0, S_k, 1, DType::Int64, Q.device()), {1, S_k});
                 Tensor mask = tenzor::gt(cols.to(DType::Float64), rows.to(DType::Float64));
                 Tensor neg_inf = tenzor::full(ssh, -std::numeric_limits<double>::infinity(),
@@ -2120,7 +2123,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 if (causal) {
                     int64_t S_q = scores_shape[scores_shape.size() - 2];
                     int64_t S_k = scores_shape[scores_shape.size() - 1];
-                    Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Qi.device());
+                    // F026/F030: BOTTOM-RIGHT causal alignment (row qi -> key
+                    // position qi + (S_k - S_q)); matches flash_attention forward
+                    // causal_offset = S_k - S_q. Top-left diverges when S_q != S_k.
+                    Tensor rows = tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, Qi.device());
                     Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Qi.device());
                     rows = tenzor::reshape(rows, {S_q, 1});
                     cols = tenzor::reshape(cols, {1, S_k});
@@ -2291,7 +2297,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 // decode have S_q != S_k). Mirrors the forward composed path.
                 int64_t S_q = scores_shape[scores_shape.size() - 2];
                 int64_t S_k = scores_shape[scores_shape.size() - 1];
-                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, scores.device());
+                // F026/F030: BOTTOM-RIGHT causal alignment (row qi -> key position
+                // qi + (S_k - S_q)); matches flash_attention forward causal_offset
+                // = S_k - S_q. Top-left diverges when S_q != S_k.
+                Tensor rows = tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, scores.device());
                 Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, scores.device());
                 rows = tenzor::reshape(rows, {S_q, 1});
                 cols = tenzor::reshape(cols, {1, S_k});
@@ -3321,24 +3330,41 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             const Tensor& w_hh  = inputs[8];
             const int64_t batch_size  = input.shape()[0];
             const int64_t hidden_size = hx.shape()[1];
+            // F16/BF16 (F107): mirror the CPU backend — widen every operand to
+            // Float32 and run d_gates, the grad_input/grad_w composition GEMMs
+            // AND the bias column-sums entirely in fp32, then narrow the final
+            // grads once. Running the composition on half d_gates dropped
+            // >half-ULP of grad_w_ih/grad_w_hh/grad_input vs CPU.
+            const DType orig = input.dtype();
+            const bool widen = (orig == DType::Float16 || orig == DType::BFloat16);
+            auto W = [&](const Tensor& t) { return widen ? t.to(DType::Float32) : t; };
+            const Tensor c_d_hy = W(d_hy), c_d_cy = W(d_cy), c_input = W(input),
+                         c_hx = W(hx), c_cx = W(cx), c_cy = W(cy),
+                         c_w_ih = W(w_ih), c_w_hh = W(w_hh);
             // Recompute the gate pre-activations (cell backward needs them).
             Tensor gates = cuda::add_kernel(
-                cuda::matmul_kernel(input, cuda::transpose_kernel(w_ih, 0, 1, stream), stream),
-                cuda::matmul_kernel(hx, cuda::transpose_kernel(w_hh, 0, 1, stream), stream), stream);
-            if (inputs[9].numel() > 0)  gates = cuda::add_kernel(gates, inputs[9], stream);
-            if (inputs[10].numel() > 0) gates = cuda::add_kernel(gates, inputs[10], stream);
-            // Cell backward -> grad wrt gate pre-activations and wrt c_prev.
+                cuda::matmul_kernel(c_input, cuda::transpose_kernel(c_w_ih, 0, 1, stream), stream),
+                cuda::matmul_kernel(c_hx, cuda::transpose_kernel(c_w_hh, 0, 1, stream), stream), stream);
+            if (inputs[9].numel() > 0)  gates = cuda::add_kernel(gates, W(inputs[9]), stream);
+            if (inputs[10].numel() > 0) gates = cuda::add_kernel(gates, W(inputs[10]), stream);
+            // Cell backward -> grad wrt gate pre-activations and wrt c_prev
+            // (fp32 in the widened path -> native fp32 cell kernel, no narrow).
             auto [d_gates, grad_cx] = cuda::lstm_cell_backward_kernel(
-                d_hy, d_cy, gates, cx, cy, batch_size, hidden_size, stream);
+                c_d_hy, c_d_cy, gates, c_cx, c_cy, batch_size, hidden_size, stream);
             // Linear backward through gates = input@w_ih^T + hx@w_hh^T + b.
-            Tensor grad_input = cuda::matmul_kernel(d_gates, w_ih, stream);      // [B,in]
-            Tensor grad_hx    = cuda::matmul_kernel(d_gates, w_hh, stream);      // [B,H]
+            Tensor grad_input = cuda::matmul_kernel(d_gates, c_w_ih, stream);    // [B,in]
+            Tensor grad_hx    = cuda::matmul_kernel(d_gates, c_w_hh, stream);    // [B,H]
             Tensor d_gates_T  = cuda::transpose_kernel(d_gates, 0, 1, stream);   // [4H,B]
-            Tensor grad_w_ih  = cuda::matmul_kernel(d_gates_T, input, stream);   // [4H,in]
-            Tensor grad_w_hh  = cuda::matmul_kernel(d_gates_T, hx, stream);      // [4H,H]
+            Tensor grad_w_ih  = cuda::matmul_kernel(d_gates_T, c_input, stream); // [4H,in]
+            Tensor grad_w_hh  = cuda::matmul_kernel(d_gates_T, c_hx, stream);    // [4H,H]
             // Column-sum over the batch for the bias grads: ones[1,B] @ d_gates.
             Tensor ones = cuda::ones_kernel({1, batch_size}, d_gates.dtype(), d_gates.device(), stream);
             Tensor grad_b = cuda::matmul_kernel(ones, d_gates, stream).reshape({4 * hidden_size});
+            if (widen) {
+                return {grad_input.to(orig), grad_hx.to(orig), grad_cx.to(orig),
+                        grad_w_ih.to(orig), grad_w_hh.to(orig),
+                        grad_b.to(orig), grad_b.to(orig)};
+            }
             return {grad_input, grad_hx, grad_cx, grad_w_ih, grad_w_hh, grad_b, grad_b};
         }
         // Legacy fused 5-input form ({grad_h, grad_c, gates, c_prev, c_out}).
@@ -3407,11 +3433,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             const Tensor& b_hh  = inputs[6];
             const int64_t batch_size  = input.shape()[0];
             const int64_t hidden_size = hx.shape()[1];
+            // F16/BF16 (F107): mirror the CPU backend — widen every operand to
+            // Float32 and run the gate backward, the grad_input/grad_w
+            // composition GEMMs AND the bias column-sums entirely in fp32, then
+            // narrow the final grads once. Running the composition on half
+            // d_gates dropped >half-ULP of grad_w_ih/grad_w_hh/grad_input vs CPU.
+            const DType orig = input.dtype();
+            const bool widen = (orig == DType::Float16 || orig == DType::BFloat16);
+            auto W = [&](const Tensor& t) { return widen ? t.to(DType::Float32) : t; };
+            const Tensor c_d_hy = W(d_hy), c_input = W(input), c_hx = W(hx),
+                         c_w_ih = W(w_ih), c_w_hh = W(w_hh);
             // Recompute the gate pre-activations (per ih/hh side).
-            Tensor gates_ih = cuda::matmul_kernel(input, cuda::transpose_kernel(w_ih, 0, 1, stream), stream);
-            if (b_ih.numel() > 0) gates_ih = cuda::add_kernel(gates_ih, b_ih, stream);
-            Tensor gates_hh = cuda::matmul_kernel(hx, cuda::transpose_kernel(w_hh, 0, 1, stream), stream);
-            if (b_hh.numel() > 0) gates_hh = cuda::add_kernel(gates_hh, b_hh, stream);
+            Tensor gates_ih = cuda::matmul_kernel(c_input, cuda::transpose_kernel(c_w_ih, 0, 1, stream), stream);
+            if (b_ih.numel() > 0) gates_ih = cuda::add_kernel(gates_ih, W(b_ih), stream);
+            Tensor gates_hh = cuda::matmul_kernel(c_hx, cuda::transpose_kernel(c_w_hh, 0, 1, stream), stream);
+            if (b_hh.numel() > 0) gates_hh = cuda::add_kernel(gates_hh, W(b_hh), stream);
             auto ih = cuda::split_kernel(gates_ih, hidden_size, /*dim=*/1, stream); // [r_i,z_i,n_i]
             auto hh = cuda::split_kernel(gates_hh, hidden_size, /*dim=*/1, stream); // [r_h,z_h,n_h]
             Tensor reset_gates  = cuda::add_kernel(ih[0], hh[0], stream);
@@ -3419,7 +3455,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             Tensor new_input    = ih[2];
             Tensor new_hidden   = hh[2];
             auto o = cuda::gru_cell_backward_kernel(
-                d_hy, reset_gates, update_gates, new_input, new_hidden, hx,
+                c_d_hy, reset_gates, update_gates, new_input, new_hidden, c_hx,
                 batch_size, hidden_size, stream);
             // reset/update gates receive grad on both ih and hh sides;
             // new gate's ih chunk gets grad_new_input, hh chunk grad_new_hidden.
@@ -3427,14 +3463,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             std::array<Tensor, 3> hh_parts{o.grad_reset, o.grad_update, o.grad_new_hidden};
             Tensor d_gates_ih = cuda::cat_kernel(ih_parts, /*dim=*/1, stream);
             Tensor d_gates_hh = cuda::cat_kernel(hh_parts, /*dim=*/1, stream);
-            Tensor grad_input = cuda::matmul_kernel(d_gates_ih, w_ih, stream);
-            Tensor grad_hx = cuda::add_kernel(cuda::matmul_kernel(d_gates_hh, w_hh, stream),
+            Tensor grad_input = cuda::matmul_kernel(d_gates_ih, c_w_ih, stream);
+            Tensor grad_hx = cuda::add_kernel(cuda::matmul_kernel(d_gates_hh, c_w_hh, stream),
                                               o.grad_h_prev, stream);
-            Tensor grad_w_ih = cuda::matmul_kernel(cuda::transpose_kernel(d_gates_ih, 0, 1, stream), input, stream);
-            Tensor grad_w_hh = cuda::matmul_kernel(cuda::transpose_kernel(d_gates_hh, 0, 1, stream), hx, stream);
+            Tensor grad_w_ih = cuda::matmul_kernel(cuda::transpose_kernel(d_gates_ih, 0, 1, stream), c_input, stream);
+            Tensor grad_w_hh = cuda::matmul_kernel(cuda::transpose_kernel(d_gates_hh, 0, 1, stream), c_hx, stream);
             Tensor ones = cuda::ones_kernel({1, batch_size}, d_gates_ih.dtype(), d_gates_ih.device(), stream);
             Tensor grad_b_ih = cuda::matmul_kernel(ones, d_gates_ih, stream).reshape({3 * hidden_size});
             Tensor grad_b_hh = cuda::matmul_kernel(ones, d_gates_hh, stream).reshape({3 * hidden_size});
+            if (widen) {
+                return {grad_input.to(orig), grad_hx.to(orig),
+                        grad_w_ih.to(orig), grad_w_hh.to(orig),
+                        grad_b_ih.to(orig), grad_b_hh.to(orig)};
+            }
             return {grad_input, grad_hx, grad_w_ih, grad_w_hh, grad_b_ih, grad_b_hh};
         }
         // Legacy fused 6-input form.

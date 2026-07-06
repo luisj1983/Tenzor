@@ -19,6 +19,11 @@ void main() {
 
     int take_idx = indices[idx];
 
+    // Wrap negative flat indices (Python-style), matching CPU take
+    // (indexing.cpp): idx += numel. Only genuinely out-of-range indices
+    // fall through to the zero-output guard.
+    if (take_idx < 0) take_idx += int(params.numel);
+
     // Bounds check: clamp out-of-range indices to zero output
     if (take_idx < 0 || take_idx >= int(params.numel)) {
         output_data[idx] = 0.0;

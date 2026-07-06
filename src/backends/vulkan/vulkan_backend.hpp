@@ -319,7 +319,7 @@ public:
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, double param) -> Tensor;
     // NanToNum and bitwise shift dispatchers (vulkan_ops_misc.cpp). Replace previous CPU fallbacks.
-    auto dispatchNanToNum(const Tensor& input, float nan_val, float posinf_val, float neginf_val) -> Tensor;
+    auto dispatchNanToNum(const Tensor& input, double nan_val, double posinf_val, double neginf_val) -> Tensor;
     auto dispatchBitwiseBinaryOp(const std::string& shader_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchHeaviside(const Tensor& input, const Tensor& values) -> Tensor;
     // Special-math dispatchers (vulkan_ops_special_math.cpp). Replace previous CPU fallbacks.

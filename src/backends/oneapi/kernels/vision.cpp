@@ -43,6 +43,8 @@ struct InterpolateBicubicKernelBFloat16 {};
 struct BoxIoUKernelFloat16 {};
 struct BoxIoUKernelBFloat16 {};
 struct NmsIoUBitmaskKernel {};
+struct InterpolateNearestBackwardKernelFloat32 {};
+struct InterpolateNearestBackwardKernelFloat64 {};
 
 
 
@@ -2206,6 +2208,61 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
     Tensor grad_input({N, C, in_h, in_w}, grad_output.dtype(), grad_output.device());
     queue.memset(grad_input.data_ptr(), 0,
                  static_cast<size_t>(grad_input.numel()) * dtype_size(grad_input.dtype())).wait();
+
+    // Nearest backward: the transpose of the single-pixel gather forward is a
+    // single-pixel scatter — each output grad accumulates onto exactly the
+    // source pixel min(floor(o*in/out), in-1) it was gathered from. (The old
+    // code fell through to the bilinear scatter, spreading grad over a 4-corner
+    // neighborhood — the transpose of neither the forward nor any other
+    // backend's nearest backward.)
+    if (mode == "nearest") {
+        const int64_t total = N * C * out_h * out_w;
+        if (grad_output.dtype() == DType::Float32) {
+            const float* go = get_data_ptr<const float>(grad_output);
+            float* gi = get_data_ptr<float>(grad_input);
+            queue.parallel_for<InterpolateNearestBackwardKernelFloat32>(
+                sycl::range<1>(total), [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t ow = temp % out_w; temp /= out_w;
+                    const int64_t oh = temp % out_h; temp /= out_h;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+                    int64_t h_in = static_cast<int64_t>(static_cast<float>(oh) * in_h / out_h);
+                    int64_t w_in = static_cast<int64_t>(static_cast<float>(ow) * in_w / out_w);
+                    h_in = sycl::min(h_in, in_h - 1);
+                    w_in = sycl::min(w_in, in_w - 1);
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                     sycl::memory_scope::device>
+                        a(gi[((n * C + c) * in_h + h_in) * in_w + w_in]);
+                    a.fetch_add(go[idx]);
+                }).wait();
+        } else if (grad_output.dtype() == DType::Float64) {
+            const double* go = get_data_ptr<const double>(grad_output);
+            double* gi = get_data_ptr<double>(grad_input);
+            queue.parallel_for<InterpolateNearestBackwardKernelFloat64>(
+                sycl::range<1>(total), [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t ow = temp % out_w; temp /= out_w;
+                    const int64_t oh = temp % out_h; temp /= out_h;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+                    int64_t h_in = static_cast<int64_t>(static_cast<double>(oh) * in_h / out_h);
+                    int64_t w_in = static_cast<int64_t>(static_cast<double>(ow) * in_w / out_w);
+                    h_in = sycl::min(h_in, in_h - 1);
+                    w_in = sycl::min(w_in, in_w - 1);
+                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
+                                     sycl::memory_scope::device>
+                        a(gi[((n * C + c) * in_h + h_in) * in_w + w_in]);
+                    a.fetch_add(go[idx]);
+                }).wait();
+        } else {
+            throw std::runtime_error(
+                "interpolate_backward nearest (OneAPI): unsupported dtype " +
+                std::string(dtype_name(grad_output.dtype())) +
+                ". Only Float32 and Float64 are supported (sycl::atomic_ref availability).");
+        }
+        return grad_input;
+    }
 
     const bool is_bicubic = (mode == "bicubic");
     if (grad_output.dtype() == DType::Float32) {

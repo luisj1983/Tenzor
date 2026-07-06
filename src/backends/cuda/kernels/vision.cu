@@ -329,6 +329,9 @@ __global__ void interpolate_nearest_kernel(
     int64_t out_h,
     int64_t out_w
 ) {
+    // Compute the source index in double for Float64 inputs so the scale
+    // multiply + truncate matches the CPU FP64 reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total_elements = batch * channels * out_h * out_w;
 
     TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
@@ -340,8 +343,8 @@ __global__ void interpolate_nearest_kernel(
         int64_t b = temp;
 
         // Calculate source position
-        float scale_h = static_cast<float>(in_h) / out_h;
-        float scale_w = static_cast<float>(in_w) / out_w;
+        Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+        Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
 
         int64_t ih = static_cast<int64_t>(oh * scale_h);
         int64_t iw = static_cast<int64_t>(ow * scale_w);
@@ -618,9 +621,12 @@ __global__ void interpolate_nearest_5d_kernel(
     int64_t out_h,
     int64_t out_w
 ) {
-    float scale_d = static_cast<float>(in_d) / out_d;
-    float scale_h = static_cast<float>(in_h) / out_h;
-    float scale_w = static_cast<float>(in_w) / out_w;
+    // Compute the source index in double for Float64 inputs so the scale
+    // multiply + truncate matches the CPU FP64 reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
+    Compute scale_d = static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+    Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+    Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
     int64_t total = batch * channels * out_d * out_h * out_w;
 
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {
@@ -805,6 +811,9 @@ __global__ void interpolate_nearest_backward_kernel(
     int64_t in_h, int64_t in_w,
     int64_t out_h, int64_t out_w)
 {
+    // Compute the source index in double for Float64 inputs so the scale
+    // multiply + truncate matches the CPU FP64 reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
     int64_t total = batch * channels * out_h * out_w;
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t temp = idx;
@@ -814,11 +823,11 @@ __global__ void interpolate_nearest_backward_kernel(
         int64_t b  = temp;
 
         // Use the IDENTICAL source-pixel mapping as the forward kernel
-        // (float scale then truncate); float `oh*scale` and integer floor of
+        // (scale then truncate); `oh*scale` and integer floor of
         // `oh*in_h/out_h` can disagree at integer boundaries, which would land
         // the gradient on the wrong input pixel and break parity.
-        float scale_h = static_cast<float>(in_h) / out_h;
-        float scale_w = static_cast<float>(in_w) / out_w;
+        Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+        Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
         int64_t y = static_cast<int64_t>(oh * scale_h);
         int64_t x = static_cast<int64_t>(ow * scale_w);
         y = min(max(y, int64_t(0)), in_h - 1);
@@ -1019,9 +1028,12 @@ __global__ void interpolate_nearest_5d_backward_kernel(
     int64_t in_d, int64_t in_h, int64_t in_w,
     int64_t out_d, int64_t out_h, int64_t out_w)
 {
-    float scale_d = static_cast<float>(in_d) / out_d;
-    float scale_h = static_cast<float>(in_h) / out_h;
-    float scale_w = static_cast<float>(in_w) / out_w;
+    // Compute the source index in double for Float64 inputs so the scale
+    // multiply + truncate matches the CPU FP64 reference; float otherwise.
+    using Compute = typename std::conditional<std::is_same<T, double>::value, double, float>::type;
+    Compute scale_d = static_cast<Compute>(in_d) / static_cast<Compute>(out_d);
+    Compute scale_h = static_cast<Compute>(in_h) / static_cast<Compute>(out_h);
+    Compute scale_w = static_cast<Compute>(in_w) / static_cast<Compute>(out_w);
     int64_t total = batch * channels * out_d * out_h * out_w;
 
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {

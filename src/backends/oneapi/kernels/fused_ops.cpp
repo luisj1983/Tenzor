@@ -2464,8 +2464,12 @@ auto flash_attention_impl(
                 for (int kv_block = 0; kv_block < num_kv_blocks; ++kv_block) {
                     const int k_start = kv_block * Bc;
 
-                    // For causal masking: skip blocks entirely past the causal boundary
-                    if (causal && k_start > query_idx) break;
+                    // For causal masking: skip blocks entirely past the causal
+                    // boundary. Use the bottom-right offset (slk - slq) so
+                    // KV-cache / cross-attention (slk > slq) does not early-break
+                    // and drop valid key blocks the fine-grained mask (below,
+                    // kv_pos > query_idx + (slk - slq)) would still admit (F031).
+                    if (causal && k_start > query_idx + (slk - slq)) break;
 
                     const int actual_Bc = sycl::min(Bc, slk - k_start);
 
@@ -2723,7 +2727,12 @@ auto flash_attention_backward_oneapi_f32(
     sycl::queue& queue
 ) -> std::tuple<Tensor, Tensor, Tensor> {
     const int64_t batch_heads = Q.shape()[0];
-    const int64_t seq_len = Q.shape()[1];
+    // Thread the query and key sequence lengths separately: Q/O/dO/dQ/L are on
+    // the query axis (seq_len_q); K/V/dK/dV are on the key axis (seq_len_k).
+    // For cross-attention / KV-cache (seq_q != seq_k) a single seq_len breaks
+    // both the causal mask and the K/V base strides (F029).
+    const int64_t seq_len_q = Q.shape()[1];
+    const int64_t seq_len_k = K.shape()[1];
     const int64_t head_dim = Q.shape()[2];
 
     if (head_dim != 32 && head_dim != 64 && head_dim != 128) {
@@ -2737,19 +2746,20 @@ auto flash_attention_backward_oneapi_f32(
     const int Bc = Bc_const;
     const int BLOCK_SIZE = BLOCK_SIZE_const;
 
-    Tensor dQ(std::vector<int64_t>{batch_heads, seq_len, head_dim},
+    Tensor dQ(std::vector<int64_t>{batch_heads, seq_len_q, head_dim},
               DType::Float32, Q.device());
-    Tensor dK(std::vector<int64_t>{batch_heads, seq_len, head_dim},
+    Tensor dK(std::vector<int64_t>{batch_heads, seq_len_k, head_dim},
               DType::Float32, K.device());
-    Tensor dV(std::vector<int64_t>{batch_heads, seq_len, head_dim},
+    Tensor dV(std::vector<int64_t>{batch_heads, seq_len_k, head_dim},
               DType::Float32, V.device());
 
     // Zero-init dQ (atomicAdd target). dK/dV are fully written once per kv_tile.
-    queue.memset(dQ.data_ptr(), 0, batch_heads * seq_len * head_dim * sizeof(float)).wait();
+    queue.memset(dQ.data_ptr(), 0, batch_heads * seq_len_q * head_dim * sizeof(float)).wait();
 
-    const int num_kv_tiles = static_cast<int>((seq_len + Bc - 1) / Bc);
+    const int num_kv_tiles = static_cast<int>((seq_len_k + Bc - 1) / Bc);
     const int hd = static_cast<int>(head_dim);
-    const int sl = static_cast<int>(seq_len);
+    const int slq = static_cast<int>(seq_len_q);
+    const int slk = static_cast<int>(seq_len_k);
 
     // Local memory layout (floats):
     //   K_tile [Bc][hd] | V_tile [Bc][hd] | Q_tile [Br][hd] | dO_tile [Br][hd]
@@ -2771,10 +2781,11 @@ auto flash_attention_backward_oneapi_f32(
         sycl::local_accessor<float, 1> lmem(local_floats, cgh);
 
         const int hd_k = hd;
-        const int sl_k = sl;
+        const int slq_k = slq;
+        const int slk_k = slk;
         const float sc_k = scale;
         const bool causal_k = causal;
-        const int num_q_tiles = (sl + Br - 1) / Br;
+        const int num_q_tiles = (slq + Br - 1) / Br;
 
         cgh.parallel_for<FlashAttentionBackwardKernelF32>(
             sycl::nd_range<2>(
@@ -2787,24 +2798,26 @@ auto flash_attention_backward_oneapi_f32(
                 const int tid = static_cast<int>(item.get_local_id(1));
 
                 const int kv_start = kv_tile_idx * Bc;
-                if (kv_start >= sl_k) return;
-                const int actual_Bc = sycl::min(Bc, sl_k - kv_start);
+                if (kv_start >= slk_k) return;
+                const int actual_Bc = sycl::min(Bc, slk_k - kv_start);
 
-                // Per-batch_head base offset in int64_t: batch_head*sl_k*hd_k can
-                // exceed 2^31 for large batch_heads*seq_len even with bounded
-                // head_dim, and int*int*int arithmetic would wrap negative and
-                // index out of bounds.
-                const int64_t bh_off = static_cast<int64_t>(batch_head)
-                                     * sl_k * hd_k;
-                const float* Q_base  = q_ptr  + bh_off;
-                const float* K_base  = k_ptr  + bh_off;
-                const float* V_base  = v_ptr  + bh_off;
-                const float* O_base  = o_ptr  + bh_off;
-                const float* dO_base = do_ptr + bh_off;
-                const float* L_base  = l_ptr  + static_cast<int64_t>(batch_head) * sl_k;
-                float* dQ_base = dq_ptr + bh_off;
-                float* dK_base = dk_ptr + bh_off;
-                float* dV_base = dv_ptr + bh_off;
+                // Per-batch_head base offsets in int64_t: the query-axis tensors
+                // (Q/O/dO/dQ/L) stride by seq_len_q; the key-axis tensors
+                // (K/V/dK/dV) stride by seq_len_k. int*int*int would wrap
+                // negative for large batch_heads*seq_len, so use int64_t.
+                const int64_t q_bh_off = static_cast<int64_t>(batch_head)
+                                       * slq_k * hd_k;
+                const int64_t k_bh_off = static_cast<int64_t>(batch_head)
+                                       * slk_k * hd_k;
+                const float* Q_base  = q_ptr  + q_bh_off;
+                const float* K_base  = k_ptr  + k_bh_off;
+                const float* V_base  = v_ptr  + k_bh_off;
+                const float* O_base  = o_ptr  + q_bh_off;
+                const float* dO_base = do_ptr + q_bh_off;
+                const float* L_base  = l_ptr  + static_cast<int64_t>(batch_head) * slq_k;
+                float* dQ_base = dq_ptr + q_bh_off;
+                float* dK_base = dk_ptr + k_bh_off;
+                float* dV_base = dv_ptr + k_bh_off;
 
                 float* slm = lmem.template get_multi_ptr<sycl::access::decorated::no>().get();
                 float* K_tile  = slm;
@@ -2838,11 +2851,13 @@ auto flash_attention_backward_oneapi_f32(
 
                 for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
                     const int q_start = q_tile_idx * Br;
-                    if (q_start >= sl_k) break;
-                    const int actual_Br = sycl::min(Br, sl_k - q_start);
+                    if (q_start >= slq_k) break;
+                    const int actual_Br = sycl::min(Br, slq_k - q_start);
 
-                    // Causal early-exit: skip if all Q rows precede all K cols
-                    if (causal_k && (q_start + actual_Br - 1) < kv_start) continue;
+                    // Causal early-exit: skip if all Q rows precede all K cols.
+                    // Bottom-right alignment: query row r attends keys up to
+                    // r + (seq_k - seq_q).
+                    if (causal_k && (q_start + actual_Br - 1) + (slk_k - slq_k) < kv_start) continue;
 
                     // Load Q_i, dO_i tiles
                     for (int i = tid; i < actual_Br * hd_k; i += BLOCK_SIZE) {
@@ -2898,7 +2913,7 @@ auto flash_attention_backward_oneapi_f32(
                         int j = idx % Bc;
                         float p = 0.0f;
                         if (i < actual_Br && j < actual_Bc) {
-                            if (causal_k && (q_start + i) < (kv_start + j)) {
+                            if (causal_k && (q_start + i) + (slk_k - slq_k) < (kv_start + j)) {
                                 p = 0.0f;
                             } else {
                                 p = sycl::exp(S_tile[i * Bc + j] - l_tile[i]);

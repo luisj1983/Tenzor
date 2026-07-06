@@ -108,7 +108,7 @@ void main() {
                 // MaxPool
                 if (isnan(value) || value > result) {
                     result = value;
-                    max_idx = int(input_idx);
+                    max_idx = int(input_idx % (params.in_height * params.in_width));  // plane-local (F043)
                 }
             } else {
                 // AvgPool

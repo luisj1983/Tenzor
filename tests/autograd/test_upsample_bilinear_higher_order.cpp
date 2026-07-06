@@ -15,6 +15,8 @@
 #include <tenzor/ops/op_id.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/nn/layers/segmentation.hpp>
+#include <tenzor/nn/functional.hpp>
+#include <tenzor/autograd/gradcheck.hpp>
 
 #include "../grad_flow_helpers.hpp"
 #include "../backend_test_fixture.hpp"
@@ -112,6 +114,22 @@ TEST_P(D3Test, BackwardDispatchesToInterpolateBackward_NotCpuRoundTrip) {
         total += gp[i];
     }
     EXPECT_GT(total, 0.0f);
+}
+
+// F009/F010: the bilinear-upsample backward must use the SAME align_corners
+// sampling geometry as the forward. gradcheck through interpolate(...,
+// align_corners=true) fails if the backward hardcodes align_corners=false.
+TEST_P(D3Test, InterpolateBilinearGradcheck_AlignCorners) {
+    for (bool ac : {true, false}) {
+        Variable input(randn({1, 2, 3, 3}, DType::Float64, device), true);
+        auto f = [ac](const Variable& v) -> Variable {
+            return nn::functional::interpolate(
+                v, std::pair<int64_t, int64_t>{5, 5}, "bilinear", ac);
+        };
+        bool ok = gradcheck(f, input, 1e-6, 1e-4, 1e-4);
+        EXPECT_TRUE(ok) << "bilinear interpolate gradcheck failed on "
+                        << device.to_string() << " with align_corners=" << ac;
+    }
 }
 
 INSTANTIATE_BACKEND_TESTS(D3Test);

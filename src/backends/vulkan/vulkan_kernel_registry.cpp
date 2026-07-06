@@ -668,10 +668,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, indices, input] from autograd
-        // Vulkan backward shader re-computes max positions from original input (inputs[2]),
-        // rather than using pre-computed indices (inputs[1])
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool2dBackward(
-            inputs[0], inputs[2], attrs)};
+        // Use the SAVED plane-local argmax indices (inputs[1]) rather than
+        // recomputing the max positions from the original input — recomputing
+        // silently scatters grad to a different cell than the recorded argmax
+        // whenever the forward tie-break or fp16/bf16 rounding differs.
+        // Original input (inputs[2]) provides the spatial extents H_in/W_in.
+        const auto& in_shape = inputs[2].shape();
+        int64_t H_in = in_shape[in_shape.size() - 2];
+        int64_t W_in = in_shape[in_shape.size() - 1];
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool2dBackwardWithIndices(
+            inputs[0], inputs[1], H_in, W_in)};
     });
 
     table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2815,7 +2821,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                     auto ss = scaled.shape();
                     int64_t S_q = ss[ss.size() - 2];
                     int64_t S_k = ss[ss.size() - 1];
-                    Tensor row_idx = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                    // F026/F030: BOTTOM-RIGHT causal alignment (row qi -> key
+                    // position qi + (S_k - S_q)); matches flash_attention forward
+                    // causal_offset = S_k - S_q and the non-dropout Vulkan path
+                    // below. Top-left diverges when S_q != S_k (cross-attention /
+                    // cached-KV decode).
+                    Tensor row_idx = tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, Q.device());
                     Tensor col_idx = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
                     Tensor rows_2d = tenzor::reshape(row_idx, std::vector<int64_t>{S_q, 1});
                     Tensor cols_2d = tenzor::reshape(col_idx, std::vector<int64_t>{1, S_k});
@@ -2914,12 +2925,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             // Causal mask: -INFINITY (not -1e9 — FP16 saturates to -65504 and
             // leaks gradient mass through softmax, audit C15).
             if (causal) {
-                int64_t seq_len = scores_shape[scores_shape.size() - 1];
-                Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                rows = vk->dispatchReshape(rows, {seq_len, 1});
-                cols = vk->dispatchReshape(cols, {1, seq_len});
-                Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
+                // Bottom-right causal alignment matching the forward
+                // convention: a query row attends keys up to
+                // col <= row + (seq_k - seq_q). Use seq_q for the query axis
+                // (scores_shape[-2]) and seq_k for the key axis
+                // (scores_shape[-1]); do NOT build a square seq_k x seq_k mask.
+                int64_t seq_k = scores_shape[scores_shape.size() - 1];
+                int64_t seq_q = scores_shape[scores_shape.size() - 2];
+                int64_t offset = seq_k - seq_q;
+                Tensor rows = tenzor::arange(0, seq_q, 1, DType::Int64, scores.device());
+                Tensor cols = tenzor::arange(0, seq_k, 1, DType::Int64, scores.device());
+                rows = vk->dispatchReshape(rows, {seq_q, 1});
+                cols = vk->dispatchReshape(cols, {1, seq_k});
+                // Mask (set -inf) where col > row + (seq_k - seq_q).
+                Tensor rows_shifted = tenzor::add(
+                    rows.to(DType::Float32),
+                    tenzor::full({seq_q, 1}, static_cast<double>(offset),
+                                 DType::Float32, scores.device()));
+                Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows_shifted);
                 Tensor neg_inf = tenzor::full(scores_shape,
                     -std::numeric_limits<float>::infinity(),
                     scores.dtype(), scores.device());
@@ -3262,22 +3285,29 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 inputs[0], inputs[1], inputs[2], inputs[3], N, K_rhs, upper);
         });
 
-    // SparseSoftmax: row-wise softmax on CSR sparse tensor values
+    // SparseSoftmax: row-wise softmax on CSR sparse tensor values.
+    // No native Vulkan CSR softmax shader exists: relocate the CSR tensor to
+    // CPU before calling sparse::sparse_softmax, otherwise it re-dispatches the
+    // same SparseSoftmax OpId on the Vulkan device and recurses unboundedly.
+    // Move the resulting values back to the original device.
     table.register_single_output_kernel(OpId::SparseSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto shape = attrs.get_int_list(AttrKey::Shape);
+            Device orig_device = inputs[2].device();
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
-            auto result = sparse::sparse_softmax(sp);
-            return result.values();
+            auto result = sparse::sparse_softmax(sp.to(Device::cpu()));
+            return result.values().to(orig_device);
         });
 
-    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values
+    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values.
+    // Same CPU relocation as SparseSoftmax to avoid infinite re-dispatch.
     table.register_single_output_kernel(OpId::SparseLogSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto shape = attrs.get_int_list(AttrKey::Shape);
+            Device orig_device = inputs[2].device();
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
-            auto result = sparse::sparse_log_softmax(sp);
-            return result.values();
+            auto result = sparse::sparse_log_softmax(sp.to(Device::cpu()));
+            return result.values().to(orig_device);
         });
 
     // ========================================================================
@@ -3577,9 +3607,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
     // NanToNum: native Vulkan dispatch via nan_to_num.comp shader
     table.register_kernel(OpId::NanToNum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        float nan_val    = static_cast<float>(attrs.get_float(AttrKey::NanValue, 0.0));
-        float posinf_val = static_cast<float>(attrs.get_float(AttrKey::PosInfValue, static_cast<double>(std::numeric_limits<float>::max())));
-        float neginf_val = static_cast<float>(attrs.get_float(AttrKey::NegInfValue, static_cast<double>(std::numeric_limits<float>::lowest())));
+        // F149: pass the replacement values as DOUBLE. dispatchNanToNum clamps
+        // them into the float range for the fp32 shader and uses them directly for
+        // the fp64 shader. (Casting to float HERE overflowed the DBL_MAX default
+        // to +Inf, so the fp32 shader "replaced" Inf with Inf — a no-op.)
+        double nan_val    = attrs.get_float(AttrKey::NanValue, 0.0);
+        double posinf_val = attrs.get_float(AttrKey::PosInfValue, static_cast<double>(std::numeric_limits<double>::max()));
+        double neginf_val = attrs.get_float(AttrKey::NegInfValue, static_cast<double>(std::numeric_limits<double>::lowest()));
         return std::vector<Tensor>{get_vulkan_backend()->dispatchNanToNum(inputs[0], nan_val, posinf_val, neginf_val)};
     });
 

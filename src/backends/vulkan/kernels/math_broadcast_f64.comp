@@ -223,11 +223,13 @@ void main() {
             res = val_a - rounded * val_b;
             break;
         }
-        case 26: // minimum (binary)
-            res = min(val_a, val_b);
+        case 26: // minimum (binary) — NaN-propagating (torch.minimum): NaN in
+                 // either operand → NaN. GLSL min() suppresses NaN; propagate
+                 // the NaN operand (no fast-math, so `x != x` is reliable).
+            res = (val_a != val_a) ? val_a : ((val_b != val_b) ? val_b : min(val_a, val_b));
             break;
-        case 27: // maximum (binary)
-            res = max(val_a, val_b);
+        case 27: // maximum (binary) — NaN-propagating (torch.maximum).
+            res = (val_a != val_a) ? val_a : ((val_b != val_b) ? val_b : max(val_a, val_b));
             break;
         case 33: // hypot (binary)
             res = sqrt(val_a * val_a + val_b * val_b);

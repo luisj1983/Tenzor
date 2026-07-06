@@ -80,8 +80,23 @@ void writeF16COut(uint idx, float val) {
     // the neighbouring packed half-word.
 }
 
-float sigmoid(float x) {
-    return 1.0 / (1.0 + exp(-x));
+// Use exp()-based stable activations matching lstm_cell.comp (f32) exactly.
+// The driver `tanh` intrinsic drifts >1e-3 from std::tanh on NVIDIA/Vulkan and
+// breaks gradient parity; the backward shader recomputes from these values, so
+// forward and backward must share the same stable formulation.
+precise float sigmoid_stable(float x) {
+    if (x >= 0.0) {
+        float e = exp(-x);
+        return 1.0 / (1.0 + e);
+    } else {
+        float e = exp(x);
+        return e / (1.0 + e);
+    }
+}
+
+// Stable tanh via sigmoid: tanh(x) = 2 * sigmoid(2x) - 1.
+precise float tanh_stable(float x) {
+    return 2.0 * sigmoid_stable(2.0 * x) - 1.0;
 }
 
 void main() {
@@ -95,13 +110,13 @@ void main() {
 
     uint gate_base = b * (4 * params.hidden_size);
 
-    float i_gate = sigmoid(readF16Gates(gate_base + h));                              // input gate
-    float f_gate = sigmoid(readF16Gates(gate_base + params.hidden_size + h));         // forget gate
-    float g_gate = tanh(readF16Gates(gate_base + 2 * params.hidden_size + h));        // cell gate
-    float o_gate = sigmoid(readF16Gates(gate_base + 3 * params.hidden_size + h));     // output gate
+    float i_gate = sigmoid_stable(readF16Gates(gate_base + h));                              // input gate
+    float f_gate = sigmoid_stable(readF16Gates(gate_base + params.hidden_size + h));         // forget gate
+    float g_gate = tanh_stable(readF16Gates(gate_base + 2 * params.hidden_size + h));        // cell gate
+    float o_gate = sigmoid_stable(readF16Gates(gate_base + 3 * params.hidden_size + h));     // output gate
 
     float c_new = f_gate * readF16CPrev(idx) + i_gate * g_gate;
-    float h_new = o_gate * tanh(c_new);
+    float h_new = o_gate * tanh_stable(c_new);
 
     writeF16COut(idx, c_new);
     writeF16HOut(idx, h_new);

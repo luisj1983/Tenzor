@@ -17,6 +17,7 @@ layout(push_constant) uniform PushConstants {
     uint channels;
     uint in_h;
     uint in_w;
+    uint out_plane;  // out_h * out_w, per-(n,c) output plane (F043)
 } params;
 
 float readF16(uint element_idx) {
@@ -59,8 +60,11 @@ void main() {
     if (idx >= params.n_elements) return;
 
     float grad = readF16(idx);
-    int target_idx = indices[idx];
-
+    // F043: forward stores PLANE-LOCAL argmax (in_y*in_w + in_x); rebuild
+    // the global grad_input offset via the per-(n,c) plane base.
+    int plane_local = indices[idx];
+    uint nc = idx / params.out_plane;
+    int target_idx = int(nc * params.in_h * params.in_w) + plane_local;
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
         atomicAddF16(uint(target_idx), grad);
     }

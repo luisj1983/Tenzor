@@ -49,16 +49,19 @@ protected:
 // ============================================================================
 
 TEST_P(GradCheckMissingTest, CholeskyInverse) {
-    // Tracked as J9 (Cholesky-family gradcheck failure). Fails on every
-    // backend including CPU — not backend-specific. Skipped; see task J9.
-    SKIP_WITH_REASON(SkipReason::KnownBug,
-        "Cholesky-family gradcheck open (J9)");
-
-    auto spd = make_spd(4);
-    Variable x(spd, true);
+    // J9: cholesky_inverse expects a lower-triangular Cholesky factor L and
+    // computes (L Lᴴ)^{-1}. The previous test passed a FULL SPD matrix as L,
+    // so perturbations of the (ignored) upper triangle carried zero analytic
+    // gradient (backward trils grad_L) but a nonzero finite-difference gradient
+    // (the forward reads L fully / via Lᴴ) — a spurious mismatch, not a backward
+    // bug. Feed an actual lower-triangular factor so the gradcheck is well-posed.
+    Variable spdv(make_spd(4), false);
+    auto Lf = tenzor::tril(tenzor::cholesky(spdv)).tensor();  // lower-triangular factor
+    Variable x(Lf, true);
 
     auto f = [](const Variable& v) -> Variable {
-        return cholesky_inverse(v);
+        // keep the input strictly lower-triangular through the check
+        return cholesky_inverse(tenzor::tril(v));
     };
 
     bool passed = gradcheck(f, x, 1e-5, 1e-3, 1e-3);

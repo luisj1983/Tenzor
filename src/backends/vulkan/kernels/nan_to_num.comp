@@ -17,8 +17,13 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.num_elements) return;
     float x = input_buf.data[idx];
-    if (isnan(x)) output_buf.data[idx] = pc.nan_val;
-    else if (isinf(x) && x > 0.0) output_buf.data[idx] = pc.posinf_val;
-    else if (isinf(x) && x < 0.0) output_buf.data[idx] = pc.neginf_val;
+    // F149: this driver's isinf() builtin is unreliable — it left +/-Inf
+    // unreplaced (CPU/CUDA/ROCm/OneAPI map them to +/-FLT_MAX). Detect NaN/Inf
+    // via IEEE-754 bit patterns instead (exp all 1s: mantissa!=0 => NaN,
+    // mantissa==0 => Inf), matching reduction.comp's bit-pattern convention.
+    uint absbits = floatBitsToUint(x) & 0x7FFFFFFFu;
+    if (absbits > 0x7F800000u) output_buf.data[idx] = pc.nan_val;          // NaN
+    else if (absbits == 0x7F800000u) output_buf.data[idx] =
+        (x > 0.0) ? pc.posinf_val : pc.neginf_val;                        // +/-Inf
     else output_buf.data[idx] = x;
 }

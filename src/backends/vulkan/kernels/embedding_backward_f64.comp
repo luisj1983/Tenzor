@@ -1,21 +1,19 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Embedding Backward Pass (Float64)
-// Scatter-add: accumulates gradients from grad_output into grad_weight rows indexed by indices
+// Embedding Backward Pass (Float64) — non-atomic-int64 fallback.
 //
-// RACE CONDITION NOTE: The += on grad_weight_data is non-atomic. When duplicate indices
-// exist in the batch, multiple invocations may write to the same row concurrently, causing
-// lost updates (not corruption — just missed gradient contributions). This is a known
-// limitation because:
-//   1. GL_EXT_shader_atomic_int64 is not widely available on consumer GPUs
-//   2. Float64 atomics via CAS on uint64 would require the extension anyway
-//   3. In practice, duplicate embedding indices within a single batch are uncommon
-//      (e.g., word indices in NLP — each position typically has a unique token)
-//   4. Even with rare duplicates, SGD training is robust to occasional gradient noise
+// OUTPUT-CENTRIC, RACE-FREE accumulation: this shader is used on devices that
+// lack GL_EXT_shader_atomic_int64, so a CAS-based f64 atomicAdd is unavailable.
+// Rather than the (racy) index-centric `grad_weight[idx] += ...` scatter — which
+// silently drops gradient contributions when duplicate token indices appear in a
+// batch — each invocation OWNS exactly one grad_weight element (target_row, dim)
+// and sums every index position whose (wrapped) row equals target_row. Because
+// each output element is written by a single thread, no atomics are required and
+// duplicate indices accumulate correctly (matching CPU/OneAPI).
 //
-// For correctness-critical use cases with many duplicate indices, the host dispatcher
-// should pre-sort indices and use a serial accumulation path or fall back to CPU.
+// Dispatched over num_embeddings * embedding_dim threads (see the host, which
+// selects this thread count for the Float64 fallback path).
 //
 // Input: grad_output (num_indices, embedding_dim), indices (num_indices)
 // Output: grad_weight (num_embeddings, embedding_dim)
@@ -35,28 +33,25 @@ layout(push_constant) uniform PushConstants {
 void main() {
     uint global_id = gl_GlobalInvocationID.x;
 
-    uint index_pos = global_id / params.embedding_dim;
+    uint target_row = global_id / params.embedding_dim;
     uint dim = global_id % params.embedding_dim;
 
-    if (index_pos >= params.num_indices) {
-        return;
-    }
-
-    // Normalize negative indices (forward wraps row -1 -> num_embeddings-1);
-    // converting a negative index straight to uint produced a huge value that
-    // failed the bounds check below, silently dropping that row's gradient.
-    int signed_row = indices_data[index_pos];
-    if (signed_row < 0) signed_row += int(params.num_embeddings);
-    if (signed_row < 0 || signed_row >= int(params.num_embeddings)) {
-        return;
-    }
-    uint target_row = uint(signed_row);
-
-    // Bounds check on target row
     if (target_row >= params.num_embeddings) {
         return;
     }
 
-    grad_weight_data[target_row * params.embedding_dim + dim] +=
-        grad_output_data[index_pos * params.embedding_dim + dim];
+    // Race-free reduction: sum every grad_output row whose (wrapped) index equals
+    // this thread's target_row. Negative indices wrap (forward maps row -1 ->
+    // num_embeddings-1); a still-out-of-range index never matches a valid
+    // target_row and is therefore dropped, matching the forward.
+    float64_t acc = float64_t(0.0);
+    for (uint i = 0u; i < params.num_indices; ++i) {
+        int signed_row = indices_data[i];
+        if (signed_row < 0) signed_row += int(params.num_embeddings);
+        if (signed_row == int(target_row)) {
+            acc += grad_output_data[i * params.embedding_dim + dim];
+        }
+    }
+
+    grad_weight_data[target_row * params.embedding_dim + dim] = acc;
 }

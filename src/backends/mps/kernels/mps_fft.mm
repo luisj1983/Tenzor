@@ -270,6 +270,16 @@ inline void scale_array(float* data, int64_t len, float scale) {
 
 Tensor mps_fft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                       std::string_view norm) {
+    // vDSP FFT is Float32/Complex64-only. Compute double precision in single
+    // precision (upcast-compute-in-f32) then widen the Complex64 result back to
+    // Complex128 so autograd double-precision FFT runs rather than throwing.
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Complex128) {
+        DType narrow = (input.dtype() == DType::Complex128) ? DType::Complex64
+                                                            : DType::Float32;
+        return mps_fft_kernel(input.to(narrow), dim, signal_len, norm)
+            .to(DType::Complex128);
+    }
+
     dim = normalize_dim(dim, input.ndim());
 
     // Convert real input to complex (interleaved re/im as Complex64)
@@ -338,6 +348,14 @@ Tensor mps_fft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
 
 Tensor mps_ifft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                        std::string_view norm) {
+    // vDSP is Float32/Complex64-only: upcast-compute-in-f32, widen result back.
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Complex128) {
+        DType narrow = (input.dtype() == DType::Complex128) ? DType::Complex64
+                                                            : DType::Float32;
+        return mps_ifft_kernel(input.to(narrow), dim, signal_len, norm)
+            .to(DType::Complex128);
+    }
+
     dim = normalize_dim(dim, input.ndim());
 
     Tensor inp = input;
@@ -404,6 +422,13 @@ Tensor mps_ifft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
 
 Tensor mps_rfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                        std::string_view norm) {
+    // vDSP is Float32-only: compute a Float64 real signal in single precision
+    // (upcast-compute-in-f32) and widen the Complex64 result to Complex128.
+    if (input.dtype() == DType::Float64) {
+        return mps_rfft_kernel(input.to(DType::Float32), dim, signal_len, norm)
+            .to(DType::Complex128);
+    }
+
     dim = normalize_dim(dim, input.ndim());
 
     if (input.dtype() != DType::Float32) {
@@ -459,6 +484,13 @@ Tensor mps_rfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
 
 Tensor mps_irfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
                         std::string_view norm) {
+    // vDSP is Complex64-only: compute a Complex128 spectrum in single precision
+    // (upcast-compute-in-f32) and widen the Float32 real result to Float64.
+    if (input.dtype() == DType::Complex128) {
+        return mps_irfft_kernel(input.to(DType::Complex64), dim, signal_len, norm)
+            .to(DType::Float64);
+    }
+
     dim = normalize_dim(dim, input.ndim());
 
     if (input.dtype() != DType::Complex64) {

@@ -1485,6 +1485,38 @@ __global__ void adaptive_avgpool1d_backward_impl(
     }
 }
 
+// Double-precision twin: the Float64 path must divide and accumulate in
+// double to match the CPU reference (~1e-15 rel). atomicAdd(double*) is
+// supported on sm_60+.
+__global__ void adaptive_avgpool1d_backward_impl_f64(
+    const double* __restrict__ grad_output,
+    double* __restrict__ grad_input,
+    int64_t N, int64_t C, int64_t L_in, int64_t L_out
+) {
+    const int64_t total = N * C * L_out;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += blockDim.x * gridDim.x) {
+
+        int64_t ol = idx % L_out;
+        int64_t c  = (idx / L_out) % C;
+        int64_t n  = idx / (L_out * C);
+
+        int64_t l_start = (ol * L_in) / L_out;
+        int64_t l_end   = ((ol + 1) * L_in + L_out - 1) / L_out;
+
+        int64_t count = l_end - l_start;
+        if (count <= 0) continue;  // empty window: no gradient to scatter
+        double grad_val = grad_output[idx] / static_cast<double>(count);
+
+        for (int64_t l = l_start; l < l_end; ++l) {
+            int64_t in_idx = (n * C + c) * L_in + l;
+            atomicAdd(grad_input + in_idx, grad_val);
+        }
+    }
+}
+
 auto adaptive_avgpool1d_backward(const Tensor& grad_output,
                                   const std::vector<int64_t>& input_shape,
                                   cudaStream_t stream) -> Tensor {
@@ -1507,25 +1539,12 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        // Float64: accumulate in float32 then convert (atomicAdd(double*) is slow)
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
-        Tensor go_f32({N, C, L_out}, DType::Float32, grad_output.device());
-
-        auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<double>, total_out);
-        convert_to_f32<double><<<grid_conv, block_conv, 0, stream>>>(
-            grad_output.data<double>(), go_f32.data<float>(), total_out);
-        CUDA_CHECK(cudaGetLastError());
-
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl, total_out);
-        adaptive_avgpool1d_backward_impl<<<grid, block, 0, stream>>>(
-            go_f32.data<float>(), grad_f32.data<float>(),
+        // Float64: divide and accumulate in double to match CPU (~1e-15 rel).
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl_f64, total_out);
+        adaptive_avgpool1d_backward_impl_f64<<<grid, block, 0, stream>>>(
+            grad_output.data<double>(), grad_input.data<double>(),
             N, C, L_in, L_out);
-        CUDA_CHECK(cudaGetLastError());
-
-        Tensor grad_input(input_shape, DType::Float64, grad_output.device());
-        auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<double>, total_in);
-        convert_f32_to<double><<<grid_back, block_back, 0, stream>>>(
-            grad_f32.data<float>(), grad_input.data<double>(), total_in);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
@@ -2446,6 +2465,50 @@ __global__ void adaptive_avgpool3d_backward_impl(
     }
 }
 
+// Double-precision twin: the Float64 path must divide and accumulate in
+// double to match the CPU reference (~1e-15 rel). atomicAdd(double*) is
+// supported on sm_60+.
+__global__ void adaptive_avgpool3d_backward_impl_f64(
+    const double* __restrict__ grad_output,
+    double* __restrict__ grad_input,
+    int64_t N, int64_t C,
+    int64_t D_in, int64_t H_in, int64_t W_in,
+    int64_t D_out, int64_t H_out, int64_t W_out
+) {
+    const int64_t total = N * C * D_out * H_out * W_out;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += blockDim.x * gridDim.x) {
+
+        int64_t ow = idx % W_out;
+        int64_t oh = (idx / W_out) % H_out;
+        int64_t od = (idx / (W_out * H_out)) % D_out;
+        int64_t c  = (idx / (W_out * H_out * D_out)) % C;
+        int64_t n  = idx / (W_out * H_out * D_out * C);
+
+        int64_t d_start = (od * D_in) / D_out;
+        int64_t d_end   = ((od + 1) * D_in + D_out - 1) / D_out;
+        int64_t h_start = (oh * H_in) / H_out;
+        int64_t h_end   = ((oh + 1) * H_in + H_out - 1) / H_out;
+        int64_t w_start = (ow * W_in) / W_out;
+        int64_t w_end   = ((ow + 1) * W_in + W_out - 1) / W_out;
+
+        int count = static_cast<int>((d_end - d_start) * (h_end - h_start) * (w_end - w_start));
+        if (count <= 0) continue;  // empty window: no gradient to scatter
+        double grad_val = grad_output[idx] / static_cast<double>(count);
+
+        for (int64_t d = d_start; d < d_end; ++d) {
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    int64_t in_idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
+                    atomicAdd(grad_input + in_idx, grad_val);
+                }
+            }
+        }
+    }
+}
+
 auto adaptive_avgpool3d_backward(const Tensor& grad_output,
                                   const std::vector<int64_t>& input_shape,
                                   cudaStream_t stream) -> Tensor {
@@ -2472,24 +2535,12 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
-        Tensor go_f32({N, C, D_out, H_out, W_out}, DType::Float32, grad_output.device());
-
-        auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<double>, total_out);
-        convert_to_f32<double><<<grid_conv, block_conv, 0, stream>>>(
-            grad_output.data<double>(), go_f32.data<float>(), total_out);
-        CUDA_CHECK(cudaGetLastError());
-
-        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl, total_out);
-        adaptive_avgpool3d_backward_impl<<<grid, block, 0, stream>>>(
-            go_f32.data<float>(), grad_f32.data<float>(),
+        // Float64: divide and accumulate in double to match CPU (~1e-15 rel).
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
+        auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl_f64, total_out);
+        adaptive_avgpool3d_backward_impl_f64<<<grid, block, 0, stream>>>(
+            grad_output.data<double>(), grad_input.data<double>(),
             N, C, D_in, H_in, W_in, D_out, H_out, W_out);
-        CUDA_CHECK(cudaGetLastError());
-
-        Tensor grad_input(input_shape, DType::Float64, grad_output.device());
-        auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<double>, total_in);
-        convert_f32_to<double><<<grid_back, block_back, 0, stream>>>(
-            grad_f32.data<float>(), grad_input.data<double>(), total_in);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {

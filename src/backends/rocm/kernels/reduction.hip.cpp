@@ -98,6 +98,51 @@ __device__ __forceinline__ T nan_prop_min(T a, T b) {
     return reduce_is_nan(b) ? b : (reduce_is_nan(a) ? a : ((a < b) ? a : b));
 }
 
+// ----------------------------------------------------------------------------
+// NaN-aware argmax/argmin candidate predicates (F147 for the INDEX kernels).
+//
+// PyTorch / CPU / CUDA semantics: argmax/argmin PROPAGATE NaN — if any input is
+// NaN the returned index is that of the FIRST (lowest-index) NaN, because NaN
+// compares as both the maximum and the minimum of the set. Plain `cand > best` /
+// `cand < best` is always false against a NaN, so under -ffast-math NaN would be
+// silently skipped (the F147 value kernels were fixed via nan_prop_max/min; the
+// argmax/argmin INDEX kernels below were left with plain compares). We reuse the
+// bit-pattern `reduce_is_nan` (fast-math immune — never `!=`/isnan).
+//
+// arg_max_takes(cand, best): true iff cand should replace best —
+//   * a NaN cand beats any non-NaN best;
+//   * NaN vs NaN never replaces (keep the earlier index — first-NaN wins);
+//   * otherwise replace only on a STRICT numeric improvement (so ascending scans
+//     keep the lowest index on value ties).
+// Equivalent to CPU arg_takes_max / CUDA arg_max_takes.
+template<typename T>
+__device__ __forceinline__ bool arg_max_takes(T cand, T best) {
+    return !reduce_is_nan(best) && (reduce_is_nan(cand) || cand > best);
+}
+template<typename T>
+__device__ __forceinline__ bool arg_min_takes(T cand, T best) {
+    return !reduce_is_nan(best) && (reduce_is_nan(cand) || cand < best);
+}
+// Index-aware variants for unsorted tree combine steps (block reduction / phase-2
+// final reduction) where the candidate may carry a LOWER original index than the
+// current best. On an EXACT tie (equal NaNs, or equal finite values) keep the
+// lower original index so the result matches the CPU "first NaN / first
+// occurrence" reference; without this a later index could win a finite tie.
+template<typename T>
+__device__ __forceinline__ bool arg_max_takes_idx(T cand, int64_t cand_idx, T best, int64_t best_idx) {
+    if (arg_max_takes(cand, best)) return true;
+    if (reduce_is_nan(cand) && reduce_is_nan(best)) return cand_idx < best_idx;
+    if (!reduce_is_nan(cand) && !reduce_is_nan(best) && cand == best) return cand_idx < best_idx;
+    return false;
+}
+template<typename T>
+__device__ __forceinline__ bool arg_min_takes_idx(T cand, int64_t cand_idx, T best, int64_t best_idx) {
+    if (arg_min_takes(cand, best)) return true;
+    if (reduce_is_nan(cand) && reduce_is_nan(best)) return cand_idx < best_idx;
+    if (!reduce_is_nan(cand) && !reduce_is_nan(best) && cand == best) return cand_idx < best_idx;
+    return false;
+}
+
 template<typename T>
 __device__ __forceinline__ T wavefront_reduce_max(T val) {
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
@@ -456,12 +501,14 @@ __global__ void max_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
         T val = input[in_idx];
-        // NOTE: dimensional max DROPS NaN (plain `>`), unlike the full-tensor
-        // reduction which uses nan_prop_max. This is intentional and matches the
-        // CPU dimensional reduction (cpu/kernels/reduction.cpp max_along_dim),
-        // preserving cross-backend parity. Do NOT switch to nan_prop_max here
-        // without changing the CPU kernel in lockstep (see review note).
-        max_val = (val > max_val) ? val : max_val;
+        // F147: PROPAGATE NaN, matching CPU max_along_dim (reduction.cpp:1538+,
+        // incl. F16/BF16), CUDA (cuda_max_val), OneAPI (nan_fmax) and ROCm's OWN
+        // full-tensor reduction (nan_prop_max). The previous plain `>` dropped
+        // NaN and the comment claiming it "matches the CPU dimensional reduction"
+        // was STALE — CPU actually returns NaN for a slice containing NaN, so
+        // ROCm was the sole outlier (e.g. max([1,nan,3],dim) = 3 on ROCm vs nan
+        // elsewhere), which also mis-routed MaxBackward (input==max_val).
+        max_val = nan_prop_max(val, max_val);
     }
 
     output[out_idx] = max_val;
@@ -514,11 +561,11 @@ __global__ void min_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
         T val = input[in_idx];
-        // NOTE: dimensional min DROPS NaN (plain `<`), unlike the full-tensor
-        // reduction which uses nan_prop_min. Intentional and matches the CPU
-        // dimensional reduction (cross-backend parity). Do NOT switch to
-        // nan_prop_min here without changing the CPU kernel in lockstep.
-        min_val = (val < min_val) ? val : min_val;
+        // F147: PROPAGATE NaN, matching CPU min_along_dim, CUDA, OneAPI and ROCm's
+        // own full-tensor nan_prop_min. The plain `<` dropped NaN and the "matches
+        // CPU" comment was STALE (CPU returns NaN for a slice with NaN), making
+        // ROCm the sole outlier and mis-routing MinBackward (input==min_val).
+        min_val = nan_prop_min(val, min_val);
     }
 
     output[out_idx] = min_val;
@@ -575,7 +622,9 @@ __global__ void argmax_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
         T val = input[in_idx];
-        if (val > max_val) {
+        // NaN-aware: a NaN candidate beats any number (first NaN wins); strict
+        // `>` on finite values keeps the lowest index on ties. Matches CPU.
+        if (arg_max_takes(val, max_val)) {
             max_val = val;
             max_idx = i;
         }
@@ -635,7 +684,9 @@ __global__ void argmin_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
         T val = input[in_idx];
-        if (val < min_val) {
+        // NaN-aware: a NaN candidate wins argmin too (first NaN wins, matching
+        // CPU argmin([1,nan,3]) == 1); strict `<` keeps the lowest index on ties.
+        if (arg_min_takes(val, min_val)) {
             min_val = val;
             min_idx = i;
         }
@@ -1735,7 +1786,9 @@ __global__ void argmax_kernel(const T* input, int64_t* output_idx, T* output_val
     // strictly increasing idx, so > alone already keeps the first, but be
     // explicit for clarity and parity with the reduction below).
     for (idx += blockDim.x * gridDim.x; idx < n; idx += blockDim.x * gridDim.x) {
-        if (input[idx] > max_val) {
+        // Ascending idx, so best always has the lower index: strict-win predicate
+        // keeps the first NaN and the first occurrence on ties (NaN-aware).
+        if (arg_max_takes(input[idx], max_val)) {
             max_val = input[idx];
             max_idx = idx;
         }
@@ -1745,12 +1798,12 @@ __global__ void argmax_kernel(const T* input, int64_t* output_idx, T* output_val
     sidx[tid] = max_idx;
     __syncthreads();
 
-    // Block-level reduction. On value ties keep the smaller index so the result
-    // is the first occurrence in logical order (PyTorch/CPU parity).
+    // Block-level reduction. Unsorted combine, so use the index-aware predicate:
+    // NaN beats non-NaN (first-NaN wins) and exact ties keep the smaller index
+    // (PyTorch/CPU parity). NaN-safe via bit-pattern reduce_is_nan.
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] > sdata[tid] ||
-                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
+            if (arg_max_takes_idx(sdata[tid + s], sidx[tid + s], sdata[tid], sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -1781,7 +1834,9 @@ __global__ void argmax_final_kernel(const T* partial_vals, const int64_t* partia
     // the smaller global index so the first occurrence wins (PyTorch/CPU parity).
     for (int i = tid; i < num_partials; i += blockDim.x) {
         T v = partial_vals[i];
-        if (v > max_val || (v == max_val && partial_idx[i] < max_idx)) {
+        // Partials are unsorted block winners: index-aware NaN predicate (NaN
+        // beats non-NaN, exact ties keep the smaller original index).
+        if (arg_max_takes_idx(v, partial_idx[i], max_val, max_idx)) {
             max_val = v;
             max_idx = partial_idx[i];
         }
@@ -1793,8 +1848,7 @@ __global__ void argmax_final_kernel(const T* partial_vals, const int64_t* partia
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] > sdata[tid] ||
-                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
+            if (arg_max_takes_idx(sdata[tid + s], sidx[tid + s], sdata[tid], sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -1819,7 +1873,10 @@ __global__ void argmin_kernel(const T* input, int64_t* output_idx, T* output_val
     int64_t min_idx = (idx < n) ? idx : 0;
 
     for (idx += blockDim.x * gridDim.x; idx < n; idx += blockDim.x * gridDim.x) {
-        if (input[idx] < min_val) {
+        // Ascending idx, so best always has the lower index: strict-win predicate
+        // keeps the first NaN and the first occurrence on ties (NaN-aware). NaN
+        // wins argmin too (CPU argmin([1,nan,3]) == 1).
+        if (arg_min_takes(input[idx], min_val)) {
             min_val = input[idx];
             min_idx = idx;
         }
@@ -1829,12 +1886,12 @@ __global__ void argmin_kernel(const T* input, int64_t* output_idx, T* output_val
     sidx[tid] = min_idx;
     __syncthreads();
 
-    // Block-level reduction. On value ties keep the smaller index so the result
-    // is the first occurrence in logical order (PyTorch/CPU parity).
+    // Block-level reduction. Unsorted combine, so use the index-aware predicate:
+    // NaN beats non-NaN (first-NaN wins) and exact ties keep the smaller index
+    // (PyTorch/CPU parity). NaN-safe via bit-pattern reduce_is_nan.
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] < sdata[tid] ||
-                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
+            if (arg_min_takes_idx(sdata[tid + s], sidx[tid + s], sdata[tid], sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -1865,7 +1922,9 @@ __global__ void argmin_final_kernel(const T* partial_vals, const int64_t* partia
     // (PyTorch/CPU parity).
     for (int i = tid; i < num_partials; i += blockDim.x) {
         T v = partial_vals[i];
-        if (v < min_val || (v == min_val && partial_idx[i] < min_idx)) {
+        // Partials are unsorted block winners: index-aware NaN predicate (NaN
+        // beats non-NaN, exact ties keep the smaller original index).
+        if (arg_min_takes_idx(v, partial_idx[i], min_val, min_idx)) {
             min_val = v;
             min_idx = partial_idx[i];
         }
@@ -1877,8 +1936,7 @@ __global__ void argmin_final_kernel(const T* partial_vals, const int64_t* partia
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            if (sdata[tid + s] < sdata[tid] ||
-                (sdata[tid + s] == sdata[tid] && sidx[tid + s] < sidx[tid])) {
+            if (arg_min_takes_idx(sdata[tid + s], sidx[tid + s], sdata[tid], sidx[tid])) {
                 sdata[tid] = sdata[tid + s];
                 sidx[tid] = sidx[tid + s];
             }
@@ -2153,6 +2211,13 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream
         dtype == DType::UInt16 || dtype == DType::Bool) {
         return argmax_kernel(input.to(DType::Float32), dim, keepdim, stream);
     }
+    // UInt32's max (~4.29e9) exceeds Float32's exact-integer range, so widen to
+    // Float64 (exact for all uint32 < 2^53, order-preserving) on the SAME device
+    // and recurse — both the full and dimensional argmax paths handle Float64,
+    // and argmax indices are invariant under a monotonic widen.
+    if (dtype == DType::UInt32) {
+        return argmax_kernel(input.to(DType::Float64), dim, keepdim, stream);
+    }
 
     // Normalize a negative axis index (dim=-1 => last axis); INT64_MIN remains
     // the "reduce all" sentinel handled by the dim<0 branch below.
@@ -2288,6 +2353,13 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream
     if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::UInt8 ||
         dtype == DType::UInt16 || dtype == DType::Bool) {
         return argmin_kernel(input.to(DType::Float32), dim, keepdim, stream);
+    }
+    // UInt32's max (~4.29e9) exceeds Float32's exact-integer range, so widen to
+    // Float64 (exact for all uint32 < 2^53, order-preserving) on the SAME device
+    // and recurse — both the full and dimensional argmin paths handle Float64,
+    // and argmin indices are invariant under a monotonic widen.
+    if (dtype == DType::UInt32) {
+        return argmin_kernel(input.to(DType::Float64), dim, keepdim, stream);
     }
 
     // Normalize a negative axis index (dim=-1 => last axis); INT64_MIN remains
@@ -3256,6 +3328,9 @@ auto any_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t 
         case DType::Int8:
             launch(input.data<int8_t>());
             break;
+        case DType::Int16:
+            launch(input.data<int16_t>());
+            break;
         case DType::BFloat16: {
             auto input_f32 = input.to(DType::Float32);
             return any_kernel(input_f32, dim, keepdim, stream);
@@ -3340,6 +3415,9 @@ auto all_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t 
             break;
         case DType::Int8:
             launch(input.data<int8_t>());
+            break;
+        case DType::Int16:
+            launch(input.data<int16_t>());
             break;
         case DType::BFloat16: {
             auto input_f32 = input.to(DType::Float32);
@@ -3734,42 +3812,40 @@ __global__ void median_per_slice_kernel(
 
     int64_t mid = (dim_size - 1) / 2;
 
-    // PyTorch median propagates NaN: if any slice element is NaN, the median is
-    // NaN. The count-based selection below mis-ranks NaN (all comparisons false)
-    // and would otherwise fall through to an uninitialized 0. Thread 0 scans for
-    // a NaN (O(n)) and records it; the IEEE self-inequality v != v is reliable,
-    // unlike ROCm's canonicalising isnan intrinsics. (Integer T has no NaN.)
-    __shared__ int nan_found;
-    if (threadIdx.x == 0) {
-        nan_found = 0;
-        if constexpr (std::is_floating_point_v<T>) {
-            for (int64_t i = 0; i < dim_size; ++i) {
-                T v = input[base_offset + i * strides[dim]];
-                if (v != v) {
-                    out_values[slice_idx] = v;
-                    out_indices[slice_idx] = i;
-                    nan_found = 1;
-                    break;
-                }
-            }
-        }
-    }
-    __syncthreads();
-    if (nan_found) return;
-
     // Count-based selection, parallelised across the block: each thread handles
     // a strided subset of candidate indices and computes that candidate's rank
-    // (number of strictly-smaller elements, with a j<i tie-break so each index
-    // has a UNIQUE rank). Exactly one index has rank == mid, so exactly one
-    // thread writes the output — no race, no atomics. This turns the previous
-    // single-thread O(dim_size^2) into O(dim_size^2 / blockDim.x) wall-clock.
+    // (number of elements that sort strictly before it, with a j<i tie-break so
+    // each index has a UNIQUE rank). Exactly one index has rank == mid, so exactly
+    // one thread writes the output — no race, no atomics.
+    //
+    // F140: NaN is treated as the LARGEST value (sorts to the end), matching the
+    // CPU/CUDA/OneAPI/Vulkan sort-based median — which does NOT propagate NaN but
+    // orders it last, e.g. median([2,nan,1,3]) = 2 (sorted [1,2,3,nan], lower-mid).
+    // ROCm previously (a) short-circuited to return NaN whenever any element was
+    // NaN (wrong: diverged from CPU's 2) and (b) its plain `<`/`==` compares are
+    // false for NaN under this backend's -ffast-math, mis-ranking NaN. Use the
+    // bit-pattern `reduce_is_nan` (fast-math immune) for a NaN-as-largest order.
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
         int64_t offset_i = base_offset + i * strides[dim];
         T val_i = input[offset_i];
+        bool i_nan = reduce_is_nan(val_i);
         int64_t rank = 0;
         for (int64_t j = 0; j < dim_size; ++j) {
             T val_j = input[base_offset + j * strides[dim]];
-            if (val_j < val_i || (val_j == val_i && j < i)) {
+            bool j_nan = reduce_is_nan(val_j);
+            bool j_before_i;   // does val_j sort strictly before val_i? (NaN largest)
+            bool tie;
+            if (i_nan) {
+                j_before_i = !j_nan;   // any non-NaN precedes NaN
+                tie = j_nan;           // NaN ties with NaN
+            } else if (j_nan) {
+                j_before_i = false;    // NaN never precedes a non-NaN
+                tie = false;
+            } else {
+                j_before_i = (val_j < val_i);
+                tie = (val_j == val_i);
+            }
+            if (j_before_i || (tie && j < i)) {
                 rank++;
             }
         }
@@ -3901,11 +3977,19 @@ __global__ void mode_per_slice_kernel(
     // local best (highest count, tie-break to the smallest index). A block
     // reduction then picks the global best with the same tie-break. This turns
     // the previous single-thread O(dim_size^2) into O(dim_size^2 / blockDim.x).
+    // F132: match the CPU/CUDA mode tie-break EXACTLY. On equal counts, pick the
+    // SMALLEST modal VALUE (not the smallest index), and report the HIGHEST
+    // original index of that value's run. Previously ROCm tied to the smallest
+    // index, which returns a different modal value (e.g. [7,7,3,3] -> 7 where
+    // CPU/CUDA give 3); ModeBackward masks by the returned VALUE, so gradients
+    // diverged on any count tie.
     __shared__ int64_t s_count[256];
     __shared__ int64_t s_idx[256];
+    __shared__ T       s_val[256];
 
     int64_t local_count = -1;
     int64_t local_idx = 0;
+    T local_val = T(0);
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
         T val_i = input[base_offset + i * strides[dim]];
         int64_t count = 0;
@@ -3914,26 +3998,35 @@ __global__ void mode_per_slice_kernel(
                 count++;
             }
         }
-        if (count > local_count || (count == local_count && i < local_idx)) {
+        bool better = (count > local_count)
+            || (count == local_count && val_i < local_val)
+            || (count == local_count && val_i == local_val && i > local_idx);
+        if (better) {
             local_count = count;
+            local_val = val_i;
             local_idx = i;
         }
     }
     s_count[threadIdx.x] = local_count;
     s_idx[threadIdx.x] = local_idx;
+    s_val[threadIdx.x] = local_val;
     __syncthreads();
 
     if (threadIdx.x == 0) {
         int64_t best_count = -1;
         int64_t best_idx = 0;
+        T best_val = T(0);
         for (int t = 0; t < blockDim.x; ++t) {
-            if (s_count[t] > best_count ||
-                (s_count[t] == best_count && s_idx[t] < best_idx)) {
+            bool better = (s_count[t] > best_count)
+                || (s_count[t] == best_count && s_val[t] < best_val)
+                || (s_count[t] == best_count && s_val[t] == best_val && s_idx[t] > best_idx);
+            if (better) {
                 best_count = s_count[t];
+                best_val = s_val[t];
                 best_idx = s_idx[t];
             }
         }
-        out_values[slice_idx] = input[base_offset + best_idx * strides[dim]];
+        out_values[slice_idx] = best_val;
         out_indices[slice_idx] = best_idx;
     }
 }
@@ -4280,7 +4373,10 @@ __global__ void nanmean_div_f32(const float* __restrict__ sum,
                                 float* __restrict__ output) {
     if (threadIdx.x == 0) {
         int64_t c = count[0];
-        output[0] = (c > 0) ? sum[0] / static_cast<float>(c) : 0.0f;
+        // F148: all-NaN slice (count==0) -> NaN (0/0), matching CPU/CUDA/OneAPI/
+        // Vulkan and ROCm's own nanmean dim path. Bit pattern is fast-math-safe
+        // (this backend builds with -ffinite-math-only, so 0.0f/0.0f folds away).
+        output[0] = (c > 0) ? sum[0] / static_cast<float>(c) : __int_as_float(0x7fc00000);
     }
 }
 
@@ -4308,7 +4404,9 @@ __global__ void nanmean_div_f64(const double* __restrict__ sum,
                                 double* __restrict__ output) {
     if (threadIdx.x == 0) {
         int64_t c = count[0];
-        output[0] = (c > 0) ? sum[0] / static_cast<double>(c) : 0.0;
+        // F148: all-NaN slice -> NaN (see nanmean_div_f32). Double bit pattern.
+        output[0] = (c > 0) ? sum[0] / static_cast<double>(c)
+                            : __longlong_as_double(0x7ff8000000000000ULL);
     }
 }
 

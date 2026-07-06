@@ -61,7 +61,7 @@ TEST_P(SparseAutograd, SpMMBackwardGradExists) {
     // Dense input should have gradient
     EXPECT_GRAD_FLOWS(dense);
     if (dense.grad().has_value()) {
-        auto& grad_tensor = dense.grad().value();
+        auto grad_tensor = dense.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 4);
         EXPECT_EQ(grad_tensor.shape()[1], 2);
     }
@@ -84,7 +84,7 @@ TEST_P(SparseAutograd, SpMVBackwardGradExists) {
 
     EXPECT_GRAD_FLOWS(vec);
     if (vec.grad().has_value()) {
-        auto& grad_tensor = vec.grad().value();
+        auto grad_tensor = vec.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 4);
     }
 }
@@ -107,7 +107,7 @@ TEST_P(SparseAutograd, SparseAddBackwardGradExists) {
 
     EXPECT_GRAD_FLOWS(dense);
     if (dense.grad().has_value()) {
-        auto& grad_tensor = dense.grad().value();
+        auto grad_tensor = dense.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 3);
         EXPECT_EQ(grad_tensor.shape()[1], 4);
     }

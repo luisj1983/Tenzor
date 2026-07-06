@@ -16,6 +16,7 @@
 #include <cstring>
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"  // compute_grid_size: int64-safe, grid-clamped block count
+#include "cuda_nan_helpers.cuh"   // is_nan_bits: reliable NaN test under fast-math
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <device_launch_parameters.h>
@@ -563,6 +564,30 @@ __global__ void extract_all_strided_slices(const T* __restrict__ input,
         int64_t inner = s % inner_size;
         output[s * dim_size + i] =
             input[outer * dim_size * inner_size + i * inner_size + inner];
+    }
+}
+
+// Canonical POSITIVE quiet-NaN, so cub's float radix SortKeys orders it LAST
+// (matching CPU nan_less). A positive NaN's bit pattern exceeds +inf, so it
+// sorts after every finite value and +inf.
+template<typename T> __device__ inline T pos_qnan();
+template<> __device__ inline float  pos_qnan<float>()  { union { uint32_t u; float  f; } p; p.u = 0x7FC00000u;            return p.f; }
+template<> __device__ inline double pos_qnan<double>() { union { uint64_t u; double d; } p; p.u = 0x7FF8000000000000ull;  return p.d; }
+
+// Remap any NaN (either sign) to a canonical POSITIVE qNaN before the radix
+// sort. cub::DeviceSegmentedSort orders floats by their radix-transformed bits;
+// a negative-sign NaN has the sign bit set and would sort FIRST (diverging from
+// CPU, which puts all NaN last). Canonicalizing the sign fixes the ordering
+// while preserving NaN-ness, so the interpolated quantile output still carries
+// NaN when a NaN slot is selected. The CUDA backend builds with fast-math, so
+// detect NaN via the bit pattern (is_nan_bits), not ::isnan.
+template<typename T>
+__global__ void canonicalize_nan_to_pos(T* __restrict__ data, int64_t n) {
+    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        if (tenzor::cuda::is_nan_bits(data[i])) {
+            data[i] = pos_qnan<T>();
+        }
     }
 }
 
@@ -4080,6 +4105,13 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
         extract_all_strided_slices<T><<<grid_extract, block, 0, stream>>>(
             input_cont.data<T>(), workspace.data<T>(),
             dim_size, inner_size, total_slices);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        // Make NaN sort LAST (any sign) by canonicalizing its sign before the
+        // radix sort below, matching CPU nan_less. Without this a negative-sign
+        // NaN sorts first and the interpolated quantile diverges from CPU.
+        canonicalize_nan_to_pos<T><<<grid_extract, block, 0, stream>>>(
+            workspace.data<T>(), total_elems);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
 
         // Sort all slices in one cub::DeviceSegmentedSort call instead of a

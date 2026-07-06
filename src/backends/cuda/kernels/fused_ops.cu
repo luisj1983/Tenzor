@@ -2731,7 +2731,8 @@ __global__ void flash_attention_backward_kernel(
     float* __restrict__ dQ,          // [batch_heads, seq_len, HEAD_DIM] (atomicAdd)
     float* __restrict__ dK,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
     float* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
-    const int seq_len,
+    const int seq_len_q,
+    const int seq_len_k,
     const float scale,
     const bool causal,
     // Phase P0 / Fix 6: dropout reproduction. When apply_dropout is true,
@@ -2746,20 +2747,25 @@ __global__ void flash_attention_backward_kernel(
     const int batch_head = blockIdx.y;
     const int tid = threadIdx.x;
 
-    const int kv_start = kv_tile_idx * Bc;
-    if (kv_start >= seq_len) return;
-    const int actual_Bc = min(Bc, seq_len - kv_start);
+    // Bottom-right causal alignment: a query at absolute row r attends to
+    // keys up to r + (seq_len_k - seq_len_q) (matches the forward kernel).
+    const int causal_offset = seq_len_k - seq_len_q;
 
-    // Base pointers for this batch-head
-    const float* Q_base  = Q  + batch_head * seq_len * HEAD_DIM;
-    const float* K_base  = K  + batch_head * seq_len * HEAD_DIM;
-    const float* V_base  = V  + batch_head * seq_len * HEAD_DIM;
-    const float* O_base  = O  + batch_head * seq_len * HEAD_DIM;
-    const float* dO_base = dO + batch_head * seq_len * HEAD_DIM;
-    const float* L_base  = L  + batch_head * seq_len;
-    float* dQ_base = dQ + batch_head * seq_len * HEAD_DIM;
-    float* dK_base = dK + batch_head * seq_len * HEAD_DIM;
-    float* dV_base = dV + batch_head * seq_len * HEAD_DIM;
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len_k) return;
+    const int actual_Bc = min(Bc, seq_len_k - kv_start);
+
+    // Base pointers for this batch-head. Q/O/dO/L/dQ stride by seq_len_q;
+    // K/V/dK/dV stride by seq_len_k.
+    const float* Q_base  = Q  + batch_head * seq_len_q * HEAD_DIM;
+    const float* K_base  = K  + batch_head * seq_len_k * HEAD_DIM;
+    const float* V_base  = V  + batch_head * seq_len_k * HEAD_DIM;
+    const float* O_base  = O  + batch_head * seq_len_q * HEAD_DIM;
+    const float* dO_base = dO + batch_head * seq_len_q * HEAD_DIM;
+    const float* L_base  = L  + batch_head * seq_len_q;
+    float* dQ_base = dQ + batch_head * seq_len_q * HEAD_DIM;
+    float* dK_base = dK + batch_head * seq_len_k * HEAD_DIM;
+    float* dV_base = dV + batch_head * seq_len_k * HEAD_DIM;
 
     // Shared memory layout (no dK/dV tiles — those go directly to global)
     extern __shared__ float smem[];
@@ -2800,15 +2806,16 @@ __global__ void flash_attention_backward_kernel(
     }
 
     // Iterate over Q tiles (row blocks)
-    const int num_q_tiles = (seq_len + Br - 1) / Br;
+    const int num_q_tiles = (seq_len_q + Br - 1) / Br;
 
     for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
         const int q_start = q_tile_idx * Br;
-        if (q_start >= seq_len) break;
-        const int actual_Br = min(Br, seq_len - q_start);
+        if (q_start >= seq_len_q) break;
+        const int actual_Br = min(Br, seq_len_q - q_start);
 
         // For causal masking: skip if all Q rows come before all K cols
-        if (causal && (q_start + actual_Br - 1) < kv_start) {
+        // (bottom-right aligned: query row r attends keys <= r + causal_offset)
+        if (causal && (q_start + actual_Br - 1) + causal_offset < kv_start) {
             continue;
         }
 
@@ -2876,7 +2883,7 @@ __global__ void flash_attention_backward_kernel(
             int j = idx % Bc;
             float p = 0.0f;
             if (i < actual_Br && j < actual_Bc) {
-                if (causal && (q_start + i) < (kv_start + j)) {
+                if (causal && (q_start + i) + causal_offset < (kv_start + j)) {
                     p = 0.0f;
                 } else {
                     p = expf(S_tile[i * Bc + j] - l_tile[i]);
@@ -3011,7 +3018,8 @@ __global__ void flash_attention_backward_kernel_mp(
     float* __restrict__ dQ_f32,  // [batch_heads, seq_len, HEAD_DIM] FP32 scratch for atomicAdd
     T* __restrict__ dK,          // [batch_heads, seq_len, HEAD_DIM]
     T* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM]
-    const int seq_len,
+    const int seq_len_q,
+    const int seq_len_k,
     const float scale,
     const bool causal,
     // Phase P0 / Fix 6: dropout reproduction. See FP32 backward kernel
@@ -3024,20 +3032,24 @@ __global__ void flash_attention_backward_kernel_mp(
     const int batch_head = blockIdx.y;
     const int tid = threadIdx.x;
 
-    const int kv_start = kv_tile_idx * Bc;
-    if (kv_start >= seq_len) return;
-    const int actual_Bc = min(Bc, seq_len - kv_start);
+    // Bottom-right causal alignment: query row r attends keys up to
+    // r + (seq_len_k - seq_len_q) (matches the forward kernel).
+    const int causal_offset = seq_len_k - seq_len_q;
 
-    // Base pointers
-    const T* Q_base      = Q  + batch_head * seq_len * HEAD_DIM;
-    const T* K_base      = K  + batch_head * seq_len * HEAD_DIM;
-    const T* V_base      = V  + batch_head * seq_len * HEAD_DIM;
-    const T* O_base      = O  + batch_head * seq_len * HEAD_DIM;
-    const T* dO_base     = dO + batch_head * seq_len * HEAD_DIM;
-    const float* L_base  = L  + batch_head * seq_len;
-    float* dQ_base       = dQ_f32 + batch_head * seq_len * HEAD_DIM;
-    T* dK_base           = dK + batch_head * seq_len * HEAD_DIM;
-    T* dV_base           = dV + batch_head * seq_len * HEAD_DIM;
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len_k) return;
+    const int actual_Bc = min(Bc, seq_len_k - kv_start);
+
+    // Base pointers. Q/O/dO/L/dQ stride by seq_len_q; K/V/dK/dV by seq_len_k.
+    const T* Q_base      = Q  + batch_head * seq_len_q * HEAD_DIM;
+    const T* K_base      = K  + batch_head * seq_len_k * HEAD_DIM;
+    const T* V_base      = V  + batch_head * seq_len_k * HEAD_DIM;
+    const T* O_base      = O  + batch_head * seq_len_q * HEAD_DIM;
+    const T* dO_base     = dO + batch_head * seq_len_q * HEAD_DIM;
+    const float* L_base  = L  + batch_head * seq_len_q;
+    float* dQ_base       = dQ_f32 + batch_head * seq_len_q * HEAD_DIM;
+    T* dK_base           = dK + batch_head * seq_len_k * HEAD_DIM;
+    T* dV_base           = dV + batch_head * seq_len_k * HEAD_DIM;
 
     // All shared memory tiles in FP32 for numerical stability
     extern __shared__ float smem[];
@@ -3072,14 +3084,14 @@ __global__ void flash_attention_backward_kernel_mp(
         dv_acc[e] = 0.0f;
     }
 
-    const int num_q_tiles = (seq_len + Br - 1) / Br;
+    const int num_q_tiles = (seq_len_q + Br - 1) / Br;
 
     for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
         const int q_start = q_tile_idx * Br;
-        if (q_start >= seq_len) break;
-        const int actual_Br = min(Br, seq_len - q_start);
+        if (q_start >= seq_len_q) break;
+        const int actual_Br = min(Br, seq_len_q - q_start);
 
-        if (causal && (q_start + actual_Br - 1) < kv_start) {
+        if (causal && (q_start + actual_Br - 1) + causal_offset < kv_start) {
             continue;
         }
 
@@ -3141,7 +3153,7 @@ __global__ void flash_attention_backward_kernel_mp(
             int j = idx % Bc;
             float p = 0.0f;
             if (i < actual_Br && j < actual_Bc) {
-                if (causal && (q_start + i) < (kv_start + j)) {
+                if (causal && (q_start + i) + causal_offset < (kv_start + j)) {
                     p = 0.0f;
                 } else {
                     p = expf(S_tile[i * Bc + j] - l_tile[i]);
@@ -3285,7 +3297,8 @@ auto flash_attention_backward_cuda(
     }
     (void)philox_offset;  // counter[3] hardcoded to 0 in philox_uniform
     int64_t batch_heads = Q.shape()[0];
-    int64_t seq_len = Q.shape()[1];
+    int64_t seq_len_q = Q.shape()[1];
+    int64_t seq_len_k = K.shape()[1];
     int64_t head_dim = Q.shape()[2];
 
     const auto dtype = Q.dtype();
@@ -3300,7 +3313,7 @@ auto flash_attention_backward_cuda(
     constexpr int Bc = 32;
     constexpr int BLOCK_SIZE = 256;
 
-    int num_kv_tiles = (seq_len + Bc - 1) / Bc;
+    int num_kv_tiles = (seq_len_k + Bc - 1) / Bc;
     dim3 grid(num_kv_tiles, batch_heads);
     dim3 threads(BLOCK_SIZE);
 
@@ -3319,9 +3332,9 @@ auto flash_attention_backward_cuda(
 
     if (dtype == DType::Float32) {
         // Float32 path — use original kernel (no conversion overhead)
-        Tensor dQ = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, Q.device());
-        Tensor dK = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, K.device());
-        Tensor dV = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, V.device());
+        Tensor dQ = create_cuda_zeros({batch_heads, seq_len_q, head_dim}, DType::Float32, Q.device());
+        Tensor dK = create_cuda_zeros({batch_heads, seq_len_k, head_dim}, DType::Float32, K.device());
+        Tensor dV = create_cuda_zeros({batch_heads, seq_len_k, head_dim}, DType::Float32, V.device());
 
         const float* q_ptr  = Q.data<float>();
         const float* k_ptr  = K.data<float>();
@@ -3332,7 +3345,8 @@ auto flash_attention_backward_cuda(
         float* dq_ptr = dQ.data<float>();
         float* dk_ptr = dK.data<float>();
         float* dv_ptr = dV.data<float>();
-        int seq_len_int = static_cast<int>(seq_len);
+        int seq_len_q_int = static_cast<int>(seq_len_q);
+        int seq_len_k_int = static_cast<int>(seq_len_k);
 
         // Wave E3 (deferred → landed): extended head_dim support. Added
         // arms for {16, 48, 80, 96, 160} — covers ViT (head_dim=64), DeiT
@@ -3343,7 +3357,7 @@ auto flash_attention_backward_cuda(
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
             kernel_fn<<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal, dropout_p, rng_seed);
+                seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         };
         switch (head_dim) {
@@ -3370,13 +3384,14 @@ auto flash_attention_backward_cuda(
 
     // FP16 / BF16 path — mixed-precision kernel with FP32 accumulation
     // dQ uses FP32 scratch for atomicAdd, then convert to output dtype
-    Tensor dQ_f32 = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, Q.device());
-    Tensor dK = create_cuda_zeros({batch_heads, seq_len, head_dim}, dtype, K.device());
-    Tensor dV = create_cuda_zeros({batch_heads, seq_len, head_dim}, dtype, V.device());
+    Tensor dQ_f32 = create_cuda_zeros({batch_heads, seq_len_q, head_dim}, DType::Float32, Q.device());
+    Tensor dK = create_cuda_zeros({batch_heads, seq_len_k, head_dim}, dtype, K.device());
+    Tensor dV = create_cuda_zeros({batch_heads, seq_len_k, head_dim}, dtype, V.device());
 
     const float* l_ptr = L.data<float>();
     float* dq_f32_ptr = dQ_f32.data<float>();
-    int seq_len_int = static_cast<int>(seq_len);
+    int seq_len_q_int = static_cast<int>(seq_len_q);
+    int seq_len_k_int = static_cast<int>(seq_len_k);
 
     // Dispatch FP16 / BF16 kernel launches
     auto launch_mp_kernels = [&](auto q_ptr, auto k_ptr, auto v_ptr, auto o_ptr, auto do_ptr,
@@ -3387,7 +3402,7 @@ auto flash_attention_backward_cuda(
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
             kernel_fn<<<grid, threads, smem>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
-                seq_len_int, scale, causal, dropout_p, rng_seed);
+                seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         };
         // Wave E3 (deferred → landed): extended head_dim arms, same set
@@ -3985,15 +4000,22 @@ __global__ void fused_softmax_cross_entropy_kernel(
         loss[b] = log_sum_exp - static_cast<T>(logits_row[target]);
     }
 
-    // Step 4: Compute gradient if requested
+    // Step 4: Compute gradient if requested.
+    // F130: return the RAW per-sample gradient (softmax - onehot), UNSCALED.
+    // The registry (cuda_kernel_registry.cpp) applies the reduction scale
+    // (1/num_rows for "mean") exactly once, matching CPU (cpu/kernels/
+    // fused_ops.cpp) and ROCm (fused_ops.hip.cpp), which also return an unscaled
+    // grad. Baking 1/batch_size in here double-scaled the "mean" grad to 1/N^2
+    // and added a spurious 1/N to "sum"/"none". (void)batch_size keeps the
+    // signature stable for the loss-only computation above.
+    (void)batch_size;
     if (compute_grad && grad_logits) {
         T* grad_row = grad_logits + b * num_classes;
-        T inv_batch = T(1) / T(batch_size);
         for (int64_t c = threadIdx.x; c < num_classes; c += blockDim.x) {
             T softmax_val = exp(static_cast<T>(logits_row[c]) - log_sum_exp);
             T grad = softmax_val;
             if (c == target) grad -= T(1);
-            grad_row[c] = grad * inv_batch;
+            grad_row[c] = grad;
         }
     }
 }

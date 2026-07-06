@@ -101,24 +101,30 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
     auto topk_weights = topk_vals / topk_sum;
 
     // On-graph combine weights: the gate that multiplies expert outputs must be
-    // derived from probs_v (a Variable) so the router receives the TASK loss
-    // gradient — even when aux_loss_weight_ == 0. Wrapping the combine weights
-    // with requires_grad=false (the previous behaviour) severed that path.
+    // FULLY differentiable w.r.t. the router logits — BOTH the numerator (probs)
+    // AND the renormalisation denominator S = sum of the selected probs. The
+    // previous code detached the denominator (route_norm = sel_mask / topk_sum
+    // with topk_sum a constant), so combine_v = probs * (1/S) dropped the
+    // -probs/S^2 quotient term of w = probs/S. That trained the router on a
+    // fabricated signal and, for top_k == 1, injected a spurious grad*(1/probs_max)
+    // where the gate is identically 1 and MUST carry zero gradient.
     //
-    // combine_v[n, e] = probs_v[n, e] * route_norm[n, e], where
-    //   route_norm[n, e] = 1/topk_sum[n] if e is in row n's top-k, else 0.
-    // route_norm is a NON-differentiable constant (it encodes the argmax-style
-    // top-k selection and the renormalisation denominator, neither of which is
-    // learned through the expert path). Multiplying by probs_v keeps the gate
-    // ON-GRAPH, so combine_v[n, e] numerically equals the old w_e[n] for expert
-    // e but now carries a grad_fn back to the router logits.
+    // Only the SELECTION (argmax-style top-k membership) is non-differentiable;
+    // encode it as a constant 0/1 mask, then normalise ON-GRAPH so both numerator
+    // and denominator flow gradient:
+    //   masked[n,e]    = sel_mask[n,e] * probs_v[n,e]   (zero on non-selected)
+    //   S[n]           = sum_e(masked[n,e])             (Variable-level)
+    //   combine_v[n,e] = masked[n,e] / S[n]             (differentiable gate)
+    // For top_k == 1 this is identically 1 on the selected expert with zero grad.
     Tensor sel_mask = tenzor::zeros({N, num_experts_}, probs_t.dtype(),
                                     input.tensor().device());
     Tensor ones_nk = tenzor::full({N, top_k_}, 1.0, probs_t.dtype(),
                                   input.tensor().device());
     sel_mask = tenzor::scatter(sel_mask, /*dim=*/1, topk_idx, ones_nk);  // 1 at selected
-    Tensor route_norm = tenzor::div(sel_mask, topk_sum);                 // [N, E] broadcast
-    Variable combine_v = probs_v * Variable(route_norm, /*requires_grad=*/false);
+    Variable sel_mask_v(sel_mask, /*requires_grad=*/false);
+    Variable masked_probs = probs_v * sel_mask_v;                          // [N, E]
+    Variable S_v = tenzor::sum(masked_probs, /*dim=*/1, /*keepdim=*/true);  // [N, 1], on-graph
+    Variable combine_v = masked_probs / S_v;                              // differentiable gate
 
     // Variable accumulator so the addition lands on the autograd graph.
     Variable output = Variable(
@@ -157,7 +163,16 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
                 static_cast<double>(top_k_) / static_cast<double>(num_experts_)));
             if (expert_capacity < 1) expert_capacity = 1;
             if (routed.shape()[0] > expert_capacity) {
-                routed = tenzor::narrow(routed, 0, 0, expert_capacity);
+                // Make the dropped-token set deterministic across backends: keep
+                // the LOWEST original row indices regardless of nonzero()'s
+                // per-backend ordering (previously narrow() relied on nonzero()
+                // returning ascending indices, so a backend with a different
+                // ordering dropped a different set of tokens — both the forward
+                // output and which tokens receive zero grad then diverge).
+                auto [routed_sorted, routed_perm] =
+                    tenzor::sort(routed, /*dim=*/0, /*descending=*/false);
+                (void)routed_perm;
+                routed = tenzor::narrow(routed_sorted, 0, 0, expert_capacity);
             }
         }
         const int64_t M = routed.shape()[0];

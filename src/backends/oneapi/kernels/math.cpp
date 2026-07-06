@@ -1498,6 +1498,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
             );
         }
 
+        // Complex 1D×2D: the vector-specific GEMM paths below only dispatch
+        // real float dtypes and would throw on Complex64/128 (unlike CUDA/ROCm
+        // which decompose complex matmul at any rank). Reshape the vector to
+        // (1, n), reuse the 2D complex GEMM path, and squeeze back to (m,).
+        if (a_cont.dtype() == DType::Complex64 || a_cont.dtype() == DType::Complex128) {
+            Tensor a_row = a_cont.reshape({int64_t(1), n});
+            Tensor result_2d = matmul_kernel(a_row, b_cont, queue);  // (1, m)
+            return result_2d.reshape({m});
+        }
+
         // Treat 1D vector as row vector (1, n) and perform matmul to get (1, m), then return as (m,)
         Tensor output({m}, a_cont.dtype(), a_cont.device());
 
@@ -3796,15 +3806,41 @@ auto where_kernel(const Tensor& condition_in, const Tensor& x_in, const Tensor& 
         throw std::invalid_argument("where: x and y must have the same dtype");
     }
 
-    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
-    Tensor condition = condition_in.is_contiguous() ? condition_in : contiguous_kernel(condition_in, queue);
-    Tensor x = x_in.is_contiguous() ? x_in : contiguous_kernel(x_in, queue);
-    Tensor y = y_in.is_contiguous() ? y_in : contiguous_kernel(y_in, queue);
+    // Normalize the condition to Bool (nonzero == true), matching CPU and every
+    // other backend. where() may be handed a NON-Bool mask (e.g. the Float
+    // `triu(ones(...))` causal mask built in composed_attention_backward, or an
+    // Int mask). The flat kernels below read the condition through a
+    // `const bool*`, so a Float/Int mask was reinterpreted byte-for-byte as
+    // bool — a Float 1.0 (0x3F800000) contributes stray 0x00/0x80 bytes, masking
+    // essentially random positions instead of the intended ones (the OneAPI
+    // composed attention backward causal mask silently became a near-no-op).
+    // Casting first yields a true 1-byte-per-element Bool buffer.
+    Tensor condition_bool = (condition_in.dtype() == DType::Bool)
+        ? condition_in : condition_in.to(DType::Bool);
 
-    Tensor output(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
-                  x.dtype(), x.device());
+    // Broadcast condition, x and y to their common shape BEFORE the flat-indexed
+    // kernels below. Those kernels read cond_ptr[idx]/x_ptr[idx]/y_ptr[idx] with a
+    // single linear index, which is only valid when all three operands already
+    // share the output shape. Direct backend calls may pass a smaller operand
+    // (e.g. a scalar -inf other-branch, or a [S_q,S_k] mask against [1,S_q,S_k]
+    // values); without this it would be read out of bounds. Mirror the
+    // broadcast_shapes path the binary ops in this file already use.
+    std::vector<int64_t> cond_shape(condition_bool.shape().begin(), condition_bool.shape().end());
+    std::vector<int64_t> x_shape(x_in.shape().begin(), x_in.shape().end());
+    std::vector<int64_t> y_shape(y_in.shape().begin(), y_in.shape().end());
+    std::vector<int64_t> out_shape =
+        broadcast_shapes(broadcast_shapes(cond_shape, x_shape), y_shape);
 
-    const int64_t numel = x.numel();
+    Tensor condition = tenzor::broadcast_to(condition_bool, out_shape);
+    Tensor x = tenzor::broadcast_to(x_in, out_shape);
+    Tensor y = tenzor::broadcast_to(y_in, out_shape);
+    condition = condition.is_contiguous() ? condition : contiguous_kernel(condition, queue);
+    x = x.is_contiguous() ? x : contiguous_kernel(x, queue);
+    y = y.is_contiguous() ? y : contiguous_kernel(y, queue);
+
+    Tensor output(out_shape, x.dtype(), x.device());
+
+    const int64_t numel = output.numel();
 
     if (x.dtype() == DType::Float32) {
         const bool* cond_ptr = get_data_ptr<const bool>(condition);
@@ -5543,29 +5579,41 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         auto out_shape = broadcast_shapes(a_shape, b_shape);
         auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
         Tensor output(out_shape, a_cont.dtype(), a_cont.device());
-        // Use `(x < y) ? x : y` (not sycl::fmin) to match the CPU reference
-        // NaN semantics: CPU computes `less(x,y)?x:y`, so minimum(1, NaN)
-        // returns NaN (since 1<NaN is false → y). sycl::fmin would suppress
-        // the NaN and return the finite operand, breaking cross-backend parity.
+        // NaN-propagating (torch.minimum semantics): if EITHER operand is NaN
+        // the result is NaN. The CPU reference propagates a NaN from either
+        // side; a plain `(x<y)?x:y` only propagates a NaN second operand and
+        // drops a NaN first operand, and sycl::fmin suppresses NaN entirely —
+        // both break cross-backend parity. sycl::isnan is reliable here.
         if (a_cont.dtype() == DType::Float32) {
             sycl_broadcast_binary<float, BroadcastMinimumFloat32>(
                 a_cont, b_cont, output, info, queue,
-                [](float x, float y) { return (x < y) ? x : y; });
+                [](float x, float y) {
+                    return (sycl::isnan(x) || sycl::isnan(y))
+                        ? std::numeric_limits<float>::quiet_NaN() : ((x < y) ? x : y);
+                });
         } else if (a_cont.dtype() == DType::Float64) {
             sycl_broadcast_binary<double, BroadcastMinimumFloat64>(
                 a_cont, b_cont, output, info, queue,
-                [](double x, double y) { return (x < y) ? x : y; });
+                [](double x, double y) {
+                    return (sycl::isnan(x) || sycl::isnan(y))
+                        ? std::numeric_limits<double>::quiet_NaN() : ((x < y) ? x : y);
+                });
         } else if (a_cont.dtype() == DType::Float16) {
             sycl_broadcast_binary<sycl::half, BroadcastMinimumFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](sycl::half x, sycl::half y) {
-                    return (static_cast<float>(x) < static_cast<float>(y)) ? x : y;
+                    const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+                    return (sycl::isnan(fx) || sycl::isnan(fy))
+                        ? static_cast<sycl::half>(std::numeric_limits<float>::quiet_NaN())
+                        : ((fx < fy) ? x : y);
                 });
         } else if (a_cont.dtype() == DType::BFloat16) {
             sycl_broadcast_binary<uint16_t, BroadcastMinimumBFloat16>(
                 a_cont, b_cont, output, info, queue,
-                [](uint16_t x, uint16_t y) {
-                    return (bf16_to_f32(x) < bf16_to_f32(y)) ? x : y;
+                [](uint16_t x, uint16_t y) -> uint16_t {
+                    const float fx = bf16_to_f32(x), fy = bf16_to_f32(y);
+                    return (sycl::isnan(fx) || sycl::isnan(fy))
+                        ? uint16_t(0x7FC0) : ((fx < fy) ? x : y);
                 });
         } else {
             throw std::runtime_error("minimum: unsupported dtype");
@@ -5577,7 +5625,7 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
                   a_cont.dtype(), a_cont.device());
     const int64_t numel = a_cont.numel();
 
-    // `(a < b) ? a : b` matches CPU NaN semantics (NaN propagates); see the
+    // NaN-propagating (torch.minimum): NaN in EITHER operand → NaN; see the
     // broadcast path above. sycl::fmin would suppress NaN and break parity.
     if (a_cont.dtype() == DType::Float32) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
@@ -5585,7 +5633,8 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<MinimumKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const float av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (av < bv) ? av : bv;
+            out_ptr[idx] = (sycl::isnan(av) || sycl::isnan(bv))
+                ? std::numeric_limits<float>::quiet_NaN() : ((av < bv) ? av : bv);
         }).wait();
     } else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -5593,7 +5642,8 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<MinimumKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const double av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (av < bv) ? av : bv;
+            out_ptr[idx] = (sycl::isnan(av) || sycl::isnan(bv))
+                ? std::numeric_limits<double>::quiet_NaN() : ((av < bv) ? av : bv);
         }).wait();
     } else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
@@ -5601,7 +5651,10 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<MinimumKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const sycl::half av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (static_cast<float>(av) < static_cast<float>(bv)) ? av : bv;
+            const float fa = static_cast<float>(av), fb = static_cast<float>(bv);
+            out_ptr[idx] = (sycl::isnan(fa) || sycl::isnan(fb))
+                ? static_cast<sycl::half>(std::numeric_limits<float>::quiet_NaN())
+                : ((fa < fb) ? av : bv);
         }).wait();
     } else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
@@ -5609,7 +5662,9 @@ auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<MinimumKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const uint16_t av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (bf16_to_f32(av) < bf16_to_f32(bv)) ? av : bv;
+            const float fa = bf16_to_f32(av), fb = bf16_to_f32(bv);
+            out_ptr[idx] = (sycl::isnan(fa) || sycl::isnan(fb))
+                ? uint16_t(0x7FC0) : ((fa < fb) ? av : bv);
         }).wait();
     } else {
         throw std::runtime_error("minimum: unsupported dtype");
@@ -5633,29 +5688,41 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         auto out_shape = broadcast_shapes(a_shape, b_shape);
         auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
         Tensor output(out_shape, a_cont.dtype(), a_cont.device());
-        // Use `(x > y) ? x : y` (not sycl::fmax) to match the CPU reference
-        // NaN semantics: CPU computes `greater(x,y)?x:y`, so maximum(1, NaN)
-        // returns NaN (since 1>NaN is false → y). sycl::fmax would suppress
-        // the NaN and return the finite operand, breaking cross-backend parity.
+        // NaN-propagating (torch.maximum semantics): if EITHER operand is NaN
+        // the result is NaN. The CPU reference propagates a NaN from either
+        // side; a plain `(x>y)?x:y` only propagates a NaN second operand and
+        // drops a NaN first operand, and sycl::fmax suppresses NaN entirely —
+        // both break cross-backend parity. sycl::isnan is reliable here.
         if (a_cont.dtype() == DType::Float32) {
             sycl_broadcast_binary<float, BroadcastMaximumFloat32>(
                 a_cont, b_cont, output, info, queue,
-                [](float x, float y) { return (x > y) ? x : y; });
+                [](float x, float y) {
+                    return (sycl::isnan(x) || sycl::isnan(y))
+                        ? std::numeric_limits<float>::quiet_NaN() : ((x > y) ? x : y);
+                });
         } else if (a_cont.dtype() == DType::Float64) {
             sycl_broadcast_binary<double, BroadcastMaximumFloat64>(
                 a_cont, b_cont, output, info, queue,
-                [](double x, double y) { return (x > y) ? x : y; });
+                [](double x, double y) {
+                    return (sycl::isnan(x) || sycl::isnan(y))
+                        ? std::numeric_limits<double>::quiet_NaN() : ((x > y) ? x : y);
+                });
         } else if (a_cont.dtype() == DType::Float16) {
             sycl_broadcast_binary<sycl::half, BroadcastMaximumFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](sycl::half x, sycl::half y) {
-                    return (static_cast<float>(x) > static_cast<float>(y)) ? x : y;
+                    const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+                    return (sycl::isnan(fx) || sycl::isnan(fy))
+                        ? static_cast<sycl::half>(std::numeric_limits<float>::quiet_NaN())
+                        : ((fx > fy) ? x : y);
                 });
         } else if (a_cont.dtype() == DType::BFloat16) {
             sycl_broadcast_binary<uint16_t, BroadcastMaximumBFloat16>(
                 a_cont, b_cont, output, info, queue,
-                [](uint16_t x, uint16_t y) {
-                    return (bf16_to_f32(x) > bf16_to_f32(y)) ? x : y;
+                [](uint16_t x, uint16_t y) -> uint16_t {
+                    const float fx = bf16_to_f32(x), fy = bf16_to_f32(y);
+                    return (sycl::isnan(fx) || sycl::isnan(fy))
+                        ? uint16_t(0x7FC0) : ((fx > fy) ? x : y);
                 });
         } else {
             throw std::runtime_error("maximum: unsupported dtype");
@@ -5667,7 +5734,7 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
                   a_cont.dtype(), a_cont.device());
     const int64_t numel = a_cont.numel();
 
-    // `(a > b) ? a : b` matches CPU NaN semantics (NaN propagates); see the
+    // NaN-propagating (torch.maximum): NaN in EITHER operand → NaN; see the
     // broadcast path above. sycl::fmax would suppress NaN and break parity.
     if (a_cont.dtype() == DType::Float32) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
@@ -5675,7 +5742,8 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<MaximumKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const float av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (av > bv) ? av : bv;
+            out_ptr[idx] = (sycl::isnan(av) || sycl::isnan(bv))
+                ? std::numeric_limits<float>::quiet_NaN() : ((av > bv) ? av : bv);
         }).wait();
     } else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -5683,7 +5751,8 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<MaximumKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const double av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (av > bv) ? av : bv;
+            out_ptr[idx] = (sycl::isnan(av) || sycl::isnan(bv))
+                ? std::numeric_limits<double>::quiet_NaN() : ((av > bv) ? av : bv);
         }).wait();
     } else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
@@ -5691,7 +5760,10 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<MaximumKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const sycl::half av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (static_cast<float>(av) > static_cast<float>(bv)) ? av : bv;
+            const float fa = static_cast<float>(av), fb = static_cast<float>(bv);
+            out_ptr[idx] = (sycl::isnan(fa) || sycl::isnan(fb))
+                ? static_cast<sycl::half>(std::numeric_limits<float>::quiet_NaN())
+                : ((fa > fb) ? av : bv);
         }).wait();
     } else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
@@ -5699,7 +5771,9 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<MaximumKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const uint16_t av = a_ptr[idx], bv = b_ptr[idx];
-            out_ptr[idx] = (bf16_to_f32(av) > bf16_to_f32(bv)) ? av : bv;
+            const float fa = bf16_to_f32(av), fb = bf16_to_f32(bv);
+            out_ptr[idx] = (sycl::isnan(fa) || sycl::isnan(fb))
+                ? uint16_t(0x7FC0) : ((fa > fb) ? av : bv);
         }).wait();
     } else {
         throw std::runtime_error("maximum: unsupported dtype");
@@ -6366,6 +6440,13 @@ auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, sycl::
 // Logcumsumexp kernel - log-cumulative-sum-exp along a dimension
 // ============================================================================
 auto logcumsumexp_kernel(const Tensor& input_raw, int64_t dim, sycl::queue& queue) -> Tensor {
+    // Float16/BFloat16: widen to Float32 on the same device, scan, narrow back
+    // (mirrors cumsum_kernel/cumprod_kernel and CPU/CUDA backends); otherwise the
+    // dtype dispatch below throws for half inputs.
+    if (input_raw.dtype() == DType::Float16 || input_raw.dtype() == DType::BFloat16) {
+        const DType orig = input_raw.dtype();
+        return logcumsumexp_kernel(input_raw.to(DType::Float32), dim, queue).to(orig);
+    }
     // Offsets assume contiguous row-major layout; contiguize non-contiguous
     // inputs first (mirrors cummax_kernel / CUDA backend).
     Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
@@ -7882,8 +7963,21 @@ static auto quantile_impl(const Tensor& input, double q, int64_t dim, bool keepd
                 continue;
             }
 
-            // Sort valid elements on device
-            ::oneapi::dpl::sort(policy, slice_buf, slice_buf + valid_count);
+            // Sort valid elements on device. NaN-aware comparator so NaN sorts
+            // LAST (any sign), matching CPU nan_less. The default operator< is
+            // NaN-blind and dpl's radix path orders by raw bits, sending a
+            // negative-sign NaN to the FRONT — which diverges from CPU. A
+            // comparator (not a key remap) keeps the actual NaN value, so the
+            // interpolated output still carries NaN when a NaN slot is picked.
+            // For ignore_nan (nanquantile) NaNs are already partitioned out, so
+            // this is a no-op there.
+            ::oneapi::dpl::sort(policy, slice_buf, slice_buf + valid_count,
+                [](T a, T b) {
+                    bool na = sycl::isnan(a);
+                    bool nb = sycl::isnan(b);
+                    if (na || nb) return !na && nb;   // finite < NaN; NaN < nothing
+                    return a < b;
+                });
 
             // Compute interpolated quantile value on device
             double pos = q * (static_cast<double>(valid_count) - 1.0);

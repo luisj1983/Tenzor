@@ -728,28 +728,41 @@ auto CholeskyInverseBackward::forward(std::vector<Variable>) -> std::vector<Vari
     throw std::runtime_error("CholeskyInverseBackward::forward should not be called directly");
 }
 
+namespace {
+// Conjugate transpose (adjoint Xᴴ) for complex; plain transpose for real.
+inline Tensor adjoint_t(const Tensor& X) {
+    const auto nd = X.ndim();
+    auto Xt = transpose(X, nd - 2, nd - 1);
+    return X.is_complex() ? conj(Xt) : Xt;
+}
+inline Variable adjoint_v(const Variable& X) {
+    const auto nd = X.tensor().ndim();
+    auto Xt = tenzor::transpose(X, nd - 2, nd - 1);
+    return X.tensor().is_complex() ? tenzor::conj(Xt) : Xt;
+}
+}  // namespace
+
 auto CholeskyInverseBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
     const auto& L = saved_tensors_[0];          // Cholesky factor
     const auto& Ainv = saved_tensors_[1];        // A^{-1} = cholesky_inverse(L)
     const auto& grad = grad_outputs[0];          // dL/d(A^{-1})
 
-    auto ndim = L.ndim();
-
-    // Symmetrize gradient: (grad + grad^T) since A^{-1} is symmetric
-    auto grad_sym = mul(add(grad, transpose(grad, ndim - 2, ndim - 1)), 0.5);
+    // Hermitian symmetrization for complex Hermitian A^{-1} uses the conjugate
+    // transpose (adjoint); for real inputs adjoint_t() is a plain transpose.
+    auto grad_sym = mul(add(grad, adjoint_t(grad)), 0.5);
 
     // dL/dA^{-1} = grad_sym
-    // d(A^{-1})/dL: A^{-1} = (L L^T)^{-1}
+    // d(A^{-1})/dL: A^{-1} = (L L^H)^{-1}
     // Using the chain rule through matrix inverse:
     // grad_A = -Ainv @ grad_sym @ Ainv
     auto temp = matmul(matmul(Ainv, grad_sym), Ainv);
     auto neg_temp = neg(temp);
 
-    // Now grad_A is the gradient w.r.t. A = L @ L^T
-    // Chain through A = L @ L^T:
-    // dL/dL = (grad_A + grad_A^T) @ L
-    auto grad_A_sym = add(neg_temp, transpose(neg_temp, ndim - 2, ndim - 1));
+    // Now grad_A is the gradient w.r.t. A = L @ L^H
+    // Chain through A = L @ L^H:
+    // dL/dL = (grad_A + grad_A^H) @ L
+    auto grad_A_sym = add(neg_temp, adjoint_t(neg_temp));
     auto grad_L = matmul(grad_A_sym, L);
 
     // Only lower triangular part matters since L is lower triangular
@@ -774,16 +787,14 @@ auto CholeskyInverseBackward::backward_with_variables(std::vector<Variable> grad
     require_saved_tensors(2);
     Variable L_var(saved_tensors_[0], /*requires_grad=*/false);
     Variable Ainv_var(saved_tensors_[1], /*requires_grad=*/false);
-    const int64_t ndim = saved_tensors_[0].ndim();
 
     auto& grad = grad_outputs[0];
-    auto grad_T = tenzor::transpose(grad, ndim - 2, ndim - 1);
-    auto grad_sym = (grad + grad_T) * 0.5;
+    // Conjugate transpose (adjoint_v) for complex Hermitian A^{-1}; real → transpose.
+    auto grad_sym = (grad + adjoint_v(grad)) * 0.5;
 
     auto temp = tenzor::matmul(tenzor::matmul(Ainv_var, grad_sym), Ainv_var);
     auto neg_temp = tenzor::neg(temp);
-    auto neg_temp_T = tenzor::transpose(neg_temp, ndim - 2, ndim - 1);
-    auto grad_A_sym = neg_temp + neg_temp_T;
+    auto grad_A_sym = neg_temp + adjoint_v(neg_temp);
     auto grad_L = tenzor::matmul(grad_A_sym, L_var);
     if (upper_) {
         grad_L = tenzor::triu(grad_L);
@@ -1268,9 +1279,10 @@ auto TensorInvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     auto Y_2d = reshape(Y, {rows, cols});
     auto grad_2d = reshape(grad, {rows, cols});
 
-    // ∂L/∂X_2d = − X_2d⁻ᵀ · grad_Y · X_2d⁻ᵀ. Using Y_2d = X_2d⁻¹ and
-    // the transpose of Y = X⁻¹:  grad_X_2d = − Y_2dᵀ · grad_Y · Y_2dᵀ.
-    auto Y_2d_t = tenzor::transpose(Y_2d, 0, 1);
+    // ∂L/∂X_2d = − X_2d⁻ᴴ · grad_Y · X_2d⁻ᴴ. Using Y_2d = X_2d⁻¹:
+    //   grad_X_2d = − Y_2dᴴ · grad_Y · Y_2dᴴ. Conjugate transpose for complex
+    //   inputs (tensorinv delegates to inv, which supports complex); real → transpose.
+    auto Y_2d_t = adjoint_t(Y_2d);
     auto temp = matmul(matmul(Y_2d_t, grad_2d), Y_2d_t);
     auto result_2d = neg(temp);
 
@@ -1304,7 +1316,7 @@ auto TensorInvBackward::backward_with_variables(std::vector<Variable> grad_outpu
 
     auto Y_2d = tenzor::reshape(Y_var, {rows, cols});
     auto grad_2d = tenzor::reshape(grad_outputs[0], {rows, cols});
-    auto Y_2d_t = tenzor::transpose(Y_2d, 0, 1);
+    auto Y_2d_t = adjoint_v(Y_2d);  // conjugate transpose for complex; real → transpose
     auto temp = tenzor::matmul(tenzor::matmul(Y_2d_t, grad_2d), Y_2d_t);
     auto result_2d = tenzor::neg(temp);
 
@@ -1350,13 +1362,15 @@ auto TensorSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
     auto grad_flat = reshape(grad, {N, 1});
     auto X_flat = reshape(X, {N, 1});
 
-    auto At_2d = transpose(A_2d, 0, 1);
+    // Conjugate transpose for complex (tensorsolve delegates to solve, which
+    // supports complex): grad_B = solve(Aᴴ, grad), grad_A = -grad_B @ Xᴴ.
+    auto At_2d = adjoint_t(A_2d);
     auto grad_B_flat = tenzor::linalg::solve(At_2d, grad_flat);
     auto grad_B = reshape(grad_B_flat, B_shape);
 
-    // grad_A = -grad_B @ X^T reshaped
+    // grad_A = -grad_B @ X^H reshaped
     auto grad_B_col = reshape(grad_B_flat, {N, 1});
-    auto X_row = transpose(X_flat, 0, 1);
+    auto X_row = adjoint_t(X_flat);
     auto grad_A_2d = neg(matmul(grad_B_col, X_row));
     auto grad_A = reshape(grad_A_2d, A_shape);
 
@@ -1387,11 +1401,11 @@ auto TensorSolveBackward::backward_with_variables(std::vector<Variable> grad_out
     Variable X_flat_var(X_flat_t, /*requires_grad=*/false);
 
     auto grad_flat = tenzor::reshape(grad_outputs[0], {N, 1});
-    auto At_2d = tenzor::transpose(A_2d_var, 0, 1);
+    auto At_2d = adjoint_v(A_2d_var);  // conjugate transpose for complex; real → transpose
     auto grad_B_flat = tenzor::solve(At_2d, grad_flat);
     auto grad_B = tenzor::reshape(grad_B_flat, B_shape);
 
-    auto X_row = tenzor::transpose(X_flat_var, 0, 1);
+    auto X_row = adjoint_v(X_flat_var);
     auto grad_A_2d = tenzor::neg(tenzor::matmul(grad_B_flat, X_row));
     auto grad_A = tenzor::reshape(grad_A_2d, A_shape);
     return {grad_A, grad_B};

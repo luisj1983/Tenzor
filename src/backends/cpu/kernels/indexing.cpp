@@ -1335,6 +1335,15 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
             if (idx < 0) idx += input_numel;
             dst_d[idx] += src_d[i];
         }
+    } else if (accumulate) {
+        // F089: the accumulate=true fast paths above cover only Float32/Float64.
+        // Falling through to the plain memcpy here would SILENTLY OVERWRITE
+        // instead of accumulating for every other dtype (Int32/64, Float16,
+        // BFloat16, complex). Fail loudly rather than produce a wrong result.
+        throw std::runtime_error(
+            "put(accumulate=true): accumulation is only implemented for "
+            "Float32/Float64 on CPU; got an unsupported dtype. Cast to a "
+            "supported dtype, or use accumulate=false to overwrite.");
     } else {
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];

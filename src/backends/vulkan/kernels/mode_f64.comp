@@ -38,7 +38,7 @@ void main() {
             if (cur_count > best_count) {
                 best_count = cur_count;
                 best_val = cur_val;
-                best_idx = cur_start;
+                best_idx = cur_start + cur_count - 1;  // F144: run END -> highest original index (matches CPU mode); sort is stable (F138)
             }
             cur_val = v;
             cur_count = 1;
@@ -48,7 +48,7 @@ void main() {
     // Check final run
     if (cur_count > best_count) {
         best_val = cur_val;
-        best_idx = cur_start;
+        best_idx = cur_start + cur_count - 1;  // F144: run END -> highest original index (matches CPU mode); sort is stable (F138)
     }
 
     mode_values[slice_id] = best_val;

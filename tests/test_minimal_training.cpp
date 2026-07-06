@@ -128,7 +128,7 @@ TEST_P(MinimalTraining, SimpleLinearRegression) {
 
         // Check gradients
         if (weight.has_grad()) {
-            auto& grad = weight.grad().value();
+            auto grad = weight.grad().value();
             auto grad_cpu = grad.cpu();
             float grad_val = grad_cpu.data<float>()[0];
             if (std::isnan(grad_val)) {
@@ -268,7 +268,7 @@ TEST_P(MinimalTraining, IntegrationTestSetup) {
         float max_grad = 0.0f;
         for (auto& param : params) {
             if (param->has_grad()) {
-                auto& grad = param->grad().value();
+                auto grad = param->grad().value();
                 auto grad_cpu = grad.cpu();
                 auto* grad_data = grad_cpu.template data<float>();
                 int64_t numel = grad_cpu.numel();

@@ -49,9 +49,23 @@ auto ctc_loss_forward_kernel(const Tensor& log_probs,
                              const Tensor& target_lengths,
                              int64_t blank,
                              bool zero_infinity) -> std::vector<Tensor> {
-    if (log_probs.dtype() != DType::Float32) {
+    // The Metal shader is Float32-only (Metal has no native double). To match
+    // CUDA/ROCm/OneAPI — which compute Float64 natively and widen Float16/
+    // BFloat16 to Float32 then narrow — MPS widens every non-Float32 log_probs
+    // dtype to Float32, runs the DP, then narrows both outputs (loss + raw
+    // grad) back to the original dtype so precision metadata is preserved.
+    const DType dt = log_probs.dtype();
+    if (dt == DType::Float64 || dt == DType::Float16 || dt == DType::BFloat16) {
+        auto out = ctc_loss_forward_kernel(log_probs.to(DType::Float32), targets,
+                                           input_lengths, target_lengths, blank,
+                                           zero_infinity);
+        for (auto& t : out) t = t.to(dt);
+        return out;
+    }
+    if (dt != DType::Float32) {
         throw std::invalid_argument(
-            "ctc_loss_forward (MPS): log_probs must be Float32");
+            "ctc_loss_forward (MPS): log_probs must be "
+            "Float16/BFloat16/Float32/Float64");
     }
     if (targets.dtype() != DType::Int32 ||
         input_lengths.dtype() != DType::Int32 ||

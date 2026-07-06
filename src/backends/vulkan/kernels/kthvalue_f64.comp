@@ -36,12 +36,21 @@ void main() {
         uint idx = base + i * params.inner_size;
         float64_t val = input_data[idx];
 
+        // F142: NaN-as-largest ranking (see kthvalue.comp). Plain `<` mis-ranks
+        // NaN (false both ways) vs the CPU nan_less reference.
+        bool val_nan = isnan(val);
         uint less_count = 0;
         uint equal_before = 0;
         for (uint j = 0; j < params.dim_size; j++) {
             float64_t other = input_data[base + j * params.inner_size];
-            if (other < val) less_count++;
-            else if (other == val && j < i) equal_before++;
+            bool other_nan = isnan(other);
+            bool other_before;
+            bool tie;
+            if (val_nan) { other_before = !other_nan; tie = other_nan; }
+            else if (other_nan) { other_before = false; tie = false; }
+            else { other_before = (other < val); tie = (other == val); }
+            if (other_before) less_count++;
+            else if (tie && j < i) equal_before++;
         }
 
         uint rank = less_count + equal_before + 1;

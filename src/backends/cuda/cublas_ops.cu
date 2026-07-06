@@ -1021,7 +1021,9 @@ auto linear_backward_kernel(
             grad_input.data<float>(),
             CUDA_R_32F,
             in_features,
-            (::tenzor::cuda::matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F),
+            // Force exact IEEE FP32 (never TF32) for the backward GEMM so
+            // grad_input matches the exact-fp32 CPU/ROCm/OneAPI/Vulkan backends.
+            CUBLAS_COMPUTE_32F,
             CUBLAS_GEMM_DEFAULT_TENSOR_OP
         ));
 
@@ -1045,7 +1047,9 @@ auto linear_backward_kernel(
             grad_weight.data<float>(),
             CUDA_R_32F,
             in_features,
-            (::tenzor::cuda::matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F),
+            // Force exact IEEE FP32 (never TF32) for the backward GEMM so
+            // grad_weight matches the exact-fp32 CPU/ROCm/OneAPI/Vulkan backends.
+            CUBLAS_COMPUTE_32F,
             CUBLAS_GEMM_DEFAULT_TENSOR_OP
         ));
 

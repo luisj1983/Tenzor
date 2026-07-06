@@ -1,6 +1,7 @@
 #include "tenzor/autograd/function.hpp"
 #include <cassert>
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -259,7 +260,24 @@ auto LogBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // create_graph was not active during forward.
     Variable saved_input = has_saved_variables() ? saved_variables_[0]
                                                   : Variable(saved_tensors_[0], false);
-    return {grad_outputs[0] / saved_input};
+    if (saved_input.tensor().is_complex()) {
+        // Wirtinger: d/d(conj(z)) log(z) = grad / conj(z) (mirror backward()).
+        // Route conj through the Variable overload so saved_input's grad_fn
+        // survives into the higher-order graph.
+        return {grad_outputs[0] / tenzor::conj(saved_input)};
+    }
+    // Zero-safe guard mirroring backward(): replace x==0 with epsilon via
+    // Variable-level ops so the grad_fn on saved_input survives.
+    auto in_view = saved_input.tensor();
+    auto shape = std::vector<int64_t>(in_view.shape().begin(), in_view.shape().end());
+    auto zero_t = zeros(shape, in_view.dtype(), in_view.device());
+    auto eps_t = full(shape, detail::dtype_epsilon(in_view.dtype()),
+                      in_view.dtype(), in_view.device());
+    Variable zero_var(zero_t, false);
+    Variable eps_var(eps_t, false);
+    auto is_zero = ::tenzor::eq(saved_input, zero_var);
+    auto safe_input = ::tenzor::where(is_zero, eps_var, saved_input);
+    return {grad_outputs[0] / safe_input};
 }
 
 // ExpBackward implementation
@@ -291,6 +309,10 @@ auto ExpBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         saved_output = tenzor::exp(saved_variables_[0]);
     } else {
         saved_output = Variable(saved_tensors_[0], false);
+    }
+    if (saved_output.tensor().is_complex()) {
+        // Wirtinger: d/d(conj(z)) exp(z) = conj(exp(z)) * grad (mirror backward()).
+        return {grad_outputs[0] * tenzor::conj(saved_output)};
     }
     return {grad_outputs[0] * saved_output};
 }
@@ -444,6 +466,24 @@ auto AbsBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // potentially-offloaded saved copy.
     const auto& input = has_saved_variables() ? saved_variables_[0].tensor()
                                               : saved_tensors_[0];
+
+    if (input.is_complex()) {
+        // Wirtinger (no-1/2 convention, matching backward()): d/d(conj(z)) |z|
+        // = z/|z| = sgn(z). The scale factor is treated as a constant (its
+        // derivative is a delta, ignored — consistent with the real sign path);
+        // only grad_outputs[0]'s chain carries higher-order gradient.
+        auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto abs_input = tenzor::abs(input);
+        double ceps = 1e-7;
+        auto eps_tensor = full(input_shape_vec, ceps, abs_input.dtype(), input.device());
+        auto safe_abs = tenzor::where(gt(abs_input, eps_tensor), abs_input, eps_tensor);
+        auto scale = div(input, safe_abs);  // z/|z| = sgn(z), constant factor
+        Variable scale_var(scale, false);
+        // grad of |z| is real; cast to complex so the Wirtinger product is valid
+        // (mirror backward()'s grad.to(input.dtype())), keeping grad's grad_fn.
+        auto grad_c = tenzor::nn::variable_cast(grad_outputs[0], input.dtype());
+        return {grad_c * scale_var};
+    }
 
     double eps = 1e-7;
     if (input.dtype() == DType::Float64) eps = 1e-15;

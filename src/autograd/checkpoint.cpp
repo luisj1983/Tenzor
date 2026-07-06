@@ -515,12 +515,39 @@ static auto checkpoint_impl_shared(
     for (const auto& ptr : input_ptrs) {
         inputs_for_execution.push_back(*ptr);
     }
-    auto outputs = fn(inputs_for_execution);
 
-    // Attach gradient function to outputs
-    for (auto& output : outputs) {
-        if (output.requires_grad()) {
-            output.set_grad_fn(checkpoint_fn);
+    // Whether gradients should flow through this checkpoint (decided BEFORE the
+    // NoGradGuard flips the thread-local grad state).
+    const bool grad_enabled_outer = is_grad_enabled();
+    bool any_input_requires_grad = false;
+    for (const auto& ptr : input_ptrs) {
+        if (ptr->requires_grad()) { any_input_requires_grad = true; break; }
+    }
+
+    // Run the checkpointed forward WITHOUT building an autograd graph — that is
+    // the whole point of activation checkpointing (trade compute for memory).
+    // Previously the forward ran with grad enabled, building a full internal
+    // graph that was immediately discarded when checkpoint_fn was attached
+    // below, so peak forward memory equalled an un-checkpointed forward. The
+    // gradient is instead produced by re-running the forward during backward
+    // (checkpoint_fn), so no internal graph is needed here.
+    std::vector<Variable> outputs;
+    {
+        NoGradGuard no_grad;
+        outputs = fn(inputs_for_execution);
+    }
+
+    // Attach the checkpoint grad_fn so gradients flow via recomputation. Under
+    // NoGrad the outputs don't track grad, so re-mark the grad-capable
+    // (floating/complex) outputs as requiring grad when the checkpoint should
+    // participate in autograd (mirrors PyTorch's non-reentrant checkpoint).
+    if (any_input_requires_grad && grad_enabled_outer) {
+        for (auto& output : outputs) {
+            if (output.tensor().is_floating_point() || output.tensor().is_complex()) {
+                Variable tracked(output.tensor(), /*requires_grad=*/true);
+                tracked.set_grad_fn(checkpoint_fn);
+                output = tracked;
+            }
         }
     }
 

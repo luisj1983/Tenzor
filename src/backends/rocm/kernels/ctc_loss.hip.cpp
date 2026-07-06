@@ -100,7 +100,10 @@ __global__ void ctc_forward_backward_kernel(
         return (s % 2 == 0) ? static_cast<int32_t>(blank) : tgt_n[s / 2];
     };
 
-    if (T_n <= 0 || S_n <= 0 || L_n > L_max) {
+    // F116: include T_n > T_max — otherwise input_lengths[n] > T_max drives the
+    // forward recurrence to index alpha/beta (sized [T_max, L_max]) past their
+    // allocation and writes grad_out out of bounds (device heap corruption).
+    if (T_n <= 0 || S_n <= 0 || L_n > L_max || T_n > T_max) {
         if (tid == 0) loss_out[n] = T(0);
         for (int64_t idx = tid; idx < T_max * C; idx += nthreads) {
             int64_t t = idx / C;
@@ -178,7 +181,10 @@ __global__ void ctc_forward_backward_kernel(
     }
 
     T per_sample_loss = -logZ;
-    bool is_inf = !isfinite(per_sample_loss);
+    // F114: zero_infinity zeroes only +/-inf losses (matches CPU's std::isinf); a
+    // NaN loss must propagate. The old !isfinite also swallowed NaN, diverging
+    // from CPU/CUDA. Double-cast for reliable isinf semantics (as CUDA does).
+    bool is_inf = isinf(static_cast<double>(per_sample_loss));
     if (zero_infinity && is_inf) {
         per_sample_loss = T(0);
     }
@@ -282,7 +288,39 @@ auto ctc_loss_forward_kernel(
     int64_t N = lp_shape[1];
     int64_t C = lp_shape[2];
 
-    auto tgt_shape = targets.shape();
+    // F118: normalize a 1-D concatenated (PyTorch-style) targets tensor into a
+    // padded 2-D [N, S_pad] layout so the (n * S_max) indexing in host validation
+    // and in the device kernel is correct. Without this the kernel read
+    // targets + n*(total concatenated length) — out of bounds for n >= 1 (matches
+    // CUDA's host normalization and the CPU backend's prefix-sum handling).
+    Tensor targets2d = targets;
+    if (targets.shape().size() == 1 && N > 0) {
+        Tensor tl_cpu = target_lengths.to(Device::cpu()).contiguous();
+        Tensor tg_cpu = targets.to(Device::cpu()).contiguous();
+        const int32_t* tl = tl_cpu.data<int32_t>();
+        const int32_t* tg = tg_cpu.data<int32_t>();
+        const int64_t total = static_cast<int64_t>(tg_cpu.numel());
+        int64_t S_pad = 1;
+        for (int64_t n = 0; n < N; ++n) if (tl[n] > S_pad) S_pad = tl[n];
+        Tensor padded({N, S_pad}, DType::Int32, Device::cpu());
+        int32_t* pd = padded.data<int32_t>();
+        for (int64_t i = 0; i < N * S_pad; ++i) pd[i] = 0;  // pad positions (never read past S_n)
+        int64_t acc = 0;
+        for (int64_t n = 0; n < N; ++n) {
+            int64_t Sn = tl[n];
+            for (int64_t s = 0; s < Sn && (acc + s) < total; ++s)
+                pd[n * S_pad + s] = tg[acc + s];
+            if (Sn > 0) acc += Sn;
+        }
+        if (acc > total) {
+            throw std::invalid_argument(
+                "ctc_loss_forward (ROCm): sum(target_lengths) exceeds the "
+                "flattened targets length");
+        }
+        targets2d = padded.to(targets.device());
+    }
+
+    auto tgt_shape = targets2d.shape();
     int64_t S_max = (tgt_shape.size() >= 2) ? tgt_shape[1]
                   : (tgt_shape.size() == 1) ? tgt_shape[0] : 0;
     int64_t L_max = 2 * S_max + 1;
@@ -336,7 +374,7 @@ auto ctc_loss_forward_kernel(
 
         std::vector<int32_t> tgt_host(static_cast<size_t>(N * S_max));
         if (N * S_max > 0) {
-            HIP_CHECK(hipMemcpy(tgt_host.data(), targets.data<int32_t>(),
+            HIP_CHECK(hipMemcpy(tgt_host.data(), targets2d.data<int32_t>(),
                                 static_cast<size_t>(N * S_max) * sizeof(int32_t),
                                 hipMemcpyDeviceToHost));
         }
@@ -367,7 +405,7 @@ auto ctc_loss_forward_kernel(
         hipLaunchKernelGGL(ctc_forward_backward_kernel<double>,
                            grid, block, 0, stream,
                            log_probs.data<double>(),
-                           targets.data<int32_t>(),
+                           targets2d.data<int32_t>(),
                            input_lengths.data<int32_t>(),
                            target_lengths.data<int32_t>(),
                            alpha_buf.data<double>(),
@@ -381,7 +419,7 @@ auto ctc_loss_forward_kernel(
         hipLaunchKernelGGL(ctc_forward_backward_kernel<float>,
                            grid, block, 0, stream,
                            log_probs.data<float>(),
-                           targets.data<int32_t>(),
+                           targets2d.data<int32_t>(),
                            input_lengths.data<int32_t>(),
                            target_lengths.data<int32_t>(),
                            alpha_buf.data<float>(),

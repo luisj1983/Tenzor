@@ -17,6 +17,8 @@ layout(binding = 2) buffer GradInput  { uint64_t  grad_input[]; };
 layout(push_constant) uniform PushConstants {
     uint n_elements;
     uint grad_input_size;
+    uint out_plane;   // per-(n,c) output plane size (F043)
+    uint in_plane;    // per-(n,c) input plane size (F043)
 } params;
 
 float64_t bitsToF64(uint64_t bits) {
@@ -45,8 +47,11 @@ void main() {
     if (idx >= params.n_elements) return;
 
     float64_t grad = grad_output[idx];
-    int target_idx = indices[idx];
-
+    // F043: forward stores PLANE-LOCAL argmax; rebuild the global
+    // grad_input offset via the per-(n,c) plane base.
+    int plane_local = indices[idx];
+    uint nc = idx / params.out_plane;
+    int target_idx = int(nc * params.in_plane) + plane_local;
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
         atomicAddF64(uint(target_idx), grad);
     }

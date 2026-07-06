@@ -147,12 +147,37 @@ auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
 auto masked_fill(const Tensor& input, const Tensor& mask, double value) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Value, value);
+    // F131: broadcast input and mask to their common shape at the op layer — the
+    // same normalization masked_select does above. The backend MaskedFill kernels
+    // read both via data<T>()[i] in linear order and assume matching shapes, so a
+    // smaller broadcastable mask (e.g. attention's (B,1,S,S) against (B,H,S,S))
+    // was read out of bounds on ROCm and hard-rejected on OneAPI/Vulkan, while
+    // CPU/CUDA broadcast internally — a silent cross-backend divergence (and the
+    // same defect flows into masked_fill backward, which reuses this mask).
+    // Also normalize the mask to Bool: the ROCm MaskedFill kernel reads it via
+    // data<bool>() and threw "type mismatch" on a Float/Int mask, while other
+    // backends accepted it — normalizing here gives every backend a canonical
+    // 1-byte Bool mask (matches the F129 where() normalization, at op level).
+    Tensor mask_norm = (mask.dtype() == DType::Bool) ? mask : mask.to(DType::Bool);
+    std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+    std::vector<int64_t> mask_shape(mask_norm.shape().begin(), mask_norm.shape().end());
+    Tensor input_b = input;
+    Tensor mask_b = mask_norm;
+    if (input_shape != mask_shape) {
+        std::vector<int64_t> common = broadcast_shapes(input.shape(), mask_norm.shape());
+        if (input_shape != common) {
+            input_b = broadcast_to(input, common);
+        }
+        if (mask_shape != common) {
+            mask_b = broadcast_to(mask_norm, common);
+        }
+    }
     // CPU/GPU MaskedFill kernels read elements via data<T>()[i] in linear
     // (physical) order and do not contiguify; a non-contiguous view (e.g. a
-    // transpose/permute) would be read in the wrong order. Normalize here so
-    // every backend sees contiguous logical layout.
-    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
-    Tensor mask_c  = mask.is_contiguous()  ? mask  : mask.contiguous();
+    // transpose/permute, or the broadcast views above) would be read in the wrong
+    // order. Normalize here so every backend sees contiguous logical layout.
+    Tensor input_c = input_b.is_contiguous() ? input_b : input_b.contiguous();
+    Tensor mask_c  = mask_b.is_contiguous()  ? mask_b  : mask_b.contiguous();
     std::vector<Tensor> inputs = {input_c, mask_c};
     return dispatch(OpId::MaskedFill, inputs, attrs)[0];
 }

@@ -82,8 +82,9 @@ kernel void ctc_forward_backward_kernel(
 
     threadgroup float s_logZ;
 
-    // Degenerate guard.
-    if (T_n <= 0 || S_n <= 0 || L_n > L_max) {
+    // Degenerate guard. T_n > T_max would index alpha/beta past their
+    // [T_max, ...] allocation (OOB write) below, so guard it here.
+    if (T_n <= 0 || S_n <= 0 || L_n > L_max || T_n > T_max) {
         if (tid == 0) loss_out[n] = 0.0;
         for (int idx = int(tid); idx < T_max * C; idx += int(nthreads)) {
             int t = idx / C;
@@ -162,7 +163,9 @@ kernel void ctc_forward_backward_kernel(
     }
 
     float per_sample_loss = -logZ;
-    bool is_inf = !isfinite(per_sample_loss);
+    // zero_infinity zeroes only +/-inf losses (matches CPU's std::isinf); NaN is
+    // left to propagate. Using !isfinite here also swallowed NaN, diverging from CPU.
+    bool is_inf = isinf(per_sample_loss);
     if (zero_infinity && is_inf) {
         per_sample_loss = 0.0;
     }

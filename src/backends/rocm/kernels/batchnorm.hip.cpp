@@ -305,8 +305,10 @@ __global__ void batchnorm_backward_gamma_beta_kernel(const T* grad_output,
                                                      int64_t C,
                                                      int64_t H,
                                                      int64_t W) {
+    // F038: accumulate the Float32 reductions in double to match ROCm LayerNorm
+    // backward and the CPU reference (shared buffer sized for double at launch).
     HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    double* shared = reinterpret_cast<double*>(shared_mem);
 
     int64_t spatial_size = H * W;
 
@@ -314,8 +316,8 @@ __global__ void batchnorm_backward_gamma_beta_kernel(const T* grad_output,
     int64_t c = blockIdx.x;
     if (c >= C) return;
 
-    T sum_grad_gamma = T(0);
-    T sum_grad_beta = T(0);
+    double sum_grad_gamma = 0.0;
+    double sum_grad_beta = 0.0;
 
     // Each thread accumulates partial sums
     for (int64_t n = 0; n < N; n++) {
@@ -324,8 +326,8 @@ __global__ void batchnorm_backward_gamma_beta_kernel(const T* grad_output,
             int64_t w = idx % W;
             int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
 
-            T grad_out = grad_output[tensor_idx];
-            T norm = normalized[tensor_idx];
+            double grad_out = static_cast<double>(grad_output[tensor_idx]);
+            double norm = static_cast<double>(normalized[tensor_idx]);
 
             sum_grad_gamma += grad_out * norm;
             sum_grad_beta += grad_out;
@@ -339,8 +341,8 @@ __global__ void batchnorm_backward_gamma_beta_kernel(const T* grad_output,
 
     // Thread 0 writes results
     if (threadIdx.x == 0) {
-        grad_gamma[c] = sum_grad_gamma;
-        grad_beta[c] = sum_grad_beta;
+        grad_gamma[c] = static_cast<T>(sum_grad_gamma);
+        grad_beta[c] = static_cast<T>(sum_grad_beta);
     }
 }
 
@@ -358,8 +360,10 @@ __global__ void batchnorm_backward_input_kernel(const T* grad_output,
                                                 int64_t C,
                                                 int64_t H,
                                                 int64_t W) {
+    // F038: accumulate the Float32 reductions in double to match ROCm LayerNorm
+    // backward and the CPU reference (shared buffer sized for double at launch).
     HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
-    T* shared = reinterpret_cast<T*>(shared_mem);
+    double* shared = reinterpret_cast<double*>(shared_mem);
 
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
@@ -376,8 +380,8 @@ __global__ void batchnorm_backward_input_kernel(const T* grad_output,
     // Compute auxiliary statistics
     // sum_grad = sum(grad_output)
     // sum_grad_normalized = sum(grad_output * normalized)
-    T sum_grad = T(0);
-    T sum_grad_norm = T(0);
+    double sum_grad = 0.0;
+    double sum_grad_norm = 0.0;
 
     for (int64_t n = 0; n < N; n++) {
         for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
@@ -385,8 +389,8 @@ __global__ void batchnorm_backward_input_kernel(const T* grad_output,
             int64_t w = idx % W;
             int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
 
-            T grad_out = grad_output[tensor_idx];
-            T normalized = (input[tensor_idx] - channel_mean) * invstd;
+            double grad_out = static_cast<double>(grad_output[tensor_idx]);
+            double normalized = static_cast<double>((input[tensor_idx] - channel_mean) * invstd);
 
             sum_grad += grad_out;
             sum_grad_norm += grad_out * normalized;
@@ -401,12 +405,12 @@ __global__ void batchnorm_backward_input_kernel(const T* grad_output,
 
     // Broadcast to all threads
     if (threadIdx.x == 0) {
-        shared[0] = sum_grad / T(total_elements);
-        shared[1] = sum_grad_norm / T(total_elements);
+        shared[0] = sum_grad / static_cast<double>(total_elements);
+        shared[1] = sum_grad_norm / static_cast<double>(total_elements);
     }
     __syncthreads();
-    T mean_grad = shared[0];
-    T mean_grad_norm = shared[1];
+    T mean_grad = static_cast<T>(shared[0]);
+    T mean_grad_norm = static_cast<T>(shared[1]);
 
     // Compute gradient w.r.t input
     for (int64_t n = 0; n < N; n++) {
@@ -903,7 +907,9 @@ auto batchnorm2d_backward(const Tensor& grad_output,
     Tensor normalized = batchnorm2d_forward(input, mean, variance, epsilon, stream);
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
+        // F038: backward reductions accumulate in double, so size the shared
+        // buffer for double (matches the double-accumulate mean/variance path).
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
 
         // Compute grad_gamma and grad_beta
         hipLaunchKernelGGL(batchnorm_backward_gamma_beta_kernel<float>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),

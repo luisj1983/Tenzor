@@ -119,7 +119,6 @@ TEST_P(GradCheckPhase7, CholeskySolve_VsRHS) {
     bool ok = gradcheck(f, B, 1e-6, 5e-3, 5e-3);
     EXPECT_TRUE(ok) << "CholeskySolve gradcheck (w.r.t. B) failed";
 }
-
 // ============================================================================
 // Conv gradcheck — small inputs with Float64 for numerical stability
 // ============================================================================

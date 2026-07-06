@@ -2461,9 +2461,14 @@ auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable {
     // Compute forward: Y = S @ D
     auto result_tensor = sparse::spmm(sparse, dense.tensor());
 
-    // For backward: grad_D = S^T @ grad_Y
-    // Store S^T as a SparseTensor (avoids converting to dense).
+    // For backward: grad_D = Sᴴ @ grad_Y (adjoint). For complex sparse S the
+    // adjoint is the CONJUGATE transpose — transpose() only swaps indices, so
+    // conjugate the values too; for real S conj is a no-op.
     auto sparse_transposed = sparse.transpose();  // shape (K, M)
+    if (sparse_transposed.values().is_complex()) {
+        sparse_transposed = sparse_transposed.with_values(
+            tenzor::conj(sparse_transposed.values()));
+    }
 
     auto grad_fn = std::make_shared<SpMMBackward>();
     grad_fn->set_sparse_transposed(std::move(sparse_transposed));
@@ -2483,9 +2488,13 @@ auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable {
     // Compute forward: y = S @ v
     auto result_tensor = sparse::spmv(sparse, vec.tensor());
 
-    // For backward: grad_v = S^T @ grad_y
-    // Store S^T as a SparseTensor (avoids converting to dense).
+    // For backward: grad_v = Sᴴ @ grad_y (adjoint). Conjugate the transposed
+    // values for complex S (transpose() only swaps indices); real → no-op.
     auto sparse_transposed = sparse.transpose();  // shape (K, M)
+    if (sparse_transposed.values().is_complex()) {
+        sparse_transposed = sparse_transposed.with_values(
+            tenzor::conj(sparse_transposed.values()));
+    }
 
     auto grad_fn = std::make_shared<SpMVBackward>();
     grad_fn->set_sparse_transposed(std::move(sparse_transposed));
@@ -2522,9 +2531,13 @@ auto sparse_triangular_solve(const SparseTensor& L,
         return Variable(result_tensor, false);
     }
 
-    // SparseTriSolveBackward needs L^T as a sparse matrix to compute
-    // grad_b = L^{-T} @ grad_x. Pre-compute the transpose once.
+    // SparseTriSolveBackward needs Lᴴ as a sparse matrix to compute
+    // grad_b = L^{-H} @ grad_x (adjoint). Conjugate the transposed values for
+    // complex L (transpose() only swaps indices); real → no-op.
     auto Lt = L.transpose();
+    if (Lt.values().is_complex()) {
+        Lt = Lt.with_values(tenzor::conj(Lt.values()));
+    }
 
     auto grad_fn = std::make_shared<SparseTriSolveBackward>();
     grad_fn->set_sparse_l_transposed(std::move(Lt));

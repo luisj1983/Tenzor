@@ -1,6 +1,7 @@
 #include "tenzor/autograd/function.hpp"
 #include <cassert>
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -314,9 +315,14 @@ auto StdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto StdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // std backward: grad * (input - mean) / (N * std)
-    // diff and n_std are constants (don't depend on grad); compute at Tensor level
-    const auto& input = saved_tensors_[0];
-    const auto& std_out = saved_tensors_[1];
+    // diff and n_std are constants (don't depend on grad); compute at Tensor level.
+    // Widen Float16/BFloat16 to Float32 for the (input-mean) arithmetic (mirror
+    // backward()): half precision destroys the subtractive cancellation, so the
+    // higher-order path must widen too or it diverges from the first-order path.
+    const auto orig_dtype = saved_tensors_[0].dtype();
+    const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    const Tensor input = is_half ? saved_tensors_[0].to(DType::Float32) : saved_tensors_[0];
+    const Tensor std_out = is_half ? saved_tensors_[1].to(DType::Float32) : saved_tensors_[1];
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     bool has_dim = saved_tensors_.size() > 2;
@@ -352,8 +358,11 @@ auto StdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto factor = div(diff, n_std);
     Variable factor_var(factor, false);
 
-    // Expand grad at Variable level so reshape/expand are tracked for higher-order
-    auto grad_var = grad_outputs[0];
+    // Expand grad at Variable level so reshape/expand are tracked for higher-order.
+    // Widen grad to Float32 (autograd-aware) so the multiply happens in F32 and
+    // the grad_fn chain survives, then narrow the result back to the input dtype.
+    auto grad_var = is_half ? tenzor::nn::variable_cast(grad_outputs[0], DType::Float32)
+                            : grad_outputs[0];
     if (dim_opt.has_value() && !keepdim) {
         grad_var = tenzor::unsqueeze(grad_var, dim_opt.value());
     } else if (!dim_opt.has_value()) {
@@ -361,7 +370,9 @@ auto StdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     }
     grad_var = tenzor::expand(grad_var, input_shape_vec);
 
-    return {grad_var * factor_var};
+    auto result = grad_var * factor_var;
+    if (is_half) result = tenzor::nn::variable_cast(result, orig_dtype);
+    return {result};
 }
 
 // VarBackward implementation
@@ -432,7 +443,12 @@ auto VarBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto VarBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // var backward: grad * 2 * (input - mean) / N
-    const auto& input = saved_tensors_[0];
+    // Widen Float16/BFloat16 to Float32 for the (input-mean) arithmetic (mirror
+    // backward()): half precision loses the subtractive cancellation, so the
+    // higher-order path must widen too to stay consistent with first-order.
+    const auto orig_dtype = saved_tensors_[0].dtype();
+    const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    const Tensor input = is_half ? saved_tensors_[0].to(DType::Float32) : saved_tensors_[0];
     const auto& var_out = saved_tensors_[1];
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
@@ -462,8 +478,10 @@ auto VarBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto factor = mul(diff, scale);
     Variable factor_var(factor, false);
 
-    // Expand grad at Variable level
-    auto grad_var = grad_outputs[0];
+    // Expand grad at Variable level; widen to Float32 (autograd-aware) so the
+    // multiply is in F32 and the grad_fn survives, then narrow back to input dtype.
+    auto grad_var = is_half ? tenzor::nn::variable_cast(grad_outputs[0], DType::Float32)
+                            : grad_outputs[0];
     if (dim_opt.has_value() && !keepdim) {
         grad_var = tenzor::unsqueeze(grad_var, dim_opt.value());
     } else if (!dim_opt.has_value()) {
@@ -471,7 +489,9 @@ auto VarBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     }
     grad_var = tenzor::expand(grad_var, input_shape_vec);
 
-    return {grad_var * factor_var};
+    auto result = grad_var * factor_var;
+    if (is_half) result = tenzor::nn::variable_cast(result, orig_dtype);
+    return {result};
 }
 
 // ProdBackward implementation

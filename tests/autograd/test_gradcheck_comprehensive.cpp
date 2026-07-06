@@ -844,6 +844,96 @@ TEST_F(ComplexCpuAutogradTest, SqrtComplexConjugation) {
     EXPECT_GT(conj_gap, 1e-3f);
 }
 
+// M-02/M-03/M-04: the higher-order (create_graph=true) path routes through
+// backward_with_variables, which previously dropped the complex Wirtinger conj
+// that the first-order backward() applies. These tests exercise create_graph=true
+// and assert the higher-order first derivative equals the first-order path (and
+// the analytic conj convention), with a discriminating check that conj matters.
+TEST_F(ComplexCpuAutogradTest, LogComplexHigherOrderConjugation) {
+    const auto dev = Device::cpu();
+    auto re = zeros({3}, DType::Float32, dev);
+    auto im = zeros({3}, DType::Float32, dev);
+    re.data<float>()[0] = 1.5f; re.data<float>()[1] = 2.0f; re.data<float>()[2] = 0.7f;
+    im.data<float>()[0] = 0.4f; im.data<float>()[1] = -0.3f; im.data<float>()[2] = 0.9f;
+    auto g = tenzor::complex(full({3}, 1.0f, DType::Float32, dev),
+                             full({3}, 0.5f, DType::Float32, dev));
+
+    Variable z1(tenzor::complex(re, im), true);
+    auto y1 = log(z1);
+    y1.backward(g, /*retain_graph=*/false, /*create_graph=*/false);
+    auto grad_first = z1.grad().value();
+
+    Variable z2(tenzor::complex(re, im), true);
+    auto y2 = log(z2);
+    y2.backward(g, /*retain_graph=*/false, /*create_graph=*/true);
+    auto grad_ho = z2.grad().value();
+
+    // higher-order first derivative must match the first-order path
+    EXPECT_LT(tenzor::max(tenzor::abs(tenzor::sub(grad_ho, grad_first))).item<float>(), 1e-5f);
+    // and the analytic conj convention: g / conj(z)
+    auto expected = tenzor::div(g, tenzor::conj(z1.tensor()));
+    EXPECT_LT(tenzor::max(tenzor::abs(tenzor::sub(grad_ho, expected))).item<float>(), 1e-5f);
+    // discriminating: the pre-fix (no-conj) formula genuinely differs
+    auto unfixed = tenzor::div(g, z1.tensor());
+    EXPECT_GT(tenzor::max(tenzor::abs(tenzor::sub(expected, unfixed))).item<float>(), 1e-3f);
+}
+
+TEST_F(ComplexCpuAutogradTest, ExpComplexHigherOrderConjugation) {
+    const auto dev = Device::cpu();
+    auto re = zeros({3}, DType::Float32, dev);
+    auto im = zeros({3}, DType::Float32, dev);
+    re.data<float>()[0] = 0.5f; re.data<float>()[1] = -0.2f; re.data<float>()[2] = 0.3f;
+    im.data<float>()[0] = 0.4f; im.data<float>()[1] = 0.7f; im.data<float>()[2] = -0.6f;
+    auto g = tenzor::complex(full({3}, 1.0f, DType::Float32, dev),
+                             full({3}, 0.5f, DType::Float32, dev));
+
+    Variable z1(tenzor::complex(re, im), true);
+    auto y1 = exp(z1);
+    y1.backward(g, false, false);
+    auto grad_first = z1.grad().value();
+
+    Variable z2(tenzor::complex(re, im), true);
+    auto y2 = exp(z2);
+    y2.backward(g, false, true);
+    auto grad_ho = z2.grad().value();
+
+    EXPECT_LT(tenzor::max(tenzor::abs(tenzor::sub(grad_ho, grad_first))).item<float>(), 1e-5f);
+    // analytic: g * conj(exp(z))
+    auto expected = tenzor::mul(g, tenzor::conj(y1.tensor()));
+    EXPECT_LT(tenzor::max(tenzor::abs(tenzor::sub(grad_ho, expected))).item<float>(), 1e-5f);
+    auto unfixed = tenzor::mul(g, y1.tensor());
+    EXPECT_GT(tenzor::max(tenzor::abs(tenzor::sub(expected, unfixed))).item<float>(), 1e-3f);
+}
+
+TEST_F(ComplexCpuAutogradTest, AbsComplexHigherOrderConjugation) {
+    const auto dev = Device::cpu();
+    auto re = zeros({3}, DType::Float32, dev);
+    auto im = zeros({3}, DType::Float32, dev);
+    re.data<float>()[0] = 1.5f; re.data<float>()[1] = 2.0f; re.data<float>()[2] = 0.7f;
+    im.data<float>()[0] = 0.4f; im.data<float>()[1] = -0.3f; im.data<float>()[2] = 0.9f;
+    // abs of complex is real, so the incoming grad is real
+    auto g = full({3}, 1.25f, DType::Float32, dev);
+
+    Variable z1(tenzor::complex(re, im), true);
+    auto y1 = abs(z1);
+    y1.backward(g, false, false);
+    auto grad_first = z1.grad().value();
+
+    Variable z2(tenzor::complex(re, im), true);
+    auto y2 = abs(z2);
+    y2.backward(g, false, true);
+    auto grad_ho = z2.grad().value();
+
+    // higher-order path must match the first-order complex sgn(z) result
+    EXPECT_LT(tenzor::max(tenzor::abs(tenzor::sub(grad_ho, grad_first))).item<float>(), 1e-5f);
+    // analytic: g * z/|z|  (grad promoted to complex)
+    auto scale = tenzor::div(z1.tensor(), tenzor::abs(z1.tensor()));
+    auto expected = tenzor::mul(g.to(DType::Complex64), scale);
+    EXPECT_LT(tenzor::max(tenzor::abs(tenzor::sub(grad_ho, expected))).item<float>(), 1e-5f);
+    // discriminating: gradient must be genuinely complex (imag part non-trivial)
+    EXPECT_GT(tenzor::max(tenzor::abs(tenzor::imag(grad_ho))).item<float>(), 1e-3f);
+}
+
 // L-01: EigvalshBackward for a complex Hermitian input must use the conjugate
 // transpose V^H (like EighBackward), not V^T. Verify by consistency: the
 // gradient of sum(eigenvalues) via eigvalsh must equal the eigh path (whose

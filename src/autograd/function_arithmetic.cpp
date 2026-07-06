@@ -580,11 +580,13 @@ auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     }
     const auto& grad_out = grad_outputs[0];
 
-    // For Float16/BFloat16 on GPU backends, upcast to Float32 to prevent
-    // gradient overflow (FP16 max ~65504, easily exceeded in backward).
+    // For Float16/BFloat16 on ALL backends, upcast to Float32 to prevent
+    // gradient overflow (FP16 max ~65504, easily exceeded in backward) and to
+    // preserve mantissa in the matmul accumulation. The first-order backward()
+    // widens on both the GPU and CPU paths, so the higher-order path must too —
+    // gating on is_gpu diverged CPU half from CPU float and from the GPU path.
     DType orig_dt = grad_out.tensor().dtype();
-    bool is_gpu = (grad_out.tensor().device().type != Device::Type::CPU);
-    bool needs_upcast = is_gpu && (orig_dt == DType::Float16 || orig_dt == DType::BFloat16);
+    bool needs_upcast = (orig_dt == DType::Float16 || orig_dt == DType::BFloat16);
 
     // Route the upcast through the autograd-aware `variable_cast` so the
     // input grad_fn chains survive into the F32 compute path (mirrors the

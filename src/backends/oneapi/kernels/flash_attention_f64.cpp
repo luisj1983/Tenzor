@@ -153,7 +153,9 @@ static void launch_flash_attention_f64_forward(
                     const int k_start = kv_block * Bc;
 
                     // Causal early-exit: skip blocks entirely past the boundary.
-                    if (cs && k_start > query_idx) break;
+                    // Bottom-right alignment (match FP32 + Vulkan-F64): query row
+                    // attends keys up to query_idx + (slk - slq) (F040).
+                    if (cs && k_start > query_idx + (slk - slq)) break;
 
                     const int actual_Bc = sycl::min(Bc, slk - k_start);
 
@@ -171,7 +173,7 @@ static void launch_flash_attention_f64_forward(
                     for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
                         int kv_pos = k_start + j;
                         double score;
-                        if (cs && kv_pos > query_idx) {
+                        if (cs && kv_pos > query_idx + (slk - slq)) {
                             score = -std::numeric_limits<double>::infinity();
                         } else {
                             score = 0.0;
@@ -270,7 +272,7 @@ static void launch_flash_attention_f64_backward(
     const double* q_ptr, const double* k_ptr, const double* v_ptr,
     const double* o_ptr, const double* do_ptr,
     double* dq_ptr, double* dk_ptr, double* dv_ptr,
-    int64_t batch_heads, int64_t seq_len,
+    int64_t batch_heads, int64_t seq_len_q, int64_t seq_len_k,
     double scale, bool causal, sycl::queue& queue)
 {
     constexpr int Br = 32;
@@ -283,12 +285,15 @@ static void launch_flash_attention_f64_backward(
         2 * Bc * HEAD_DIM + 2 * Br * HEAD_DIM + Br * Bc + Br + Br);
 
     const int hd = HEAD_DIM;
-    const int sl = static_cast<int>(seq_len);
+    // Query axis (Q/O/dO/dQ/L) strides by seq_len_q; key axis (K/V/dK/dV) by
+    // seq_len_k. Bottom-right causal mask uses offset (slk - slq) (F040).
+    const int slq = static_cast<int>(seq_len_q);
+    const int slk = static_cast<int>(seq_len_k);
     const double sc = scale;
     const bool cs = causal;
 
-    const int num_kv_tiles = (sl + Bc - 1) / Bc;
-    const int num_q_tiles  = (sl + Br - 1) / Br;
+    const int num_kv_tiles = (slk + Bc - 1) / Bc;
+    const int num_q_tiles  = (slq + Br - 1) / Br;
 
     queue.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<double, 1> local_mem(local_doubles, cgh);
@@ -304,17 +309,19 @@ static void launch_flash_attention_f64_backward(
                 const int tid         = static_cast<int>(item.get_local_id(1));
 
                 const int kv_start = kv_tile_idx * Bc;
-                if (kv_start >= sl) return;
-                const int actual_Bc = sycl::min(Bc, sl - kv_start);
+                if (kv_start >= slk) return;
+                const int actual_Bc = sycl::min(Bc, slk - kv_start);
 
-                const double* Q_base  = q_ptr  + batch_head * sl * hd;
-                const double* K_base  = k_ptr  + batch_head * sl * hd;
-                const double* V_base  = v_ptr  + batch_head * sl * hd;
-                const double* O_base  = o_ptr  + batch_head * sl * hd;
-                const double* dO_base = do_ptr + batch_head * sl * hd;
-                double* dQ_base = dq_ptr + batch_head * sl * hd;
-                double* dK_base = dk_ptr + batch_head * sl * hd;
-                double* dV_base = dv_ptr + batch_head * sl * hd;
+                const int64_t q_bh_off = static_cast<int64_t>(batch_head) * slq * hd;
+                const int64_t k_bh_off = static_cast<int64_t>(batch_head) * slk * hd;
+                const double* Q_base  = q_ptr  + q_bh_off;
+                const double* K_base  = k_ptr  + k_bh_off;
+                const double* V_base  = v_ptr  + k_bh_off;
+                const double* O_base  = o_ptr  + q_bh_off;
+                const double* dO_base = do_ptr + q_bh_off;
+                double* dQ_base = dq_ptr + q_bh_off;
+                double* dK_base = dk_ptr + k_bh_off;
+                double* dV_base = dv_ptr + k_bh_off;
 
                 double* lmem = local_mem.template get_multi_ptr<sycl::access::decorated::no>().get();
                 double* K_tile  = lmem;
@@ -348,10 +355,10 @@ static void launch_flash_attention_f64_backward(
 
                 for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
                     const int q_start = q_tile_idx * Br;
-                    if (q_start >= sl) break;
-                    const int actual_Br = sycl::min(Br, sl - q_start);
+                    if (q_start >= slq) break;
+                    const int actual_Br = sycl::min(Br, slq - q_start);
 
-                    if (cs && (q_start + actual_Br - 1) < kv_start) continue;
+                    if (cs && (q_start + actual_Br - 1) + (slk - slq) < kv_start) continue;
 
                     // Load Q_i / dO_i tiles.
                     for (int i = tid; i < actual_Br * hd; i += BLOCK_SIZE) {
@@ -415,8 +422,8 @@ static void launch_flash_attention_f64_backward(
                         const int row_q = q_start + row;
                         double m_row = -std::numeric_limits<double>::infinity();
                         double l_row = 0.0;
-                        for (int k = 0; k < sl; ++k) {
-                            if (cs && k > row_q) break;
+                        for (int k = 0; k < slk; ++k) {
+                            if (cs && k > row_q + (slk - slq)) break;
                             double dot = 0.0;
                             const double* Kk = K_base + k * hd;
                             for (int d = 0; d < hd; ++d) {
@@ -456,7 +463,7 @@ static void launch_flash_attention_f64_backward(
                             // its softmax weights to 0. (Under pure causal masking
                             // the diagonal keeps every row non-empty, but Float64
                             // padding / non-square cases can produce empty rows.)
-                            if (cs && (q_start + i) < (kv_start + j)) {
+                            if (cs && (q_start + i) + (slk - slq) < (kv_start + j)) {
                                 p = 0.0;
                             } else if (sycl::isinf(l_tile[i])) {
                                 p = 0.0;
@@ -636,12 +643,15 @@ auto flash_attention_backward_oneapi_f64(
     Tensor Oc  = O.is_contiguous()  ? O  : O.contiguous();
     Tensor dOc = dO.is_contiguous() ? dO : dO.contiguous();
     const int64_t batch_heads = Qc.shape()[0];
-    const int64_t seq_len     = Qc.shape()[1];
+    const int64_t seq_len_q   = Qc.shape()[1];
+    const int64_t seq_len_k   = Kc.shape()[1];
     const int64_t head_dim    = Qc.shape()[2];
 
-    Tensor dQ = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, Q.device(), queue);
-    Tensor dK = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device(), queue);
-    Tensor dV = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device(), queue);
+    // dQ is on the query axis (seq_len_q); dK/dV on the key axis (seq_len_k).
+    // These differ for cross-attention / KV-cache (F040).
+    Tensor dQ = make_zeros_f64({batch_heads, seq_len_q, head_dim}, DType::Float64, Q.device(), queue);
+    Tensor dK = make_zeros_f64({batch_heads, seq_len_k, head_dim}, DType::Float64, K.device(), queue);
+    Tensor dV = make_zeros_f64({batch_heads, seq_len_k, head_dim}, DType::Float64, V.device(), queue);
 
     const double* q_ptr  = get_data_ptr<const double>(Qc);
     const double* k_ptr  = get_data_ptr<const double>(Kc);
@@ -653,13 +663,13 @@ auto flash_attention_backward_oneapi_f64(
     double* dv_ptr = get_data_ptr<double>(dV);
 
     switch (head_dim) {
-        case 16:  launch_flash_attention_f64_backward<16> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;
-        case 32:  launch_flash_attention_f64_backward<32> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;
-        case 48:  launch_flash_attention_f64_backward<48> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;
-        case 64:  launch_flash_attention_f64_backward<64> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;
-        case 80:  launch_flash_attention_f64_backward<80> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;
-        case 96:  launch_flash_attention_f64_backward<96> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;
-        case 128: launch_flash_attention_f64_backward<128>(q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;
+        case 16:  launch_flash_attention_f64_backward<16> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
+        case 32:  launch_flash_attention_f64_backward<32> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
+        case 48:  launch_flash_attention_f64_backward<48> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
+        case 64:  launch_flash_attention_f64_backward<64> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
+        case 80:  launch_flash_attention_f64_backward<80> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
+        case 96:  launch_flash_attention_f64_backward<96> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
+        case 128: launch_flash_attention_f64_backward<128>(q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
         default:
             throw std::runtime_error(
                 "flash_attention_backward_oneapi_f64: Unsupported head_dim " +

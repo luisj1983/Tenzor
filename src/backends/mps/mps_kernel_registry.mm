@@ -1840,6 +1840,7 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_multi(OpId::FractionalMaxPool3dForward);
     mps_accelerate_single(OpId::FractionalMaxPool2dBackward);
     mps_accelerate_single(OpId::FractionalMaxPool3dBackward);
+    mps_accelerate_single(OpId::MaxUnpool1dBackward);
     mps_accelerate_single(OpId::MaxUnpool2dForward);
     mps_accelerate_single(OpId::MaxUnpool2dBackward);
     mps_accelerate_single(OpId::MaxUnpool3dForward);

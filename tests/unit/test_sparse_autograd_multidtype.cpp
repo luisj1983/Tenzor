@@ -75,7 +75,7 @@ TEST_P(SparseAutogradMultiDTypeTest, SpMMBackwardGradExists) {
 
     EXPECT_GRAD_FLOWS(dense);
     if (dense.grad().has_value()) {
-        auto& grad_tensor = dense.grad().value();
+        auto grad_tensor = dense.grad().value();
         EXPECT_EQ(grad_tensor.shape()[0], 4);
         EXPECT_EQ(grad_tensor.shape()[1], 2);
         expectFiniteNonZero(grad_tensor);

@@ -196,6 +196,7 @@ __global__ void im2col_kernel_nchw(
     const T* __restrict__ input,
     T* __restrict__ output,
     int64_t batch,
+    int64_t in_channels_total,   // full C_in for the per-batch stride (channels = per-group)
     int64_t channels,
     int64_t height,
     int64_t width,
@@ -233,8 +234,11 @@ __global__ void im2col_kernel_nchw(
         int64_t out_idx = out_row * (channels * kernel_h * kernel_w) + out_col;
 
         // Check bounds and apply padding (use ternary for better instruction scheduling)
+        // F058: batch stride uses the full C_in (in_channels_total); the grouped
+        // wgrad/forward callers pass input.data + in_start*h*w, so batch>0 with
+        // groups>1 must skip the whole C_in block, not just the per-group count.
         T value = (ih >= 0 && ih < height && iw >= 0 && iw < width)
-                  ? input[b * (channels * height * width) + c * (height * width) + ih * width + iw]
+                  ? input[b * (in_channels_total * height * width) + c * (height * width) + ih * width + iw]
                   : T(0);
         output[out_idx] = value;
     }
@@ -311,6 +315,7 @@ __global__ void col2im_kernel_nchw(
     const T* __restrict__ col,
     T* __restrict__ output,
     int64_t batch,
+    int64_t in_channels_total,   // full C_in for the per-batch stride (channels = per-group)
     int64_t channels,
     int64_t height,
     int64_t width,
@@ -366,7 +371,12 @@ __global__ void col2im_kernel_nchw(
         }
 
         // Direct write - NO ATOMIC NEEDED!
-        output[output_idx] = sum;
+        // F057: the loop decoded output_idx with the per-group `channels` stride,
+        // but grad_input is laid out with the full C_in stride; correct the batch
+        // term so batch>0 with groups>1 writes the right channel block (mirrors
+        // col3im_kernel_nchw).
+        int64_t out_write = output_idx + b * (in_channels_total - channels) * height * width;
+        output[out_write] = sum;
     }
 }
 
@@ -940,7 +950,7 @@ auto conv2d_forward_kernel(
             if (layout == DataLayout::NCHW) {
                 const float* input_ptr = input.data<float>() + in_start * height * width;
                 im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                    input_ptr, col_buffer, batch, in_channels_per_group,
+                    input_ptr, col_buffer, batch, in_channels, in_channels_per_group,
                     height, width, kernel_h, kernel_w,
                     stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
@@ -1003,7 +1013,7 @@ auto conv2d_forward_kernel(
             if (layout == DataLayout::NCHW) {
                 const double* input_ptr = input.data<double>() + in_start * height * width;
                 im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                    input_ptr, col_buffer, batch, in_channels_per_group,
+                    input_ptr, col_buffer, batch, in_channels, in_channels_per_group,
                     height, width, kernel_h, kernel_w,
                     stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
@@ -1068,7 +1078,7 @@ auto conv2d_forward_kernel(
             if (layout == DataLayout::NCHW) {
                 const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * height * width;
                 im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                    input_ptr, col_buffer, batch, in_channels_per_group,
+                    input_ptr, col_buffer, batch, in_channels, in_channels_per_group,
                     height, width, kernel_h, kernel_w,
                     stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                 );
@@ -1418,7 +1428,7 @@ auto conv2d_backward_kernel(
                 if (layout == DataLayout::NCHW) {
                     grad_input_ptr = reinterpret_cast<__half*>(grad_input.data<Float16>()) + in_start * height * width;
                     col2im_kernel_nchw<<<grid, block, 0, stream>>>(
-                        reinterpret_cast<__half*>(grad_col), grad_input_ptr, batch, in_channels_per_group,
+                        reinterpret_cast<__half*>(grad_col), grad_input_ptr, batch, in_channels, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
                         stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
@@ -1480,7 +1490,7 @@ auto conv2d_backward_kernel(
                 if (layout == DataLayout::NCHW) {
                     grad_input_ptr = grad_input.data<double>() + in_start * height * width;
                     col2im_kernel_nchw<<<grid, block, 0, stream>>>(
-                        grad_col, grad_input_ptr, batch, in_channels_per_group,
+                        grad_col, grad_input_ptr, batch, in_channels, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
                         stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
@@ -1547,7 +1557,7 @@ auto conv2d_backward_kernel(
                 if (layout == DataLayout::NCHW) {
                     grad_input_ptr = grad_input.data<float>() + in_start * height * width;
                     col2im_kernel_nchw<<<grid, block, 0, stream>>>(
-                        grad_col, grad_input_ptr, batch, in_channels_per_group,
+                        grad_col, grad_input_ptr, batch, in_channels, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
                         stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
@@ -1576,7 +1586,7 @@ auto conv2d_backward_kernel(
                 if (layout == DataLayout::NCHW) {
                     const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * height * width;
                     im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                        input_ptr, reinterpret_cast<__half*>(input_col), batch, in_channels_per_group,
+                        input_ptr, reinterpret_cast<__half*>(input_col), batch, in_channels, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
                         stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
@@ -1642,7 +1652,7 @@ auto conv2d_backward_kernel(
                 if (layout == DataLayout::NCHW) {
                     const double* input_ptr = input.data<double>() + in_start * height * width;
                     im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                        input_ptr, input_col, batch, in_channels_per_group,
+                        input_ptr, input_col, batch, in_channels, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
                         stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );
@@ -1707,7 +1717,7 @@ auto conv2d_backward_kernel(
                 if (layout == DataLayout::NCHW) {
                     const float* input_ptr = input.data<float>() + in_start * height * width;
                     im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                        input_ptr, input_col, batch, in_channels_per_group,
+                        input_ptr, input_col, batch, in_channels, in_channels_per_group,
                         height, width, kernel_h, kernel_w,
                         stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, out_h, out_w
                     );

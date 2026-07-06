@@ -15,7 +15,7 @@
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float64_t grad_output[]; };
-layout(binding = 1) buffer Indices { float64_t indices[]; };
+layout(binding = 1) buffer Indices { int indices[]; };  // Int32 argmax indices from forward
 layout(binding = 2) buffer GradInput { uint64_t grad_input[]; };
 
 layout(push_constant) uniform PushConstants {
@@ -57,7 +57,7 @@ void main() {
 
     float64_t grad = grad_output[idx];
     // Plane-local index -> global offset via the (n,c) plane base.
-    int plane_local = int(indices[idx]);
+    int plane_local = indices[idx];
     uint nc = idx / params.out_plane;
     int target_idx = int(nc * params.in_plane) + plane_local;
 

@@ -124,51 +124,32 @@ auto SpGEMMBackward::accumulate_sparse_into_inputs(const Tensor& grad_c) -> void
     sparse_grad_accumulated_ = true;
 }
 
-auto SpGEMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // B.6: implementation analysis. C = A @ B (both sparse CSR). Chain rule:
-    //   grad_A = grad_C @ B^T  =  spmm(B^T_sparse, grad_C_dense)
-    //   grad_B = A^T @ grad_C  =  spmm(A^T_sparse, grad_C_dense)
-    // We never densify A or B. The engine stores dense grads in Variable's
-    // `grad_` slot, while the sparse_grad_ slot (for SparseAdam) is also
-    // accumulated as a side effect.
-    auto& grad_c = grad_outputs[0];
-    // Result vector MUST align positionally with input_variables_:
-    // result[0]=grad_A, result[1]=grad_B. Pre-allocate with empty Tensors so
-    // a missing transposed factor doesn't shift positions (audit B.4).
-    std::vector<Tensor> result(2);
-
-    // Sparse side-effect (SparseAdam accumulation). NN.5: gated by latch so
-    // a subsequent backward_with_variables call cannot double-accumulate.
-    accumulate_sparse_into_inputs(grad_c);
-
-    if (sparse_b_t_.has_value()) {
-        result[0] = sparse::spmm(sparse_b_t_.value(), grad_c);
-    }
-    if (sparse_a_t_.has_value()) {
-        result[1] = sparse::spmm(sparse_a_t_.value(), grad_c);
-    }
-    return result;
+// F011/F012: sparse-sparse (SpGEMM, A@B with BOTH operands sparse) autograd is
+// NOT implemented. There is no differentiable spgemm() forward that constructs
+// this backward or populates its transposed factors — set_sparse_a_transposed /
+// set_sparse_b_transposed are never called anywhere, so sparse_a_t_/sparse_b_t_
+// are always empty and the methods would return EMPTY (zero) gradients (F012).
+// The grad_A path was also wrong: spmm(Bᵀ, grad_C) = Bᵀ·grad_C is the transpose
+// of the correct grad_A = grad_C·Bᵀ (F011). Rather than silently emit zero or
+// transposed gradients, FAIL LOUD. A correct future implementation needs a
+// differentiable spgemm forward that stores A and B (not their transposes) and:
+//   grad_A = grad_C @ Bᴴ = transpose(spmm(B, transpose(grad_C)))
+//   grad_B = Aᴴ @ grad_C  = spmm(adjoint(A), grad_C)
+[[noreturn]] static void spgemm_autograd_not_implemented() {
+    throw std::runtime_error(
+        "SpGEMMBackward: sparse-sparse (A@B, both operands sparse) autograd is "
+        "not implemented — no differentiable spgemm() forward exists to wire it. "
+        "Use dense operands, or compute the product via sparse::spgemm() (which "
+        "returns a non-differentiable SparseTensor).");
 }
 
-auto SpGEMMBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // R.5 — Variable-level rewrite. Forward C = A @ B (both sparse). A, B
-    // are saved as constant transposes (sparse_b_t_, sparse_a_t_):
-    //   grad_A = spmm(B^T, grad_C)
-    //   grad_B = spmm(A^T, grad_C)
-    //
-    // audit-10 NN.5: call the sparse side-effect helper directly (idempotent
-    // via the latch) so we don't re-enter backward() and double-accumulate
-    // under retain_graph=true.
-    accumulate_sparse_into_inputs(grad_outputs[0].tensor());
+auto SpGEMMBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+    spgemm_autograd_not_implemented();
+}
 
-    std::vector<Variable> results(2);
-    if (sparse_b_t_.has_value()) {
-        results[0] = tenzor::spmm(*sparse_b_t_, grad_outputs[0]);
-    }
-    if (sparse_a_t_.has_value()) {
-        results[1] = tenzor::spmm(*sparse_a_t_, grad_outputs[0]);
-    }
-    return results;
+auto SpGEMMBackward::backward_with_variables(std::vector<Variable> /*grad_outputs*/)
+    -> std::vector<Variable> {
+    spgemm_autograd_not_implemented();
 }
 
 // ============================================================================

@@ -37,12 +37,17 @@ void main() {
 
     int val_i = values[i];
     int val_j = values[j];
+    int idx_i = indices[i];
+    int idx_j = indices[j];
 
+    // F138: STABLE comparator — break value ties by original index so the sort
+    // is stable and real elements (index < n) stay ahead of the INT_MAX/INT_MIN
+    // padding (index == n) on ties (no padding leak into the first-n results).
     bool should_swap;
     if (ascending_block) {
-        should_swap = (val_i > val_j);
+        should_swap = (val_i > val_j) || (val_i == val_j && idx_i > idx_j);
     } else {
-        should_swap = (val_i < val_j);
+        should_swap = (val_i < val_j) || (val_i == val_j && idx_i > idx_j);
     }
 
     if (should_swap) {

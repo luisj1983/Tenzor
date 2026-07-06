@@ -490,8 +490,12 @@ __global__ void grid_sample_bilinear_backward_kernel(
         sum_dy += go * (wx0 * (-safe_get(y0, x0) + safe_get(y1, x0)) +
                         wx1 * (-safe_get(y0, x1) + safe_get(y1, x1)));
     }
-    T scale_x = (padding_mode == 0 && !in_bounds_ix) ? T(0) : dix_dgx;
-    T scale_y = (padding_mode == 0 && !in_bounds_iy) ? T(0) : diy_dgy;
+    // F069: zero grad_grid where the pre-clamp coord is out of range for BOTH
+    // zeros (0) and border (1) padding — under border the clamp derivative is 0,
+    // so a clamped sample must not produce a spurious grad_grid (matches CPU/CUDA).
+    bool oob_gate = (padding_mode == 0 || padding_mode == 1);
+    T scale_x = (oob_gate && !in_bounds_ix) ? T(0) : dix_dgx;
+    T scale_y = (oob_gate && !in_bounds_iy) ? T(0) : diy_dgy;
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }
@@ -562,6 +566,11 @@ __global__ void grid_sample_bicubic_backward_kernel(
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
     T ix = gs_denormalize_dev<T>(grid[grid_idx], W_in, align_corners);
     T iy = gs_denormalize_dev<T>(grid[grid_idx + 1], H_in, align_corners);
+
+    // F069: capture pre-clamp in-bounds BEFORE the border clamp overwrites ix/iy,
+    // so a border-clamped sample gets zero grad_grid (clamp derivative is 0).
+    bool in_bounds_ix = (ix >= T(0) && ix <= static_cast<T>(W_in - 1));
+    bool in_bounds_iy = (iy >= T(0) && iy <= static_cast<T>(H_in - 1));
 
     // Reflection contributes a ±1 fold-sign to the coordinate gradient; capture
     // it from the PRE-reflection coordinate before ix/iy are overwritten.
@@ -639,8 +648,13 @@ __global__ void grid_sample_bicubic_backward_kernel(
         sum_dy += go * dval_diy;
     }
 
-    grad_grid[grid_idx]     = sum_dx * dix_dgx;
-    grad_grid[grid_idx + 1] = sum_dy * diy_dgy;
+    // F069: under border padding a clamped coord has zero clamp derivative, so
+    // zero grad_grid (zeros padding is already handled by the per-corner v=0
+    // checks above, so it needs no whole-point gate here).
+    T scale_x = (padding_mode == 1 && !in_bounds_ix) ? T(0) : dix_dgx;
+    T scale_y = (padding_mode == 1 && !in_bounds_iy) ? T(0) : diy_dgy;
+    grad_grid[grid_idx]     = sum_dx * scale_x;
+    grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }
 
 __global__ void affine_grid_backward_kernel_dev(

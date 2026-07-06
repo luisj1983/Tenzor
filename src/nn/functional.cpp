@@ -1326,7 +1326,7 @@ auto interpolate(const Variable& input,
         int64_t H_in = in_shape[2];
         int64_t W_in = in_shape[3];
         auto grad_fn = std::make_shared<UpsampleBilinearBackward>(
-            H_in, W_in, size.first, size.second);
+            H_in, W_in, size.first, size.second, align_corners);
         grad_fn->save_for_backward({input.tensor()});
         std::vector<std::shared_ptr<Function>> next_funcs;
         next_funcs.push_back(input.grad_fn());

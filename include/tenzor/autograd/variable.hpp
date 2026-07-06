@@ -314,7 +314,9 @@ public:
      *
      * @return Optional tensor containing gradient (nullopt if no gradient)
      */
-    auto grad() const -> const std::optional<Tensor>&;
+    // Returns BY VALUE (a cheap handle copy made under the grad lock) so the
+    // thread-safe accessor does not leak a reference to grad_ past the lock.
+    auto grad() const -> std::optional<Tensor>;
 
     /**
      * @brief Get gradient as a Variable with its backward graph attached.

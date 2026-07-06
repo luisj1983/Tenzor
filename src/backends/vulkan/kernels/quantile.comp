@@ -17,6 +17,15 @@ layout(push_constant) uniform PushConstants {
     float q;             // quantile value in [0, 1]
 } params;
 
+// Strict-greater under NaN-as-largest ordering (NaN sorts LAST, any sign),
+// matching CPU nan_less. `a != a` is a reliable NaN test in shaders.
+bool nan_gt(float a, float b) {
+    bool na = a != a;
+    bool nb = b != b;
+    if (na || nb) return na && !nb;   // NaN > finite; nothing > NaN
+    return a > b;
+}
+
 void main() {
     uint slice_idx = gl_GlobalInvocationID.x;
     if (slice_idx >= params.total_slices) return;
@@ -35,7 +44,7 @@ void main() {
     for (uint i = 1; i < params.dim_size; i++) {
         float key = scratch_data[scratch_base + i];
         int j = int(i) - 1;
-        while (j >= 0 && scratch_data[scratch_base + uint(j)] > key) {
+        while (j >= 0 && nan_gt(scratch_data[scratch_base + uint(j)], key)) {
             scratch_data[scratch_base + uint(j) + 1] = scratch_data[scratch_base + uint(j)];
             j--;
         }

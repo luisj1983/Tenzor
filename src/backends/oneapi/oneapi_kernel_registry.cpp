@@ -589,9 +589,9 @@ namespace oneapi {
     auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
                              const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
     auto avgpool1d_forward(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
-                           std::array<int64_t, 1> padding, sycl::queue& queue) -> Tensor;
+                           std::array<int64_t, 1> padding, bool count_include_pad, sycl::queue& queue) -> Tensor;
     auto avgpool1d_backward(const Tensor& grad_output, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride,
-                             std::array<int64_t, 1> padding, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+                             std::array<int64_t, 1> padding, bool count_include_pad, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
     auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
                                      sycl::queue& queue) -> std::vector<Tensor>;
     auto adaptive_maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
@@ -2413,7 +2413,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const auto s = ::tenzor::backend::attrs::read_1d(attrs,
                 AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
             const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
-            return {oneapi::avgpool1d_forward(inputs[0], k, s, p, get_q(inputs))};
+            const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
+            return {oneapi::avgpool1d_forward(inputs[0], k, s, p, count_include_pad, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AvgPool1dBackward,
@@ -2425,7 +2426,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 AttrKey::Stride, AttrKey::StrideW, /*default*/ k[0]);
             const auto p = ::tenzor::backend::attrs::padding_1d(attrs);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            return {oneapi::avgpool1d_backward(inputs[0], k, s, p, input_shape, get_q(inputs))};
+            const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
+            return {oneapi::avgpool1d_backward(inputs[0], k, s, p, count_include_pad, input_shape, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d,
@@ -3437,7 +3439,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                     auto ss = scaled.shape();
                     int64_t S_q = ss[ss.size() - 2];
                     int64_t S_k = ss[ss.size() - 1];
-                    Tensor row_idx = tenzor::arange(0, S_q, 1, DType::Int64, Q.device());
+                    // F026/F030: BOTTOM-RIGHT causal alignment. Row qi represents
+                    // key position qi + (S_k - S_q); masking `col > row` with the
+                    // shifted rows reproduces `ki > qi + (S_k - S_q)`, matching the
+                    // flash_attention forward (causal_offset = S_k - S_q). Top-left
+                    // (`col > qi`) diverges whenever S_q != S_k (cross-attention /
+                    // cached-KV decode).
+                    Tensor row_idx = tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, Q.device());
                     Tensor col_idx = tenzor::arange(0, S_k, 1, DType::Int64, Q.device());
                     Tensor rows_2d = tenzor::reshape(row_idx, std::vector<int64_t>{S_q, 1});
                     Tensor cols_2d = tenzor::reshape(col_idx, std::vector<int64_t>{1, S_k});
@@ -3549,7 +3557,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                     if (is_causal) {
                         int64_t S_q = scores_shape[scores_shape.size() - 2];
                         int64_t S_k = scores_shape[scores_shape.size() - 1];
-                        Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, Qi.device());
+                        // F026/F030: BOTTOM-RIGHT causal alignment (row qi -> key
+                        // position qi + (S_k - S_q)); matches flash_attention
+                        // forward causal_offset = S_k - S_q. Top-left diverges when
+                        // S_q != S_k (cross-attention / cached-KV decode).
+                        Tensor rows = tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, Qi.device());
                         Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, Qi.device());
                         rows = tenzor::reshape(rows, {S_q, 1});
                         cols = tenzor::reshape(cols, {1, S_k});
@@ -3651,10 +3663,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 auto grads = oneapi::flash_attention_backward_oneapi_f64(
                     dO_flat, Q_flat, K_flat, V_flat, O_flat,
                     static_cast<double>(scale), causal, queue);
-                auto orig = std::vector<int64_t>(Q.shape().begin(), Q.shape().end());
-                return {tenzor::reshape(grads[0], orig),
-                        tenzor::reshape(grads[1], orig),
-                        tenzor::reshape(grads[2], orig)};
+                // dQ matches Q's shape; dK/dV match K/V's shape (differs from Q
+                // for cross-attention / KV-cache where seq_k != seq_q).
+                auto q_orig = std::vector<int64_t>(Q.shape().begin(), Q.shape().end());
+                auto k_orig = std::vector<int64_t>(K.shape().begin(), K.shape().end());
+                auto v_orig = std::vector<int64_t>(V.shape().begin(), V.shape().end());
+                return {tenzor::reshape(grads[0], q_orig),
+                        tenzor::reshape(grads[1], k_orig),
+                        tenzor::reshape(grads[2], v_orig)};
             }
 
             const bool fused_supported =
@@ -3679,10 +3695,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 auto& queue = get_q(inputs);
                 auto [dQf, dKf, dVf] = oneapi::flash_attention_backward_oneapi_f32(
                     dO_flat, Q_flat, K_flat, V_flat, O_flat, L_flat, scale, causal, queue);
-                auto orig = std::vector<int64_t>(Q.shape().begin(), Q.shape().end());
-                return {tenzor::reshape(dQf, orig),
-                        tenzor::reshape(dKf, orig),
-                        tenzor::reshape(dVf, orig)};
+                // dQ matches Q's shape; dK/dV match K/V's shape (differs from Q
+                // for cross-attention / KV-cache where seq_k != seq_q).
+                auto q_orig = std::vector<int64_t>(Q.shape().begin(), Q.shape().end());
+                auto k_orig = std::vector<int64_t>(K.shape().begin(), K.shape().end());
+                auto v_orig = std::vector<int64_t>(V.shape().begin(), V.shape().end());
+                return {tenzor::reshape(dQf, q_orig),
+                        tenzor::reshape(dKf, k_orig),
+                        tenzor::reshape(dVf, v_orig)};
             }
 
             // Composed-ops fallback for unsupported shapes / missing LSE / non-F32.
@@ -3699,11 +3719,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             // Apply causal mask if needed
             if (causal) {
-                int64_t seq_len = scores_shape[scores_shape.size() - 1];
-                Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                rows = tenzor::reshape(rows, {seq_len, 1});
-                cols = tenzor::reshape(cols, {1, seq_len});
+                // F026/F029/F030: BOTTOM-RIGHT causal alignment with DISTINCT
+                // S_q/S_k extents. The old code used seq_len = S_k for BOTH axes:
+                // a square [S_k,S_k] top-left mask that (a) mis-shapes against the
+                // [.,S_q,S_k] scores when S_q != S_k and (b) ignores the forward's
+                // causal_offset = S_k - S_q. Row qi -> key position qi + (S_k - S_q);
+                // matches the OneAPI forward composed path and the shared
+                // composed_attention_backward. This fallback runs for Float64 /
+                // unsupported-head_dim, so cross-attn gradcheck exercises it.
+                int64_t S_q = scores_shape[scores_shape.size() - 2];
+                int64_t S_k = scores_shape[scores_shape.size() - 1];
+                Tensor rows = tenzor::arange(S_k - S_q, S_k, 1, DType::Int64, scores.device());
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, scores.device());
+                rows = tenzor::reshape(rows, {S_q, 1});
+                cols = tenzor::reshape(cols, {1, S_k});
                 Tensor causal_mask = tenzor::gt(cols.to(DType::Float64), rows.to(DType::Float64));
                 // Use where-based selection rather than scores + mask*(-inf):
                 // a -1e9 sentinel saturates to ~-65504 in Float16/BFloat16, which
@@ -5338,22 +5367,35 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 #endif // TENZOR_HAS_ONEMKL
 
-    // SparseSoftmax: row-wise softmax on CSR sparse tensor values
+    // SparseSoftmax: row-wise softmax on CSR sparse tensor values.
+    // IMPORTANT: there is no native OneAPI CSR softmax kernel. Calling the
+    // top-level `sparse::sparse_softmax` on a SYCL-device sparse tensor sees a
+    // non-CPU device, finds has_kernel(SparseSoftmax) true, and re-dispatches
+    // this same OpId → unbounded recursion (stack overflow). Relocate the CSR
+    // components to CPU, compute there, then move the result values back to the
+    // original SYCL device.
     table.register_single_output_kernel(OpId::SparseSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto shape = attrs.get_int_list(AttrKey::Shape);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            Device orig = inputs[2].device();
+            auto sp = SparseTensor::sparse_csr(
+                inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()),
+                inputs[2].to(Device::cpu()), shape);
             auto result = sparse::sparse_softmax(sp);
-            return result.values();
+            return result.values().to(orig);
         });
 
-    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values
+    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values.
+    // Same recursion hazard as SparseSoftmax — relocate to CPU and move back.
     table.register_single_output_kernel(OpId::SparseLogSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto shape = attrs.get_int_list(AttrKey::Shape);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            Device orig = inputs[2].device();
+            auto sp = SparseTensor::sparse_csr(
+                inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()),
+                inputs[2].to(Device::cpu()), shape);
             auto result = sparse::sparse_log_softmax(sp);
-            return result.values();
+            return result.values().to(orig);
         });
 
     // ========================================================================
