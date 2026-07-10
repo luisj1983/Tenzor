@@ -792,9 +792,19 @@ private:
             throw std::runtime_error(
                 "compile_script: method argument must be a scalar");
         }
-        if (t.dtype() != DType::Float32) t = t.to(DType::Float32);
+        // Transfer to host BEFORE narrowing dtype (JIT-R006): casting
+        // f64/f16/bf16->f32 on the device is not guaranteed identical
+        // across backends -- see the ForStmt/NumberExpr handlers' comment
+        // on why CPU-first ordering is required. Casting on CPU is
+        // deterministic regardless of which backend produced `t`.
         if (t.device().type != Device::Type::CPU) t = t.to(Device::cpu());
-        return t.data<float>()[0];
+        if (t.dtype() != DType::Float32) t = t.to(DType::Float32);
+        // item<T>() (not a raw data<T>() pointer read) fires the JIT
+        // graph-break hook (JIT-R007), matching every other data-dependent
+        // scalar extraction in this file (see the IfStmt handler above) --
+        // a raw pointer read silently bakes this value into the trace with
+        // no warning even in strict mode.
+        return t.item<float>();
     }
 
     // Evaluate an expression that must reduce to an integer.
@@ -814,7 +824,9 @@ private:
         // rejecting the other dtypes, which broke integer args for F16/BF16/int
         // traces.
         if (t.dtype() != DType::Int64) t = t.to(DType::Int64);
-        return t.data<int64_t>()[0];
+        // item<T>() (not a raw data<T>() pointer read) fires the JIT
+        // graph-break hook (JIT-R007) -- see eval_scalar above.
+        return t.item<int64_t>();
     }
 
     Variable call_method_with_args(const Variable& recv,

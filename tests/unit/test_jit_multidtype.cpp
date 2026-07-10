@@ -250,6 +250,41 @@ TEST_P(JITMultiDTypeTest, OptimizeForInferenceKeepsFusedReLU) {
         << "ReLU clamped no elements; test is not exercising the fusion path";
 }
 
+// JIT-R008: a shape change on a call to CompiledModule::forward() triggers a
+// retrace (compute_shape_key encodes shape, not just device/dtype). The
+// retraced replacement graph must mirror THIS module's optimization state
+// -- a module the caller never explicitly optimized must stay unfused after
+// a shape-triggered retrace, not silently start fusing (fusion is not
+// numerically neutral -- see compile.cpp's Float16-downcast comment).
+TEST_P(JITMultiDTypeTest, RetraceMirrorsUnoptimizedState) {
+    tenzor::manual_seed(42);
+    auto model = std::make_shared<LinearReLUModel>();
+    convert_model(*model);
+    model->eval();
+
+    Variable input1 = createInput({4, 10}, false);
+    auto traced = jit::trace(model, input1.tensor());
+    ASSERT_NE(traced, nullptr);
+    // Deliberately do NOT call optimize_for_inference() -- this module
+    // should never fuse, on the initial graph or any retraced one.
+
+    (void)traced->forward(input1);
+
+    // A different batch size is still shape-key-distinct from input1, which
+    // forces CompiledModule::forward's device/dtype-mismatch retrace branch
+    // (it retraces on ANY shape/device/dtype change, not just device/dtype).
+    Variable input2 = createInput({7, 10}, false);
+    (void)traced->forward(input2);
+
+    bool any_fused_relu = false;
+    for (const auto& node : traced->graph()->nodes()) {
+        if (node->get_bool_attr("fused_relu")) any_fused_relu = true;
+    }
+    EXPECT_FALSE(any_fused_relu)
+        << "a shape-triggered retrace silently optimized a module the "
+           "caller never called optimize_for_inference() on";
+}
+
 // ============================================================================
 // Function Compilation Tests
 // ============================================================================
@@ -352,6 +387,12 @@ TEST_P(JITMultiDTypeTest, OptimizeFusionConvBNReLU) {
 
     Variable input = createInput({1, 3, 32, 32}, false);
 
+    // Eager reference computed independently, before tracing/optimization
+    // mutates anything (JIT-R034: this pass previously had zero numeric
+    // coverage -- see JIT-R001 for the underlying weight-resolution bug
+    // that made it dead code on every real graph until fixed).
+    auto eager_out = model->forward(input);
+
     auto traced = jit::trace(model, input.tensor());
 
     // Optimize graph (should fuse Conv+BN+ReLU)
@@ -361,10 +402,25 @@ TEST_P(JITMultiDTypeTest, OptimizeFusionConvBNReLU) {
     EXPECT_EQ(output.tensor().shape()[1], 64);
     EXPECT_EQ(output.tensor().dtype(), dtype());
 
-    // Graph should have nodes; fusion may or may not reduce to <3 depending
-    // on whether the pattern match catches this exact sequence on this dtype.
+    // The fusion pass must actually fire on this canonical Conv->BN->ReLU
+    // block (model->eval() puts BN in inference mode, satisfying the
+    // training-mode guard) -- assert this directly rather than the old
+    // "graph has some nodes" tautology, which passes whether or not the
+    // pass matched anything.
     auto graph = traced->graph();
-    EXPECT_GT(graph->nodes().size(), 0u);
+    bool found_fused_conv = false;
+    for (const auto& node : graph->nodes()) {
+        if (node->op_type() == OpType::Conv2d && node->get_bool_attr("fused_bn") &&
+            node->get_bool_attr("fused_relu")) {
+            found_fused_conv = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_fused_conv)
+        << "FuseConvBatchNormReLU did not fuse the traced Conv->BN->ReLU block";
+
+    // The fused replay must reproduce the eager numbers.
+    expectTensorNear(output.tensor(), eager_out.tensor());
 }
 
 TEST_P(JITMultiDTypeTest, OptimizeConstantFolding) {

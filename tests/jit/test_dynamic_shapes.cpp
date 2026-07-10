@@ -57,6 +57,28 @@ TEST(SymbolicShapeInferenceFixes, MaxWithDimEmitsTwoOutputShapes) {
     EXPECT_EQ(out[1].rank(), 2u);
 }
 
+// JIT-R021: a duplicate index in Squeeze's "dims" attr (e.g. {0,0}) must not
+// erase two elements. shape [1,1,5] with dims={0,0} (dedups to just {0}) must
+// squeeze ONLY dim 0 -> [1,5] (rank 2). The pre-fix code sorted descending but
+// never deduped: erasing index 0 twice on an already-shrunk vector landed the
+// second erase on originally-index-1 (also size-1), silently also squeezing
+// it -> wrong-rank [5] (rank 1).
+TEST(SymbolicShapeInferenceFixes, SqueezeDupDimsDoesNotOverErase) {
+    auto x = mk_val("x", {1, 1, 5});
+    auto node = std::make_shared<Node>(OpType::Squeeze);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("dims", {0, 0});
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_concrete());
+    EXPECT_EQ(out[0][0].value(), 1);
+    EXPECT_TRUE(out[0][1].is_concrete());
+    EXPECT_EQ(out[0][1].value(), 5);
+}
+
 // JIT-F022: a genuinely fixed reshape (no -1, trailing product differs from the
 // input's) on a dynamic input must resolve to the concrete target, not a
 // symbolized leading dim.

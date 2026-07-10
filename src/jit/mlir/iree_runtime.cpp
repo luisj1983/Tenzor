@@ -887,10 +887,33 @@ auto write_npy(const ::tenzor::Tensor& t, const std::string& path) -> bool {
     return static_cast<bool>(f);
 }
 
+// Write a tensor's raw contiguous bytes (no header) for the
+// `--input=SHAPExTYPE=@FILE` form, where the shape/dtype travel in the flag
+// text itself and FILE supplies only the value bytes. Distinct from
+// write_npy's `--input=@FILE.npy` form (whole-file numpy header, shape/dtype
+// inferred from the file).
+auto write_raw_binary(const ::tenzor::Tensor& t, const std::string& path) -> bool {
+    const ::tenzor::Tensor cpu = t.cpu().contiguous();
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    const int64_t nbytes =
+        cpu.numel() * static_cast<int64_t>(::tenzor::dtype_size(cpu.dtype()));
+    f.write(reinterpret_cast<const char*>(cpu.data_ptr()),
+            static_cast<std::streamsize>(nbytes));
+    return static_cast<bool>(f);
+}
+
 // Build one --input flag. A large operand of an NPY-representable dtype is
 // written to a temp .npy and passed as --input=@path (exact bits, no ARG_MAX
-// limit); smaller/BF16 operands use the inline ASCII form. Temp paths are pushed
-// onto `temp_files` for the caller to clean up after the subprocess returns.
+// limit). A large operand whose dtype has no NPY encoding in
+// iree-run-module's numpy_io (BFloat16 -- see invoke_subprocess's output-side
+// comment on the same limitation) instead uses the raw-binary
+// `--input=SHAPExTYPE=@path` form, which carries shape/dtype in the flag
+// text and only the value bytes in the file -- still exact bits, still no
+// ARG_MAX growth with tensor size. Only genuinely small operands (or a dtype
+// with neither encoding available) fall through to the inline ASCII form.
+// Temp paths are pushed onto `temp_files` for the caller to clean up after
+// the subprocess returns.
 auto build_input_arg(const ::tenzor::Tensor& t,
                      std::vector<std::string>& temp_files) -> std::string {
     const std::string descr = dtype_to_npy_descr(t.dtype());
@@ -906,6 +929,26 @@ auto build_input_arg(const ::tenzor::Tensor& t,
             if (write_npy(t, p)) {
                 temp_files.push_back(p);
                 return "--input=@" + p;
+            }
+            std::remove(p.c_str());
+        }
+    }
+    if (t.numel() > 4096 && t.dtype() == ::tenzor::DType::BFloat16) {
+        auto tmpl = (std::filesystem::temp_directory_path() /
+                     "tenzor_iree_in_XXXXXX.bin").string();
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        const int fd = ::mkstemps(buf.data(), 4);
+        if (fd >= 0) {
+            ::close(fd);
+            std::string p(buf.data());
+            if (write_raw_binary(t, p)) {
+                temp_files.push_back(p);
+                std::ostringstream os;
+                os << "--input=";
+                for (auto d : t.shape()) os << d << 'x';
+                os << dtype_to_iree_element(t.dtype()) << "=@" << p;
+                return os.str();
             }
             std::remove(p.c_str());
         }

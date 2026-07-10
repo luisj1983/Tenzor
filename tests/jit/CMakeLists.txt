@@ -12,6 +12,11 @@ add_executable(test_fusion_passes test_fusion_passes.cpp)
 target_link_libraries(test_fusion_passes PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_fusion_passes LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+# Fusion cost model device-aware heuristic tests (JIT-R026)
+add_executable(test_fusion_cost_model test_fusion_cost_model.cpp)
+target_link_libraries(test_fusion_cost_model PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fusion_cost_model LABELS "jit" DISCOVERY_TIMEOUT 60)
+
 add_executable(test_jit_quantization test_jit_quantization.cpp)
 target_link_libraries(test_jit_quantization PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jit_quantization LABELS "jit" DISCOVERY_TIMEOUT 120)
@@ -113,6 +118,14 @@ tenzor_discover_tests(test_jit_serialization_control_flow LABELS "jit" DISCOVERY
 add_executable(test_graph_viz_schema test_graph_viz_schema.cpp)
 target_link_libraries(test_graph_viz_schema PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_graph_viz_schema LABELS "jit" DISCOVERY_TIMEOUT 60)
+
+# JIT-R016/JIT-R017: MemorySwapPlanner consumer-redirect consistency
+# (subgraph-aware node search) and device-gated swap candidacy. Planner is
+# currently unwired (no Compiler/codegen path invokes it), so this is its
+# only coverage; still worth being correct per the class's own doc comment.
+add_executable(test_memory_planner_swap test_memory_planner_swap.cpp)
+target_link_libraries(test_memory_planner_swap PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_memory_planner_swap LABELS "jit" DISCOVERY_TIMEOUT 60)
 
 # Phase 13 MLIR JIT tests (subdirectory; test_optype_roundtrip always built;
 # dialect/runtime tests gated on TENZOR_USE_MLIR_JIT inside the subdir)

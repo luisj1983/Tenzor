@@ -6,6 +6,7 @@
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/compiler.hpp"
 #include "tenzor/backend/dispatch_interceptor.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/core/jit_hooks.hpp"
 #include "tenzor/utils/log.hpp"
@@ -162,6 +163,23 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
         throw std::invalid_argument(
             "CompiledFunction::operator(): expected at least one input "
             "Variable, got zero");
+    }
+
+    // JIT-R019: IREE target/arch/HAL-ordinal (and, on the nvrtc path, the
+    // launch device) are derived exclusively from inputs[0]'s device further
+    // down this call -- with no check that every input actually shares that
+    // device, a multi-argument call with mixed-device inputs would silently
+    // compile/dispatch for only the first input's device while other inputs
+    // are read from a different one, diverging from eager dispatch (which
+    // get_dispatch_device already rejects outright, see fast_dispatch.hpp).
+    // Reuse that exact same validation here so the JIT path rejects a
+    // mixed-device call at the same point eager would, instead of silently
+    // mis-targeting.
+    {
+        std::vector<Tensor> input_tensors;
+        input_tensors.reserve(inputs.size());
+        for (const auto& v : inputs) input_tensors.push_back(v.tensor());
+        (void)get_dispatch_device(std::span<const Tensor>(input_tensors));
     }
 
     // Re-entrancy guard: if a trace is already active on this thread, this
@@ -953,6 +971,7 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
                 "target (CPU/CUDA/ROCm/Vulkan) to enable JIT.",
                 dev.to_string());
         }
+        ::tenzor::jit::mlir_jit::internal::record_eager_fallback();
         return fn_(inputs);
     }
 
@@ -986,6 +1005,7 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
                 "MLIR JIT: compile/run failed (target={}): {}. Reusing the "
                 "traced eager result (fn already ran).",
                 config_.target, e.what());
+            ::tenzor::jit::mlir_jit::internal::record_eager_fallback();
             return traced_result;
         }
         if (fn_attempted) {
@@ -997,6 +1017,7 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
             "MLIR JIT: compile/run failed (target={}): {}. Falling back to "
             "eager execution on the input's backend.",
             config_.target, e.what());
+        ::tenzor::jit::mlir_jit::internal::record_eager_fallback();
         return fn_(inputs);
     }
 }
@@ -1076,6 +1097,7 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
         // result instead of running it a SECOND time.
         TENZOR_LOG_WARN("MLIR JIT: trace produced no graph; reusing the traced "
                         "eager result for this invocation.");
+        ::tenzor::jit::mlir_jit::internal::record_eager_fallback();
         if (out_result && out_fn_ok && *out_fn_ok) return *out_result;
         return fn_(inputs);
     }

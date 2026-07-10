@@ -219,12 +219,14 @@ private:
      *         was false.
      */
     auto read_subgraph() -> std::shared_ptr<Graph>;
-    // Counts from the metadata section — saved so read_nodes() knows
+    // Count from the metadata section — saved so read_nodes() knows
     // exactly how many nodes to read (the old code used a peek+try/catch
     // loop that conflicted with any trailing section past the nodes).
+    // The metadata section also carries num_inputs/num_outputs counts, but
+    // those are parsed-and-discarded (see read_metadata()): the
+    // authoritative input/output ID lists are read fresh by
+    // read_io_lists(), so there's no need to stash the counts here.
     uint64_t meta_num_nodes_{0};
-    uint64_t meta_num_inputs_{0};
-    uint64_t meta_num_outputs_{0};
 
     /**
      * @brief Read and validate header.

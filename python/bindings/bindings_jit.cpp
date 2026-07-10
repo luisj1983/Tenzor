@@ -647,7 +647,21 @@ void register_jit(py::module_& m) {
              py::arg("parameters"),
              "Declare the closure-captured trainable parameters (e.g. "
              "model.parameters()) so training-through-JIT produces correct "
-             "gradients and uses updated weights. Returns self for chaining.");
+             "gradients and uses updated weights. Returns self for chaining.")
+        // JIT-R012: these existed in C++ (compile.hpp) but were never bound,
+        // so Python had no way to tell "ran compiled" from "silently fell
+        // back to eager" for a given function -- the only prior signal was a
+        // C++-side TENZOR_LOG_WARN never bridged to Python.
+        .def("had_graph_break", &tenzor::jit::CompiledFunction::had_graph_break,
+             "True if the last trace hit a graph break (e.g. a data-dependent "
+             ".item()/scalar extraction) and the graph was discarded, so this "
+             "call ran eager rather than compiled. Use to diagnose why a "
+             "function falls back to eager execution.")
+        .def("num_grad_forwards", &tenzor::jit::CompiledFunction::num_grad_forwards,
+             "Number of times this compiled function was replayed "
+             "DIFFERENTIABLY (training-through-JIT, grad mode). Zero means "
+             "every requires_grad call fell back to eager autograd instead of "
+             "the compiled graph.");
 
     jit.def("compile_function",
         [](py::function fn, std::string backend, std::string target,
@@ -822,10 +836,15 @@ void register_jit(py::module_& m) {
         d["retraces"]         = s.retraces;
         d["evictions"]        = s.evictions;
         d["total_compile_ms"] = s.total_compile_ms;
+        d["eager_fallbacks"]  = s.eager_fallbacks;
         return d;
     },
     "Return a dict of JIT cache counters: hits, misses, retraces, "
-    "evictions, total_compile_ms.");
+    "evictions, total_compile_ms, eager_fallbacks. eager_fallbacks (JIT-R012) "
+    "counts calls that traced successfully but ran eager instead of compiled "
+    "(unaccelerated device, a lower/compile/invoke failure, or an empty "
+    "trace) -- misses alone cannot distinguish a genuine compile from an "
+    "attempted-then-silently-eager one.");
 
     jit.def("reset_cache_stats", []() {
         tenzor::jit::mlir_jit::reset_cache_stats();

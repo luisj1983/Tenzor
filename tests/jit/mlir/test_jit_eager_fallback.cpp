@@ -26,9 +26,11 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../../backend_parity/parity_test_utils.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <random>
@@ -81,17 +83,49 @@ constexpr const char* kTrivialModule = R"MLIR(module {
 // ── C2: an unlowered op (Tanh) degrades to eager (non-strict) / rethrows
 //    (strict) on each available target. ──────────────────────────────────────
 
+// JIT-R027: the C2 eager-fallback path dispatches on the INPUT TENSOR's
+// device (compile.cpp), not on CompileConfig::target -- so a CPU-resident
+// input exercises only CPU's own eager tanh kernel regardless of which
+// target string this function is called with, giving _Cuda/_Rocm/_Vulkan
+// zero coverage of their OWN backend's eager-dispatch numerics (exactly the
+// scenario most likely to hide a real per-backend divergence, e.g. an
+// edge-value tanh difference). Map target -> the actual device it names so
+// each variant's eager fallback genuinely runs on that backend.
+auto device_for_target(const std::string& target) -> ::tenzor::Device {
+    if (target == "cuda") return ::tenzor::Device::cuda(0);
+    if (target == "rocm") return ::tenzor::Device::rocm(0);
+    if (target == "vulkan-spirv" || target == "vulkan") return ::tenzor::Device::vulkan(0);
+    return ::tenzor::Device::cpu();
+}
+
 void run_c2_unlowered_op(const std::string& target) {
     ensure_core_init();
     if (!target_runnable(target)) {
         GTEST_SKIP() << "target not runnable here: " << target;
     }
 
+    const auto dev = device_for_target(target);
+    // A GPU device named by `target` may have no ACTUAL Tenzor backend
+    // registered on this machine (target_runnable only checks IREE's own
+    // HAL/compiler support, deliberately independent of the Tenzor GPU
+    // backend -- see its own comment) -- constructing a tensor on an
+    // unregistered backend would throw before ever reaching the code this
+    // test means to exercise. Skip cleanly rather than fail in that case.
+    if (dev.type != ::tenzor::Device::Type::CPU) {
+        const auto backends = ::tenzor::testing::get_available_backends();
+        const bool have_backend = std::any_of(
+            backends.begin(), backends.end(),
+            [&](const ::tenzor::Device& d) { return d.type == dev.type; });
+        if (!have_backend) {
+            GTEST_SKIP() << "no Tenzor backend registered for target: " << target;
+        }
+    }
+
     auto tanh_fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return ::tenzor::tanh(x);  // OpType::Tanh has no StableHLO lowering
     };
 
-    auto x_tensor = ::tenzor::full({4}, 0.3F, ::tenzor::DType::Float32);
+    auto x_tensor = ::tenzor::full({4}, 0.3F, ::tenzor::DType::Float32, dev);
     auto x = ::tenzor::Variable(x_tensor, /*requires_grad=*/false);
     const auto eager = tanh_fn(x).tensor();
 
@@ -175,6 +209,14 @@ TEST(JitEagerFallback, UnloweredOpDegradesToEager_Cuda) {
 }
 TEST(JitEagerFallback, UnloweredOpDegradesToEager_Rocm) {
     run_c2_unlowered_op("rocm");
+}
+// JIT-R028: no _Vulkan variant existed at all, despite target_runnable()
+// explicitly handling "vulkan-spirv" and Vulkan being a fully exercised IREE
+// HAL target elsewhere in this same file (JitVulkanAlias). Combined with
+// JIT-R027's fix above, this closes Vulkan's eager-fallback numeric coverage
+// gap alongside CUDA/ROCm's.
+TEST(JitEagerFallback, UnloweredOpDegradesToEager_Vulkan) {
+    run_c2_unlowered_op("vulkan-spirv");
 }
 
 // ── C1: a target with no valid IREE mapping (the OneAPI/MPS class of device,

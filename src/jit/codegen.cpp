@@ -216,8 +216,15 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
     // (LeakyRelu -> 0.01, Elu -> 1.0); without this the negative branch would
     // collapse to 0 (LeakyRelu) or use a 0 coefficient (Elu), diverging from
     // the CPU fallback for the same fused group.
+    // JIT-R023: use emit_scalar (NaN/Inf-safe device intrinsics), not raw
+    // fmt_double -- a traced NaN/Inf LeakyReLU slope or Elu/Softplus alpha
+    // would otherwise emit the invalid device literal token "nanf"/"inff"
+    // (the exact JIT-002 bug emit_scalar exists to fix), failing NVRTC/HIPRTC
+    // compilation identically on both backends. Returns a COMPLETE literal
+    // (dtype suffix already included for the finite case, no suffix needed
+    // for the non-finite intrinsic-call case) -- callers must NOT append `F`.
     auto activation_scalar = [&](double dflt) -> std::string {
-        return fmt_double(step.scalar != 0.0 ? step.scalar : dflt);
+        return emit_scalar(step.scalar != 0.0 ? step.scalar : dflt);
     };
 
     // Device math intrinsic name for this kernel's compute precision. The
@@ -253,8 +260,8 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         // Match the CPU fallback (clamp_min(x, 0) == `x < 0 ? 0 : x`), which
         // propagates NaN; fmax(NaN, 0) returns 0 and diverged from CPU/eager.
         case ElemOp::Relu:       return vp + "val = (" + a + " < " + ZERO + ") ? " + ZERO + " : " + a + ";";
-        case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(0.01) + F + " * " + a + ";";
-        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(1.0) + F + " * (" + fn("exp") + "(" + a + ") - " + ONE + ");";
+        case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(0.01) + " * " + a + ";";
+        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(1.0) + " * (" + fn("exp") + "(" + a + ") - " + ONE + ");";
         case ElemOp::Selu: {
             std::string lam = "1.0507009873554805" + F;
             std::string alp = "1.6732632423543772" + F;
@@ -275,8 +282,8 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
             // return x once beta*x > threshold. The old plain log(1+exp(x))
             // overflowed to +inf for large x (CPU returns x).
             std::string beta = activation_scalar(1.0);
-            return vp + "val = (" + beta + F + " * " + a + " > 20.0" + F + ") ? " +
-                   a + " : " + fn("log1p") + "(" + fn("exp") + "(" + beta + F + " * " + a + ")) / (" + beta + F + ");";
+            return vp + "val = (" + beta + " * " + a + " > 20.0" + F + ") ? " +
+                   a + " : " + fn("log1p") + "(" + fn("exp") + "(" + beta + " * " + a + ")) / (" + beta + ");";
         }
         case ElemOp::Erf:        return vp + "val = " + fn("erf") + "(" + a + ");";
         case ElemOp::Erfc:       return vp + "val = " + fn("erfc") + "(" + a + ");";
@@ -828,7 +835,7 @@ auto execute_fused(const FusionGroup& group,
     // fails device validation / lands data on the wrong backend.
 #if defined(TENZOR_USE_CUDA)
     auto gpu_device = Device::cuda(0);
-#elif defined(TENZOR_USE_ROCM)
+#elif defined(TENZOR_HAS_ROCM)
     auto gpu_device = Device::rocm(0);
 #else
     auto gpu_device = Device::cuda(0);
@@ -1064,11 +1071,17 @@ auto execute_fused_cpu(const FusionGroup& group,
             case ElemOp::Min: { Tensor b = binary_b(); result = tenzor::minimum(a, b); break; }
             case ElemOp::Fmod: { Tensor b = binary_b(); result = tenzor::fmod(a, b); break; }
             case ElemOp::Pow: {
-                // No tensor-tensor pow free function; route through dispatch.
+                // tenzor::float_power implements genuine elementwise
+                // tensor-tensor pow with correct negative-base handling.
+                // dispatch(OpId::Pow, ...) is NOT the right call here: that
+                // kernel's contract (see cpu_kernel_registry.cpp) is a single
+                // tensor input plus a scalar AttrKey::Exponent attribute --
+                // it silently ignores a second tensor operand and defaults
+                // to exponent=2.0, diverging from the genuine pow(a,b) the
+                // generated device code above (emit_op's ElemOp::Pow case)
+                // actually computes.
                 Tensor b = binary_b();
-                const Tensor in_arr[2] = {a, b};
-                result = tenzor::dispatch(OpId::Pow,
-                                          std::span<const Tensor>{in_arr, 2}, {})[0];
+                result = tenzor::float_power(a, b);
                 break;
             }
 

@@ -201,26 +201,49 @@ TEST(JitCorrectnessFixes, ConvBnReluTripleFusionSkipsTrainingBN) {
            "batch stats)";
 }
 
+namespace {
+// Helper: create a bare Value (no producer node) registered in
+// g.constants(), mirroring exactly how the real tracer represents a
+// captured parameter -- see Graph::set_constant's doc comment. Conv2d/
+// BatchNorm2d parameters are real graph inputs bound this way, never node
+// attrs (JIT-R001), so fusion tests need this to give the fold something to
+// actually resolve.
+auto make_const_input_jcf(Graph& g, const std::string& name, const Tensor& tensor)
+    -> std::shared_ptr<Value> {
+    std::vector<int64_t> shape(tensor.shape().begin(), tensor.shape().end());
+    auto val = g.create_value(name, shape, tensor.dtype(), tensor.device());
+    g.set_constant(name, tensor);
+    return val;
+}
+}  // namespace
+
 TEST(JitCorrectnessFixes, ConvBnReluTripleFusionStillRunsInEvalMode) {
     // Regression guard: triple fusion still runs when BN is eval-mode.
     auto g = std::make_shared<Graph>();
     auto x = g->create_value("x", {1, 3, 8, 8}, DType::Float32, Device::cpu());
     g->set_inputs({x});
 
+    auto conv_w = make_const_input_jcf(*g, "conv_w",
+        tenzor::randn({4, 3, 3, 3}, DType::Float32, Device::cpu()));
+    auto conv_b = make_const_input_jcf(*g, "conv_b",
+        tenzor::zeros({4}, DType::Float32, Device::cpu()));
     auto conv = g->create_node(OpType::Conv2d, "conv");
     conv->add_input(x);
-    conv->set_tensor_attr("weight",
-        tenzor::randn({4, 3, 3, 3}, DType::Float32, Device::cpu()));
-    conv->set_tensor_attr("bias", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    conv->add_input(conv_w);
+    conv->add_input(conv_b);
     auto conv_out = g->create_value("cv", {1, 4, 6, 6}, DType::Float32, Device::cpu());
     conv->add_output(conv_out); conv_out->set_node(conv); g->add_node(conv);
 
+    auto gamma = make_const_input_jcf(*g, "gamma", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    auto beta = make_const_input_jcf(*g, "beta", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    auto mean = make_const_input_jcf(*g, "mean", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    auto var = make_const_input_jcf(*g, "var", tenzor::ones({4}, DType::Float32, Device::cpu()));
     auto bn = g->create_node(OpType::BatchNorm2d, "bn");
     bn->add_input(conv_out);
-    bn->set_tensor_attr("weight", tenzor::ones({4}, DType::Float32, Device::cpu()));
-    bn->set_tensor_attr("bias", tenzor::zeros({4}, DType::Float32, Device::cpu()));
-    bn->set_tensor_attr("running_mean", tenzor::zeros({4}, DType::Float32, Device::cpu()));
-    bn->set_tensor_attr("running_var", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    bn->add_input(gamma);
+    bn->add_input(beta);
+    bn->add_input(mean);
+    bn->add_input(var);
     bn->set_attr("eps", 1e-5f);
     // training defaults to false → eval mode → fusion allowed.
     auto bn_out = g->create_value("bn_out", {1, 4, 6, 6}, DType::Float32, Device::cpu());
@@ -244,19 +267,24 @@ TEST(JitCorrectnessFixes, ConvBnFusionStillRunsInEvalMode) {
     auto x = g->create_value("x", {1, 3, 8, 8}, DType::Float32, Device::cpu());
     g->set_inputs({x});
 
+    auto conv_w = make_const_input_jcf(*g, "conv_w",
+        tenzor::randn({4, 3, 3, 3}, DType::Float32, Device::cpu()));
     auto conv = g->create_node(OpType::Conv2d, "conv");
     conv->add_input(x);
-    conv->set_tensor_attr("weight",
-        tenzor::randn({4, 3, 3, 3}, DType::Float32, Device::cpu()));
+    conv->add_input(conv_w);
     auto conv_out = g->create_value("cv", {1, 4, 6, 6}, DType::Float32, Device::cpu());
     conv->add_output(conv_out); conv_out->set_node(conv); g->add_node(conv);
 
+    auto gamma = make_const_input_jcf(*g, "gamma", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    auto beta = make_const_input_jcf(*g, "beta", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    auto mean = make_const_input_jcf(*g, "mean", tenzor::zeros({4}, DType::Float32, Device::cpu()));
+    auto var = make_const_input_jcf(*g, "var", tenzor::ones({4}, DType::Float32, Device::cpu()));
     auto bn = g->create_node(OpType::BatchNorm2d, "bn");
     bn->add_input(conv_out);
-    bn->set_tensor_attr("weight", tenzor::ones({4}, DType::Float32, Device::cpu()));
-    bn->set_tensor_attr("bias", tenzor::zeros({4}, DType::Float32, Device::cpu()));
-    bn->set_tensor_attr("running_mean", tenzor::zeros({4}, DType::Float32, Device::cpu()));
-    bn->set_tensor_attr("running_var", tenzor::ones({4}, DType::Float32, Device::cpu()));
+    bn->add_input(gamma);
+    bn->add_input(beta);
+    bn->add_input(mean);
+    bn->add_input(var);
     bn->set_attr("eps", 1e-5f);
     // No training attr set — defaults to false → eval mode → fusion allowed.
     auto bn_out = g->create_value("bn_out", {1, 4, 6, 6}, DType::Float32, Device::cpu());

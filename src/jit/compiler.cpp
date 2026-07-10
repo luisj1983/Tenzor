@@ -573,6 +573,51 @@ auto ConstantFoldingPass::evaluate_constant(const Node& node) -> Tensor {
     }
 }
 
+namespace {
+// Return the single consumer node of `value`, or nullptr if it has zero or
+// more than one use.
+//
+// Every multi-node fusion pass below must match by DATA FLOW -- "does this
+// value have exactly one consumer, and is it the expected op type?" --
+// never by positional adjacency in graph.nodes(). The tracer inserts Cast
+// nodes around Float16/BFloat16 operands that need Float32-accumulator
+// math (e.g. BatchNorm2d's gamma/beta/mean/var, per the "eager BatchNorm
+// computes in a Float32 accumulator for half types" convention documented
+// on fold_bn_into_conv below), so two data-flow-adjacent ops routinely land
+// at NON-adjacent indices in graph.nodes() for half-precision graphs. An
+// index-based `graph.nodes()[i]/[i+1]/[i+2]` pattern matcher silently never
+// fires on any real half-precision model as a result -- every fusion pass
+// using that style was effectively FP32/FP64-only.
+auto single_consumer(const std::shared_ptr<Value>& value) -> std::shared_ptr<Node> {
+    if (!value || value->uses().size() != 1) return nullptr;
+    return value->uses()[0].lock();
+}
+
+// Like single_consumer, but transparently walks through a chain of pure
+// dtype-cast nodes to find the first "real" (non-Cast) consumer. Graphs
+// traced with a Float16/BFloat16 dtype route operands needing a Float32
+// accumulator (e.g. every BatchNorm2d/LayerNorm input, and their output
+// narrowed back afterward) through explicit Cast nodes -- e.g.
+// Conv2d -> Cast(f32) -> BatchNorm2d -> Cast(f16) -> ReLU. Fusion passes
+// care about the real op chain (Conv2d -> BatchNorm2d -> ReLU), not the
+// incidental casts, so this is what they should use to find the next node.
+// Bounded to guard against a malformed/cyclic graph.
+auto next_op(const std::shared_ptr<Value>& value) -> std::shared_ptr<Node> {
+    auto current = value;
+    for (int hops = 0; hops < 8; ++hops) {
+        auto consumer = single_consumer(current);
+        if (!consumer) return nullptr;
+        if (consumer->op_type() == OpType::Cast && consumer->inputs().size() == 1 &&
+            !consumer->outputs().empty()) {
+            current = consumer->outputs()[0];
+            continue;
+        }
+        return consumer;
+    }
+    return nullptr;
+}
+}  // namespace
+
 // ============================================================================
 // Conv-BatchNorm Fusion Pass
 // ============================================================================
@@ -580,45 +625,28 @@ auto ConstantFoldingPass::evaluate_constant(const Node& node) -> Tensor {
 auto FuseConvBatchNormPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    // Find Conv2d -> BatchNorm2d patterns
-    for (size_t i = 0; i + 1 < graph.nodes().size(); ++i) {
-        auto& node1 = graph.nodes()[i];
-        auto& node2 = graph.nodes()[i + 1];
+    // Find Conv2d -> BatchNorm2d patterns by DATA FLOW, not positional
+    // adjacency (see single_consumer's doc comment -- Cast nodes the tracer
+    // wedges around half-precision BN operands break index-based matching).
+    // Snapshot the node list since fuse_pair mutates it (removes the BN
+    // node) as matches fire.
+    auto snapshot = graph.nodes();
+    for (auto& node1 : snapshot) {
+        if (node1->op_type() != OpType::Conv2d || node1->outputs().empty()) continue;
+        auto node2 = next_op(node1->outputs()[0]);
+        if (!node2 || node2->op_type() != OpType::BatchNorm2d) continue;
 
-        if (node1->op_type() == OpType::Conv2d && node2->op_type() == OpType::BatchNorm2d) {
-            // Check if conv output is only used by batchnorm
-            bool can_fuse = true;
-            // Data-flow guard: the BN node must actually consume the conv
-            // output (mirrors FuseConvBatchNormReluPass). Without this check a
-            // positionally-adjacent but data-independent (Conv, BN) pair would
-            // have its conv weights folded with BN stats and BN's real
-            // consumers redirected to the unmodified conv output — silently
-            // wrong results.
-            if (node1->outputs().empty() || node2->inputs().empty() ||
-                node1->outputs()[0]->id() != node2->inputs()[0]->id()) {
-                can_fuse = false;
-            }
-            if (can_fuse) {
-                auto conv_out = node1->outputs()[0];
-                if (conv_out->uses().size() > 1) {
-                    can_fuse = false;
-                }
-            }
+        // Phase P0 / JIT correctness fix: Conv+BN fusion is only valid
+        // in eval/inference mode. In training, BN uses *batch* mean and
+        // variance computed from the live input, not the saved running
+        // statistics — folding running_mean/var into the conv weights
+        // would silently produce different output than the eager path.
+        // Tracer marks training mode via the bool attribute "training";
+        // if present and true, refuse to fuse.
+        if (node2->get_bool_attr("training")) continue;
 
-            // Phase P0 / JIT correctness fix: Conv+BN fusion is only valid
-            // in eval/inference mode. In training, BN uses *batch* mean and
-            // variance computed from the live input, not the saved running
-            // statistics — folding running_mean/var into the conv weights
-            // would silently produce different output than the eager path.
-            // Tracer marks training mode via the bool attribute "training";
-            // if present and true, refuse to fuse.
-            if (can_fuse && node2->get_bool_attr("training")) {
-                can_fuse = false;
-            }
-
-            if (can_fuse && fuse_pair(node1, node2, graph)) {
-                modified = true;
-            }
+        if (fuse_pair(node1, node2, graph)) {
+            modified = true;
         }
     }
 
@@ -690,31 +718,137 @@ void fold_bn_into_conv(const std::shared_ptr<Node>& conv_node,
     conv_node->set_tensor_attr("bias", fused_bias);
 }
 
+// Resolve a captured (compile-time-constant) tensor from a graph Value. Real
+// traced parameters (Linear/Conv weight+bias, BatchNorm gamma/beta/mean/var,
+// ...) are recorded in Graph::constants() -- a side-table the tracer
+// populates at end_trace() for every op input that isn't a graph input --
+// with the Value itself having NO producer node (see
+// Graph::set_constant's doc comment). Graphs built or rewritten at compile
+// time (e.g. by ConstantFoldingPass) instead represent a constant as an
+// OpType::Constant producer node holding a "value" tensor attr; check that
+// too. Returns an empty Tensor (numel()==0) if the value is neither --
+// i.e. it's a live computation -- and the caller must treat that as
+// "cannot fold at compile time" and skip fusion.
+auto resolve_constant_tensor(const Graph& graph, const std::shared_ptr<Value>& value) -> Tensor {
+    if (!value) return Tensor();
+    const auto& constants = graph.constants();
+    auto it = constants.find(value->id());
+    if (it != constants.end()) return it->second;
+    auto producer = value->node();
+    if (!producer) return Tensor();
+    if (producer->op_type() == OpType::Constant) {
+        return producer->get_tensor_attr("value");
+    }
+    // See through a pure dtype cast: half-precision graphs route captured
+    // parameters through an explicit Cast(param, f32) node ahead of ops
+    // (e.g. BatchNorm2d) that need Float32-accumulator math. Resolve the
+    // ORIGINAL (pre-cast) tensor -- fold_bn_into_conv widens f16/bf16
+    // params to Float32 itself, replicating exactly what this Cast does,
+    // so constant-folding fusion passes should see straight through it.
+    if (producer->op_type() == OpType::Cast && producer->inputs().size() == 1) {
+        return resolve_constant_tensor(graph, producer->inputs()[0]);
+    }
+    return Tensor();
+}
+
+// Replace conv_node's weight/bias inputs with new bare, constants-map-backed
+// values holding the BN-folded tensors, so the unmodified
+// Graph::execute_node OpType::Conv2d replay path (which reads input_vars,
+// never node attrs) picks up the fused weight/bias like any other traced
+// conv. Uses graph.set_constant() (no producer node) rather than an
+// OpType::Constant node, matching how the tracer represents every other
+// captured parameter in this graph -- see Graph::set_constant's doc
+// comment. This also keeps the pass's net effect on num_nodes() intuitive:
+// removing the BN/ReLU nodes without adding synthetic Constant nodes back.
+void install_fused_conv_weights(Graph& graph, const std::shared_ptr<Node>& conv_node,
+                                 const Tensor& fused_weight, const Tensor& fused_bias) {
+    auto make_const_value = [&](const Tensor& t, const std::string& suffix) {
+        // Base the new value id on the conv's own OUTPUT value id, not its
+        // node name -- node names aren't guaranteed unique across a graph
+        // (e.g. multiple "conv" nodes from repeated Conv2d blocks), while
+        // Value ids in graph.values_/constants_ must be, or one fused
+        // weight silently aliases another's map entry.
+        std::string const_val_id = (conv_node->outputs().empty()
+                                         ? conv_node->name()
+                                         : conv_node->outputs()[0]->id()) + suffix;
+        std::vector<int64_t> shape_vec(t.shape().begin(), t.shape().end());
+        auto const_val = graph.create_value(const_val_id, shape_vec, t.dtype(), t.device());
+        graph.set_constant(const_val_id, t);
+        return const_val;
+    };
+
+    conv_node->replace_input(1, make_const_value(fused_weight, "_fused_w"));
+    if (conv_node->inputs().size() >= 3) {
+        conv_node->replace_input(2, make_const_value(fused_bias, "_fused_b"));
+    } else {
+        conv_node->add_input(make_const_value(fused_bias, "_fused_b"));
+    }
+}
+
+// Resolve BatchNorm2d's affine (gamma/beta) and running-stat (mean/var)
+// parameters from its real graph inputs. Mirrors the kernel-canonical
+// operand order documented in Graph::execute_node's OpType::BatchNorm2d
+// case: affine variant is (x, gamma, beta, mean, var); non-affine is
+// (x, mean, var) with gamma=1/beta=0 implied. Returns empty tensors (and
+// leaves gamma/beta/mean/var untouched) if resolution fails.
+struct BnParams {
+    Tensor gamma, beta, running_mean, running_var;
+};
+auto resolve_bn_params(const Graph& graph, const std::shared_ptr<Node>& bn_node) -> BnParams {
+    BnParams p;
+    const auto& bn_inputs = bn_node->inputs();
+    if (bn_inputs.size() >= 5) {
+        p.gamma = resolve_constant_tensor(graph, bn_inputs[1]);
+        p.beta = resolve_constant_tensor(graph, bn_inputs[2]);
+        p.running_mean = resolve_constant_tensor(graph, bn_inputs[3]);
+        p.running_var = resolve_constant_tensor(graph, bn_inputs[4]);
+    } else if (bn_inputs.size() >= 3) {
+        p.running_mean = resolve_constant_tensor(graph, bn_inputs[1]);
+        p.running_var = resolve_constant_tensor(graph, bn_inputs[2]);
+        if (p.running_var.numel() > 0) {
+            p.gamma = tenzor::ones({p.running_var.shape()[0]}, p.running_var.dtype(),
+                                    p.running_var.device());
+            p.beta = tenzor::zeros({p.running_var.shape()[0]}, p.running_var.dtype(),
+                                    p.running_var.device());
+        }
+    }
+    return p;
+}
+
 }  // namespace
 
 auto FuseConvBatchNormPass::fuse_pair(std::shared_ptr<Node> conv_node,
                                        std::shared_ptr<Node> bn_node,
                                        Graph& graph) -> bool {
-    // Get BatchNorm parameters
-    Tensor gamma = bn_node->get_tensor_attr("weight");
-    Tensor beta = bn_node->get_tensor_attr("bias");
-    Tensor running_mean = bn_node->get_tensor_attr("running_mean");
-    Tensor running_var = bn_node->get_tensor_attr("running_var");
+    // BatchNorm2d/Conv2d parameters are real graph inputs, never node attrs
+    // (see JIT-R001 for why a get_tensor_attr("weight")-style lookup here
+    // always silently returned an empty Tensor and made this pass dead).
+    BnParams bn = resolve_bn_params(graph, bn_node);
+
+    const auto& conv_inputs = conv_node->inputs();
+    if (conv_inputs.size() < 2) return false;
+    Tensor conv_weight = resolve_constant_tensor(graph, conv_inputs[1]);
+    Tensor conv_bias = conv_inputs.size() >= 3 ? resolve_constant_tensor(graph, conv_inputs[2]) : Tensor();
+
     float eps = bn_node->get_attr("eps");
 
-    // Get Conv parameters
-    Tensor conv_weight = conv_node->get_tensor_attr("weight");
-    Tensor conv_bias = conv_node->get_tensor_attr("bias");
-
-    // Validate that we have the necessary tensors
-    if (gamma.numel() == 0 || running_var.numel() == 0 || conv_weight.numel() == 0) {
+    // Validate that we have the necessary tensors (compile-time constant
+    // folding requires every operand to be a genuine captured parameter).
+    if (bn.gamma.numel() == 0 || bn.beta.numel() == 0 || bn.running_mean.numel() == 0 ||
+        bn.running_var.numel() == 0 || conv_weight.numel() == 0) {
         return false;
     }
 
     // Fold BN into the conv weight/bias (widens f16/bf16 to match eager — JIT-076).
-    fold_bn_into_conv(conv_node, gamma, beta, running_mean, running_var, eps,
+    fold_bn_into_conv(conv_node, bn.gamma, bn.beta, bn.running_mean, bn.running_var, eps,
                       conv_weight, conv_bias);
 
+    // fold_bn_into_conv stashed the folded tensors as "weight"/"bias" attrs;
+    // install them as REAL replacement graph inputs so the unmodified
+    // Graph::execute_node OpType::Conv2d replay path picks them up.
+    install_fused_conv_weights(graph, conv_node,
+                                conv_node->get_tensor_attr("weight"),
+                                conv_node->get_tensor_attr("bias"));
     conv_node->set_bool_attr("fused_bn", true);
 
     // Redirect consumers of BN output to use conv output, then remove BN node
@@ -733,24 +867,15 @@ auto FuseConvBatchNormPass::fuse_pair(std::shared_ptr<Node> conv_node,
 auto FuseConvReluPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    for (size_t i = 0; i + 1 < graph.nodes().size(); ++i) {
-        auto& node1 = graph.nodes()[i];
-        auto& node2 = graph.nodes()[i + 1];
-
-        if (node1->op_type() == OpType::Conv2d && node2->op_type() == OpType::ReLU) {
-            // Data-flow guard: the ReLU must consume the conv output and the
-            // conv output must have a single use (mirrors FuseMatMulAddPass /
-            // FuseConvBatchNormReluPass). Otherwise a positionally-adjacent but
-            // data-independent (Conv, ReLU) pair would attach an unwanted ReLU
-            // to the conv output and redirect the real ReLU's consumers to the
-            // conv output, dropping the genuine ReLU — silently wrong results.
-            if (!node1->outputs().empty() && !node2->inputs().empty() &&
-                node1->outputs()[0]->id() == node2->inputs()[0]->id() &&
-                node1->outputs()[0]->uses().size() == 1) {
-                if (fuse_pair(node1, node2, graph)) {
-                    modified = true;
-                }
-            }
+    // Match by DATA FLOW, not positional adjacency (see single_consumer's
+    // doc comment). Snapshot the node list since fuse_pair mutates it.
+    auto snapshot = graph.nodes();
+    for (auto& node1 : snapshot) {
+        if (node1->op_type() != OpType::Conv2d || node1->outputs().empty()) continue;
+        auto node2 = next_op(node1->outputs()[0]);
+        if (!node2 || node2->op_type() != OpType::ReLU) continue;
+        if (fuse_pair(node1, node2, graph)) {
+            modified = true;
         }
     }
 
@@ -779,24 +904,15 @@ auto FuseConvReluPass::fuse_pair(std::shared_ptr<Node> conv_node,
 auto FuseLinearReluPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    for (size_t i = 0; i + 1 < graph.nodes().size(); ++i) {
-        auto& node1 = graph.nodes()[i];
-        auto& node2 = graph.nodes()[i + 1];
-
-        if (node1->op_type() == OpType::Linear && node2->op_type() == OpType::ReLU) {
-            // Data-flow guard: the ReLU must consume the linear output and the
-            // linear output must have a single use (mirrors FuseMatMulAddPass /
-            // FuseConvBatchNormReluPass). Otherwise a positionally-adjacent but
-            // data-independent (Linear, ReLU) pair would attach an unwanted
-            // ReLU to the linear output and redirect the real ReLU's consumers
-            // to the linear output, dropping the genuine ReLU.
-            if (!node1->outputs().empty() && !node2->inputs().empty() &&
-                node1->outputs()[0]->id() == node2->inputs()[0]->id() &&
-                node1->outputs()[0]->uses().size() == 1) {
-                if (fuse_pair(node1, node2, graph)) {
-                    modified = true;
-                }
-            }
+    // Match by DATA FLOW, not positional adjacency (see single_consumer's
+    // doc comment). Snapshot the node list since fuse_pair mutates it.
+    auto snapshot = graph.nodes();
+    for (auto& node1 : snapshot) {
+        if (node1->op_type() != OpType::Linear || node1->outputs().empty()) continue;
+        auto node2 = next_op(node1->outputs()[0]);
+        if (!node2 || node2->op_type() != OpType::ReLU) continue;
+        if (fuse_pair(node1, node2, graph)) {
+            modified = true;
         }
     }
 
@@ -825,38 +941,31 @@ auto FuseLinearReluPass::fuse_pair(std::shared_ptr<Node> linear_node,
 auto FuseMatMulAddPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    for (size_t i = 0; i + 1 < graph.nodes().size(); ++i) {
-        auto& node1 = graph.nodes()[i];
-        auto& node2 = graph.nodes()[i + 1];
+    // Match by DATA FLOW, not positional adjacency (see single_consumer's
+    // doc comment). Snapshot the node list since fuse_pair mutates it.
+    auto snapshot = graph.nodes();
+    for (auto& node1 : snapshot) {
+        if (node1->op_type() != OpType::MatMul || node1->outputs().empty()) continue;
+        auto matmul_out = node1->outputs()[0];
+        auto node2 = next_op(matmul_out);
+        if (!node2 || node2->op_type() != OpType::Add || node2->inputs().size() < 2) continue;
 
-        if (node1->op_type() == OpType::MatMul && node2->op_type() == OpType::Add) {
-            // Check if matmul output is used as one of the Add inputs
-            if (!node1->outputs().empty() && node2->inputs().size() >= 2) {
-                auto matmul_out_id = node1->outputs()[0]->id();
-                auto add_in0_id = node2->inputs()[0]->id();
-                auto add_in1_id = node2->inputs()[1]->id();
+        // Determine which Add input is the matmul result and which is the bias
+        auto matmul_out_id = matmul_out->id();
+        std::shared_ptr<Value> bias_value;
+        if (node2->inputs()[0]->id() == matmul_out_id) {
+            bias_value = node2->inputs()[1];
+        } else if (node2->inputs()[1]->id() == matmul_out_id) {
+            bias_value = node2->inputs()[0];
+        } else {
+            continue;  // MatMul output is not consumed by this Add
+        }
 
-                // Determine which Add input is the matmul result and which is the bias
-                std::shared_ptr<Value> bias_value;
-                if (add_in0_id == matmul_out_id) {
-                    bias_value = node2->inputs()[1];
-                } else if (add_in1_id == matmul_out_id) {
-                    bias_value = node2->inputs()[0];
-                } else {
-                    continue;  // MatMul output is not consumed by this Add
-                }
+        // Check that bias is 1D (typical bias pattern)
+        if (bias_value->shape().size() != 1) continue;
 
-                // Check that bias is 1D (typical bias pattern)
-                if (bias_value->shape().size() == 1) {
-                    // Check that matmul output is only used by this Add
-                    auto matmul_out = node1->outputs()[0];
-                    if (matmul_out->uses().size() <= 1) {
-                        if (fuse_pair(node1, node2, graph)) {
-                            modified = true;
-                        }
-                    }
-                }
-            }
+        if (fuse_pair(node1, node2, graph)) {
+            modified = true;
         }
     }
 
@@ -904,52 +1013,30 @@ auto FuseMatMulAddPass::fuse_pair(std::shared_ptr<Node> matmul_node,
 auto FuseConvBatchNormReluPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    for (size_t i = 0; i + 2 < graph.nodes().size(); ++i) {
-        auto& node1 = graph.nodes()[i];
-        auto& node2 = graph.nodes()[i + 1];
-        auto& node3 = graph.nodes()[i + 2];
+    // Match by DATA FLOW, not positional adjacency (see single_consumer's
+    // doc comment -- this triple is exactly the case that motivated it:
+    // half-precision BatchNorm operands get Cast nodes wedged between the
+    // Conv2d and BatchNorm2d in graph.nodes(), so an index-based
+    // `[i]/[i+1]/[i+2]` matcher never fired on any real F16/BF16 model).
+    // Snapshot the node list since fuse_triple mutates it.
+    auto snapshot = graph.nodes();
+    for (auto& node1 : snapshot) {
+        if (node1->op_type() != OpType::Conv2d || node1->outputs().empty()) continue;
+        auto node2 = next_op(node1->outputs()[0]);
+        if (!node2 || node2->op_type() != OpType::BatchNorm2d) continue;
+        if (node2->outputs().empty()) continue;
+        auto node3 = next_op(node2->outputs()[0]);
+        if (!node3 || node3->op_type() != OpType::ReLU) continue;
 
-        if (node1->op_type() == OpType::Conv2d &&
-            node2->op_type() == OpType::BatchNorm2d &&
-            node3->op_type() == OpType::ReLU) {
-            // Verify data flow: conv -> bn -> relu
-            bool flow_valid = true;
-            if (!node1->outputs().empty() && !node2->inputs().empty()) {
-                if (node1->outputs()[0]->id() != node2->inputs()[0]->id()) {
-                    flow_valid = false;
-                }
-                // Conv output should only be used by BN
-                if (node1->outputs()[0]->uses().size() > 1) {
-                    flow_valid = false;
-                }
-            } else {
-                flow_valid = false;
-            }
-            if (!node2->outputs().empty() && !node3->inputs().empty()) {
-                if (node2->outputs()[0]->id() != node3->inputs()[0]->id()) {
-                    flow_valid = false;
-                }
-                // BN output should only be used by ReLU
-                if (node2->outputs()[0]->uses().size() > 1) {
-                    flow_valid = false;
-                }
-            } else {
-                flow_valid = false;
-            }
+        // Phase P0 / JIT correctness fix (5th-audit sibling-bug A3): mirror
+        // the training-mode guard from the Conv+BN pair-fusion pass. In
+        // training, BN uses live batch mean/variance; folding the running
+        // statistics into conv weights would silently produce wrong
+        // outputs compared to the eager path.
+        if (node2->get_bool_attr("training")) continue;
 
-            // Phase P0 / JIT correctness fix (5th-audit sibling-bug A3): mirror
-            // the training-mode guard from the Conv+BN pair-fusion pass (line
-            // ~429). In training, BN uses live batch mean/variance; folding the
-            // running statistics into conv weights would silently produce wrong
-            // outputs compared to the eager path.
-            if (flow_valid && node2->get_bool_attr("training")) {
-                flow_valid = false;
-            }
-
-            if (flow_valid && fuse_triple(node1, node2, node3, graph)) {
-                modified = true;
-                // Skip over the removed nodes
-            }
+        if (fuse_triple(node1, node2, node3, graph)) {
+            modified = true;
         }
     }
 
@@ -961,22 +1048,30 @@ auto FuseConvBatchNormReluPass::fuse_triple(std::shared_ptr<Node> conv_node,
                                               std::shared_ptr<Node> relu_node,
                                               Graph& graph) -> bool {
     // Fuse BatchNorm parameters into Conv weights (same logic as FuseConvBatchNormPass)
-    Tensor gamma = bn_node->get_tensor_attr("weight");
-    Tensor beta = bn_node->get_tensor_attr("bias");
-    Tensor running_mean = bn_node->get_tensor_attr("running_mean");
-    Tensor running_var = bn_node->get_tensor_attr("running_var");
+    BnParams bn = resolve_bn_params(graph, bn_node);
+
+    const auto& conv_inputs = conv_node->inputs();
+    if (conv_inputs.size() < 2) return false;
+    Tensor conv_weight = resolve_constant_tensor(graph, conv_inputs[1]);
+    Tensor conv_bias = conv_inputs.size() >= 3 ? resolve_constant_tensor(graph, conv_inputs[2]) : Tensor();
+
     float eps = bn_node->get_attr("eps");
 
-    Tensor conv_weight = conv_node->get_tensor_attr("weight");
-    Tensor conv_bias = conv_node->get_tensor_attr("bias");
-
-    if (gamma.numel() == 0 || running_var.numel() == 0 || conv_weight.numel() == 0) {
+    if (bn.gamma.numel() == 0 || bn.beta.numel() == 0 || bn.running_mean.numel() == 0 ||
+        bn.running_var.numel() == 0 || conv_weight.numel() == 0) {
         return false;
     }
 
     // Fold BN into the conv weight/bias (widens f16/bf16 to match eager — JIT-076).
-    fold_bn_into_conv(conv_node, gamma, beta, running_mean, running_var, eps,
+    fold_bn_into_conv(conv_node, bn.gamma, bn.beta, bn.running_mean, bn.running_var, eps,
                       conv_weight, conv_bias);
+
+    // Install the folded weight/bias as real replacement graph inputs (see
+    // FuseConvBatchNormPass::fuse_pair -- execute_node reads input_vars,
+    // never node attrs).
+    install_fused_conv_weights(graph, conv_node,
+                                conv_node->get_tensor_attr("weight"),
+                                conv_node->get_tensor_attr("bias"));
 
     // Mark as triple-fused
     conv_node->set_bool_attr("fused_bn", true);
@@ -1003,33 +1098,27 @@ auto FuseConvBatchNormReluPass::fuse_triple(std::shared_ptr<Node> conv_node,
 auto FuseLayerNormActivationPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    for (size_t i = 0; i + 1 < graph.nodes().size(); ++i) {
-        auto& node1 = graph.nodes()[i];
-        auto& node2 = graph.nodes()[i + 1];
+    // Match by DATA FLOW, not positional adjacency (see single_consumer's
+    // doc comment). Snapshot the node list since fuse_pair mutates it.
+    auto snapshot = graph.nodes();
+    for (auto& node1 : snapshot) {
+        if (node1->op_type() != OpType::LayerNorm ||
+            node1->get_bool_attr("fused_activation") || node1->outputs().empty()) {
+            continue;
+        }
+        // Only ONE activation may be folded into a LayerNorm. Without the
+        // fused_activation guard above, `relu(gelu(layer_norm(x)))` fuses
+        // twice — LN+GELU (marks gelu, deletes GELU), then LN+ReLU
+        // (OVERWRITES the marker with relu, deletes ReLU) — silently dropping
+        // the GELU. Fusing only the first adjacent activation and leaving the
+        // rest as normal nodes keeps replay == eager.
+        auto node2 = next_op(node1->outputs()[0]);
+        if (!node2 || (node2->op_type() != OpType::ReLU && node2->op_type() != OpType::GELU)) {
+            continue;
+        }
 
-        if (node1->op_type() == OpType::LayerNorm &&
-            !node1->get_bool_attr("fused_activation") &&
-            (node2->op_type() == OpType::ReLU || node2->op_type() == OpType::GELU)) {
-            // Only ONE activation may be folded into a LayerNorm. Without the
-            // fused_activation guard above, `relu(gelu(layer_norm(x)))` fuses
-            // twice — LN+GELU (marks gelu, deletes GELU), then LN+ReLU
-            // (OVERWRITES the marker with relu, deletes ReLU) — silently dropping
-            // the GELU. Fusing only the first adjacent activation and leaving the
-            // rest as normal nodes keeps replay == eager.
-            // Verify data flow: layernorm output feeds into activation
-            bool flow_valid = false;
-            if (!node1->outputs().empty() && !node2->inputs().empty()) {
-                if (node1->outputs()[0]->id() == node2->inputs()[0]->id()) {
-                    // LayerNorm output should only be used by the activation
-                    if (node1->outputs()[0]->uses().size() <= 1) {
-                        flow_valid = true;
-                    }
-                }
-            }
-
-            if (flow_valid && fuse_pair(node1, node2, graph)) {
-                modified = true;
-            }
+        if (fuse_pair(node1, node2, graph)) {
+            modified = true;
         }
     }
 
@@ -1426,41 +1515,24 @@ auto FuseResidualAddPass::run(Graph& graph) -> bool {
 auto FuseFFNPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    for (size_t i = 0; i + 2 < graph.nodes().size(); ++i) {
-        auto& node1 = graph.nodes()[i];
-        auto& node2 = graph.nodes()[i + 1];
-        auto& node3 = graph.nodes()[i + 2];
+    // Match by DATA FLOW, not positional adjacency (see single_consumer's
+    // doc comment -- a Linear's weight/bias can pick up Cast nodes for
+    // half-precision F32-accumulator math the same way BatchNorm2d's do,
+    // which would silently disable an index-based matcher for F16/BF16
+    // models). Snapshot the node list since fuse_triple mutates it.
+    auto snapshot = graph.nodes();
+    for (auto& node1 : snapshot) {
+        if (node1->op_type() != OpType::Linear || node1->outputs().empty()) continue;
+        auto node2 = next_op(node1->outputs()[0]);
+        if (!node2 || (node2->op_type() != OpType::GELU && node2->op_type() != OpType::ReLU)) {
+            continue;
+        }
+        if (node2->outputs().empty()) continue;
+        auto node3 = next_op(node2->outputs()[0]);
+        if (!node3 || node3->op_type() != OpType::Linear) continue;
 
-        if (node1->op_type() == OpType::Linear &&
-            (node2->op_type() == OpType::GELU || node2->op_type() == OpType::ReLU) &&
-            node3->op_type() == OpType::Linear) {
-
-            // Verify data flow: linear1 -> activation -> linear2
-            bool flow_valid = true;
-            if (!node1->outputs().empty() && !node2->inputs().empty()) {
-                if (node1->outputs()[0]->id() != node2->inputs()[0]->id()) {
-                    flow_valid = false;
-                }
-                if (node1->outputs()[0]->uses().size() > 1) {
-                    flow_valid = false;
-                }
-            } else {
-                flow_valid = false;
-            }
-            if (!node2->outputs().empty() && !node3->inputs().empty()) {
-                if (node2->outputs()[0]->id() != node3->inputs()[0]->id()) {
-                    flow_valid = false;
-                }
-                if (node2->outputs()[0]->uses().size() > 1) {
-                    flow_valid = false;
-                }
-            } else {
-                flow_valid = false;
-            }
-
-            if (flow_valid && fuse_triple(node1, node2, node3, graph)) {
-                modified = true;
-            }
+        if (fuse_triple(node1, node2, node3, graph)) {
+            modified = true;
         }
     }
 
@@ -1471,56 +1543,69 @@ auto FuseFFNPass::fuse_triple(std::shared_ptr<Node> linear1,
                                std::shared_ptr<Node> act_node,
                                std::shared_ptr<Node> linear2,
                                Graph& graph) -> bool {
+    // Resolve weight/bias as real graph Values from the Linear nodes' own
+    // inputs. A traced Linear node stores its weight at inputs()[1] and an
+    // optional bias at inputs()[2] -- NEVER as node attrs (get_tensor_attr
+    // would silently return an empty Tensor here, which used to corrupt
+    // every fusion; see JIT-R001). Bail out without mutating the graph if
+    // either Linear doesn't even have a weight input.
+    if (linear1->inputs().size() < 2 || linear2->inputs().size() < 2) {
+        return false;
+    }
+    if (linear1->outputs().empty() || linear2->outputs().empty()) {
+        return false;
+    }
+
+    auto x_value = linear1->inputs()[0];
+    auto w1_value = linear1->inputs()[1];
+    auto w2_value = linear2->inputs()[1];
+    const bool has_b1 = linear1->inputs().size() >= 3;
+    const bool has_b2 = linear2->inputs().size() >= 3;
+
     // Create FusedFFN node
     auto ffn_node = graph.create_node(OpType::FusedFFN, "fused_ffn");
 
-    // Transfer inputs from linear1 (the data input)
-    if (!linear1->inputs().empty()) {
-        ffn_node->add_input(linear1->inputs()[0]);
-    }
+    // Wire real graph inputs in a fixed, unambiguous layout: x, w1, w2, then
+    // b1/b2 only if present. Graph::execute_node's OpType::FusedFFN case
+    // reads this same layout, keyed off the has_bias1/has_bias2 attrs below.
+    ffn_node->add_input(x_value);
+    ffn_node->add_input(w1_value);
+    ffn_node->add_input(w2_value);
+    if (has_b1) ffn_node->add_input(linear1->inputs()[2]);
+    if (has_b2) ffn_node->add_input(linear2->inputs()[2]);
 
-    // Store weights from both linear layers
-    Tensor w1 = linear1->get_tensor_attr("weight");
-    Tensor b1 = linear1->get_tensor_attr("bias");
-    Tensor w2 = linear2->get_tensor_attr("weight");
-    Tensor b2 = linear2->get_tensor_attr("bias");
-
-    if (w1.numel() > 0) ffn_node->set_tensor_attr("weight1", w1);
-    if (b1.numel() > 0) ffn_node->set_tensor_attr("bias1", b1);
-    if (w2.numel() > 0) ffn_node->set_tensor_attr("weight2", w2);
-    if (b2.numel() > 0) ffn_node->set_tensor_attr("bias2", b2);
+    ffn_node->set_bool_attr("has_bias1", has_b1);
+    ffn_node->set_bool_attr("has_bias2", has_b2);
 
     // Store activation type
     ffn_node->set_int_attr("activation_type",
                            act_node->op_type() == OpType::ReLU ? 1 : 2);
 
     // Create output value matching linear2's output
-    if (!linear2->outputs().empty()) {
-        auto old_output = linear2->outputs()[0];
-        std::string out_id = ffn_node->name() + "_out";
-        auto new_output = graph.create_value(
-            out_id, old_output->shape(), old_output->dtype(), old_output->device());
-        new_output->set_node(ffn_node);
-        ffn_node->add_output(new_output);
+    auto old_output = linear2->outputs()[0];
+    std::string out_id = ffn_node->name() + "_out";
+    auto new_output = graph.create_value(
+        out_id, old_output->shape(), old_output->dtype(), old_output->device());
+    new_output->set_node(ffn_node);
+    ffn_node->add_output(new_output);
 
-        graph.add_node(ffn_node);
+    graph.add_node(ffn_node);
 
-        // Redirect consumers
-        graph.replace_value(old_output->id(), out_id);
+    // Redirect consumers
+    graph.replace_value(old_output->id(), out_id);
 
-        // Also redirect any remaining references to intermediate values
-        if (!linear1->outputs().empty()) {
-            graph.replace_value(linear1->outputs()[0]->id(), out_id);
-        }
-        if (!act_node->outputs().empty()) {
-            graph.replace_value(act_node->outputs()[0]->id(), out_id);
-        }
-
-        // Remove fused nodes
-        graph.remove_node(linear2);
-        graph.remove_node(act_node);
-        graph.remove_node(linear1);
+    // Also redirect any remaining references to intermediate values
+    if (!linear1->outputs().empty()) {
+        graph.replace_value(linear1->outputs()[0]->id(), out_id);
     }
+    if (!act_node->outputs().empty()) {
+        graph.replace_value(act_node->outputs()[0]->id(), out_id);
+    }
+
+    // Remove fused nodes
+    graph.remove_node(linear2);
+    graph.remove_node(act_node);
+    graph.remove_node(linear1);
 
     return true;
 }

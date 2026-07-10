@@ -19,6 +19,7 @@
 #include <tenzor/jit/graph.hpp>
 #include <tenzor/jit/compiler.hpp>
 #include <tenzor/nn/activations/activations.hpp>
+#include <tenzor/nn/functional.hpp>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -109,6 +110,24 @@ protected:
         graph.set_outputs({prev});
 
         return graph;
+    }
+
+    // Helper: create a bare Value (no producer node) registered in
+    // graph.constants(), mirroring exactly how the real tracer represents a
+    // captured parameter (Conv weight, BatchNorm gamma/beta/mean/var, ...)
+    // -- see Graph::set_constant's doc comment: "Called by the tracer during
+    // end_trace() for every tensor that appears as an op input but is not a
+    // graph input... pre-populated into the runtime value_map during
+    // Graph::forward." These are never node attrs (JIT-R001) and never
+    // OpType::Constant producer nodes either, so tests must use this same
+    // representation for a fusion pass's constant-folding to have anything
+    // real to resolve.
+    auto make_const_input(Graph& graph, const std::string& name, const Tensor& tensor)
+        -> std::shared_ptr<Value> {
+        std::vector<int64_t> shape(tensor.shape().begin(), tensor.shape().end());
+        auto val = graph.create_value(name, shape, tensor.dtype(), tensor.device());
+        graph.set_constant(name, tensor);
+        return val;
     }
 
     Device device_;
@@ -1258,33 +1277,39 @@ TEST_F(JITCompilerTest, FuseConvBatchNorm_WithPattern) {
     Graph graph;
 
     auto input = graph.create_value("input", {1, 3, 8, 8}, DType::Float32, device_);
-    auto conv_out = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float32, device_);
-    auto bn_out = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float32, device_);
+    auto conv_w = make_const_input(graph, "conv_w",
+                                    tenzor::randn({16, 3, 3, 3}, DType::Float32, device_));
 
     auto conv = graph.create_node(OpType::Conv2d, "conv");
     conv->add_input(input);
+    conv->add_input(conv_w);
+    auto conv_out = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float32, device_);
     conv->add_output(conv_out);
     conv_out->set_node(conv);
+    graph.add_node(conv);
+
+    // Conv+BN fold needs the conv weight and BN gamma/running_var tensors as
+    // real graph inputs (JIT-R001: these are never node attrs) — the pass
+    // bails without them.
+    auto gamma = make_const_input(graph, "gamma", ones({16}, DType::Float32, device_));
+    auto beta  = make_const_input(graph, "beta",  zeros({16}, DType::Float32, device_));
+    auto mean  = make_const_input(graph, "mean",  zeros({16}, DType::Float32, device_));
+    auto var   = make_const_input(graph, "var",   ones({16}, DType::Float32, device_));
 
     auto bn = graph.create_node(OpType::BatchNorm2d, "bn");
     bn->add_input(conv_out);
+    bn->add_input(gamma);
+    bn->add_input(beta);
+    bn->add_input(mean);
+    bn->add_input(var);
+    bn->set_attr("eps", 1e-5F);
+    auto bn_out = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float32, device_);
     bn->add_output(bn_out);
     bn_out->set_node(bn);
-
-    graph.add_node(conv);
     graph.add_node(bn);
+
     graph.set_inputs({input});
     graph.set_outputs({bn_out});
-
-    // Conv+BN fold needs the conv weight and BN gamma/running_var tensors — the
-    // pass bails without them, so the old EXPECT_LE passed vacuously (no fuse).
-    conv->set_tensor_attr("weight",
-                          tenzor::randn({16, 3, 3, 3}, DType::Float32, device_));
-    bn->set_tensor_attr("weight",       ones({16}, DType::Float32, device_));
-    bn->set_tensor_attr("bias",         zeros({16}, DType::Float32, device_));
-    bn->set_tensor_attr("running_mean", zeros({16}, DType::Float32, device_));
-    bn->set_tensor_attr("running_var",  ones({16}, DType::Float32, device_));
-    bn->set_attr("eps", 1e-5F);
 
     int orig_nodes = graph.num_nodes();
 
@@ -1309,15 +1334,6 @@ TEST_F(JITCompilerTest, FuseConvBatchNorm_WithPattern) {
 TEST_F(JITCompilerTest, FuseConvBatchNorm_Float16FoldMatchesF32Widened) {
     Graph graph;
     auto input = graph.create_value("input", {1, 3, 8, 8}, DType::Float16, device_);
-    auto conv_out = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float16, device_);
-    auto bn_out = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float16, device_);
-
-    auto conv = graph.create_node(OpType::Conv2d, "conv");
-    conv->add_input(input); conv->add_output(conv_out); conv_out->set_node(conv);
-    auto bn = graph.create_node(OpType::BatchNorm2d, "bn");
-    bn->add_input(conv_out); bn->add_output(bn_out); bn_out->set_node(bn);
-    graph.add_node(conv); graph.add_node(bn);
-    graph.set_inputs({input}); graph.set_outputs({bn_out});
 
     Tensor w_f32({16, 3, 3, 3}, DType::Float32, device_);
     { float* p = w_f32.data<float>();
@@ -1336,15 +1352,37 @@ TEST_F(JITCompilerTest, FuseConvBatchNorm_Float16FoldMatchesF32Widened) {
       } }
     const float eps = 1e-5F;
 
-    conv->set_tensor_attr("weight", w_f32.to(DType::Float16));
-    bn->set_tensor_attr("weight",       gamma_f32.to(DType::Float16));
-    bn->set_tensor_attr("bias",         beta_f32.to(DType::Float16));
-    bn->set_tensor_attr("running_mean", mean_f32.to(DType::Float16));
-    bn->set_tensor_attr("running_var",  var_f32.to(DType::Float16));
+    auto conv_w = make_const_input(graph, "conv_w", w_f32.to(DType::Float16));
+    auto conv = graph.create_node(OpType::Conv2d, "conv");
+    conv->add_input(input);
+    conv->add_input(conv_w);
+    auto conv_out = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float16, device_);
+    conv->add_output(conv_out); conv_out->set_node(conv);
+    graph.add_node(conv);
+
+    auto gamma = make_const_input(graph, "gamma", gamma_f32.to(DType::Float16));
+    auto beta  = make_const_input(graph, "beta", beta_f32.to(DType::Float16));
+    auto mean  = make_const_input(graph, "mean", mean_f32.to(DType::Float16));
+    auto var   = make_const_input(graph, "var", var_f32.to(DType::Float16));
+    auto bn = graph.create_node(OpType::BatchNorm2d, "bn");
+    bn->add_input(conv_out);
+    bn->add_input(gamma);
+    bn->add_input(beta);
+    bn->add_input(mean);
+    bn->add_input(var);
     bn->set_attr("eps", eps);
+    auto bn_out = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float16, device_);
+    bn->add_output(bn_out); bn_out->set_node(bn);
+    graph.add_node(bn);
+
+    graph.set_inputs({input}); graph.set_outputs({bn_out});
 
     FuseConvBatchNormPass pass;
     ASSERT_TRUE(pass.run(graph)) << "fusion did not fire";
+    // fold_bn_into_conv stashes the folded weight as a "weight" tensor attr
+    // as an implementation detail (see install_fused_conv_weights in
+    // compiler.cpp), even though replay reads it from the fused Constant
+    // graph input installed by the same call -- both hold the same tensor.
     Tensor fused = conv->get_tensor_attr("weight");
     ASSERT_EQ(fused.dtype(), DType::Float16) << "fused weight must stay Float16";
 
@@ -2044,36 +2082,47 @@ TEST_F(JITCompilerTest, Integration_ComplexGraphFusion) {
     Graph graph;
 
     auto input = graph.create_value("input", {1, 3, 8, 8}, DType::Float32, device_);
-    auto conv_out = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float32, device_);
-    auto bn_out = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float32, device_);
-    auto relu_out = graph.create_value("relu_out", {1, 16, 8, 8}, DType::Float32, device_);
+
+    // Real weight/bias graph inputs so FuseConvBatchNormReluPass can actually
+    // fuse (JIT-R001: Conv/BatchNorm parameters are graph inputs, never node
+    // attrs -- a get_tensor_attr-style lookup on the node itself always
+    // silently found nothing).
+    auto conv_w = make_const_input(graph, "conv_w",
+        tenzor::ones({16, 3, 3, 3}, DType::Float32, device_));
+    auto conv_b = make_const_input(graph, "conv_b",
+        tenzor::zeros({16}, DType::Float32, device_));
 
     auto conv = graph.create_node(OpType::Conv2d);
     conv->add_input(input);
+    conv->add_input(conv_w);
+    conv->add_input(conv_b);
+    auto conv_out = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float32, device_);
     conv->add_output(conv_out);
     conv_out->set_node(conv);
-    // Real weight/bias attrs so FuseConvBatchNormReluPass can actually fuse.
-    conv->set_tensor_attr("weight",
-        tenzor::ones({16, 3, 3, 3}, DType::Float32, device_));
-    conv->set_tensor_attr("bias",
+
+    auto gamma = make_const_input(graph, "gamma",
+        tenzor::ones({16}, DType::Float32, device_));
+    auto beta = make_const_input(graph, "beta",
         tenzor::zeros({16}, DType::Float32, device_));
+    auto mean = make_const_input(graph, "mean",
+        tenzor::zeros({16}, DType::Float32, device_));
+    auto var = make_const_input(graph, "var",
+        tenzor::ones({16}, DType::Float32, device_));
 
     auto bn = graph.create_node(OpType::BatchNorm2d);
     bn->add_input(conv_out);
+    bn->add_input(gamma);
+    bn->add_input(beta);
+    bn->add_input(mean);
+    bn->add_input(var);
+    auto bn_out = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float32, device_);
     bn->add_output(bn_out);
     bn_out->set_node(bn);
-    bn->set_tensor_attr("weight",
-        tenzor::ones({16}, DType::Float32, device_));
-    bn->set_tensor_attr("bias",
-        tenzor::zeros({16}, DType::Float32, device_));
-    bn->set_tensor_attr("running_mean",
-        tenzor::zeros({16}, DType::Float32, device_));
-    bn->set_tensor_attr("running_var",
-        tenzor::ones({16}, DType::Float32, device_));
     bn->set_attr("eps", 1e-5f);
 
     auto relu = graph.create_node(OpType::ReLU);
     relu->add_input(bn_out);
+    auto relu_out = graph.create_value("relu_out", {1, 16, 8, 8}, DType::Float32, device_);
     relu->add_output(relu_out);
     relu_out->set_node(relu);
 
@@ -2084,15 +2133,29 @@ TEST_F(JITCompilerTest, Integration_ComplexGraphFusion) {
     graph.set_outputs({relu_out});
 
     int orig_nodes = graph.num_nodes();
+    // conv_w/conv_b/gamma/beta/mean/var are bare constants-map Values (no
+    // producer node -- see make_const_input), matching how the tracer
+    // represents captured parameters, so only conv/bn/relu count as nodes.
     EXPECT_EQ(orig_nodes, 3);
 
     optimize_graph(graph);
 
-    // Triple-fusion folds BN and ReLU into Conv (−2 nodes), then the
-    // ShapeGuardInsertionPass adds one guard node (+1), so the final
-    // count should be at most orig_nodes. A +1 slack covers the
-    // ShapeGuard explicitly.
-    EXPECT_LE(graph.num_nodes(), orig_nodes + 1);
+    // Triple-fusion folds BN and ReLU into Conv, removing the bn/relu nodes
+    // (the 4 BN-param constants remain unused but present in the graph
+    // until a dead-code-elimination pass prunes them), then
+    // ShapeGuardInsertionPass adds one guard node. Assert the fusion
+    // actually happened (fused_bn/fused_relu on the surviving Conv2d node)
+    // rather than just bounding the node count, which passes vacuously
+    // whether or not the pass fired.
+    ASSERT_EQ(graph.outputs().size(), 1u);
+    auto final_node = graph.outputs()[0]->node();
+    ASSERT_NE(final_node, nullptr);
+    // ShapeGuardInsertionPass may interpose a ShapeGuard between the graph
+    // input and the real compute chain, but the OUTPUT must trace back to
+    // the fused Conv2d node.
+    EXPECT_EQ(final_node->op_type(), OpType::Conv2d);
+    EXPECT_TRUE(final_node->get_bool_attr("fused_bn"));
+    EXPECT_TRUE(final_node->get_bool_attr("fused_relu"));
 }
 
 TEST_F(JITCompilerTest, Integration_LargeGraphPerformance) {
@@ -2247,10 +2310,88 @@ TEST_F(JITCompilerTest, Integration_DeepNetwork) {
 
     optimize_graph(graph);
 
-    Variable input(Tensor({1, 10}, DType::Float32, device_), true);
+    // create_chain_graph declares the graph's input/output shape as {2, 3}
+    // (see its definition) -- this runtime input must match that, not an
+    // arbitrary different shape. A mismatch here used to go unnoticed because
+    // a stale bug (JIT-R015) let Graph::forward() silently complete a full
+    // run even after a ShapeGuard inside the optimized graph flagged the
+    // input as not matching what the graph was built for; forward() now
+    // stops as soon as that guard trips (correctly -- the run genuinely
+    // isn't valid for a mismatched shape), which surfaced this test's own
+    // pre-existing shape mismatch.
+    Variable input(Tensor({2, 3}, DType::Float32, device_), true);
     auto results = graph.forward({input});
 
     EXPECT_EQ(results.size(), 1);
+}
+
+// JIT-R015: a ShapeGuard mismatch must stop the graph immediately rather than
+// finishing the run on data already known to be invalid (the old behavior
+// set needs_retrace_ but kept executing every remaining node, so a caller
+// that retraces-and-reruns on top -- CompiledModule::forward -- ran the
+// WHOLE graph twice per external call whenever the guard tripped). Hand-build
+// a graph mirroring ShapeGuardInsertionPass's own node shape (compiler.cpp)
+// with a deliberately mismatched expected_shape, followed by a ReLU that
+// would only run if execution continued past the guard.
+TEST_F(JITCompilerTest, ShapeGuardMismatchStopsExecutionImmediately) {
+    Graph graph;
+    auto input = graph.create_value("input", {2, 3}, DType::Float32, device_);
+
+    auto guard_node = graph.create_node(OpType::ShapeGuard, "shape_guard_0");
+    guard_node->set_vec_attr("expected_shape", std::vector<int64_t>{9, 9});  // deliberate mismatch
+    guard_node->add_input(input);
+    auto guard_out = graph.create_value("guard_out", {2, 3}, DType::Float32, device_);
+    guard_out->set_node(guard_node);
+    guard_node->add_output(guard_out);
+    graph.add_node(guard_node);
+
+    auto relu_out = graph.create_value("relu_out", {2, 3}, DType::Float32, device_);
+    auto relu_node = graph.create_node(OpType::ReLU, "op_0");
+    relu_node->add_input(guard_out);
+    relu_node->add_output(relu_out);
+    relu_out->set_node(relu_node);
+    graph.add_node(relu_node);
+
+    graph.set_inputs({input});
+    graph.set_outputs({relu_out});
+
+    Variable runtime_input(Tensor({2, 3}, DType::Float32, device_), true);
+    auto results = graph.forward({runtime_input});
+
+    // The guard mismatched (expected {9,9}, got {2,3}) -- forward() must have
+    // stopped at the guard, before the ReLU node ever ran, so no output was
+    // produced and needs_retrace() must be set for the caller to see.
+    EXPECT_TRUE(graph.needs_retrace())
+        << "ShapeGuard mismatch must set needs_retrace()";
+    EXPECT_TRUE(results.empty())
+        << "forward() must not have reached the ReLU node past the mismatched "
+           "guard -- a non-empty result here means the old double-execution "
+           "bug (running the whole graph on known-invalid data) is back";
+
+    // Sanity check the other direction: a MATCHING guard must let execution
+    // proceed normally all the way to the ReLU output.
+    graph.reset_retrace();
+    Graph graph2;
+    auto input2 = graph2.create_value("input", {2, 3}, DType::Float32, device_);
+    auto guard_node2 = graph2.create_node(OpType::ShapeGuard, "shape_guard_0");
+    guard_node2->set_vec_attr("expected_shape", std::vector<int64_t>{2, 3});  // matches
+    guard_node2->add_input(input2);
+    auto guard_out2 = graph2.create_value("guard_out", {2, 3}, DType::Float32, device_);
+    guard_out2->set_node(guard_node2);
+    guard_node2->add_output(guard_out2);
+    graph2.add_node(guard_node2);
+    auto relu_out2 = graph2.create_value("relu_out", {2, 3}, DType::Float32, device_);
+    auto relu_node2 = graph2.create_node(OpType::ReLU, "op_0");
+    relu_node2->add_input(guard_out2);
+    relu_node2->add_output(relu_out2);
+    relu_out2->set_node(relu_node2);
+    graph2.add_node(relu_node2);
+    graph2.set_inputs({input2});
+    graph2.set_outputs({relu_out2});
+
+    auto results2 = graph2.forward({runtime_input});
+    EXPECT_FALSE(graph2.needs_retrace());
+    ASSERT_EQ(results2.size(), 1u);
 }
 
 TEST_F(JITCompilerTest, Integration_ResidualConnection) {
@@ -2283,30 +2424,59 @@ TEST_F(JITCompilerTest, Integration_ResidualConnection) {
 }
 
 TEST_F(JITCompilerTest, Integration_SaveLoadOptimizedGraph) {
-    auto graph = create_chain_graph({OpType::Conv2d, OpType::BatchNorm2d, OpType::ReLU});
-
-    // Populate Conv/BN tensor attributes so FuseConvBatchNormReluPass can
-    // actually fold them. Without these, the fusion passes all bail out on
-    // `gamma.numel() == 0` and the "optimized" graph is the same as the
-    // original plus a ShapeGuard insertion.
+    // Built manually (not via create_chain_graph, which only wires a single
+    // data input per node) with real Conv/BN weight/gamma/beta/mean/var
+    // graph INPUTS so FuseConvBatchNormReluPass can actually fold them
+    // (JIT-R001: these are never node attrs -- a get_tensor_attr-style
+    // lookup on the node itself always silently found nothing, so this
+    // fusion pass previously bailed out on every real graph).
     constexpr int64_t out_channels = 3;
     constexpr int64_t in_channels  = 3;
-    auto conv_node = graph.nodes()[0];
-    conv_node->set_tensor_attr(
-        "weight", tenzor::ones({out_channels, in_channels, 3, 3}, DType::Float32, device_));
-    conv_node->set_tensor_attr(
-        "bias", tenzor::zeros({out_channels}, DType::Float32, device_));
+    Graph graph;
+    auto input = graph.create_value("input", {1, in_channels, 8, 8}, DType::Float32, device_);
 
-    auto bn_node = graph.nodes()[1];
-    bn_node->set_tensor_attr(
-        "weight", tenzor::ones({out_channels}, DType::Float32, device_));
-    bn_node->set_tensor_attr(
-        "bias", tenzor::zeros({out_channels}, DType::Float32, device_));
-    bn_node->set_tensor_attr(
-        "running_mean", tenzor::zeros({out_channels}, DType::Float32, device_));
-    bn_node->set_tensor_attr(
-        "running_var", tenzor::ones({out_channels}, DType::Float32, device_));
+    auto conv_w = make_const_input(graph, "conv_w",
+        tenzor::ones({out_channels, in_channels, 3, 3}, DType::Float32, device_));
+    auto conv_b = make_const_input(graph, "conv_b",
+        tenzor::zeros({out_channels}, DType::Float32, device_));
+    auto conv_node = graph.create_node(OpType::Conv2d, "conv");
+    conv_node->add_input(input);
+    conv_node->add_input(conv_w);
+    conv_node->add_input(conv_b);
+    auto conv_out = graph.create_value("conv_out", {1, out_channels, 8, 8}, DType::Float32, device_);
+    conv_node->add_output(conv_out);
+    conv_out->set_node(conv_node);
+    graph.add_node(conv_node);
+
+    auto gamma = make_const_input(graph, "gamma",
+        tenzor::ones({out_channels}, DType::Float32, device_));
+    auto beta = make_const_input(graph, "beta",
+        tenzor::zeros({out_channels}, DType::Float32, device_));
+    auto mean = make_const_input(graph, "mean",
+        tenzor::zeros({out_channels}, DType::Float32, device_));
+    auto var = make_const_input(graph, "var",
+        tenzor::ones({out_channels}, DType::Float32, device_));
+    auto bn_node = graph.create_node(OpType::BatchNorm2d, "bn");
+    bn_node->add_input(conv_out);
+    bn_node->add_input(gamma);
+    bn_node->add_input(beta);
+    bn_node->add_input(mean);
+    bn_node->add_input(var);
     bn_node->set_attr("eps", 1e-5f);
+    auto bn_out = graph.create_value("bn_out", {1, out_channels, 8, 8}, DType::Float32, device_);
+    bn_node->add_output(bn_out);
+    bn_out->set_node(bn_node);
+    graph.add_node(bn_node);
+
+    auto relu_node = graph.create_node(OpType::ReLU, "relu");
+    relu_node->add_input(bn_out);
+    auto relu_out = graph.create_value("relu_out", {1, out_channels, 8, 8}, DType::Float32, device_);
+    relu_node->add_output(relu_out);
+    relu_out->set_node(relu_node);
+    graph.add_node(relu_node);
+
+    graph.set_inputs({input});
+    graph.set_outputs({relu_out});
 
     optimize_graph(graph);
 
@@ -2314,11 +2484,19 @@ TEST_F(JITCompilerTest, Integration_SaveLoadOptimizedGraph) {
     graph.save(path);
 
     auto loaded = Graph::load(path);
-    // Conv+BN+ReLU triple-fuses into a single Conv node; a ShapeGuard is
-    // also inserted for the graph input. So the optimized graph is
-    // {ShapeGuard, Conv}. Upper-bounded at 3 in case the fusion is
-    // reorganized later.
-    EXPECT_LE(loaded->num_nodes(), 3);
+    // Conv+BN+ReLU triple-fuses into a single Conv node carrying its own
+    // fused-weight/bias Constant inputs (JIT-R001 fix: the fold installs
+    // real replacement graph inputs, not just node attrs, so it now
+    // contributes 2 small Constant nodes rather than 0). Assert the
+    // structural outcome directly -- the surviving output-producing node is
+    // a Conv2d marked fused_bn/fused_relu -- rather than pinning an exact
+    // node count that depends on incidental DCE/ShapeGuard behavior.
+    ASSERT_EQ(loaded->outputs().size(), 1u);
+    auto final_node = loaded->outputs()[0]->node();
+    ASSERT_NE(final_node, nullptr);
+    EXPECT_EQ(final_node->op_type(), OpType::Conv2d);
+    EXPECT_TRUE(final_node->get_bool_attr("fused_bn"));
+    EXPECT_TRUE(final_node->get_bool_attr("fused_relu"));
 }
 
 TEST_F(JITCompilerTest, Integration_BranchingAndMerging) {
@@ -2745,9 +2923,11 @@ TEST_F(JITCompilerTest, Numerical_MatMulAddBias) {
     expect_tensors_near(results_pre[0].tensor(), ref.tensor(), 1e-4f,
                         "MatMulAddBias");
 
-    // Verify the FuseMatMulAdd pass recognizes the pattern
-    // Note: after fusion, execute_node for MatMul does not handle fused_bias,
-    // so we only verify that the pass detects the pattern and modifies the graph.
+    // Verify the FuseMatMulAdd pass recognizes the pattern AND that replaying
+    // the fused graph reproduces the same eager numbers (JIT-R034: execute_node's
+    // OpType::MatMul case does honor fused_bias -- graph.cpp -- so this is no
+    // longer just a "pattern was detected" smoke test; an `if (fused)`-gated
+    // assertion would pass vacuously if the pass silently stopped matching).
     Graph graph2;
     auto x2 = graph2.create_value("x", {4, 8}, DType::Float32, device_);
     auto w2 = graph2.create_value("w", {8, 4}, DType::Float32, device_);
@@ -2774,11 +2954,14 @@ TEST_F(JITCompilerTest, Numerical_MatMulAddBias) {
 
     EXPECT_EQ(graph2.num_nodes(), 2);
     FuseMatMulAddPass pass;
-    bool fused = pass.run(graph2);
-    if (fused) {
-        EXPECT_LT(graph2.num_nodes(), 2);
-        EXPECT_TRUE(mm_node2->get_bool_attr("fused_bias"));
-    }
+    ASSERT_TRUE(pass.run(graph2)) << "FuseMatMulAdd did not fire on MatMul->Add";
+    EXPECT_LT(graph2.num_nodes(), 2);
+    EXPECT_TRUE(mm_node2->get_bool_attr("fused_bias"));
+
+    auto fused_results = graph2.forward({vx, vw, vb});
+    ASSERT_EQ(fused_results.size(), 1);
+    expect_tensors_near(fused_results[0].tensor(), ref.tensor(), 1e-4f,
+                        "MatMulAddBias_Fused");
 }
 
 TEST_F(JITCompilerTest, Numerical_TanhChain) {
@@ -2973,37 +3156,66 @@ TEST_F(JITCompilerTest, Numerical_ExpLogRoundtrip) {
 }
 
 TEST_F(JITCompilerTest, Numerical_ConvBatchNormReLU_GraphStructure) {
-    // Verify the Conv+BN+ReLU fusion pass reduces node count when
-    // proper tensor attributes are provided on the nodes.
+    // Verify the Conv+BN+ReLU fusion pass reduces node count AND that
+    // replaying the fused graph reproduces the eager Conv->BN->ReLU numbers
+    // (JIT-R001/JIT-R034: conv weight and BN gamma/beta/mean/var must be
+    // real graph inputs -- fuse_triple resolves them from
+    // conv->inputs()/bn->inputs(), never node attrs -- and the fused
+    // Conv2d's replacement weight/bias inputs must actually be read back
+    // correctly by Graph::execute_node's OpType::Conv2d case).
     Graph graph;
     const int64_t C = 16;
+    const int64_t IC = 3;
 
-    auto input = graph.create_value("input", {1, 3, 8, 8}, DType::Float32, device_);
-    auto conv_out = graph.create_value("conv_out", {1, C, 8, 8}, DType::Float32, device_);
-    auto bn_out = graph.create_value("bn_out", {1, C, 8, 8}, DType::Float32, device_);
-    auto relu_out = graph.create_value("relu_out", {1, C, 8, 8}, DType::Float32, device_);
+    auto input = graph.create_value("input", {1, IC, 8, 8}, DType::Float32, device_);
 
+    Tensor conv_w_t({C, IC, 3, 3}, DType::Float32, device_);
+    { float* p = conv_w_t.data<float>();
+      for (int64_t i = 0; i < conv_w_t.numel(); ++i) p[i] = std::sin(0.2f * static_cast<float>(i)) * 0.5f; }
+    Tensor conv_b_t({C}, DType::Float32, device_);
+    Tensor gamma_t({C}, DType::Float32, device_);
+    Tensor beta_t({C}, DType::Float32, device_);
+    Tensor mean_t({C}, DType::Float32, device_);
+    Tensor var_t({C}, DType::Float32, device_);
+    { float* cb = conv_b_t.data<float>(); float* g = gamma_t.data<float>();
+      float* b = beta_t.data<float>(); float* m = mean_t.data<float>(); float* v = var_t.data<float>();
+      for (int64_t c = 0; c < C; ++c) {
+          cb[c] = 0.05f * static_cast<float>(c);
+          g[c]  = 1.2f + 0.1f * static_cast<float>(c);
+          b[c]  = 0.03f * static_cast<float>(c);
+          m[c]  = 0.02f * static_cast<float>(c) - 0.1f;
+          v[c]  = 0.5f + 0.07f * static_cast<float>(c);
+      } }
+    const float eps = 1e-5f;
+
+    auto conv_w = make_const_input(graph, "conv_w", conv_w_t);
+    auto conv_b = make_const_input(graph, "conv_b", conv_b_t);
     auto conv = graph.create_node(OpType::Conv2d, "conv");
     conv->add_input(input);
+    conv->add_input(conv_w);
+    conv->add_input(conv_b);
+    auto conv_out = graph.create_value("conv_out", {1, C, 8, 8}, DType::Float32, device_);
     conv->add_output(conv_out);
     conv_out->set_node(conv);
-    // Provide conv weight and bias tensor attributes for fusion
-    conv->set_tensor_attr("weight", ones({C, 3, 3, 3}, DType::Float32, device_));
-    conv->set_tensor_attr("bias", zeros({C}, DType::Float32, device_));
 
+    auto gamma = make_const_input(graph, "gamma", gamma_t);
+    auto beta  = make_const_input(graph, "beta",  beta_t);
+    auto mean  = make_const_input(graph, "mean",  mean_t);
+    auto var   = make_const_input(graph, "var",   var_t);
     auto bn = graph.create_node(OpType::BatchNorm2d, "bn");
     bn->add_input(conv_out);
+    bn->add_input(gamma);
+    bn->add_input(beta);
+    bn->add_input(mean);
+    bn->add_input(var);
+    bn->set_attr("eps", eps);
+    auto bn_out = graph.create_value("bn_out", {1, C, 8, 8}, DType::Float32, device_);
     bn->add_output(bn_out);
     bn_out->set_node(bn);
-    bn->set_attr("eps", 1e-5f);
-    // Provide BN tensor attributes for fusion
-    bn->set_tensor_attr("weight", ones({C}, DType::Float32, device_));
-    bn->set_tensor_attr("bias", zeros({C}, DType::Float32, device_));
-    bn->set_tensor_attr("running_mean", zeros({C}, DType::Float32, device_));
-    bn->set_tensor_attr("running_var", ones({C}, DType::Float32, device_));
 
     auto relu = graph.create_node(OpType::ReLU, "relu");
     relu->add_input(bn_out);
+    auto relu_out = graph.create_value("relu_out", {1, C, 8, 8}, DType::Float32, device_);
     relu->add_output(relu_out);
     relu_out->set_node(relu);
 
@@ -3013,22 +3225,37 @@ TEST_F(JITCompilerTest, Numerical_ConvBatchNormReLU_GraphStructure) {
     graph.set_inputs({input});
     graph.set_outputs({relu_out});
 
-    EXPECT_EQ(graph.num_nodes(), 3);
+    Tensor input_t({1, IC, 8, 8}, DType::Float32, device_);
+    { float* p = input_t.data<float>();
+      for (int64_t i = 0; i < input_t.numel(); ++i) p[i] = std::cos(0.13f * static_cast<float>(i)) * 0.6f; }
+    Variable input_var(input_t, false);
 
-    // Apply triple fusion pass
+    // Eager reference computed independently via the eager functional API.
+    Variable ref = nn::functional::conv2d(input_var, Variable(conv_w_t, false),
+                                           Variable(conv_b_t, false));
+    ref = nn::functional::batch_norm(ref, mean_t, var_t,
+                                      Variable(gamma_t, false), Variable(beta_t, false),
+                                      /*training=*/false, /*momentum=*/0.1, eps);
+    ref = nn::relu(ref);
+
+    // Apply triple fusion pass -- must fire unconditionally given real
+    // weight/gamma/beta/mean/var inputs; an `if (fused)`-gated assertion
+    // here would pass vacuously if the pass silently stopped matching.
     FuseConvBatchNormReluPass pass;
-    bool fused = pass.run(graph);
+    ASSERT_TRUE(pass.run(graph)) << "FuseConvBatchNormReLU did not fire on Conv->BN->ReLU";
+    EXPECT_LT(graph.num_nodes(), 3);
 
-    // If fusion occurred, node count should be reduced
-    if (fused) {
-        EXPECT_LT(graph.num_nodes(), 3);
-        // The fused conv should have fused_relu attribute
-        for (const auto& node : graph.nodes()) {
-            if (node->op_type() == OpType::Conv2d) {
-                EXPECT_TRUE(node->get_bool_attr("fused_relu"));
-            }
-        }
-    }
+    ASSERT_EQ(graph.outputs().size(), 1u);
+    auto fused_node = graph.outputs()[0]->node();
+    ASSERT_NE(fused_node, nullptr);
+    EXPECT_EQ(fused_node->op_type(), OpType::Conv2d);
+    EXPECT_TRUE(fused_node->get_bool_attr("fused_relu"));
+    EXPECT_TRUE(fused_node->get_bool_attr("fused_bn"));
+
+    auto fused_results = graph.forward({input_var});
+    ASSERT_EQ(fused_results.size(), 1);
+    expect_tensors_near(fused_results[0].tensor(), ref.tensor(), 1e-3f,
+                        "ConvBatchNormReLU_Fused");
 }
 
 TEST_F(JITCompilerTest, Numerical_ConstantNode) {
@@ -3161,6 +3388,36 @@ TEST_F(JITCompilerTest, Numerical_BackwardThroughGraph) {
     // Forward values should match
     expect_tensors_near(results[0].tensor(), ref.tensor(), 1e-5f,
                         "Backward_ForwardMatch");
+
+    // JIT-R033: this test's own name/comment claimed to verify backward
+    // through graph-executed operations, but never called .backward() or
+    // checked a single .grad() -- only forward values were ever compared.
+    // MatMul/ReLU's execute_node cases (graph.cpp) both dispatch through the
+    // Variable-level (differentiable) API unconditionally (not gated by
+    // Graph::forward's grad_mode flag, which only affects a handful of OTHER
+    // ops with a separate raw/differentiable dispatch choice) whenever an
+    // input requires_grad -- so the replayed graph's output already carries
+    // a real grad_fn chain here and backward() should reach both leaves.
+    // Reduce to a scalar for backward() (a rank-2 output has no default
+    // implicit gradient) and verify the graph-replayed backward pass
+    // reproduces the same gradients as backpropagating through the identical
+    // eager computation.
+    Variable graph_loss = tenzor::sum(results[0]);
+    graph_loss.backward();
+    ASSERT_TRUE(vx_graph.grad().has_value())
+        << "graph-replayed backward did not populate x.grad()";
+    ASSERT_TRUE(vw_graph.grad().has_value())
+        << "graph-replayed backward did not populate w.grad()";
+
+    Variable ref_loss = tenzor::sum(ref);
+    ref_loss.backward();
+    ASSERT_TRUE(vx_ref.grad().has_value());
+    ASSERT_TRUE(vw_ref.grad().has_value());
+
+    expect_tensors_near(*vx_graph.grad(), *vx_ref.grad(), 1e-5f,
+                        "Backward_XGradMatch");
+    expect_tensors_near(*vw_graph.grad(), *vw_ref.grad(), 1e-5f,
+                        "Backward_WGradMatch");
 }
 
 // ============================================================================

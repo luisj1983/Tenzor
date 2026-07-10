@@ -6,6 +6,14 @@ Phase 13 wrap-up: confirms that
   - `tz.jit` invokes through to the C++ pipeline and produces correct values.
   - `tz.jit.show_graph` and `tz.jit.cache_stats` resolve through the Python
     wrapper and return text/dict outputs after a compile.
+  - On an MLIR-off build, `tz.jit.show_graph`/`show_mlir` raise
+    JitNotEnabledError when called on the disabled-JIT stub instead of
+    silently no-oping, crashing some other way, or (as with a prior version
+    of this file) never being reached at all — JIT-R032: the old MLIR-off
+    branch did `return 0` before the script ever got to its show_graph(f)
+    call, so this smoke test could never catch a regression in that
+    disabled-stub path (JIT-R013). The except-branch below now exercises it
+    directly instead of skipping past it.
 """
 from __future__ import annotations
 
@@ -40,19 +48,53 @@ def main() -> int:
 
     # 2. The decorator must compile and execute correctly on a trivial
     #    function. If TENZOR_USE_MLIR_JIT is OFF this raises a
-    #    JitNotEnabledError which we treat as a clean skip.
+    #    JitNotEnabledError, which we treat as a clean skip -- but only AFTER
+    #    exercising the show_graph/show_mlir introspection helpers on the
+    #    resulting disabled-JIT stub (JIT-R032/JIT-R013 coverage): a prior
+    #    version of this test returned early right here, before the script
+    #    ever reached its show_graph(f) call below, so running this exact
+    #    smoke test on an MLIR-off build never actually exercised how
+    #    show_graph/show_mlir handle a disabled-JIT stub.
     tz.initialize()
 
     from tenzor.jit import JitNotEnabledError
-    try:
-        @tz.jit
-        def f(x):
-            return x + x
 
-        x = tz.Variable(tz.full([4], 1.5, tz.dtype.float32))
+    @tz.jit
+    def f(x):
+        return x + x
+
+    x = tz.Variable(tz.full([4], 1.5, tz.dtype.float32))
+
+    try:
         out = f(x)
     except JitNotEnabledError:
-        print("SKIP: MLIR JIT not enabled in this build")
+        print("MLIR JIT not enabled in this build -- verifying the "
+              "disabled-JIT stub still raises JitNotEnabledError from the "
+              "show_graph/show_mlir introspection helpers (JIT-R013 "
+              "coverage) instead of skipping past them")
+
+        try:
+            tz.jit.show_graph(f)
+        except JitNotEnabledError:
+            print("OK: tz.jit.show_graph(f) raised JitNotEnabledError on "
+                  "the disabled-JIT stub")
+        else:
+            print("FAIL: tz.jit.show_graph(f) did not raise "
+                  "JitNotEnabledError with MLIR JIT disabled", file=sys.stderr)
+            return 1
+
+        try:
+            tz.jit.show_mlir(f)
+        except JitNotEnabledError:
+            print("OK: tz.jit.show_mlir(f) raised JitNotEnabledError on "
+                  "the disabled-JIT stub")
+        else:
+            print("FAIL: tz.jit.show_mlir(f) did not raise "
+                  "JitNotEnabledError with MLIR JIT disabled", file=sys.stderr)
+            return 1
+
+        print("SKIP: MLIR JIT not enabled in this build (disabled-stub "
+              "show_graph/show_mlir assertions passed)")
         return 0
 
     # @tz.jit handles return a Variable; reach through to the underlying

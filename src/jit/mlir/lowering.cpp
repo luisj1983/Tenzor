@@ -417,11 +417,26 @@ auto render_one(std::ostream& os, T v) -> void {
         if (!std::isfinite(d)) {
             // Encode the bit pattern as 0x...  T's natural width is what
             // the surrounding type annotation requires, so use T's size.
+            // JIT-R022: the else branch below used to assume any non-4-byte T
+            // was 8-byte double, memcpy'ing a DOUBLE PROMOTION of v (losing
+            // T's own actual bits) with a 16-hex-digit width -- wrong for a
+            // genuine 2-byte T (Float16/BFloat16). No current call site hits
+            // this (F16/BF16 non-finite scalars route through
+            // emit_float_literal instead), but a future reuse of render_one
+            // for a half-precision T would silently reproduce this. Handle
+            // sizeof(T)==2 explicitly, memcpy'ing v's own bits like the
+            // sizeof(T)==4 case does, not a converted double's.
             if constexpr (sizeof(T) == 4) {
                 std::uint32_t bits;
                 std::memcpy(&bits, &v, sizeof(bits));
                 os << "0x" << std::hex << std::uppercase
                    << std::setfill('0') << std::setw(8) << bits
+                   << std::dec << std::nouppercase << std::setfill(' ');
+            } else if constexpr (sizeof(T) == 2) {
+                std::uint16_t bits;
+                std::memcpy(&bits, &v, sizeof(bits));
+                os << "0x" << std::hex << std::uppercase
+                   << std::setfill('0') << std::setw(4) << bits
                    << std::dec << std::nouppercase << std::setfill(' ');
             } else {
                 std::uint64_t bits;
@@ -773,6 +788,57 @@ auto handle_unary(LoweringContext& ctx,
     emit_stablehlo_unary(body, mnemonic, rc, xc, out->shape(), cd);
     body << '\n';
     emit_stablehlo_convert(body, out_name, rc, out->shape(), cd, d);
+    body << '\n';
+}
+
+// Comparison ops (Eq/Ne/Lt/Le/Gt/Ge) are traced (opid_to_optype maps them) so
+// data-dependent control-flow predicates and things like
+// tenzor::float_power's negative-base branch are real graph nodes instead of
+// trace-time-frozen constants -- but had no MLIR lowering at all, so any
+// traced graph reaching one always failed GraphToMLIR ("OpType ... not yet
+// supported") and silently degraded the WHOLE compiled function to eager.
+// Unlike handle_binary, the comparison itself must run at the OPERAND dtype
+// (e.g. Float32), not out->dtype() (always Bool) -- only the result is Bool.
+auto handle_compare(LoweringContext& ctx,
+                    const ::tenzor::jit::Node& node,
+                    std::ostream& body,
+                    const char* direction) -> void {
+    if (node.inputs().size() != 2) {
+        throw std::runtime_error(
+            std::string("GraphToMLIR: compare(") + direction + ") expects 2 inputs, got " +
+            std::to_string(node.inputs().size()));
+    }
+    if (node.outputs().size() != 1) {
+        throw std::runtime_error(
+            std::string("GraphToMLIR: compare(") + direction + ") expects 1 output");
+    }
+    const auto& out = node.outputs()[0];
+    const auto& a_val = node.inputs()[0];
+    const auto& b_val = node.inputs()[1];
+    // The eager comparison ops promote both operands to a common dtype before
+    // dispatching, so a_val/b_val should already match; convert_if is a
+    // defensive no-op in the expected case.
+    const auto operand_dtype = a_val->dtype();
+    auto convert_if = [&](const std::string& name,
+                          const std::shared_ptr<::tenzor::jit::Value>& val) -> std::string {
+        if (val->dtype() == operand_dtype) return name;
+        auto c = ctx.fresh_name();
+        emit_stablehlo_convert(body, c, name, val->shape(), val->dtype(), operand_dtype);
+        return c;
+    };
+    auto a = maybe_broadcast(body, ctx, convert_if(ctx.name_for(a_val->id()), a_val),
+                             a_val->shape(), out->shape(), operand_dtype);
+    auto b = maybe_broadcast(body, ctx, convert_if(ctx.name_for(b_val->id()), b_val),
+                             b_val->shape(), out->shape(), operand_dtype);
+    auto out_name = ctx.fresh_name();
+    ctx.bind(out->id(), out_name);
+    body << '%' << out_name << " = stablehlo.compare " << direction << ", %" << a << ", %" << b
+         << " : (";
+    write_tensor_type_for_emit(body, out->shape(), operand_dtype);
+    body << ", ";
+    write_tensor_type_for_emit(body, out->shape(), operand_dtype);
+    body << ") -> ";
+    write_tensor_type_for_emit(body, out->shape(), ::tenzor::DType::Bool);
     body << '\n';
 }
 
@@ -3242,9 +3308,105 @@ auto handle_pow(LoweringContext& ctx,
             emit_stablehlo_convert(body, bc, b, shape, d, cd); body << '\n';
             a = ac; b = bc;
         }
-        auto p = ctx.fresh_name();
-        emit_stablehlo_binary(body, "power", p, a, b, shape, cd);
+        // JIT-R011: stablehlo.power is exp(y*log(x)) on GPU/SPIR-V HAL targets,
+        // which returns NaN for ANY negative base regardless of whether y
+        // happens to be an integer at runtime -- diverging from eager/libm
+        // pow, which gives the correctly-signed real result for a negative
+        // base raised to an integer power (and NaN for a non-integer power,
+        // matching real-analysis pow). The compile-time-constant-exponent
+        // paths above (lower_int_pow) already handle this; this is the same
+        // fix for a dynamically-computed (non-constant, 2-tensor-operand)
+        // exponent tensor, decomposed as:
+        //   magnitude = |x|^y = exp(y * log(|x|))
+        //   result = magnitude,  negated when x<0 and y is an odd integer,
+        //            forced to NaN when x<0 and y is not an integer.
+        auto abs_x = ctx.fresh_name();
+        emit_stablehlo_unary(body, "abs", abs_x, a, shape, cd); body << '\n';
+        auto log_abs_x = ctx.fresh_name();
+        emit_stablehlo_unary(body, "log", log_abs_x, abs_x, shape, cd); body << '\n';
+        auto y_log = ctx.fresh_name();
+        emit_stablehlo_binary(body, "multiply", y_log, b, log_abs_x, shape, cd); body << '\n';
+        auto magnitude = ctx.fresh_name();
+        emit_stablehlo_unary(body, "exponential", magnitude, y_log, shape, cd); body << '\n';
+
+        auto emit_compare = [&](const char* direction, const std::string& lhs,
+                                const std::string& rhs) {
+            auto result = ctx.fresh_name();
+            body << '%' << result << " = stablehlo.compare " << direction
+                 << ", %" << lhs << ", %" << rhs << " : (";
+            write_tensor_type_for_emit(body, shape, cd);
+            body << ", ";
+            write_tensor_type_for_emit(body, shape, cd);
+            body << ") -> ";
+            write_tensor_type_for_emit(body, shape, ::tenzor::DType::Bool);
+            body << '\n';
+            return result;
+        };
+        auto emit_select = [&](const std::string& pred, const std::string& on_true,
+                               const std::string& on_false) {
+            auto result = ctx.fresh_name();
+            body << '%' << result << " = stablehlo.select %" << pred << ", %"
+                 << on_true << ", %" << on_false << " : ";
+            write_tensor_type_for_emit(body, shape, ::tenzor::DType::Bool);
+            body << ", ";
+            write_tensor_type_for_emit(body, shape, cd);
+            body << '\n';
+            return result;
+        };
+
+        // is_int = (y == round_nearest_even(y))
+        auto y_round = ctx.fresh_name();
+        emit_stablehlo_unary(body, "round_nearest_even", y_round, b, shape, cd); body << '\n';
+        auto is_int = emit_compare("EQ", b, y_round);
+
+        // is_odd = is_int AND round_nearest_even(y/2) != y/2 (a half-integer
+        // remainder iff y_round is odd).
+        auto half_c = ctx.fresh_name();
+        emit_stablehlo_splat_constant(body, half_c, scalar_literal(0.5, cd), shape, cd);
         body << '\n';
+        auto half_y = ctx.fresh_name();
+        emit_stablehlo_binary(body, "multiply", half_y, y_round, half_c, shape, cd); body << '\n';
+        auto half_y_round = ctx.fresh_name();
+        emit_stablehlo_unary(body, "round_nearest_even", half_y_round, half_y, shape, cd);
+        body << '\n';
+        auto is_even = emit_compare("EQ", half_y, half_y_round);
+        auto not_even = ctx.fresh_name();
+        emit_stablehlo_unary(body, "not", not_even, is_even, shape, ::tenzor::DType::Bool);
+        body << '\n';
+        auto is_odd_int = ctx.fresh_name();
+        emit_stablehlo_binary(body, "and", is_odd_int, is_int, not_even, shape,
+                              ::tenzor::DType::Bool);
+        body << '\n';
+
+        // x_neg = (x < 0)
+        auto zero_c = ctx.fresh_name();
+        emit_stablehlo_splat_constant(body, zero_c, scalar_literal(0.0, cd), shape, cd);
+        body << '\n';
+        auto x_neg = emit_compare("LT", a, zero_c);
+
+        // signed_result = select(x_neg AND is_odd_int, -magnitude, magnitude)
+        auto apply_negate = ctx.fresh_name();
+        emit_stablehlo_binary(body, "and", apply_negate, x_neg, is_odd_int, shape,
+                              ::tenzor::DType::Bool);
+        body << '\n';
+        auto neg_magnitude = ctx.fresh_name();
+        emit_stablehlo_unary(body, "negate", neg_magnitude, magnitude, shape, cd); body << '\n';
+        auto signed_result = emit_select(apply_negate, neg_magnitude, magnitude);
+
+        // final = select(x_neg AND NOT is_int, NaN, signed_result) -- a
+        // negative base to a genuinely fractional power is NaN under
+        // eager/libm pow too, matching real-analysis semantics.
+        auto not_int = ctx.fresh_name();
+        emit_stablehlo_unary(body, "not", not_int, is_int, shape, ::tenzor::DType::Bool);
+        body << '\n';
+        auto needs_nan = ctx.fresh_name();
+        emit_stablehlo_binary(body, "and", needs_nan, x_neg, not_int, shape,
+                              ::tenzor::DType::Bool);
+        body << '\n';
+        auto nan_c = ctx.fresh_name();
+        emit_stablehlo_splat_constant(body, nan_c, scalar_literal(std::nan(""), cd), shape, cd);
+        body << '\n';
+        auto p = emit_select(needs_nan, nan_c, signed_result);
         bind_result(p);
         return;
     }
@@ -4333,6 +4495,10 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Sub:          handle_binary(ctx, *node, body, "subtract"); break;
             case OpType::Mul:          handle_binary(ctx, *node, body, "multiply"); break;
             case OpType::Div:          handle_binary(ctx, *node, body, "divide");   break;
+            // stablehlo.remainder's sign follows the dividend (truncated
+            // toward zero), matching tenzor::fmod's C-style semantics exactly
+            // (distinct from tenzor::remainder, which floors like Python %).
+            case OpType::Fmod:         handle_binary(ctx, *node, body, "remainder"); break;
             case OpType::ResidualAdd:  handle_binary(ctx, *node, body, "add");      break;
 
             // ── Elementwise unary ──
@@ -4341,6 +4507,7 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Exp:          handle_unary(ctx, *node, body, "exponential"); break;
             case OpType::Log:          handle_unary(ctx, *node, body, "log");         break;
             case OpType::Sqrt:         handle_unary(ctx, *node, body, "sqrt");        break;
+            case OpType::Round:        handle_unary(ctx, *node, body, "round_nearest_even"); break;
             case OpType::Sin:          handle_unary(ctx, *node, body, "sine");        break;
             case OpType::Cos:          handle_unary(ctx, *node, body, "cosine");      break;
             case OpType::Rsqrt:        handle_unary(ctx, *node, body, "rsqrt");       break;
@@ -4348,6 +4515,19 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             // ── Special-shape elementwise ──
             case OpType::Pow:          handle_pow(ctx, *node, body);   break;
             case OpType::Where:        handle_where(ctx, *node, body); break;
+            case OpType::Eq:           handle_compare(ctx, *node, body, "EQ"); break;
+            case OpType::Ne:           handle_compare(ctx, *node, body, "NE"); break;
+            case OpType::Lt:           handle_compare(ctx, *node, body, "LT"); break;
+            case OpType::Le:           handle_compare(ctx, *node, body, "LE"); break;
+            case OpType::Gt:           handle_compare(ctx, *node, body, "GT"); break;
+            case OpType::Ge:           handle_compare(ctx, *node, body, "GE"); break;
+            // Inputs/outputs are already Bool (out->dtype() == in dtype), so
+            // the generic dtype-converting handle_binary/handle_unary apply
+            // directly -- no dtype mismatch between operand and output as
+            // with comparisons above.
+            case OpType::LogicalAnd:   handle_binary(ctx, *node, body, "and"); break;
+            case OpType::LogicalOr:    handle_binary(ctx, *node, body, "or");  break;
+            case OpType::LogicalNot:   handle_unary(ctx, *node, body, "not"); break;
             case OpType::Clamp:        handle_clamp(ctx, *node, body); break;
 
             // ── Activations ──

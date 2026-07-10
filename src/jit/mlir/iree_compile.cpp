@@ -577,6 +577,7 @@ struct GlobalCacheCounters {
     // Total compile time is stored as integer nanoseconds for lock-free
     // accumulation; converted to milliseconds in the snapshot.
     std::atomic<std::uint64_t> total_compile_ns{0};
+    std::atomic<std::uint64_t> eager_fallbacks{0};
 };
 
 auto counters() -> GlobalCacheCounters& {
@@ -596,6 +597,7 @@ auto cache_stats() -> CacheStats {
     s.total_compile_ms =
         static_cast<double>(c.total_compile_ns.load(std::memory_order_relaxed))
         / 1.0e6;
+    s.eager_fallbacks  = c.eager_fallbacks.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -606,6 +608,7 @@ auto reset_cache_stats() -> void {
     c.retraces.store(0, std::memory_order_relaxed);
     c.evictions.store(0, std::memory_order_relaxed);
     c.total_compile_ns.store(0, std::memory_order_relaxed);
+    c.eager_fallbacks.store(0, std::memory_order_relaxed);
 }
 
 namespace internal {
@@ -624,6 +627,9 @@ auto record_eviction() -> void {
 auto record_compile_ms(double ms) -> void {
     auto ns = static_cast<std::uint64_t>(ms * 1.0e6);
     counters().total_compile_ns.fetch_add(ns, std::memory_order_relaxed);
+}
+auto record_eager_fallback() -> void {
+    counters().eager_fallbacks.fetch_add(1, std::memory_order_relaxed);
 }
 }  // namespace internal
 
@@ -883,6 +889,23 @@ auto compile_mlir(const std::string& mlir_text,
     if ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty()) {
         vulkan_target_flag = std::string("--iree-vulkan-target=") + vulkan_arch;
         flags.push_back(vulkan_target_flag.c_str());
+    }
+    // llvm-cpu needs an explicit target-cpu too, in-process only: the standalone
+    // iree-compile CLI binary (compile_via_subprocess, above) applies a sensible
+    // default when this flag is omitted, but the raw embedding API used here does
+    // not replicate that default -- ireeCompilerInvocationPipeline fails outright
+    // ("Defaulting to targeting a generic CPU... Please specify a target CPU")
+    // once a graph is complex enough to need CPU-feature-dependent codegen (e.g.
+    // masked vector loads). 'host' is IREE's documented value for "detect and
+    // target this machine's native CPU", matching --iree-llvmcpu-target-cpu-features
+    // below.
+    std::string llvmcpu_target_cpu_flag;
+    std::string llvmcpu_target_cpu_features_flag;
+    if (target == "llvm-cpu") {
+        llvmcpu_target_cpu_flag = "--iree-llvmcpu-target-cpu=host";
+        flags.push_back(llvmcpu_target_cpu_flag.c_str());
+        llvmcpu_target_cpu_features_flag = "--iree-llvmcpu-target-cpu-features=host";
+        flags.push_back(llvmcpu_target_cpu_features_flag.c_str());
     }
     if (auto* set_err = ireeCompilerSessionSetFlags(
             session, /*argc=*/static_cast<int>(flags.size()), flags.data());

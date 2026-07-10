@@ -106,8 +106,21 @@ auto FusionCostModel::estimate_speedup(const FusionCandidate& candidate) const -
         return 1.0;
     }
 
+    // JIT-R026: Vulkan and OneAPI are real GPU compute backends with the same
+    // kernel-launch-overhead characteristics as CUDA/ROCm -- omitting them
+    // here meant any caller that DID set device_type_ to Vulkan/OneAPI
+    // silently fell through to the CPU cache-locality heuristic instead of
+    // the GPU launch-overhead one. (ExtendedFusionPass::run(), the only
+    // current caller of set_device_type(), deliberately never calls it at
+    // all -- see that function's own comment for why leaving the cost model
+    // on its permissive CPU-heuristic default is the CORRECT, intentional
+    // behavior for that specific pass, not a gap to "finish wiring up". This
+    // fix is about is_gpu's own completeness for any OTHER/future caller of
+    // set_device_type(), independent of that.)
     bool is_gpu = (device_type_ == Device::Type::CUDA ||
-                   device_type_ == Device::Type::ROCm);
+                   device_type_ == Device::Type::ROCm ||
+                   device_type_ == Device::Type::Vulkan ||
+                   device_type_ == Device::Type::OneAPI);
 
     if (is_gpu) {
         // GPU heuristic: kernel launch overhead (~5us) vs compute savings.

@@ -85,6 +85,8 @@ enum class OpType {
     Sin,      ///< Elementwise sine
     Cos,      ///< Elementwise cosine
     Rsqrt,    ///< Elementwise reciprocal square root (1/sqrt(x))
+    Round,    ///< Elementwise round-to-nearest-even
+    Fmod,     ///< Elementwise C-style truncated modulo (sign follows dividend)
 
     // Indexing
     Slice,

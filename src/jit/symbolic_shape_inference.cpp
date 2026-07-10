@@ -626,6 +626,11 @@ auto SymbolicShapeInference::infer_squeeze(const Node* node)
         for (int64_t d : dims) { if (d < 0) d += rank; norm.push_back(d); }
         std::sort(norm.begin(), norm.end(),
                   [](int64_t a, int64_t b) { return a > b; });
+        // JIT-R021: a duplicate index (e.g. {0,0}) would otherwise erase two
+        // elements on the second pass through an already-shrunk vector,
+        // producing a wrong-rank symbolic shape. std::unique needs a
+        // pre-sorted range (already true above) to remove adjacent dups.
+        norm.erase(std::unique(norm.begin(), norm.end()), norm.end());
         for (int64_t d : norm) {
             if (d >= 0 && d < static_cast<int64_t>(sym_shape.rank()) &&
                 is_one(sym_shape[static_cast<size_t>(d)])) {

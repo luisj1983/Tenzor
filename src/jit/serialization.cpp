@@ -433,8 +433,8 @@ auto GraphReader::read_header() -> void {
 auto GraphReader::read_metadata(Graph& graph) -> void {
     meta_num_nodes_ = read_uint64();
     (void)read_uint64();  // num_values — consumed by read_values() directly
-    meta_num_inputs_ = read_uint64();
-    meta_num_outputs_ = read_uint64();
+    (void)read_uint64();  // num_inputs — read_io_lists() re-reads the authoritative list
+    (void)read_uint64();  // num_outputs — read_io_lists() re-reads the authoritative list
     // v4: user KV metadata. Bound the declared pair count against the remaining
     // file length before the loop (each pair reads two length-prefixed strings),
     // mirroring the other readers' anti-DoS guards.

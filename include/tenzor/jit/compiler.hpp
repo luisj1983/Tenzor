@@ -1398,6 +1398,18 @@ private:
     /// modules that cannot be retraced via the single-input source_module_ path.
     std::function<std::shared_ptr<CompiledModule>(const std::vector<Variable>&)> retrace_fn_;
 
+    /// True once optimize_for_inference() has been called on this module.
+    /// The device/dtype-mismatch and ShapeGuard retrace paths in forward()
+    /// must mirror this on the freshly retraced graph -- if they always
+    /// (un)optimized it regardless, a module the caller never optimized
+    /// would start fusing (or one they DID optimize would start running
+    /// unfused) the instant an input triggers a retrace, producing
+    /// different numerics for the SAME logical CompiledModule depending on
+    /// which specific input shape/device/dtype happened to be called first
+    /// (JIT-R008 -- fusion is not numerically neutral; see compile.cpp's
+    /// "DType downcasting to Float16 would change the numerics vs eager").
+    bool was_optimized_{false};
+
     /// True for a module reconstructed by load(). A loaded module has no source
     /// module or retrace closure (neither is serialized), so it cannot retrace;
     /// forward() therefore throws on a shape change rather than silently replaying

@@ -114,6 +114,145 @@ auto conv_transpose_output_shape(const Node& node,
     return out;
 }
 
+// General N-D convolution output shape, covering Conv1d/Conv2d/Conv3d --
+// they all trace to OpType::Conv2d (tracing_interceptor.cpp), and
+// Graph::execute_node's own OpType::Conv2d case correctly rank-dispatches
+// at runtime via attr_vec_or_scalar, so shape inference must match that
+// same general per-axis contract instead of assuming rank-4 (JIT-R003: the
+// old rank-4-only version left Conv1d/Conv3d nodes with no inferred output
+// shape at all, correct in the native interpreter -- which doesn't consult
+// this -- but silently wrong/type-invalid for the MLIR/IREE compile path).
+auto conv_output_shape(const Node& node,
+                       const std::vector<std::vector<int64_t>>& input_shapes)
+        -> std::vector<int64_t> {
+    if (input_shapes.empty() || input_shapes[0].size() < 3) return {};
+    const auto& shape = input_shapes[0];
+    const auto spatial_rank = shape.size() - 2;
+
+    // Prefer reading out_channels/kernel_* from the weight tensor's shape
+    // (input 1: [out_channels, in_channels/groups, k0, k1, ...]). The
+    // dispatch-level Conv op doesn't push these as attrs, so the legacy
+    // 2D-only kernel_h/kernel_w attrs are only a fallback for hand-built
+    // graphs that don't wire a weight input.
+    int64_t out_channels = 0;
+    std::vector<int64_t> kernel(spatial_rank, 0);
+    if (input_shapes.size() >= 2 && input_shapes[1].size() == spatial_rank + 2) {
+        out_channels = input_shapes[1][0];
+        for (size_t i = 0; i < spatial_rank; ++i) kernel[i] = input_shapes[1][i + 2];
+    } else if (spatial_rank == 2) {
+        out_channels = node.get_int_attr("out_channels");
+        kernel = {node.get_int_attr("kernel_h"), node.get_int_attr("kernel_w")};
+    } else {
+        return {};  // no weight shape and no generic legacy fallback for 1D/3D
+    }
+
+    // Honor both paired (stride_h/stride_w, the dispatch interceptor's
+    // hw-pair copy) and the pair-as-vec form ("stride" = {h, w, ...}) that
+    // the interceptor populates from AttrKey::Padding/Stride/Dilation
+    // scalars -- but only for the 2D legacy naming; 1D/3D always use the
+    // generic vec-or-scalar form (matching Graph::execute_node's actual
+    // Conv1d/Conv2d/Conv3d dispatch contract via attr_vec_or_scalar).
+    auto pair_or_generic = [&](const char* h_key, const char* w_key,
+                               const char* vec_key, int64_t default_v) {
+        if (spatial_rank == 2 && node.has_attr(h_key) && node.has_attr(w_key)) {
+            return std::vector<int64_t>{node.get_int_attr(h_key), node.get_int_attr(w_key)};
+        }
+        return attr_vec_or_scalar(node, vec_key, spatial_rank, default_v);
+    };
+    auto stride   = pair_or_generic("stride_h",   "stride_w",   "stride",   1);
+    auto padding  = pair_or_generic("padding_h",  "padding_w",  "padding",  0);
+    auto dilation = pair_or_generic("dilation_h", "dilation_w", "dilation", 1);
+
+    std::vector<int64_t> out;
+    out.reserve(shape.size());
+    out.push_back(shape[0]);
+    out.push_back(out_channels);
+    for (size_t i = 0; i < spatial_rank; ++i) {
+        out.push_back((shape[i + 2] + 2 * padding[i] - dilation[i] * (kernel[i] - 1) - 1) /
+                           stride[i] +
+                       1);
+    }
+    return out;
+}
+
+// Symbolic-shape analog of conv_output_shape (see its doc comment above) --
+// general N-D convolution output shape covering Conv1d/Conv2d/Conv3d for
+// the MLIR/dynamic-shape compile path.
+auto conv_sym_output_shape(const Node& node,
+                           const std::vector<SymbolicShape>& input_sym_shapes)
+        -> std::optional<SymbolicShape> {
+    if (input_sym_shapes.empty() || input_sym_shapes[0].rank() < 3) return std::nullopt;
+    const auto& in_shape = input_sym_shapes[0];
+    const size_t spatial_rank = in_shape.rank() - 2;
+
+    int64_t out_channels = 0;
+    std::vector<int64_t> kernel(spatial_rank, 0);
+    const bool have_weight_shape = input_sym_shapes.size() >= 2 &&
+                                    input_sym_shapes[1].rank() == spatial_rank + 2;
+    if (spatial_rank == 2) {
+        out_channels = node.get_int_attr("out_channels");
+        kernel = {node.get_int_attr("kernel_h"), node.get_int_attr("kernel_w")};
+    } else if (!have_weight_shape) {
+        return std::nullopt;  // no weight shape and no generic legacy fallback for 1D/3D
+    }
+    if (have_weight_shape) {
+        const auto& w = input_sym_shapes[1];
+        if (w[0].is_concrete()) out_channels = w[0].value();
+        for (size_t i = 0; i < spatial_rank; ++i) {
+            if (w[i + 2].is_concrete()) kernel[i] = w[i + 2].value();
+        }
+    }
+
+    auto pair_or_generic = [&](const char* h_key, const char* w_key,
+                               const char* vec_key, int64_t default_v) {
+        if (spatial_rank == 2 && node.has_attr(h_key) && node.has_attr(w_key)) {
+            return std::vector<int64_t>{node.get_int_attr(h_key), node.get_int_attr(w_key)};
+        }
+        return attr_vec_or_scalar(node, vec_key, spatial_rank, default_v);
+    };
+    auto stride   = pair_or_generic("stride_h",   "stride_w",   "stride",   1);
+    auto padding  = pair_or_generic("padding_h",  "padding_w",  "padding",  0);
+    auto dilation = pair_or_generic("dilation_h", "dilation_w", "dilation", 1);
+
+    std::vector<SymbolicDim> out_dims;
+    out_dims.reserve(in_shape.rank());
+    out_dims.push_back(in_shape[0]);
+    out_dims.push_back(SymbolicDim::concrete(out_channels));
+    for (size_t i = 0; i < spatial_rank; ++i) {
+        SymbolicDim padding_dim = SymbolicDim::concrete(2 * padding[i]);
+        SymbolicDim kernel_term = SymbolicDim::concrete(dilation[i] * (kernel[i] - 1) + 1);
+        SymbolicDim stride_dim = SymbolicDim::concrete(stride[i]);
+        out_dims.push_back((in_shape[i + 2] + padding_dim - kernel_term) / stride_dim +
+                           SymbolicDim::concrete(1));
+    }
+    return SymbolicShape(std::move(out_dims));
+}
+
+// Per-axis pooling output dim for the symbolic-shape path, matching the
+// concrete infer_types MaxPool2d/AvgPool2d formula (rectangular kernel,
+// dilation, ceil_mode) exactly whenever `in` is concrete (JIT-R005: the old
+// version reused ONE scalar kernel_size/stride/padding for both H and W and
+// ignored dilation/ceil_mode entirely). For a genuinely dynamic `in`,
+// ceil_mode's "last window must start inside the padded input" boundary
+// correction needs a concrete comparison that isn't available symbolically,
+// so this falls back to the plain floor-division formula in that case --
+// the same behavior the symbolic path already had for every other pooling
+// config (not a new limitation, just not newly "fixed" for that one case).
+auto pool_output_dim(const SymbolicDim& in, int64_t k, int64_t s, int64_t p, int64_t d,
+                     bool ceil_mode) -> SymbolicDim {
+    if (in.is_concrete()) {
+        const int64_t in_v = in.value();
+        const int64_t num = in_v + 2 * p - d * (k - 1) - 1;
+        int64_t o = ceil_mode ? (num + s - 1) / s + 1 : num / s + 1;
+        if (ceil_mode && (o - 1) * s >= in_v + p) --o;
+        return SymbolicDim::concrete(o);
+    }
+    SymbolicDim pad2 = SymbolicDim::concrete(2 * p);
+    SymbolicDim kernel_term = SymbolicDim::concrete(d * (k - 1) + 1);
+    SymbolicDim stride_dim = SymbolicDim::concrete(s);
+    return (in + pad2 - kernel_term) / stride_dim + SymbolicDim::concrete(1);
+}
+
 auto mode_attr_to_string(const Node& node) -> std::string {
     if (!node.has_int_attr("mode")) return "bilinear";
     switch (node.get_int_attr("mode")) {
@@ -399,6 +538,7 @@ auto Graph::infer_types() -> void {
             case OpType::Ge:
             case OpType::LogicalAnd:
             case OpType::LogicalOr:
+            case OpType::Fmod:
                 if (input_shapes.size() >= 2) {
                     output_shapes.push_back(
                         broadcast_shapes(input_shapes[0], input_shapes[1]));
@@ -463,6 +603,7 @@ auto Graph::infer_types() -> void {
             case OpType::Sin:
             case OpType::Cos:
             case OpType::Rsqrt:
+            case OpType::Round:
             case OpType::Dropout:
             case OpType::SiLU:
             case OpType::RMSNorm:
@@ -700,55 +841,8 @@ auto Graph::infer_types() -> void {
             // ================================================================
             case OpType::QuantizedConv2d:  // same [x, weight] conv shape rule (JIT-026)
             case OpType::Conv2d:
-                if (!input_shapes.empty()) {
-                    auto& shape = input_shapes[0];  // [N, C, H, W]
-                    // Prefer reading from the weight tensor's shape
-                    // (input 1: [out_channels, in_channels/groups,
-                    // kernel_h, kernel_w]). The dispatch-level Conv2d
-                    // doesn't push out_channels/kernel_* as attrs, so
-                    // the legacy attr path is now a fallback for
-                    // hand-built graphs.
-                    int64_t out_channels = node->get_int_attr("out_channels");
-                    int64_t kernel_h = node->get_int_attr("kernel_h");
-                    int64_t kernel_w = node->get_int_attr("kernel_w");
-                    if (input_shapes.size() >= 2 &&
-                        input_shapes[1].size() == 4) {
-                        out_channels = input_shapes[1][0];
-                        kernel_h     = input_shapes[1][2];
-                        kernel_w     = input_shapes[1][3];
-                    }
-                    // Honor both paired (stride_h/stride_w from the
-                    // dispatch interceptor's hw-pair copy) and the
-                    // pair-as-vec form ("stride", "padding", "dilation"
-                    // = {h, w}) that the interceptor populates from
-                    // AttrKey::Padding/Stride/Dilation scalars.
-                    auto pair_from = [&](const char* h_key, const char* w_key,
-                                          const char* vec_key,
-                                          int64_t default_v)
-                            -> std::pair<int64_t, int64_t> {
-                        if (node->has_attr(h_key) && node->has_attr(w_key)) {
-                            return {node->get_int_attr(h_key),
-                                    node->get_int_attr(w_key)};
-                        }
-                        if (node->has_attr(vec_key)) {
-                            auto v = node->get_vec_attr(vec_key);
-                            if (v.size() == 2) return {v[0], v[1]};
-                            if (v.size() == 1) return {v[0], v[0]};
-                        }
-                        return {default_v, default_v};
-                    };
-                    auto [stride_h, stride_w]   = pair_from(
-                        "stride_h",  "stride_w",  "stride",   1);
-                    auto [padding_h, padding_w] = pair_from(
-                        "padding_h", "padding_w", "padding",  0);
-                    auto [dilation_h, dilation_w] = pair_from(
-                        "dilation_h", "dilation_w", "dilation", 1);
-
-                    if (shape.size() == 4) {
-                        int64_t H_out = (shape[2] + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
-                        int64_t W_out = (shape[3] + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
-                        output_shapes.push_back({shape[0], out_channels, H_out, W_out});
-                    }
+                if (auto out = conv_output_shape(*node, input_shapes); !out.empty()) {
+                    output_shapes.push_back(std::move(out));
                 }
                 break;
 
@@ -1306,6 +1400,7 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Ge:
             case OpType::LogicalAnd:
             case OpType::LogicalOr:
+            case OpType::Fmod:
                 if (input_sym_shapes.size() >= 2) {
                     output_sym_shapes.push_back(
                         broadcast_symbolic_shapes(input_sym_shapes[0], input_sym_shapes[1]));
@@ -1369,6 +1464,7 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Sin:
             case OpType::Cos:
             case OpType::Rsqrt:
+            case OpType::Round:
             case OpType::Dropout:
             case OpType::SiLU:
             case OpType::RMSNorm:
@@ -1626,76 +1722,9 @@ auto Graph::infer_symbolic_types() -> void {
             // ================================================================
             case OpType::QuantizedConv2d:  // same conv shape rule (JIT-026)
             case OpType::Conv2d:
-                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() == 4) {
-                    auto& in_shape = input_sym_shapes[0];
-                    int64_t out_channels = node->get_int_attr("out_channels");
-                    int64_t kernel_h = node->get_int_attr("kernel_h");
-                    int64_t kernel_w = node->get_int_attr("kernel_w");
-                    // Prefer the weight tensor's shape (input 1:
-                    // [out_channels, in_channels/groups, kernel_h, kernel_w]),
-                    // mirroring the concrete infer_types Conv2d path, since the
-                    // dispatch interceptor does not push out_channels/kernel_*
-                    // as attrs for traced graphs.
-                    if (input_sym_shapes.size() >= 2 &&
-                        input_sym_shapes[1].rank() == 4) {
-                        const auto& w = input_sym_shapes[1];
-                        if (w[0].is_concrete()) out_channels = w[0].value();
-                        if (w[2].is_concrete()) kernel_h = w[2].value();
-                        if (w[3].is_concrete()) kernel_w = w[3].value();
-                    }
-                    // Honor both the paired per-axis form (stride_h/stride_w
-                    // from the dispatch interceptor's hw-pair copy) and the
-                    // pair-as-vec form ("stride"/"padding"/"dilation" = {h, w})
-                    // that the interceptor populates from AttrKey scalars. A
-                    // bare has_attr("stride_h") check silently defaults traced
-                    // graphs (which only carry the vec form) to 1/0/1, diverging
-                    // from the concrete infer_types result.
-                    auto pair_from = [&](const char* h_key, const char* w_key,
-                                          const char* vec_key,
-                                          int64_t default_v)
-                            -> std::pair<int64_t, int64_t> {
-                        if (node->has_attr(h_key) && node->has_attr(w_key)) {
-                            return {node->get_int_attr(h_key),
-                                    node->get_int_attr(w_key)};
-                        }
-                        if (node->has_attr(vec_key)) {
-                            auto v = node->get_vec_attr(vec_key);
-                            if (v.size() == 2) return {v[0], v[1]};
-                            if (v.size() == 1) return {v[0], v[0]};
-                        }
-                        return {default_v, default_v};
-                    };
-                    auto [stride_h, stride_w]     = pair_from(
-                        "stride_h",   "stride_w",   "stride",   1);
-                    auto [padding_h, padding_w]   = pair_from(
-                        "padding_h",  "padding_w",  "padding",  0);
-                    auto [dilation_h, dilation_w] = pair_from(
-                        "dilation_h", "dilation_w", "dilation", 1);
-
-                    // Batch dim (N) is symbolic, spatial dims may be symbolic too
-                    SymbolicDim N_dim = in_shape[0];
-                    SymbolicDim H_dim = in_shape[2];
-                    SymbolicDim W_dim = in_shape[3];
-
-                    // H_out = (H + 2*padding - dilation*(kernel-1) - 1) / stride + 1
-                    SymbolicDim padding_h_dim = SymbolicDim::concrete(2 * padding_h);
-                    SymbolicDim kernel_term_h = SymbolicDim::concrete(dilation_h * (kernel_h - 1) + 1);
-                    SymbolicDim stride_h_dim = SymbolicDim::concrete(stride_h);
-                    SymbolicDim H_out = (H_dim + padding_h_dim - kernel_term_h) / stride_h_dim
-                                        + SymbolicDim::concrete(1);
-
-                    SymbolicDim padding_w_dim = SymbolicDim::concrete(2 * padding_w);
-                    SymbolicDim kernel_term_w = SymbolicDim::concrete(dilation_w * (kernel_w - 1) + 1);
-                    SymbolicDim stride_w_dim = SymbolicDim::concrete(stride_w);
-                    SymbolicDim W_out = (W_dim + padding_w_dim - kernel_term_w) / stride_w_dim
-                                        + SymbolicDim::concrete(1);
-
-                    output_sym_shapes.push_back(SymbolicShape({
-                        N_dim,
-                        SymbolicDim::concrete(out_channels),
-                        H_out,
-                        W_out
-                    }));
+                if (auto out = conv_sym_output_shape(*node, input_sym_shapes);
+                    out.has_value()) {
+                    output_sym_shapes.push_back(std::move(*out));
                 }
                 break;
 
@@ -1736,19 +1765,32 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::AvgPool2d:
                 if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() == 4) {
                     auto& in_shape = input_sym_shapes[0];
-                    int64_t kernel = node->get_int_attr("kernel_size");
-                    int64_t stride = node->has_attr("stride") ? node->get_int_attr("stride") : kernel;
-                    int64_t padding = node->has_attr("padding") ? node->get_int_attr("padding") : 0;
+                    // kernel_size/stride/padding/dilation may be traced either as
+                    // a scalar (square config) or as a [h, w] vec (rectangular);
+                    // mirrors the concrete infer_types MaxPool2d/AvgPool2d case.
+                    auto read_pair = [&](const char* name, int64_t dflt) -> std::pair<int64_t, int64_t> {
+                        if (node->has_vec_attr(name)) {
+                            auto v = node->get_vec_attr(name);
+                            if (v.size() >= 2) return {v[0], v[1]};
+                            if (v.size() == 1) return {v[0], v[0]};
+                        }
+                        if (node->has_int_attr(name)) {
+                            int64_t s = node->get_int_attr(name);
+                            return {s, s};
+                        }
+                        return {dflt, dflt};
+                    };
+                    auto [kh, kw] = read_pair("kernel_size", 1);
+                    bool has_stride = node->has_int_attr("stride") || node->has_vec_attr("stride");
+                    auto [sh, sw] = has_stride ? read_pair("stride", 1)
+                                               : std::pair<int64_t, int64_t>{kh, kw};
+                    auto [ph, pw] = read_pair("padding", 0);
+                    auto [dh, dw] = read_pair("dilation", 1);
+                    bool ceil_mode = node->has_bool_attr("ceil_mode") &&
+                                     node->get_bool_attr("ceil_mode");
 
-                    SymbolicDim H_dim = in_shape[2];
-                    SymbolicDim W_dim = in_shape[3];
-                    SymbolicDim pad2 = SymbolicDim::concrete(2 * padding);
-                    SymbolicDim k = SymbolicDim::concrete(kernel);
-                    SymbolicDim s = SymbolicDim::concrete(stride);
-                    SymbolicDim one = SymbolicDim::concrete(1);
-
-                    SymbolicDim H_out = (H_dim + pad2 - k) / s + one;
-                    SymbolicDim W_out = (W_dim + pad2 - k) / s + one;
+                    SymbolicDim H_out = pool_output_dim(in_shape[2], kh, sh, ph, dh, ceil_mode);
+                    SymbolicDim W_out = pool_output_dim(in_shape[3], kw, sw, pw, dw, ceil_mode);
 
                     output_sym_shapes.push_back(SymbolicShape({
                         in_shape[0], in_shape[1], H_out, W_out
@@ -1945,6 +1987,42 @@ auto Graph::infer_symbolic_types() -> void {
 	                break;
 
 	            case OpType::Padding:
+	                // Padding ENLARGES dims; it must not be treated as shape-
+	                // preserving (JIT-044 regression for the symbolic/MLIR path
+	                // -- mirrors the concrete infer_types Padding case's
+	                // pad-vector interpretation, the same one
+	                // handle_padding's MLIR lowering uses to type
+	                // stablehlo.pad; a copied (unpadded) shape here produces a
+	                // pad result type smaller than the real extent for any
+	                // graph with a symbolic/dynamic input, same failure mode
+	                // as JIT-044 but only reachable on that path).
+	                if (!input_sym_shapes.empty()) {
+	                    auto out_shape = input_sym_shapes[0];
+	                    const size_t rank = out_shape.rank();
+	                    if (node->has_attr("padding")) {
+	                        auto v = node->get_vec_attr("padding");
+	                        std::vector<int64_t> low(rank, 0), high(rank, 0);
+	                        if (v.size() == 2 * rank) {
+	                            for (size_t i = 0; i < rank; ++i) {
+	                                low[i] = v[2 * i];
+	                                high[i] = v[2 * i + 1];
+	                            }
+	                        } else if (v.size() % 2 == 0) {
+	                            const size_t pairs = v.size() / 2;
+	                            for (size_t i = 0; i < pairs && i < rank; ++i) {
+	                                const size_t dim = rank - 1 - i;
+	                                low[dim] = v[2 * i];
+	                                high[dim] = v[2 * i + 1];
+	                            }
+	                        }
+	                        for (size_t i = 0; i < rank; ++i) {
+	                            out_shape[i] = out_shape[i] + SymbolicDim::concrete(low[i] + high[i]);
+	                        }
+	                    }
+	                    output_sym_shapes.push_back(std::move(out_shape));
+	                }
+	                break;
+
 	            case OpType::GQA:
 	                if (!input_sym_shapes.empty()) {
 	                    output_sym_shapes.push_back(input_sym_shapes[0]);
@@ -2300,17 +2378,34 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
     // "value", fused weights/bias) can be placed on it (JIT-050).
     exec_target_device_ = target_device;
 
-    // Execute nodes in topological order
+    // Execute nodes in topological order. JIT-R015: a ShapeGuard/GuardNode
+    // mismatch only ever SET needs_retrace_ (execute_node's OpType::ShapeGuard/
+    // GuardNode cases) without aborting -- every remaining node still ran to
+    // completion on data known to be stale/mismatched, only for the caller
+    // (CompiledModule::forward) to immediately discard the whole result and
+    // re-run the retraced graph. For a graph with side-effecting ops (RNG-based
+    // Dropout, in-place mutation) after the guard, that meant genuinely running
+    // them twice per external call. Stop as soon as a guard trips: everything
+    // strictly after it in topological order is about to be thrown away anyway.
     for (const auto& node : nodes_) {
         execute_node(node, value_map, grad_mode);
+        if (needs_retrace_) break;
     }
 
-    // Gather outputs
+    // Gather outputs. A guard trip mid-loop means some (or all) outputs_ were
+    // never computed -- that's expected here, not an error; the caller is
+    // required to check needs_retrace() before trusting this result (every
+    // caller in this codebase does: CompiledModule::forward's two overloads).
+    // Return whatever was actually computed rather than throwing, so a guard
+    // trip on an EARLY node (the common case) doesn't manufacture a spurious
+    // "output not computed" exception on top of the real, expected retrace.
     std::vector<Variable> results;
     for (const auto& output : outputs_) {
         auto it = value_map.find(output->id());
         if (it != value_map.end()) {
             results.push_back(it->second);
+        } else if (needs_retrace_) {
+            break;
         } else {
             throw std::runtime_error("Output value not computed: " + output->id());
         }
@@ -3413,6 +3508,22 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        case OpType::Round:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::round(input_vars[0]));
+            }
+            break;
+
+        // Non-differentiable: tenzor::fmod has no Variable-level (autograd) overload
+        // anywhere in the codebase, matching the comparison ops above. Wrap as a
+        // non-tracking Variable exactly like Eq/Lt/etc.
+        case OpType::Fmod:
+            if (input_vars.size() >= 2) {
+                outputs.push_back(Variable(
+                    tenzor::fmod(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            }
+            break;
+
         case OpType::Abs:
             if (!input_vars.empty()) {
                 outputs.push_back(tenzor::abs(input_vars[0]));
@@ -4049,57 +4160,50 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::FusedFFN: {
             // Fused feed-forward: Linear -> Activation -> Linear
-            // Inputs may arrive either as [x, w1, b1, w2, b2] (all graph inputs)
-            // or as [x] with w1/b1/w2/b2 carried as tensor attrs (the form
-            // FuseFFNPass::fuse_triple emits — it transfers only linear1's data
-            // input and stores the weights as attrs). Support both so the fused
-            // node is actually executable.
+            // Inputs are always real graph values in a fixed layout emitted
+            // by FuseFFNPass::fuse_triple: [x, w1, w2, (b1 if has_bias1),
+            // (b2 if has_bias2)]. The has_bias1/has_bias2 attrs disambiguate
+            // the trailing optional-bias positions (see JIT-R001 -- the
+            // previous tensor-attr-based weight storage silently dropped
+            // weights/biases because Linear never stores them as attrs).
             //
-            // The attr-carried weights are wrapped as requires_grad=false
-            // constants, so running this node in grad_mode would flow gradient to
-            // x but silently sever the weight gradients. Like the other fused
-            // nodes, the grad graph is compiled WITHOUT fusion; a FusedFFN here in
-            // grad_mode means that contract was violated — fail loudly rather than
-            // produce a zero-weight-gradient training step.
+            // Like the other fused nodes, the grad graph is compiled WITHOUT
+            // fusion; a FusedFFN here in grad_mode means that contract was
+            // violated -- fail loudly rather than produce a wrong training
+            // step.
             if (grad_mode) {
                 throw std::runtime_error(
                     "JIT: encountered a FusedFFN node (" + node->name() +
                     ") during differentiable replay; the grad graph must be "
-                    "compiled without fusion (its attr-carried weights are frozen "
-                    "constants and would silently sever weight gradients)");
+                    "compiled without fusion");
             }
-            if (!input_vars.empty()) {
+            if (input_vars.size() >= 3) {
                 Variable x = input_vars[0];
-                Variable w1, b1, w2, b2;
-                bool have_b1 = false, have_b2 = false;
-
-                if (input_vars.size() >= 5) {
-                    w1 = input_vars[1];
-                    b1 = input_vars[2]; have_b1 = true;
-                    w2 = input_vars[3];
-                    b2 = input_vars[4]; have_b2 = true;
-                } else {
-                    // Pull weights/biases from the node's tensor attrs.
-                    w1 = Variable(place_on_exec_device(
-                        node->get_tensor_attr("weight1")), false);
-                    w2 = Variable(place_on_exec_device(
-                        node->get_tensor_attr("weight2")), false);
-                    if (node->has_tensor_attr("bias1") &&
-                        node->get_tensor_attr("bias1").numel() > 0) {
-                        b1 = Variable(place_on_exec_device(
-                            node->get_tensor_attr("bias1")), false);
-                        have_b1 = true;
+                Variable w1 = input_vars[1];
+                Variable w2 = input_vars[2];
+                const bool has_b1 = node->get_bool_attr("has_bias1");
+                const bool has_b2 = node->get_bool_attr("has_bias2");
+                size_t next_idx = 3;
+                Variable b1, b2;
+                if (has_b1) {
+                    if (next_idx >= input_vars.size()) {
+                        throw std::runtime_error(
+                            "JIT: FusedFFN node (" + node->name() +
+                            ") declares has_bias1 but is missing the bias input");
                     }
-                    if (node->has_tensor_attr("bias2") &&
-                        node->get_tensor_attr("bias2").numel() > 0) {
-                        b2 = Variable(place_on_exec_device(
-                            node->get_tensor_attr("bias2")), false);
-                        have_b2 = true;
+                    b1 = input_vars[next_idx++];
+                }
+                if (has_b2) {
+                    if (next_idx >= input_vars.size()) {
+                        throw std::runtime_error(
+                            "JIT: FusedFFN node (" + node->name() +
+                            ") declares has_bias2 but is missing the bias input");
                     }
+                    b2 = input_vars[next_idx++];
                 }
 
                 auto h = tenzor::matmul(x, w1.transpose(-2, -1));
-                if (have_b1) h = h + b1;
+                if (has_b1) h = h + b1;
 
                 // activation_type: 1 = ReLU, 2 = GELU (default). Set by
                 // FuseFFNPass; default to GELU when absent.
@@ -4109,7 +4213,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 h = (act == 1) ? nn::relu(h) : nn::gelu(h);
 
                 auto out = tenzor::matmul(h, w2.transpose(-2, -1));
-                if (have_b2) out = out + b2;
+                if (has_b2) out = out + b2;
                 outputs.push_back(out);
             }
             break;

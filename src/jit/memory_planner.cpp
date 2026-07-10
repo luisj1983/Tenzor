@@ -39,6 +39,30 @@ inline auto checked_byte_size(const std::vector<int64_t>& shape,
     if (__builtin_mul_overflow(numel, elem_size, &bytes)) return 0;
     return bytes;
 }
+
+// Recursively collect every node reachable from `graph`, including nodes
+// nested inside If/Loop subgraph bodies (then_branch/else_branch/body).
+//
+// Node::add_input() (src/jit/graph.cpp) wires a value's uses() list purely
+// based on which Node consumes it -- via val->add_use(shared_from_this()) --
+// with no regard for which Graph object owns that node. That means a
+// subgraph-internal node can legitimately be the sole real consumer of a
+// value produced in an outer graph. Any pass that wants to locate "the"
+// consumer(s) of a value via uses() must search a node set built this way
+// (recursively, across subgraph bodies), or it will silently fail to find
+// subgraph-only consumers -- see JIT-R016, where MemorySwapPlanner::apply
+// used a top-level-only index for its redirect search while its
+// single-consumer gate counted uses() unfiltered, so the gate could pass
+// for a subgraph-only consumer that the search could never find.
+void collect_nodes_recursive(const Graph& graph,
+                              std::unordered_set<const Node*>& nodes_out) {
+    for (const auto& node : graph.nodes()) {
+        nodes_out.insert(node.get());
+        if (const auto& then_g = node->then_branch()) collect_nodes_recursive(*then_g, nodes_out);
+        if (const auto& else_g = node->else_branch()) collect_nodes_recursive(*else_g, nodes_out);
+        if (const auto& body_g = node->body()) collect_nodes_recursive(*body_g, nodes_out);
+    }
+}
 }  // namespace
 
 // ============================================================================
@@ -664,6 +688,17 @@ auto MemorySwapPlanner::plan(const Graph& graph) -> std::vector<SwapSchedule> {
         for (const auto& output : node->outputs()) {
             if (excluded.count(output->id())) continue;
 
+            // JIT-R017: only GPU-resident activations are swap candidates.
+            // The class's own semantics are GPU-activation-swap-to-CPU (see
+            // the doc comment on MemorySwapPlanner and the SwapOut/SwapIn
+            // CPU-handle wiring in apply()); a CPU-resident value has nothing
+            // to evict to CPU memory. Without this gate, a CPU->CPU "swap"
+            // could hit an unimplemented-op path on a backend whose codegen
+            // only lowers SwapOut/SwapIn for its GPU path, while a generic
+            // interpreter silently no-ops it -- backend-dependent behavior
+            // for the same graph once this planner is wired in.
+            if (output->device().type == Device::Type::CPU) continue;
+
             // Compute value size
             const auto& shape = output->shape();
             if (shape.empty()) continue;
@@ -706,35 +741,66 @@ auto MemorySwapPlanner::apply(Graph& graph,
                                const std::vector<SwapSchedule>& schedules) -> size_t {
     size_t count = 0;
 
-    // Build the node->index map once. It is used only to locate the last
-    // pre-existing CONSUMER of a value (drawn from value->uses()). The
-    // swap_out/swap_in nodes we append below via graph.add_node are never
-    // looked up as consumers (and SwapOut uses are explicitly skipped), so the
-    // original (pre-loop) index map stays correct for every schedule and
-    // rebuilding it per iteration would be wasted work.
-    const auto& nodes = graph.nodes();
-    std::unordered_map<const Node*, size_t> node_index;
-    node_index.reserve(nodes.size());
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        node_index[nodes[i].get()] = i;
-    }
+    // Build the reachable-node set once, covering the top-level graph AND
+    // every node nested inside If/Loop subgraph bodies (then_branch/
+    // else_branch/body), recursively (JIT-R016). This set is used below to
+    // decide both (a) whether a value's consumer count gate passes, and
+    // (b) whether that same consumer can actually be redirected -- the two
+    // checks must agree, or a subgraph-only consumer can pass the gate while
+    // the redirect search (previously restricted to a top-level-only index)
+    // finds nothing, splicing an orphaned SwapOut/SwapIn pair whose "real"
+    // consumer keeps reading the original (soon-to-be-evicted) value
+    // directly. The swap_out/swap_in nodes appended below via
+    // graph.add_node() are never looked up as consumers of themselves (and
+    // SwapOut uses are explicitly skipped), so this set, built once before
+    // the loop, stays correct for every schedule.
+    std::unordered_set<const Node*> reachable_nodes;
+    collect_nodes_recursive(graph, reachable_nodes);
 
     for (const auto& sched : schedules) {
         auto value = graph.get_value(sched.value_id);
         if (!value) continue;
 
-        // Only swap values with exactly ONE live consumer (JIT-009). This planner
-        // restores the value before its LAST consumer and redirects only that
-        // consumer, so any intermediate consumer scheduled between SwapOut and
-        // SwapIn would read the evicted (freed/stale) buffer. Mirror
-        // RematerializationPlanner's single-consumer guard rather than corrupt a
-        // multi-consumer value.
+        // Only swap values with exactly ONE live, FINDABLE consumer
+        // (JIT-009 + JIT-R016). "Findable" means the consuming node is
+        // present in reachable_nodes (top-level or nested subgraph body),
+        // which is exactly what the redirect below requires to succeed.
+        // Gating and searching over the same set closes the JIT-R016 gap:
+        // either there is exactly one real consumer and it can be
+        // redirected, or the value is left alone entirely (fail closed)
+        // instead of splicing an orphaned SwapOut/SwapIn pair. This planner
+        // restores the value before its LAST consumer and redirects only
+        // that consumer, so any intermediate consumer scheduled between
+        // SwapOut and SwapIn would read the evicted (freed/stale) buffer --
+        // mirror RematerializationPlanner's single-consumer guard rather
+        // than corrupt a multi-consumer value.
         size_t live_consumers = 0;
+        std::shared_ptr<Node> sole_consumer;
         for (const auto& use : value->uses()) {
             auto user = use.lock();
-            if (user && user->op_type() != OpType::SwapOut) ++live_consumers;
+            if (!user) continue;
+            if (user->op_type() == OpType::SwapOut) continue;  // skip our own swap_out node
+            if (!reachable_nodes.count(user.get())) continue;  // not findable: can't redirect it
+            ++live_consumers;
+            sole_consumer = user;
         }
-        if (live_consumers != 1) continue;
+        if (live_consumers != 1 || !sole_consumer) continue;
+
+        // Locate the input slot on the sole consumer up front, before
+        // splicing anything into the graph. If the value is somehow not
+        // actually referenced there (shouldn't happen given uses() is how
+        // we found this consumer, but don't splice on a "shouldn't
+        // happen"), fail closed rather than leave an orphaned pair.
+        bool found_slot = false;
+        size_t redirect_slot = 0;
+        for (size_t inp_idx = 0; inp_idx < sole_consumer->inputs().size(); ++inp_idx) {
+            if (sole_consumer->inputs()[inp_idx]->id() == sched.value_id) {
+                redirect_slot = inp_idx;
+                found_slot = true;
+                break;
+            }
+        }
+        if (!found_slot) continue;
 
         // Create SwapOut node: placed after the producer
         auto swap_out = graph.create_node(OpType::SwapOut,
@@ -765,32 +831,9 @@ auto MemorySwapPlanner::apply(Graph& graph,
         swap_in->add_output(gpu_restored);
         graph.add_node(swap_in);
 
-        // Redirect the last consumer to use the swapped-in value
-        // Find the last consumer node (node_index built once above)
-        size_t last_idx = 0;
-        std::shared_ptr<Node> last_consumer;
-        for (const auto& use : value->uses()) {
-            auto user = use.lock();
-            if (!user) continue;
-            // Skip our own swap_out node
-            if (user->op_type() == OpType::SwapOut) continue;
-            if (node_index.count(user.get())) {
-                size_t idx = node_index[user.get()];
-                if (idx >= last_idx) {
-                    last_idx = idx;
-                    last_consumer = user;
-                }
-            }
-        }
-
-        if (last_consumer) {
-            for (size_t inp_idx = 0; inp_idx < last_consumer->inputs().size(); ++inp_idx) {
-                if (last_consumer->inputs()[inp_idx]->id() == sched.value_id) {
-                    last_consumer->replace_input(inp_idx, gpu_restored);
-                    break;
-                }
-            }
-        }
+        // Redirect the sole consumer (possibly nested inside an If/Loop
+        // subgraph body) to use the swapped-in value.
+        sole_consumer->replace_input(redirect_slot, gpu_restored);
 
         ++count;
     }

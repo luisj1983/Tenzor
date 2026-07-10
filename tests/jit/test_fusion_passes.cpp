@@ -85,27 +85,54 @@ TEST_F(FusionPassesTest, FuseConvBatchNormReLU_NoPattern) {
 }
 
 TEST_F(FusionPassesTest, FuseConvBatchNormReLU_WithPattern) {
+    // fuse_triple resolves BN/Conv parameters from their real graph INPUTS
+    // (kernel-canonical order: Conv2d is (x, weight, [bias]); affine
+    // BatchNorm2d is (x, gamma, beta, mean, var)), never from node attrs --
+    // see JIT-R001. Build real Constant-backed inputs so the fold has real
+    // work to do and the assertions have teeth.
     Graph graph;
     auto input = graph.create_value("input", {1, 3, 8, 8}, DType::Float32, device_);
-    auto conv_v = add_node(graph, input,    OpType::Conv2d,      {1, 16, 8, 8}, "conv");
-    auto bn_v   = add_node(graph, conv_v,   OpType::BatchNorm2d, {1, 16, 8, 8}, "bn");
-    auto relu_v = add_node(graph, bn_v,     OpType::ReLU,        {1, 16, 8, 8}, "relu");
+
+    // Bare Values registered in graph.constants(), mirroring how the real
+    // tracer represents a captured parameter (no producer node -- see
+    // Graph::set_constant's doc comment).
+    auto make_const = [&](const std::string& name, const std::vector<int64_t>& shape,
+                           double fill) {
+        auto val = graph.create_value(name, shape, DType::Float32, device_);
+        graph.set_constant(name, tenzor::full(shape, fill, DType::Float32, device_));
+        return val;
+    };
+
+    auto conv_w_v = graph.create_value("conv_w", {16, 3, 3, 3}, DType::Float32, device_);
+    graph.set_constant("conv_w", tenzor::randn({16, 3, 3, 3}, DType::Float32, device_));
+
+    auto conv_node = graph.create_node(OpType::Conv2d, "conv");
+    conv_node->add_input(input);
+    conv_node->add_input(conv_w_v);
+    auto conv_v = graph.create_value("conv_out", {1, 16, 8, 8}, DType::Float32, device_);
+    conv_v->set_node(conv_node);
+    conv_node->add_output(conv_v);
+    graph.add_node(conv_node);
+
+    auto gamma = make_const("gamma", {16}, 1.0);
+    auto beta  = make_const("beta",  {16}, 0.0);
+    auto mean  = make_const("mean",  {16}, 0.0);
+    auto var   = make_const("var",   {16}, 1.0);
+    auto bn_node = graph.create_node(OpType::BatchNorm2d, "bn");
+    bn_node->add_input(conv_v);
+    bn_node->add_input(gamma);
+    bn_node->add_input(beta);
+    bn_node->add_input(mean);
+    bn_node->add_input(var);
+    bn_node->set_attr("eps", 1e-5F);
+    auto bn_v = graph.create_value("bn_out", {1, 16, 8, 8}, DType::Float32, device_);
+    bn_v->set_node(bn_node);
+    bn_node->add_output(bn_v);
+    graph.add_node(bn_node);
+
+    auto relu_v = add_node(graph, bn_v, OpType::ReLU, {1, 16, 8, 8}, "relu");
     graph.set_inputs({input});
     graph.set_outputs({relu_v});
-
-    // fuse_triple folds the BN running-stats into the conv weights, so it bails
-    // (no fusion) unless the conv weight and BN gamma/running_var tensors are
-    // present. The value-only nodes above have none — which is exactly why the
-    // old EXPECT_LE passed vacuously (the pass never actually fired). Attach
-    // real params so the fold can happen and the assertions have teeth.
-    conv_v->node()->set_tensor_attr(
-        "weight", tenzor::randn({16, 3, 3, 3}, DType::Float32, device_));
-    auto bn = bn_v->node();
-    bn->set_tensor_attr("weight",       tenzor::ones({16}, DType::Float32, device_));
-    bn->set_tensor_attr("bias",         tenzor::zeros({16}, DType::Float32, device_));
-    bn->set_tensor_attr("running_mean", tenzor::zeros({16}, DType::Float32, device_));
-    bn->set_tensor_attr("running_var",  tenzor::ones({16}, DType::Float32, device_));
-    bn->set_attr("eps", 1e-5F);
 
     int orig_nodes = graph.num_nodes();
     FuseConvBatchNormReluPass pass;
@@ -118,6 +145,20 @@ TEST_F(FusionPassesTest, FuseConvBatchNormReLU_WithPattern) {
     EXPECT_LT(graph.num_nodes(), orig_nodes)
         << "fusion did not reduce the node count (expected the triplet to "
            "collapse into a single fused op)";
+
+    // The fused Conv2d node must carry over BN-folded weights (not the
+    // original conv_w constant) and be marked fused_bn/fused_relu so replay
+    // (Graph::execute_node) applies the folded weight and the ReLU.
+    ASSERT_EQ(graph.outputs().size(), 1u);
+    auto fused_node = graph.outputs()[0]->node();
+    ASSERT_NE(fused_node, nullptr);
+    EXPECT_EQ(fused_node->op_type(), OpType::Conv2d);
+    EXPECT_TRUE(fused_node->get_bool_attr("fused_bn"));
+    EXPECT_TRUE(fused_node->get_bool_attr("fused_relu"));
+    ASSERT_GE(fused_node->inputs().size(), 2u);
+    EXPECT_NE(fused_node->inputs()[1]->id(), conv_w_v->id())
+        << "fused conv weight input must be the BN-folded constant, not the "
+           "original unfused weight";
 }
 
 // ============================================================================
@@ -190,14 +231,54 @@ TEST_F(FusionPassesTest, FuseFFN_NoPattern) {
 }
 
 TEST_F(FusionPassesTest, FuseFFN_WithPattern) {
-    // Linear -> GELU -> Linear is the canonical FFN block.
+    // Linear -> GELU -> Linear is the canonical FFN block. fuse_triple
+    // resolves weight/bias from each Linear's own graph INPUTS (a traced
+    // Linear stores weight at inputs()[1] and an optional bias at
+    // inputs()[2], never as node attrs -- see JIT-R001), so a Linear with
+    // only a bare data input (the old version of this test) has nothing to
+    // fold and must NOT fuse. Build real weight/bias Constant inputs so the
+    // pass has real work to do and the assertions have teeth.
     Graph graph;
     auto input = graph.create_value("input", {2, 16}, DType::Float32, device_);
-    auto l1 = add_node(graph, input, OpType::Linear, {2, 64}, "l1");
-    auto act = add_node(graph, l1,    OpType::GELU,   {2, 64}, "act");
-    auto l2 = add_node(graph, act,   OpType::Linear, {2, 16}, "l2");
+
+    // Bare Values registered in graph.constants(), mirroring how the real
+    // tracer represents a captured parameter (no producer node -- see
+    // Graph::set_constant's doc comment). Using OpType::Constant NODES here
+    // instead would wedge extra nodes between l1/act/l2 in graph.nodes(),
+    // breaking FuseFFNPass::run()'s positional Linear/Act/Linear match --
+    // exactly the layout a real trace never produces.
+    auto make_const = [&](const std::string& name, const std::vector<int64_t>& shape) {
+        auto val = graph.create_value(name, shape, DType::Float32, device_);
+        graph.set_constant(name, tenzor::randn(shape, DType::Float32, device_));
+        return val;
+    };
+
+    auto w1 = make_const("w1", {64, 16});
+    auto b1 = make_const("b1", {64});
+    auto l1_node = graph.create_node(OpType::Linear, "l1");
+    l1_node->add_input(input);
+    l1_node->add_input(w1);
+    l1_node->add_input(b1);
+    auto l1_out = graph.create_value("l1_out", {2, 64}, DType::Float32, device_);
+    l1_out->set_node(l1_node);
+    l1_node->add_output(l1_out);
+    graph.add_node(l1_node);
+
+    auto act = add_node(graph, l1_out, OpType::GELU, {2, 64}, "act");
+
+    auto w2 = make_const("w2", {16, 64});
+    auto b2 = make_const("b2", {16});
+    auto l2_node = graph.create_node(OpType::Linear, "l2");
+    l2_node->add_input(act);
+    l2_node->add_input(w2);
+    l2_node->add_input(b2);
+    auto l2_out = graph.create_value("l2_out", {2, 16}, DType::Float32, device_);
+    l2_out->set_node(l2_node);
+    l2_node->add_output(l2_out);
+    graph.add_node(l2_node);
+
     graph.set_inputs({input});
-    graph.set_outputs({l2});
+    graph.set_outputs({l2_out});
 
     int orig_nodes = graph.num_nodes();
     FuseFFNPass pass;
@@ -205,6 +286,20 @@ TEST_F(FusionPassesTest, FuseFFN_WithPattern) {
     EXPECT_TRUE(changed) << "FuseFFN did not fire on Linear->GELU->Linear";
     EXPECT_LT(graph.num_nodes(), orig_nodes)
         << "fusion did not reduce the node count";
+
+    // The fused node must carry over the SAME weight values the original
+    // Linears used (JIT-R001 regression: previously these were silently
+    // dropped -- get_tensor_attr("weight") always returned an empty Tensor
+    // -- and the fused node executed matmul against a 0-element operand).
+    ASSERT_EQ(graph.outputs().size(), 1u);
+    auto ffn_node = graph.outputs()[0]->node();
+    ASSERT_NE(ffn_node, nullptr);
+    EXPECT_EQ(ffn_node->op_type(), OpType::FusedFFN);
+    ASSERT_GE(ffn_node->inputs().size(), 3u);
+    EXPECT_EQ(ffn_node->inputs()[1]->id(), w1->id());
+    EXPECT_EQ(ffn_node->inputs()[2]->id(), w2->id());
+    EXPECT_TRUE(ffn_node->get_bool_attr("has_bias1"));
+    EXPECT_TRUE(ffn_node->get_bool_attr("has_bias2"));
 }
 
 // ============================================================================

@@ -187,7 +187,13 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             // Cache only while under the capacity bound; past it, use the fresh
             // graph for this call without growing the cache.
             auto retraced = CompiledModule::trace(source_module_, input);
-            retraced->optimize_for_inference();
+            // Mirror THIS module's optimization state onto the retraced
+            // replacement (JIT-R008): unconditionally optimizing here made
+            // a never-optimized module start silently fusing (and thus
+            // computing different numerics -- fusion is not numerically
+            // neutral) the instant any input triggered a retrace, while a
+            // module the caller HAD optimized stayed unfused on this path.
+            if (was_optimized_) retraced->optimize_for_inference();
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
                 shape_cache_[key] = retraced->graph_;
             }
@@ -213,7 +219,13 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
         } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
             // Re-trace with the new input shape and cache
             auto retraced = CompiledModule::trace(source_module_, input);
-            retraced->optimize_for_inference();
+            // Mirror THIS module's optimization state onto the retraced
+            // replacement (JIT-R008): unconditionally optimizing here made
+            // a never-optimized module start silently fusing (and thus
+            // computing different numerics -- fusion is not numerically
+            // neutral) the instant any input triggered a retrace, while a
+            // module the caller HAD optimized stayed unfused on this path.
+            if (was_optimized_) retraced->optimize_for_inference();
             shape_cache_[key] = retraced->graph_;
             graph_ = retraced->graph_;
         }
@@ -221,6 +233,22 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
 
         // Re-execute with new/cached graph
         results = graph_->forward({input});
+    } else if (graph_->needs_retrace()) {
+        // JIT-R015: a ShapeGuard mismatch was detected but this module has no
+        // source_module_ to retrace with (e.g. loaded from serialization
+        // without its originating nn::Module). Graph::forward() now stops as
+        // soon as the guard trips rather than completing the run on
+        // known-mismatched data, so `results` here is whatever was computed
+        // before the trip (possibly empty) -- fail loudly and specifically
+        // rather than either silently returning a partial/stale result or
+        // falling through to the generic "produced no outputs" message below,
+        // which wouldn't explain WHY.
+        graph_->reset_retrace();
+        throw std::runtime_error(
+            "CompiledModule: input shape mismatch detected by a ShapeGuard, "
+            "but no source module is available to retrace with (this "
+            "CompiledModule was likely loaded from a serialized graph without "
+            "its originating nn::Module). Cannot safely continue.");
     }
 
     if (results.empty()) {
@@ -295,7 +323,13 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
             // drop all but inputs[0] and throw an argument-count mismatch.
             auto retraced = retrace_fn_ ? retrace_fn_(inputs)
                                         : CompiledModule::trace(source_module_, inputs[0]);
-            retraced->optimize_for_inference();
+            // Mirror THIS module's optimization state onto the retraced
+            // replacement (JIT-R008): unconditionally optimizing here made
+            // a never-optimized module start silently fusing (and thus
+            // computing different numerics -- fusion is not numerically
+            // neutral) the instant any input triggered a retrace, while a
+            // module the caller HAD optimized stayed unfused on this path.
+            if (was_optimized_) retraced->optimize_for_inference();
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
                 shape_cache_[key] = retraced->graph_;
             }
@@ -320,12 +354,31 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
         } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
             auto retraced = retrace_fn_ ? retrace_fn_(inputs)
                                         : CompiledModule::trace(source_module_, inputs[0]);
-            retraced->optimize_for_inference();
+            // Mirror THIS module's optimization state onto the retraced
+            // replacement (JIT-R008): unconditionally optimizing here made
+            // a never-optimized module start silently fusing (and thus
+            // computing different numerics -- fusion is not numerically
+            // neutral) the instant any input triggered a retrace, while a
+            // module the caller HAD optimized stayed unfused on this path.
+            if (was_optimized_) retraced->optimize_for_inference();
             shape_cache_[key] = retraced->graph_;
             graph_ = retraced->graph_;
         }
 
         results = graph_->forward(inputs);
+    } else if (graph_->needs_retrace()) {
+        // JIT-R015: mirrors the single-input overload above -- a ShapeGuard
+        // mismatch fired but there's no way to retrace (no source_module_/
+        // retrace_fn_, or a niladic call with an empty inputs list).
+        // Graph::forward() now stops as soon as the guard trips, so `results`
+        // here may be empty/incomplete rather than the old fully-computed
+        // (but already-known-wrong) run. Fail loudly instead of silently
+        // returning a partial result to the caller.
+        graph_->reset_retrace();
+        throw std::runtime_error(
+            "CompiledModule: input shape mismatch detected by a ShapeGuard, "
+            "but no source module/retrace closure is available to retrace "
+            "with. Cannot safely continue.");
     }
 
     return results;
@@ -371,6 +424,7 @@ auto CompiledModule::optimize_for_inference() -> int {
     Compiler compiler(true);
     int result = compiler.optimize(*graph_);
     memory_plan_ = compiler.memory_plan();
+    was_optimized_ = true;
     return result;
 }
 

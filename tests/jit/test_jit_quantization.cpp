@@ -292,43 +292,97 @@ std::pair<Tensor, float> quantize_i8(const Tensor& x) {
 }
 }  // namespace
 
-TEST(JITQuantizationGpuKernels, PerChannelRejectedOnGpu_JIT041) {
-    for (const auto& dev : get_available_backends()) {
-        if (dev.type == Device::Type::CPU) continue;  // CPU wrapper honors per-channel
-        auto [xq, xs] = quantize_i8(randn({4, 16}, DType::Float32, Device::cpu()));
-        auto [wq, ws] = quantize_i8(randn({8, 16}, DType::Float32, Device::cpu()));
-        // Per-channel scale/zp tensors at inputs[3]/[4] (size > 1) => must throw.
-        Tensor pc_scale = tenzor::full({8}, static_cast<double>(ws), DType::Float32, Device::cpu());
-        Tensor pc_zp    = tenzor::full({8}, 0.0, DType::Int32, Device::cpu());
-        std::vector<Tensor> inputs = {
-            xq.to(dev), wq.to(dev),
-            tenzor::full({8}, 0.0, DType::Float32, dev),  // bias placeholder
-            pc_scale.to(dev), pc_zp.to(dev)};
+// JIT-R002 (was JIT-041): PerChannelRejectedOnGpu asserted that GPU
+// QuantizedLinear THROWS on a per-channel weight scale/zero-point. That
+// stopped being true once real per-channel support ("F045") shipped on
+// every GPU backend (cuda_kernel_registry.cpp:4642+, oneapi/kernels/
+// quantization.cpp:189+, vulkan_ops_linalg.cpp:1798+, the ROCm equivalent) —
+// the reject-only test just started failing with no real regression. Per
+// JIT-042's pattern, replace the reject check with a genuine numerical-
+// parity check: quantize each output channel of the weight independently
+// (distinct scales, not the old test's uniform-value placeholder, so the
+// per-channel code path is actually exercised rather than coinciding with
+// the per-tensor path) and assert every GPU backend matches CPU.
+TEST(JITQuantizationGpuKernels, PerChannelQuantizedLinearMatchesCpu_JIT041) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("per-channel quantized linear parity");
+
+    Tensor x_f32 = randn({4, 16}, DType::Float32, Device::cpu());
+    Tensor w_f32 = randn({8, 16}, DType::Float32, Device::cpu());
+    Tensor bias  = randn({8}, DType::Float32, Device::cpu());
+    auto [xq, xs] = quantize_i8(x_f32);
+
+    // Per-output-channel (per-row) symmetric int8 quantization of the weight —
+    // each of the 8 rows gets its OWN scale, so the scales genuinely differ.
+    Tensor wq({8, 16}, DType::Int8, Device::cpu());
+    Tensor w_scales({8}, DType::Float32, Device::cpu());
+    Tensor w_zps({8}, DType::Int32, Device::cpu());
+    {
+        auto w_contig = w_f32.contiguous();
+        const float* wd = w_contig.data<float>();
+        int8_t* wqd = wq.data<int8_t>();
+        float* wsd = w_scales.data<float>();
+        int32_t* wzd = w_zps.data<int32_t>();
+        for (int64_t r = 0; r < 8; ++r) {
+            float amax = 1e-8f;
+            for (int64_t c = 0; c < 16; ++c)
+                amax = std::max(amax, std::fabs(wd[r * 16 + c]));
+            float scale = amax / 127.0f;
+            wsd[r] = scale;
+            wzd[r] = 0;
+            for (int64_t c = 0; c < 16; ++c) {
+                int v = static_cast<int>(std::lround(wd[r * 16 + c] / scale));
+                wqd[r * 16 + c] = static_cast<int8_t>(std::max(-127, std::min(127, v)));
+            }
+        }
+    }
+
+    auto run = [&](Device dev) {
+        std::vector<Tensor> inputs = {xq.to(dev), wq.to(dev), bias.to(dev),
+                                      w_scales.to(dev), w_zps.to(dev)};
         OpAttributes attrs;
         attrs.set(AttrKey::InputScale, static_cast<double>(xs));
-        attrs.set(AttrKey::WeightScaleQ, static_cast<double>(ws));
-        SCOPED_TRACE(std::string("per-channel guard on ") + backend_name(dev));
-        EXPECT_THROW({ (void)dispatch(OpId::QuantizedLinear, inputs, attrs); },
-                     std::invalid_argument)
-            << "GPU QuantizedLinear must reject per-channel scale/zp (JIT-041) on "
-            << backend_name(dev);
+        return dispatch(OpId::QuantizedLinear, inputs, attrs)[0].to(Device::cpu());
+    };
+
+    Tensor cpu_out = run(Device::cpu());
+    for (const auto& dev : get_available_backends()) {
+        if (dev.type == Device::Type::CPU) continue;
+        SCOPED_TRACE(std::string("per-channel quantized linear on ") + backend_name(dev));
+        Tensor gpu_out = run(dev);
+        EXPECT_TRUE(tensors_close(cpu_out, gpu_out, 5e-2f, 5e-2f))
+            << "Per-channel QuantizedLinear diverges from CPU on " << backend_name(dev);
     }
 }
 
-TEST(JITQuantizationGpuKernels, RectangularQuantConvRejected_JIT040) {
-    for (const auto& dev : get_available_backends()) {
-        if (dev.type != Device::Type::Vulkan && dev.type != Device::Type::ROCm) continue;
-        auto [xq, xs] = quantize_i8(randn({1, 2, 8, 8}, DType::Float32, Device::cpu()));
-        auto [wq, ws] = quantize_i8(randn({3, 2, 2, 3}, DType::Float32, Device::cpu()));  // rectangular kH!=kW
+// JIT-R002 (was JIT-040): RectangularQuantConvRejected asserted GPU
+// QuantizedConv2d THROWS on a rectangular (kH != kW) kernel, and only
+// checked Vulkan/ROCm. Real rectangular-kernel support ("F044") shipped on
+// Vulkan, ROCm, AND OneAPI (vulkan_kernel_registry.cpp:2498,
+// rocm_kernel_registry.cpp:4563, oneapi_kernel_registry.cpp:5185 all say so)
+// — the old test both asserted removed behavior AND never covered CUDA/
+// OneAPI at all. Replace with a genuine numerical-parity check across every
+// available backend (mirroring JIT-042's pattern), closing that coverage gap.
+TEST(JITQuantizationGpuKernels, RectangularQuantConvMatchesCpu_JIT040) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("rectangular quantized conv2d parity");
+
+    auto [xq, xs] = quantize_i8(randn({1, 2, 8, 8}, DType::Float32, Device::cpu()));
+    auto [wq, ws] = quantize_i8(randn({3, 2, 2, 3}, DType::Float32, Device::cpu()));  // rectangular kH!=kW
+
+    auto run = [&](Device dev) {
         std::vector<Tensor> inputs = {xq.to(dev), wq.to(dev)};
         OpAttributes attrs;
         attrs.set(AttrKey::InputScale, static_cast<double>(xs));
         attrs.set(AttrKey::WeightScaleQ, static_cast<double>(ws));
-        SCOPED_TRACE(std::string("rectangular quant-conv guard on ") + backend_name(dev));
-        EXPECT_THROW({ (void)dispatch(OpId::QuantizedConv2d, inputs, attrs); },
-                     std::invalid_argument)
-            << "GPU QuantizedConv2d must reject a rectangular kernel (JIT-040) on "
-            << backend_name(dev);
+        return dispatch(OpId::QuantizedConv2d, inputs, attrs)[0].to(Device::cpu());
+    };
+
+    Tensor cpu_out = run(Device::cpu());
+    for (const auto& dev : get_available_backends()) {
+        if (dev.type == Device::Type::CPU) continue;
+        SCOPED_TRACE(std::string("rectangular quant-conv on ") + backend_name(dev));
+        Tensor gpu_out = run(dev);
+        EXPECT_TRUE(tensors_close(cpu_out, gpu_out, 5e-2f, 5e-2f))
+            << "Rectangular-kernel QuantizedConv2d diverges from CPU on " << backend_name(dev);
     }
 }
 

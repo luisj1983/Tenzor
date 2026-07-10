@@ -78,6 +78,11 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Sin:        return OpType::Sin;
         case OpId::Cos:        return OpType::Cos;
         case OpId::Rsqrt:      return OpType::Rsqrt;
+        // Both previously unmapped -> any traced use of round()/fmod(), including
+        // internally within tenzor::float_power's negative-base decomposition,
+        // graph-broke the ENTIRE compiled graph regardless of how small the use.
+        case OpId::Round:      return OpType::Round;
+        case OpId::Fmod:       return OpType::Fmod;
 
         // Normalization (dispatched form; the nn RMSNorm layer's SIMD fast
         // path records via jit_record_rms_norm, but a raw OpId::RMSNorm
@@ -318,7 +323,16 @@ auto make_tracing_interceptor(
         // later passes can't infer shapes for.
         std::vector<std::string> output_ids;
         if (op == OpId::BatchNorm2dForwardAffine ||
-            op == OpId::BatchNorm2dForward) {
+            op == OpId::BatchNorm2dForward ||
+            // JIT-R014: GroupNorm/InstanceNorm kernels also return auxiliary
+            // (mean, inv_std) tensors on every backend, but Graph::execute_node's
+            // OpType::GroupNorm/InstanceNorm cases (graph.cpp) only ever produce
+            // 1 output Variable at replay -- registering all 3 here built 2 Values
+            // with no producer-side replay support (no consumer could safely use
+            // them, and the output-binding loop silently dropped them anyway).
+            // Surface only the primary output, matching BatchNorm2d above.
+            op == OpId::GroupNorm ||
+            op == OpId::InstanceNorm) {
             if (!results.empty()) {
                 output_ids.push_back(tracer.register_tensor(results[0]));
             }

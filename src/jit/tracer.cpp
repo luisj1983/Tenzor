@@ -63,6 +63,8 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Sin: return "Sin";
         case OpType::Cos: return "Cos";
         case OpType::Rsqrt: return "Rsqrt";
+        case OpType::Round: return "Round";
+        case OpType::Fmod: return "Fmod";
         case OpType::Slice: return "Slice";
         case OpType::Cat: return "Cat";
         case OpType::Dropout: return "Dropout";
@@ -178,6 +180,8 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Sin", OpType::Sin},
         {"Cos", OpType::Cos},
         {"Rsqrt", OpType::Rsqrt},
+        {"Round", OpType::Round},
+        {"Fmod", OpType::Fmod},
         {"Slice", OpType::Slice},
         {"Cat", OpType::Cat},
         {"Dropout", OpType::Dropout},

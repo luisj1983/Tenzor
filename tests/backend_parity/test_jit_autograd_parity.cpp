@@ -462,14 +462,44 @@ TEST_P(JITAutogradParity, ClosureCapturedParams_TrainingLoop) {
 TEST(JITAutogradGradcheck, ClosureCapturedParam_FiniteDifference_CPU) {
     const Device cpu = Device::cpu();
     const int64_t N = 3, D0 = 4, H = 4, D2 = 3;
-    std::vector<Tensor> pseeds = {
-        randn({D0, H}, DType::Float32, cpu),  // W1 (the checked parameter)
-        randn({H},     DType::Float32, cpu),  // b1
-        randn({H, D2}, DType::Float32, cpu),  // W2
-        randn({D2},    DType::Float32, cpu),  // b2
-    };
-    const Tensor x_seed = randn({N, D0}, DType::Float32, cpu);
-    const Tensor t_seed = randn({N, D2}, DType::Float32, cpu);
+
+    // Central finite-difference gradchecks are only valid away from a
+    // ReLU's non-differentiable kink at 0: closure_mlp_loss applies
+    // nn::relu(matmul(x, W1) + b1), and if any pre-activation element lands
+    // within the +-eps perturbation radius used below, the probe can cross
+    // the kink -- the analytic (single-sided) backprop gradient then
+    // genuinely disagrees with the finite-difference estimate for that
+    // element. This is a textbook FD/gradcheck pitfall, not a JIT bug
+    // (confirmed by bisecting against the pre-fusion-fix baseline, which
+    // reproduces the identical ~1%-of-random-draws / 10-20x-over-tolerance
+    // failure). Reject-sample until every pre-activation clears a safe
+    // margin from the kink.
+    std::vector<Tensor> pseeds;
+    Tensor x_seed, t_seed;
+    constexpr float kKinkMargin = 0.5f;
+    constexpr int kMaxAttempts = 64;
+    int attempt = 0;
+    for (; attempt < kMaxAttempts; ++attempt) {
+        pseeds = {
+            randn({D0, H}, DType::Float32, cpu),  // W1 (the checked parameter)
+            randn({H},     DType::Float32, cpu),  // b1
+            randn({H, D2}, DType::Float32, cpu),  // W2
+            randn({D2},    DType::Float32, cpu),  // b2
+        };
+        x_seed = randn({N, D0}, DType::Float32, cpu);
+        t_seed = randn({N, D2}, DType::Float32, cpu);
+
+        Tensor h = (tenzor::matmul(x_seed, pseeds[0]) + pseeds[1]).contiguous();
+        const float* hp = h.data<float>();
+        bool safe = true;
+        for (int64_t i = 0; i < h.numel() && safe; ++i) {
+            if (std::fabs(hp[i]) < kKinkMargin) safe = false;
+        }
+        if (safe) break;
+    }
+    ASSERT_LT(attempt, kMaxAttempts)
+        << "could not find a ReLU-kink-safe random draw for the gradcheck";
+
     const double scale = 1.0 / static_cast<double>(N * D2);
 
     auto comp_p = make_param_leaves(pseeds, cpu);

@@ -124,6 +124,14 @@ struct CacheStats {
     std::uint64_t evictions = 0;
     /// Cumulative wall-clock time spent inside compile_mlir(), milliseconds.
     double total_compile_ms = 0.0;
+    /// JIT-R012: number of calls that traced successfully but then ran eager
+    /// instead of compiled -- unaccelerated device (OneAPI/MPS), a lower/
+    /// compile/invoke failure caught by the C2 safety net, or an empty trace.
+    /// misses alone cannot distinguish "compiled and ran" from "attempted a
+    /// compile, failed, and quietly ran eager"; this can. A function whose
+    /// eager_fallbacks tracks its misses 1:1 never actually ran compiled on
+    /// this target/process, despite misses > 0 looking like real JIT activity.
+    std::uint64_t eager_fallbacks = 0;
 };
 
 /// Snapshot the cache stats. Thread-safe — reads atomics under the hood.
@@ -140,6 +148,7 @@ auto record_cache_miss() -> void;
 auto record_retrace() -> void;
 auto record_eviction() -> void;
 auto record_compile_ms(double ms) -> void;
+auto record_eager_fallback() -> void;
 }  // namespace internal
 
 }  // namespace tenzor::jit::mlir_jit
