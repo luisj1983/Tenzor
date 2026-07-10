@@ -105,6 +105,60 @@ TEST(OpLinalg, LinearWithBias) {
     run_over_targets("linear", fn, x, 1e-3F);
 }
 
+// F007 — a transposed (non-contiguous) weight captured as a frozen constant must
+// be baked via its REAL strides, not a raw row-major flat index. Before the fix
+// emit_tensor_constant read the storage pointer in logical order and baked
+// permuted values, so the JIT diverged from eager on every target.
+TEST(OpLinalg, MatMulNonContiguousConstantWeight) {
+    ensure_core_init();
+    auto Wbase = ::tenzor::randn({6, 8}, ::tenzor::DType::Float32);
+    auto Wt = Wbase.transpose(0, 1);  // [8,6], non-contiguous view
+    ::tenzor::Variable wv(Wt, false);
+    auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return ::tenzor::matmul(x, wv);
+    };
+    auto raw = ::tenzor::randn({4, 8}, ::tenzor::DType::Float32);
+    ::tenzor::Variable x(raw, false);
+    run_over_targets("matmul_noncontig_w", fn, x, 1e-3F);
+}
+
+// F032 — F16 GEMM must accumulate in F32 (matching the eager
+// matmul_blocked_float16 kernel, which accumulates half products in float and
+// narrows only on store). Before the fix the MLIR dot_general accumulated in the
+// f16 result element type, diverging from eager by an error that grows with the
+// contraction length K. K is deliberately long (512) so half-accumulation would
+// blow past the tolerance. Inputs are scaled so the output magnitude is O(1) and
+// the tolerance is a meaningful f16-ULP bound, not swamped by large values.
+TEST(OpLinalg, MatMulFloat16AccumulatesInFloat) {
+    ensure_core_init();
+    auto W = (::tenzor::randn({512, 6}, ::tenzor::DType::Float32) * 0.1F)
+                 .to(::tenzor::DType::Float16);
+    ::tenzor::Variable wv(W, false);
+    auto fn = [wv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return ::tenzor::matmul(x, wv);
+    };
+    auto raw = (::tenzor::randn({4, 512}, ::tenzor::DType::Float32) * 0.1F)
+                   .to(::tenzor::DType::Float16);
+    ::tenzor::Variable x(raw, false);
+    run_over_targets("matmul_f16", fn, x, 5e-3F);
+}
+
+TEST(OpLinalg, LinearFloat16AccumulatesInFloat) {
+    ensure_core_init();
+    auto W = (::tenzor::randn({6, 512}, ::tenzor::DType::Float32) * 0.1F)
+                 .to(::tenzor::DType::Float16);
+    auto b = (::tenzor::randn({6}, ::tenzor::DType::Float32) * 0.1F)
+                 .to(::tenzor::DType::Float16);
+    ::tenzor::Variable wv(W, false), bv(b, false);
+    auto fn = [wv, bv](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return ::tenzor::linear(x, wv, bv);
+    };
+    auto raw = (::tenzor::randn({4, 512}, ::tenzor::DType::Float32) * 0.1F)
+                   .to(::tenzor::DType::Float16);
+    ::tenzor::Variable x(raw, false);
+    run_over_targets("linear_f16", fn, x, 5e-3F);
+}
+
 // ---------------------------------------------------------------------------
 // Audit item A.8 — unequal-rank MatMul must broadcast the smaller operand.
 //

@@ -72,6 +72,18 @@ private:
     /// Permute: reorder axes per the "dims" permutation attribute.
     auto infer_permute(const Node* node) -> std::vector<SymbolicShape>;
 
+    /// Where(cond, a, b): broadcast of all three input shapes.
+    auto infer_where(const Node* node) -> std::vector<SymbolicShape>;
+
+    /// Squeeze: remove concrete size-1 dims (per "dim"/"dims" or all).
+    auto infer_squeeze(const Node* node) -> std::vector<SymbolicShape>;
+
+    /// Unsqueeze: insert a size-1 dim at "dim".
+    auto infer_unsqueeze(const Node* node) -> std::vector<SymbolicShape>;
+
+    /// Flatten: collapse dims [start_dim, end_dim] into one (symbolic product).
+    auto infer_flatten(const Node* node) -> std::vector<SymbolicShape>;
+
     /// Infer output shape for Linear: (*, in_features) -> (*, out_features).
     auto infer_linear(const Node* node) -> std::vector<SymbolicShape>;
 

@@ -307,3 +307,140 @@ TEST_F(FusionPassesTest, GemmEpilogue_PerColumnBiasStillFuses) {
         << "a genuine [cols] per-column bias must still fuse into GemmEpilogue "
            "(guard over-rejected a real bias)";
 }
+
+// ============================================================================
+// Matcher guards: non-last-axis softmax/norm must NOT fuse (the fused kernels
+// only support the last axis and would crash / read wrong strided elements with
+// no fallback — F034/F035), and a plain std/variance subgraph must NOT be
+// mistaken for a full LayerNorm (F009). Positive controls confirm the guards do
+// not over-reject legitimate last-axis softmax / full LayerNorm.
+// ============================================================================
+namespace {
+auto has_kind(const std::vector<FusionMatch>& ms, FusionKind k) -> bool {
+    for (const auto& m : ms) {
+        if (m.kind == k) return true;
+    }
+    return false;
+}
+
+// Numerically-stable softmax over `dim`:
+//   Max[dim] -> Sub(x,max) -> Exp -> Sum[dim] -> Div(exp,sum).
+auto build_softmax(Graph& g, const Device& dev,
+                   const std::vector<int64_t>& shape, int64_t dim) -> void {
+    const int64_t nd = dim < 0 ? dim + static_cast<int64_t>(shape.size()) : dim;
+    std::vector<int64_t> red = shape;
+    red[nd] = 1;
+    auto x = g.create_value("x", shape, DType::Float32, dev);
+    auto mx = g.create_node(OpType::Max, "max");
+    auto mx_o = g.create_value("max_o", red, DType::Float32, dev);
+    mx->add_input(x); mx->add_output(mx_o); mx_o->set_node(mx);
+    mx->set_int_attr("dim", dim); mx->set_bool_attr("keepdim", true);
+    g.add_node(mx);
+    auto sub = g.create_node(OpType::Sub, "sub");
+    auto sub_o = g.create_value("sub_o", shape, DType::Float32, dev);
+    sub->add_input(x); sub->add_input(mx_o); sub->add_output(sub_o);
+    sub_o->set_node(sub); g.add_node(sub);
+    auto ex = g.create_node(OpType::Exp, "exp");
+    auto ex_o = g.create_value("exp_o", shape, DType::Float32, dev);
+    ex->add_input(sub_o); ex->add_output(ex_o); ex_o->set_node(ex); g.add_node(ex);
+    auto sm = g.create_node(OpType::Sum, "sum");
+    auto sm_o = g.create_value("sum_o", red, DType::Float32, dev);
+    sm->add_input(ex_o); sm->add_output(sm_o); sm_o->set_node(sm);
+    sm->set_int_attr("dim", dim); sm->set_bool_attr("keepdim", true);
+    g.add_node(sm);
+    auto dv = g.create_node(OpType::Div, "div");
+    auto dv_o = g.create_value("div_o", shape, DType::Float32, dev);
+    dv->add_input(ex_o); dv->add_input(sm_o); dv->add_output(dv_o);
+    dv_o->set_node(dv); g.add_node(dv);
+    g.set_inputs({x}); g.set_outputs({dv_o});
+}
+
+// LayerNorm-shaped chain over the last axis. If `full_layernorm`, append the
+// normalizing Div (x-mean)/std; otherwise stop at Sqrt — a plain std/variance
+// subgraph that is NOT a LayerNorm. The eps Constant is emitted first so the
+// compute chain stays positionally contiguous for the matcher's scan.
+auto build_layernorm_like(Graph& g, const Device& dev, bool full_layernorm)
+    -> void {
+    const std::vector<int64_t> shape = {2, 3, 4};
+    const std::vector<int64_t> red = {2, 3, 1};
+    auto x = g.create_value("x", shape, DType::Float32, dev);
+    auto epsc = g.create_node(OpType::Constant, "eps");
+    auto epsc_o = g.create_value("epsv", {1}, DType::Float32, dev);
+    epsc->add_output(epsc_o); epsc_o->set_node(epsc);
+    epsc->set_tensor_attr("value", ::tenzor::full({1}, 1e-5F, DType::Float32));
+    g.add_node(epsc);
+    auto m1 = g.create_node(OpType::Mean, "mean1");
+    auto m1_o = g.create_value("m1", red, DType::Float32, dev);
+    m1->add_input(x); m1->add_output(m1_o); m1_o->set_node(m1);
+    m1->set_int_attr("dim", -1); m1->set_bool_attr("keepdim", true);
+    g.add_node(m1);
+    auto sub = g.create_node(OpType::Sub, "sub");
+    auto sub_o = g.create_value("sub", shape, DType::Float32, dev);
+    sub->add_input(x); sub->add_input(m1_o); sub->add_output(sub_o);
+    sub_o->set_node(sub); g.add_node(sub);
+    auto pw = g.create_node(OpType::Pow, "pow");
+    auto pw_o = g.create_value("pow", shape, DType::Float32, dev);
+    pw->add_input(sub_o); pw->add_output(pw_o); pw_o->set_node(pw);
+    pw->set_attr("exponent", 2.0); g.add_node(pw);
+    auto m2 = g.create_node(OpType::Mean, "mean2");
+    auto m2_o = g.create_value("m2", red, DType::Float32, dev);
+    m2->add_input(pw_o); m2->add_output(m2_o); m2_o->set_node(m2);
+    m2->set_int_attr("dim", -1); m2->set_bool_attr("keepdim", true);
+    g.add_node(m2);
+    auto add = g.create_node(OpType::Add, "addeps");
+    auto add_o = g.create_value("addeps", red, DType::Float32, dev);
+    add->add_input(m2_o); add->add_input(epsc_o); add->add_output(add_o);
+    add_o->set_node(add); g.add_node(add);
+    auto sq = g.create_node(OpType::Sqrt, "sqrt");
+    auto sq_o = g.create_value("sqrt", red, DType::Float32, dev);
+    sq->add_input(add_o); sq->add_output(sq_o); sq_o->set_node(sq); g.add_node(sq);
+    if (!full_layernorm) {
+        g.set_inputs({x}); g.set_outputs({sq_o});
+        return;
+    }
+    auto dv = g.create_node(OpType::Div, "div");
+    auto dv_o = g.create_value("div", shape, DType::Float32, dev);
+    dv->add_input(sub_o); dv->add_input(sq_o); dv->add_output(dv_o);
+    dv_o->set_node(dv); g.add_node(dv);
+    g.set_inputs({x}); g.set_outputs({dv_o});
+}
+}  // namespace
+
+TEST_F(FusionPassesTest, Softmax_NonLastAxisNotFused) {
+    Graph graph;
+    build_softmax(graph, device_, {2, 3, 4}, /*dim=*/1);  // middle axis
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    EXPECT_FALSE(has_kind(matches, FusionKind::Softmax))
+        << "a non-last-axis softmax must NOT fuse — the fused kernel only "
+           "supports the last dim and hard-crashes with no fallback (F034)";
+}
+
+TEST_F(FusionPassesTest, Softmax_LastAxisStillFused) {
+    Graph graph;
+    build_softmax(graph, device_, {2, 3, 4}, /*dim=*/-1);  // last axis
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    EXPECT_TRUE(has_kind(matches, FusionKind::Softmax))
+        << "a last-axis softmax must still fuse (guard over-rejected)";
+}
+
+TEST_F(FusionPassesTest, LayerNorm_PlainStdNotFused) {
+    Graph graph;
+    build_layernorm_like(graph, device_, /*full_layernorm=*/false);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    EXPECT_FALSE(has_kind(matches, FusionKind::LayerNorm))
+        << "a plain std/variance subgraph (no normalizing Div) must NOT fuse as "
+           "a full LayerNorm (F009)";
+}
+
+TEST_F(FusionPassesTest, LayerNorm_FullStillFused) {
+    Graph graph;
+    build_layernorm_like(graph, device_, /*full_layernorm=*/true);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    EXPECT_TRUE(has_kind(matches, FusionKind::LayerNorm))
+        << "a full LayerNorm (with normalizing Div) must still fuse (guard "
+           "over-rejected)";
+}

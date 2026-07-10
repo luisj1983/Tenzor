@@ -99,22 +99,30 @@ auto CompiledModule::compute_shape_key(const std::vector<Variable>& inputs) -> s
 }
 
 auto CompiledModule::throw_if_loaded_shape_mismatch(
-    const std::vector<std::vector<int64_t>>& call_shapes) const -> void {
+    const std::vector<std::vector<int64_t>>& call_shapes,
+    const std::vector<int>& call_dtypes) const -> void {
     // Only loaded modules that cannot retrace are guarded. If dynamic dims were
     // configured (via mark_dynamic_dims after load) or a retrace path exists, the
     // module can adapt and this guard does not apply.
     if (!loaded_ || source_module_ || retrace_fn_ || !dynamic_dims_.empty()) {
         return;
     }
-    if (call_shapes == loaded_input_shapes_) {
+    if (call_shapes == loaded_input_shapes_ &&
+        call_dtypes == loaded_input_dtypes_) {
         return;
     }
+    // A loaded module bakes its constants (weights, folded biases) at the
+    // trace-time DTYPE; the loaded path never consults compute_shape_key's dtype
+    // component, so a same-shape/different-dtype call would replay e.g. Float32
+    // constants against Float64 activations — a confusing downstream dispatch
+    // error or silently-wrong precision. Guard shape AND dtype (JIT-F030).
     throw std::runtime_error(
-        "CompiledModule: input shape differs from the serialized trace and this "
-        "module was loaded from disk, which cannot retrace (the source module is "
-        "not serialized). Replaying would silently use the baked trace-time "
-        "shapes. Re-trace/re-export the module for the new shape, or call "
-        "mark_dynamic_dims() on the loaded module before forwarding.");
+        "CompiledModule: input shape or dtype differs from the serialized trace "
+        "and this module was loaded from disk, which cannot retrace (the source "
+        "module is not serialized). Replaying would silently use the baked "
+        "trace-time shapes/dtypes. Re-trace/re-export the module for the new "
+        "shape/dtype, or call mark_dynamic_dims() on the loaded module before "
+        "forwarding.");
 }
 
 auto CompiledModule::set_traced_signature(const std::vector<Variable>& example_inputs)
@@ -156,7 +164,9 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
     // rather than replay a graph baked at the serialized trace shape.
     {
         auto s = input.tensor().shape();
-        throw_if_loaded_shape_mismatch({std::vector<int64_t>(s.begin(), s.end())});
+        throw_if_loaded_shape_mismatch(
+            {std::vector<int64_t>(s.begin(), s.end())},
+            {static_cast<int>(input.tensor().dtype())});
     }
 
     // Device/dtype mismatch retrace: if the current graph was traced with a
@@ -263,12 +273,15 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     // rather than replay a graph baked at the serialized trace shape.
     {
         std::vector<std::vector<int64_t>> call_shapes;
+        std::vector<int> call_dtypes;
         call_shapes.reserve(inputs.size());
+        call_dtypes.reserve(inputs.size());
         for (const auto& v : inputs) {
             auto s = v.tensor().shape();
             call_shapes.emplace_back(s.begin(), s.end());
+            call_dtypes.push_back(static_cast<int>(v.tensor().dtype()));
         }
-        throw_if_loaded_shape_mismatch(call_shapes);
+        throw_if_loaded_shape_mismatch(call_shapes, call_dtypes);
     }
 
     auto key = compute_shape_key(inputs);
@@ -386,6 +399,24 @@ auto CompiledModule::save(const std::string& path) const -> void {
     for (const auto& [key, value] : metadata_) {
         graph_->set_string_metadata(key, value);
     }
+    // F031: serialize the dynamic-dim configuration so a module made dynamic via
+    // mark_dynamic_dims() loads back DYNAMIC. Previously neither the Value
+    // symbolic_shape_ nor dynamic_dims_ was serialized, so a dynamic module
+    // reloaded as a STATIC graph locked to the trace-time shape — and, with the
+    // loaded-module exact-shape guard (F030), silently rejected the variable
+    // shapes it was configured to accept. Encoded as a reserved metadata KV
+    // (`input_idx:dim:name` entries joined by ';') via the existing string-metadata
+    // round-trip (no binary-format change); load() re-applies mark_dynamic_dims,
+    // which re-runs SymbolicTracePass to rebuild the symbolic shapes.
+    if (!dynamic_dims_.empty()) {
+        std::string encoded;
+        for (const auto& dd : dynamic_dims_) {
+            if (!encoded.empty()) encoded += ';';
+            encoded += std::to_string(dd.input_idx) + ':' +
+                       std::to_string(dd.dim) + ':' + dd.name;
+        }
+        graph_->set_string_metadata("__tenzor_dynamic_dims__", encoded);
+    }
     // Save the graph using existing serialization
     save_graph(*graph_, path);
 }
@@ -396,9 +427,41 @@ auto CompiledModule::load(const std::string& path) -> std::shared_ptr<CompiledMo
         throw std::runtime_error("Failed to load graph from: " + path);
     }
     auto module = std::make_shared<CompiledModule>(graph);
-    // Restore user KV metadata that was serialized with the graph.
+    // Restore user KV metadata that was serialized with the graph (skipping the
+    // internal dynamic-dims key, which is not user metadata).
     for (const auto& [key, value] : graph->string_metadata()) {
+        if (key == "__tenzor_dynamic_dims__") continue;
         module->add_metadata(key, value);
+    }
+    // F031: re-apply the serialized dynamic-dim configuration so the module loads
+    // back DYNAMIC (matching what mark_dynamic_dims() configured before save),
+    // instead of a static graph locked to the trace-time shape.
+    {
+        const auto& md = graph->string_metadata();
+        auto it = md.find("__tenzor_dynamic_dims__");
+        if (it != md.end() && !it->second.empty()) {
+            std::vector<DynamicDimSpec> specs;
+            std::stringstream ss(it->second);
+            std::string entry;
+            while (std::getline(ss, entry, ';')) {
+                const auto p1 = entry.find(':');
+                if (p1 == std::string::npos) continue;
+                const auto p2 = entry.find(':', p1 + 1);
+                if (p2 == std::string::npos) continue;
+                try {
+                    DynamicDimSpec dd;
+                    dd.input_idx = std::stoi(entry.substr(0, p1));
+                    dd.dim = std::stoi(entry.substr(p1 + 1, p2 - p1 - 1));
+                    dd.name = entry.substr(p2 + 1);
+                    specs.push_back(std::move(dd));
+                } catch (const std::exception&) {
+                    // Malformed entry — skip it rather than fail the load.
+                }
+            }
+            if (!specs.empty()) {
+                module->mark_dynamic_dims(specs);  // re-runs SymbolicTracePass
+            }
+        }
     }
     // A loaded module has no source module / retrace closure (neither is
     // serialized), so it cannot retrace. Record that fact and the graph's baked
@@ -409,8 +472,10 @@ auto CompiledModule::load(const std::string& path) -> std::shared_ptr<CompiledMo
         if (in) {
             auto s = in->shape();
             module->loaded_input_shapes_.emplace_back(s.begin(), s.end());
+            module->loaded_input_dtypes_.push_back(static_cast<int>(in->dtype()));
         } else {
             module->loaded_input_shapes_.emplace_back();
+            module->loaded_input_dtypes_.push_back(-1);
         }
     }
     return module;

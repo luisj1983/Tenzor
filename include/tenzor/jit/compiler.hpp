@@ -1406,10 +1406,16 @@ private:
     /// Input shapes the loaded graph was serialized at (used by the loaded-module
     /// shape guard). Empty for non-loaded modules.
     std::vector<std::vector<int64_t>> loaded_input_shapes_;
+    /// Input dtypes (DType as int) the loaded graph was serialized at, parallel to
+    /// loaded_input_shapes_. A loaded module bakes its constants at the trace-time
+    /// dtype and cannot retrace, so a same-shape but different-dtype call would
+    /// replay Float32 constants against Float64 activations (JIT-F030).
+    std::vector<int> loaded_input_dtypes_;
     /// Throw a clear error if this is a loaded (non-retraceable) module being
-    /// called with input shapes different from the serialized trace shapes.
+    /// called with input shapes OR dtypes different from the serialized trace.
     auto throw_if_loaded_shape_mismatch(
-        const std::vector<std::vector<int64_t>>& call_shapes) const -> void;
+        const std::vector<std::vector<int64_t>>& call_shapes,
+        const std::vector<int>& call_dtypes) const -> void;
 
     /// Serialises the mutating paths of forward()/replay/capture so a single
     /// CompiledModule shared across inference threads (the natural server

@@ -750,6 +750,12 @@ static auto tensor_fingerprint(const Tensor& tensor) -> std::string {
     for (auto s : tensor.shape())   ss << s << ',';
     ss << '#';
     for (auto s : tensor.strides()) ss << s << ',';
+    // Include the DEVICE (JIT-F015): a CUDA/ROCm/Vulkan device pointer lives in a
+    // separate address space from a host pointer and can be numerically equal to
+    // a CPU tensor's data_ptr. Without the device in the fingerprint, a trace that
+    // touches both a CPU constant and a GPU activation whose pointers coincide
+    // would alias them to one graph value, baking a value on the wrong device.
+    ss << '#' << tensor.device().to_string();
     return ss.str();
 }
 
@@ -801,6 +807,20 @@ auto Tracer::register_new_tensor(const Tensor& tensor) -> std::string {
     tensor_storage_[id] = tensor;
     tensor_id_map_[tensor_fingerprint(tensor)] = id;
     return id;
+}
+
+auto Tracer::is_registered(const Tensor& tensor) const -> bool {
+    return tensor_id_map_.find(tensor_fingerprint(tensor)) !=
+           tensor_id_map_.end();
+}
+
+auto Tracer::set_pre_op_snapshot(const std::string& id,
+                                 const Tensor& snapshot) -> void {
+    // Only overwrite storage we already retain — the id must already exist.
+    auto it = tensor_storage_.find(id);
+    if (it != tensor_storage_.end()) {
+        it->second = snapshot;
+    }
 }
 
 auto Tracer::alias_tensor(const Tensor& alias, const std::string& existing_id) -> void {
@@ -1021,14 +1041,46 @@ auto Tracer::trace_if(const Tensor& condition,
     // Save current ops state to isolate subgraphs
     auto ops_before_then = ops_.size();
 
+    // Snapshot the fingerprint->id map so we can detect an in-place op inside a
+    // branch that mutates a tensor VISIBLE OUTSIDE the branch (a carried input or
+    // captured external). trace_if executes BOTH branches eagerly on the same
+    // tensors, but only one runs at replay — an in-place mutation is therefore
+    // conditional and has no well-defined functional trace: record_inplace remaps
+    // the mutated tensor's fingerprint to an SSA id INSIDE the mutating branch's
+    // (skipped) op range, so the other branch and every post-cond consumer
+    // re-resolve that tensor to a baked constant holding post-mutation data,
+    // silently diverging from eager on every backend (JIT-F043). A functional op
+    // only ADDS new fingerprints; only record_inplace CHANGES an existing one, so
+    // a changed pre-cond entry uniquely identifies this case. Fail loudly.
+    const auto id_map_before = tensor_id_map_;
+    auto assert_no_inplace_on_shared =
+        [&](const char* branch) {
+            for (const auto& [fp, id] : id_map_before) {
+                auto it = tensor_id_map_.find(fp);
+                if (it != tensor_id_map_.end() && it->second != id) {
+                    throw std::runtime_error(
+                        std::string("jit::cond: in-place mutation of a tensor "
+                        "visible outside the '") + branch + "' branch is not "
+                        "supported inside a traced conditional — it has no "
+                        "well-defined functional semantics (the mutation is "
+                        "conditional but the trace is not) and would silently "
+                        "corrupt the other branch and post-cond graph. Use an "
+                        "out-of-place op (e.g. `y = x + z` instead of "
+                        "`x.add_(z)`) inside cond branches.");
+                }
+            }
+        };
+
     // Trace the then-branch by executing it
     auto then_outputs = then_fn(inputs);
+    assert_no_inplace_on_shared("then");
 
     // Record then-branch ops range
     auto then_ops_end = ops_.size();
 
     // Trace the else-branch
     auto else_outputs = else_fn(inputs);
+    assert_no_inplace_on_shared("else");
     auto else_ops_end = ops_.size();
 
     // A well-formed conditional must yield the SAME number of outputs from both

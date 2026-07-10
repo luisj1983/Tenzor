@@ -53,6 +53,32 @@ void require_cpu_iree() {
         << "llvm-cpu IREE target unavailable in an MLIR build";
 }
 
+// F020: compile `fn` on EVERY available IREE target and assert it matches the
+// eager reference on each — the accumulation tests were hardcoded to llvm-cpu, so
+// a GPU-only accumulation narrowing went unseen. A target where IREE genuinely
+// cannot run the dtype (e.g. f64 transcendentals lack a libm symbol) degrades to
+// eager, which IS the correct reference, so the numeric check still holds;
+// misses>=1 confirms a compile was attempted per target.
+void assert_parity_over_targets(const char* name,
+                                ::tenzor::jit::CompiledFunction::FnType fn,
+                                const Variable& x, const Tensor& eager,
+                                double tol) {
+    for (const auto& target : mt::available_iree_targets()) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+        mj::reset_cache_stats();
+        Variable out;
+        ASSERT_NO_THROW({ out = compiled(x); })
+            << name << " threw on target=" << target;
+        ASSERT_GE(mj::cache_stats().misses, 1u)
+            << name << " did not attempt an IREE compile on target=" << target;
+        EXPECT_LT(max_abs_diff_f64(eager, out.tensor()), tol)
+            << name << " diverges from eager on target=" << target;
+    }
+}
+
 // M8 — the subprocess output path must be bit-exact, not ~6-sig-fig ASCII.
 TEST(MlirNumericParity, SubprocessFloat32BitExact) {
     mt::ensure_core_init();
@@ -143,10 +169,6 @@ TEST(MlirNumericParity, Float16SoftmaxWideAxis) {
 
     auto fn = ::tenzor::jit::CompiledFunction::FnType(
         [](const Variable& x) -> Variable { return nn::softmax(x, -1); });
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target = "llvm-cpu";
-    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
 
     // Moderately peaked logits (×4): a handful of probabilities are O(0.1), so
     // the exp-sum accumulation error scales up into a visible per-prob abs diff
@@ -156,16 +178,11 @@ TEST(MlirNumericParity, Float16SoftmaxWideAxis) {
     Variable x(x_t, /*requires_grad=*/false);
 
     const Variable eager = nn::softmax(x, -1);
-    mj::reset_cache_stats();
-    Variable out;
-    ASSERT_NO_THROW({ out = compiled(x); });
-    ASSERT_GE(mj::cache_stats().misses, 1u)
-        << "F16 softmax did NOT run through IREE (eager fallback)";
-
     // Widened compiled softmax matches eager to ~F16 ULP; unwidened F16
-    // accumulation over 2048 elements diverges by >1e-2.
-    EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 3e-3)
-        << "F16 softmax diverges from eager (F16 accumulation not widened?)";
+    // accumulation over 2048 elements diverges by >1e-2. Fanned over every IREE
+    // target (F020) so a GPU-only narrowing is caught, not just llvm-cpu.
+    assert_parity_over_targets("F16 softmax wide-axis", fn, x, eager.tensor(),
+                               3e-3);
 }
 
 // Fix #10 coverage — the JIT numeric-parity suite was Float32/Float16-dominant,
@@ -181,24 +198,14 @@ TEST(MlirNumericParity, Float64SoftmaxWideAxisAccumulates) {
 
     auto fn = ::tenzor::jit::CompiledFunction::FnType(
         [](const Variable& x) -> Variable { return nn::softmax(x, -1); });
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target = "llvm-cpu";
-    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
 
     Tensor x_t = (::tenzor::randn({4, 4096}, DType::Float32, Device::cpu()) * 4.0f)
                      .to(DType::Float64);
     Variable x(x_t, /*requires_grad=*/false);
 
     const Variable eager = nn::softmax(x, -1);
-    mj::reset_cache_stats();
-    Variable out;
-    ASSERT_NO_THROW({ out = compiled(x); });
-    ASSERT_GE(mj::cache_stats().misses, 1u)
-        << "F64 softmax did NOT run through IREE (eager fallback)";
-
-    EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 1e-9)
-        << "F64 softmax diverges from eager (F64 accumulation narrowed to F32?)";
+    assert_parity_over_targets("F64 softmax wide-axis", fn, x, eager.tensor(),
+                               1e-9);
 }
 
 // M3 — F16 LayerNorm over a long axis: mean/variance must accumulate in F32.
@@ -211,24 +218,15 @@ TEST(MlirNumericParity, Float16LayerNormWideAxis) {
         [D](const Variable& x) -> Variable {
             return nn::functional::layer_norm(x, {D});
         });
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target = "llvm-cpu";
-    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
-
     Tensor x_t = ::tenzor::randn({4, D}, DType::Float32, Device::cpu())
                      .to(DType::Float16);
     Variable x(x_t, /*requires_grad=*/false);
 
     const Variable eager = nn::functional::layer_norm(x, {D});
-    mj::reset_cache_stats();
-    Variable out;
-    ASSERT_NO_THROW({ out = compiled(x); });
-    ASSERT_GE(mj::cache_stats().misses, 1u)
-        << "F16 LayerNorm did NOT run through IREE (eager fallback)";
-
-    EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 5e-3)
-        << "F16 LayerNorm diverges from eager (F16 accumulation not widened?)";
+    // Fanned over every IREE target (F020): a GPU-only F16 accumulation narrowing
+    // in the mean/variance reduction is caught, not just llvm-cpu.
+    assert_parity_over_targets("F16 LayerNorm wide-axis", fn, x, eager.tensor(),
+                               5e-3);
 }
 
 // F16 AvgPool2d (my fix): the reduce-window sum must accumulate in F32 to match

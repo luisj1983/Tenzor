@@ -7,6 +7,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/pattern_matcher.hpp>
 #include <tenzor/jit/extended_codegen.hpp>
+#include <tenzor/jit/codegen.hpp>
 #include <tenzor/jit/compiler.hpp>
 #include <tenzor/jit/graph.hpp>
 #include <tenzor/jit/tracer.hpp>
@@ -165,6 +166,127 @@ TEST(ExtendedCodegen, GenerateSmallMLPKernel) {
     EXPECT_FALSE(source.empty());
     EXPECT_NE(source.find("fused_small_mlp_kernel"), std::string::npos);
     EXPECT_NE(source.find("__shared__"), std::string::npos);
+}
+
+// ============================================================================
+// Per-op 16-bit round-to-storage regression (JIT-F011/F012/F037/F038).
+//
+// Eager (and the fused CPU twin) run each fused step as a full tensor op that
+// NARROWS the Float16/BFloat16 intermediate back to 16-bit storage AFTER EVERY
+// step. The generated GPU kernel keeps the fused intermediate in `float` across
+// all steps and narrows only on the final store, so a multi-step 16-bit fusion
+// diverged from eager/CPU. The fix rounds the compute variable through the
+// storage type T after each step: `v = static_cast<C>(static_cast<T>(v))`.
+//
+// These tests assert the round-trip is emitted for the 16-bit storage types and
+// is ABSENT for Float32 (T == C, where it must be a no-op / skipped). Each
+// EXPECT below fails on the unpatched codegen (which emitted no per-step round),
+// giving the fix teeth without needing a GPU.
+// ============================================================================
+namespace {
+// Number of non-overlapping occurrences of `needle` in `hay`.
+auto count_occurrences(const std::string& hay, const std::string& needle) -> size_t {
+    if (needle.empty()) return 0;
+    size_t n = 0, pos = 0;
+    while ((pos = hay.find(needle, pos)) != std::string::npos) { ++n; pos += needle.size(); }
+    return n;
+}
+// The round-to-storage-and-back the fix emits for compute var `v`, storage `T`.
+auto round_trip(const std::string& v, const std::string& storage) -> std::string {
+    return v + " = static_cast<float>(static_cast<" + storage + ">(" + v + "));";
+}
+}  // namespace
+
+// F011 — elementwise fusion (codegen.cpp KernelCodegen::generate). A >=2-step
+// f16 chain must round `val` to __half after EACH step; f32 must not round.
+TEST(ExtendedCodegen, ElementwisePerStepRoundF16) {
+    FusionGroup g;
+    g.num_inputs = 1;
+    g.dtype = DType::Float16;
+    g.steps = {
+        {ElemOp::Exp, 0, -1, 0.0},
+        {ElemOp::Log, 0, -1, 0.0},
+    };
+    auto src = KernelCodegen::generate(g);
+    // One round-trip per fused step (2 here).
+    EXPECT_EQ(count_occurrences(src, round_trip("val", "__half")), 2u) << src;
+
+    // BFloat16 rounds through tz_bf16.
+    g.dtype = DType::BFloat16;
+    auto src_bf = KernelCodegen::generate(g);
+    EXPECT_EQ(count_occurrences(src_bf, round_trip("val", "tz_bf16")), 2u) << src_bf;
+
+    // Float32: storage == compute, so NO per-step round-trip (no-op / skipped).
+    g.dtype = DType::Float32;
+    auto src_f32 = KernelCodegen::generate(g);
+    EXPECT_EQ(count_occurrences(src_f32, "static_cast<float>(static_cast<float>"), 0u)
+        << src_f32;
+}
+
+// F012 — reduction pre/post elementwise ops (extended_codegen.cpp
+// generate_reduction). Each pre-op rounds `val`; each post-op rounds `result`.
+TEST(ExtendedCodegen, ReductionPrePostPerStepRoundF16) {
+    ExtendedFusionGroup group;
+    group.kind = FusionKind::Reduction;
+    group.dtype = DType::Float16;
+    group.reduce_dim = -1;
+    group.reduce_kind = OpType::Sum;
+    group.pre_ops = {{ElemOp::Exp, 0, -1, 0.0}};    // one pre-reduction op
+    group.post_ops = {{ElemOp::Log, 0, -1, 0.0}};   // one post-reduction op
+
+    auto src = ExtendedKernelCodegen::generate(group);
+    ASSERT_FALSE(src.empty());  // both ops are single-stream representable
+    EXPECT_EQ(count_occurrences(src, round_trip("val", "__half")), 1u) << src;
+    EXPECT_EQ(count_occurrences(src, round_trip("result", "__half")), 1u) << src;
+
+    // Float32: no per-step rounding on either accumulator.
+    group.dtype = DType::Float32;
+    auto src_f32 = ExtendedKernelCodegen::generate(group);
+    EXPECT_EQ(count_occurrences(src_f32, "static_cast<float>(static_cast<float>"), 0u)
+        << src_f32;
+}
+
+// F037 — GEMM epilogue (extended_codegen.cpp generate_gemm_epilogue). For
+// f16/bf16 the post-bias result must be rounded to T BEFORE the activation.
+TEST(ExtendedCodegen, GemmEpilogueBiasRoundBeforeActivationF16) {
+    ExtendedFusionGroup group;
+    group.kind = FusionKind::GemmEpilogue;
+    group.dtype = DType::Float16;
+    group.has_bias = true;
+    group.has_activation = true;
+    group.activation_type = OpType::Tanh;  // nonlinear: rounding matters
+
+    auto src = ExtendedKernelCodegen::generate(group);
+    auto rt = src.find(round_trip("val", "__half"));
+    ASSERT_NE(rt, std::string::npos) << src;
+    // The round-trip must precede the tanh activation application.
+    auto act = src.find("tanh");
+    ASSERT_NE(act, std::string::npos) << src;
+    EXPECT_LT(rt, act) << "post-bias round must come before activation\n" << src;
+
+    // Float32: no pre-activation round-trip.
+    group.dtype = DType::Float32;
+    auto src_f32 = ExtendedKernelCodegen::generate(group);
+    EXPECT_EQ(count_occurrences(src_f32, "static_cast<float>(static_cast<float>"), 0u)
+        << src_f32;
+}
+
+// F038 — SmallMLP stage 1 (extended_codegen.cpp generate_small_mlp). The stage-1
+// linear result `acc` must be rounded to T before the activation for f16/bf16.
+TEST(ExtendedCodegen, SmallMLPStage1RoundBeforeActivationF16) {
+    ExtendedFusionGroup group;
+    group.kind = FusionKind::SmallMLP;
+    group.dtype = DType::Float16;
+    group.hidden_dim = 256;
+    group.mlp_activation = OpType::GELU;
+
+    auto src = ExtendedKernelCodegen::generate(group);
+    EXPECT_EQ(count_occurrences(src, round_trip("acc", "__half")), 1u) << src;
+
+    // Float32: no acc round-trip.
+    group.dtype = DType::Float32;
+    auto src_f32 = ExtendedKernelCodegen::generate(group);
+    EXPECT_EQ(count_occurrences(src_f32, round_trip("acc", "float")), 0u) << src_f32;
 }
 
 TEST(ExtendedCodegen, ExtendedFusionPassRegisteredInCompiler) {

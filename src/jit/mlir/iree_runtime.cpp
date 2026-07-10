@@ -17,6 +17,7 @@
 #include "_iree_marshal.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
+#include "tenzor/utils/log.hpp"  // TENZOR_LOG_WARN (F041 skew warning)
 #include "tenzor/ops/creation.hpp"
 
 #include <iree/runtime/api.h>
@@ -823,13 +824,131 @@ auto read_npy_output(const std::string& path) -> ::tenzor::Tensor {
     return out;
 }
 
+// Inverse of npy_descr_to_dtype. Returns "" for dtypes with no standard NumPy
+// descr (e.g. BFloat16), which then use the inline ASCII input path.
+auto dtype_to_npy_descr(::tenzor::DType d) -> std::string {
+    using ::tenzor::DType;
+    switch (d) {
+        case DType::Float16:    return "<f2";
+        case DType::Float32:    return "<f4";
+        case DType::Float64:    return "<f8";
+        case DType::Int8:       return "<i1";
+        case DType::Int16:      return "<i2";
+        case DType::Int32:      return "<i4";
+        case DType::Int64:      return "<i8";
+        case DType::UInt8:      return "<u1";
+        case DType::UInt16:     return "<u2";
+        case DType::UInt32:     return "<u4";
+        case DType::UInt64:     return "<u8";
+        case DType::Bool:       return "|b1";
+        case DType::Complex64:  return "<c8";
+        case DType::Complex128: return "<c16";
+        default:                return {};
+    }
+}
+
+// Write a CPU, contiguous tensor as a little-endian C-order NumPy .npy (v1.0).
+// The exact binary buffer is written, so all bits survive — unlike the ASCII
+// --input= rendering (NaN payload/sign, Inf; JIT-F045) — and there is no
+// command-line length limit, which fixes the "Argument list too long" execv
+// failure that silently degraded large-tensor GPU subprocess runs to eager.
+auto write_npy(const ::tenzor::Tensor& t, const std::string& path) -> bool {
+    const std::string descr = dtype_to_npy_descr(t.dtype());
+    if (descr.empty()) return false;
+    const ::tenzor::Tensor cpu = t.cpu().contiguous();
+    const auto shp = cpu.shape();
+    std::string dims;
+    for (size_t i = 0; i < shp.size(); ++i) {
+        if (i) dims += ", ";
+        dims += std::to_string(shp[i]);
+    }
+    if (shp.size() == 1) dims += ",";
+    std::string header = "{'descr': '" + descr +
+        "', 'fortran_order': False, 'shape': (" + dims + "), }";
+    // Pad the header so (10-byte preamble + header + '\n') is a 64-byte multiple.
+    const size_t base = 10 + header.size() + 1;
+    header.append((64 - (base % 64)) % 64, ' ');
+    header += '\n';
+    const auto hlen = static_cast<uint16_t>(header.size());
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    static const char kMagic[6] = {'\x93', 'N', 'U', 'M', 'P', 'Y'};
+    f.write(kMagic, 6);
+    const char ver[2] = {1, 0};
+    f.write(ver, 2);
+    const char lb[2] = {static_cast<char>(hlen & 0xff),
+                        static_cast<char>((hlen >> 8) & 0xff)};
+    f.write(lb, 2);
+    f.write(header.data(), static_cast<std::streamsize>(header.size()));
+    const int64_t nbytes =
+        cpu.numel() * static_cast<int64_t>(::tenzor::dtype_size(cpu.dtype()));
+    f.write(reinterpret_cast<const char*>(cpu.data_ptr()),
+            static_cast<std::streamsize>(nbytes));
+    return static_cast<bool>(f);
+}
+
+// Build one --input flag. A large operand of an NPY-representable dtype is
+// written to a temp .npy and passed as --input=@path (exact bits, no ARG_MAX
+// limit); smaller/BF16 operands use the inline ASCII form. Temp paths are pushed
+// onto `temp_files` for the caller to clean up after the subprocess returns.
+auto build_input_arg(const ::tenzor::Tensor& t,
+                     std::vector<std::string>& temp_files) -> std::string {
+    const std::string descr = dtype_to_npy_descr(t.dtype());
+    if (t.numel() > 4096 && !descr.empty()) {
+        auto tmpl = (std::filesystem::temp_directory_path() /
+                     "tenzor_iree_in_XXXXXX.npy").string();
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        const int fd = ::mkstemps(buf.data(), 4);
+        if (fd >= 0) {
+            ::close(fd);
+            std::string p(buf.data());
+            if (write_npy(t, p)) {
+                temp_files.push_back(p);
+                return "--input=@" + p;
+            }
+            std::remove(p.c_str());
+        }
+    }
+    return render_input_flag(t);
+}
+
 auto invoke_subprocess(IreeInvoker& self,
                        const std::vector<::tenzor::Tensor>& inputs,
                        const std::string& vmfb_path,
                        const std::string& device,
-                       const std::string& iree_run_module)
+                       const std::string& iree_run_module,
+                       int expected_outputs)
     -> std::vector<::tenzor::Tensor> {
     (void)self;
+    // F041: warn once if iree-compile (which produced the .vmfb) and
+    // iree-run-module (which loads it) resolve from DIFFERENT directories. A
+    // partial install — e.g. a .venv-iree shipping only the compiler wheel while
+    // run-module comes from $PATH — can pair a compiler and runtime from
+    // different IREE builds whose bytecode formats are incompatible, surfacing as
+    // an opaque module-load failure that reproduces only on that host. Cheap
+    // parent-dir comparison; no subprocess.
+    static std::once_flag skew_warned;
+    std::call_once(skew_warned, [&]() {
+        try {
+            const std::string& compile_bin =
+                ::tenzor::jit::mlir_jit::resolve_iree_compile();
+            if (!compile_bin.empty() && !iree_run_module.empty()) {
+                auto cdir = std::filesystem::path(compile_bin).parent_path();
+                auto rdir = std::filesystem::path(iree_run_module).parent_path();
+                if (cdir != rdir) {
+                    TENZOR_LOG_WARN(
+                        "IREE JIT: iree-compile (" + cdir.string() +
+                        ") and iree-run-module (" + rdir.string() +
+                        ") resolve from different directories; if they come from "
+                        "different IREE builds a vmfb compiled by one may fail to "
+                        "load in the other. Install both from the same IREE "
+                        "distribution to avoid opaque module-load errors.");
+                }
+            }
+        } catch (...) {
+        }
+    });
     auto base_argv = [&]() {
         std::vector<std::string> argv;
         argv.reserve(inputs.size() + 6);
@@ -872,16 +991,50 @@ auto invoke_subprocess(IreeInvoker& self,
         std::string p;
         ~FileGuard() { if (!p.empty()) std::remove(p.c_str()); }
     } guard{npy_path};
+    // Temp .npy input files written by build_input_arg for large operands; cleaned
+    // up when this guard leaves scope (after both subprocess attempts below).
+    std::vector<std::string> input_temps;
+    struct InputTempGuard {
+        std::vector<std::string>& v;
+        ~InputTempGuard() {
+            for (const auto& p : v) std::remove(p.c_str());
+        }
+    } input_guard{input_temps};
 
     if (!npy_path.empty()) {
+        // F003: write ONE --output=@file per result so a multi-output @main
+        // returns ALL results on the subprocess path (the in-process path already
+        // does). npy_path is the first; extra outputs get their own temp files,
+        // cleaned up with the inputs at scope exit.
+        std::vector<std::string> out_paths;
+        out_paths.push_back(npy_path);
+        for (int j = 1; j < expected_outputs; ++j) {
+            auto tmpl = (std::filesystem::temp_directory_path() /
+                         "tenzor_iree_out_XXXXXX.npy").string();
+            std::vector<char> b(tmpl.begin(), tmpl.end());
+            b.push_back('\0');
+            const int fd = ::mkstemps(b.data(), 4);
+            if (fd >= 0) {
+                ::close(fd);
+                out_paths.emplace_back(b.data());
+                input_temps.push_back(out_paths.back());  // reuse the temp guard
+            }
+        }
         std::vector<std::string> argv = base_argv();
-        argv.push_back("--output=@" + npy_path);
+        for (const auto& op : out_paths) {
+            argv.push_back("--output=@" + op);
+        }
         for (const auto& t : inputs) {
-            argv.push_back(render_input_flag(t));
+            argv.push_back(build_input_arg(t, input_temps));
         }
         SubprocessResult res = run_subprocess(argv);
         if (res.exit_code == 0) {
-            return {read_npy_output(npy_path)};
+            std::vector<::tenzor::Tensor> outs;
+            outs.reserve(out_paths.size());
+            for (const auto& op : out_paths) {
+                outs.push_back(read_npy_output(op));
+            }
+            return outs;
         }
         // Only the known numpy-encoding gap (bf16) is retried via stdout; any
         // other non-zero exit is a genuine failure.
@@ -901,7 +1054,7 @@ auto invoke_subprocess(IreeInvoker& self,
     std::vector<std::string> argv = base_argv();
     argv.push_back("--output_max_element_count=2147483647");
     for (const auto& t : inputs) {
-        argv.push_back(render_input_flag(t));
+        argv.push_back(build_input_arg(t, input_temps));
     }
     SubprocessResult res = run_subprocess(argv);
     if (res.exit_code != 0) {
@@ -933,7 +1086,7 @@ auto IreeInvoker::invoke(const std::vector<::tenzor::Tensor>& inputs)
         const std::string& dev =
             (device_index_ > 0) ? device_uri_ : device_;
         return invoke_subprocess(*this, inputs, vmfb_path_, dev,
-                                 iree_run_module_);
+                                 iree_run_module_, expected_outputs_);
     }
 
     // ─── InProcess invoke ────────────────────────────────────────────────

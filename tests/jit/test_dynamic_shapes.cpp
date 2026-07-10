@@ -4,9 +4,12 @@
  */
 
 #include <gtest/gtest.h>
+#include <filesystem>
 #include <memory>
+#include <string>
 #include <tenzor/jit/symbolic_shape.hpp>
 #include <tenzor/jit/graph.hpp>
+#include <tenzor/jit/compiler.hpp>
 #include <tenzor/jit/tracer.hpp>
 #include <tenzor/jit/symbolic_shape_inference.hpp>
 #include <tenzor/core/dtype.hpp>
@@ -95,6 +98,79 @@ TEST(SymbolicShapeInferenceFixes, BatchReshapeOnDynamicInputSymbolizesLeading) {
     EXPECT_TRUE(out[0][0].is_symbolic());   // leading dim tracks batch
     ASSERT_TRUE(out[0][1].is_concrete());
     EXPECT_EQ(out[0][1].value(), 10);
+}
+
+// JIT-F040 — shape-preserving / rank-changing ops previously fell to
+// default -> {} in SymbolicShapeInference::infer(), freezing the dynamic batch
+// dim to its trace-time size. They must now propagate the symbolic dim.
+TEST(SymbolicShapeInferenceFixes, CastPreservesDynamicDim) {
+    auto x = mk_val("x", {0, 10});
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+    auto node = std::make_shared<Node>(OpType::Cast);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    ASSERT_TRUE(out[0][1].is_concrete());
+    EXPECT_EQ(out[0][1].value(), 10);
+}
+
+TEST(SymbolicShapeInferenceFixes, FlattenPreservesDynamicBatch) {
+    // conv->Flatten->Linear: Flatten(start_dim=1) over [B,3,4] -> [B, 12] with B
+    // still symbolic (12 = 3*4 concrete product).
+    auto x = mk_val("x", {0, 3, 4});
+    x->set_symbolic_shape(SymbolicShape({SymbolicDim::symbolic("B"),
+                                         SymbolicDim::concrete(3),
+                                         SymbolicDim::concrete(4)}));
+    auto node = std::make_shared<Node>(OpType::Flatten);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_int_attr("start_dim", 1);
+    node->set_int_attr("end_dim", -1);
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    ASSERT_TRUE(out[0][1].is_concrete());
+    EXPECT_EQ(out[0][1].value(), 12);
+}
+
+// F031: a module made dynamic via mark_dynamic_dims must reload DYNAMIC, not as a
+// static graph frozen at the trace-time shape. dynamic_dims_ is serialized into
+// graph metadata and re-applied on load.
+TEST(SymbolicShapeInferenceFixes, DynamicModuleRoundTripsAsDynamic) {
+    auto g = std::make_shared<Graph>();
+    auto x = g->create_value("x", {4, 8}, tenzor::DType::Float32,
+                             tenzor::Device::cpu());
+    auto y = g->create_value("y", {4, 8}, tenzor::DType::Float32,
+                             tenzor::Device::cpu());
+    auto relu = g->create_node(OpType::ReLU, "relu");
+    relu->add_input(x);
+    relu->add_output(y);
+    y->set_node(relu);
+    g->add_node(relu);
+    g->set_inputs({x});
+    g->set_outputs({y});
+
+    auto module = std::make_shared<CompiledModule>(g);
+    std::vector<CompiledModule::DynamicDimSpec> specs = {{0, 0, "B"}};
+    module->mark_dynamic_dims(specs);
+    ASSERT_TRUE(module->has_dynamic_shapes());
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("tenzor_f031_" + std::to_string(::getpid()) + ".tzg");
+    module->save(path.string());
+    auto loaded = CompiledModule::load(path.string());
+    std::filesystem::remove(path);
+
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_TRUE(loaded->has_dynamic_shapes())
+        << "dynamic module reloaded as STATIC — dynamic_dims not serialized (F031)";
 }
 
 class DynamicShapesTest : public ::testing::Test {};

@@ -1693,8 +1693,16 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
     // skip the rewrite rather than corrupt the graph.
     if (node->outputs().empty()) return false;
     const auto& out_shape = node->outputs()[0]->shape();
+    const auto out_dtype = node->outputs()[0]->dtype();
+    // The rewrite redirects consumers to the surviving operand's Value WITHOUT
+    // inserting a cast (replace_node_with_value only rewires ids). A binary op
+    // promotes dtypes (e.g. x:Float16 + zero:Float32 -> Float32), so redirecting
+    // consumers to the Float16 operand would silently drop the promotion and
+    // change the output dtype and numerics. Require the surviving operand to
+    // already match the node's output shape AND dtype; otherwise skip the
+    // rewrite (conservative, same philosophy as the shape guard).
     auto same_shape = [&](const std::shared_ptr<Value>& v) -> bool {
-        return v && v->shape() == out_shape;
+        return v && v->shape() == out_shape && v->dtype() == out_dtype;
     };
 
     switch (node->op_type()) {
@@ -1802,19 +1810,6 @@ auto AlgebraicSimplificationPass::simplify_unary_op(std::shared_ptr<Node> node, 
 
 /// Try to extract a scalar float value from a Constant node.
 /// Returns std::nullopt if the node is not a scalar constant.
-static auto get_scalar_float(const Node& node) -> std::optional<float> {
-    if (node.op_type() != OpType::Constant) return std::nullopt;
-    try {
-        const Tensor& t = node.get_tensor_attr("value");
-        if (t.numel() != 1) return std::nullopt;
-        if (t.dtype() == DType::Float32) return t.item<float>();
-        if (t.dtype() == DType::Float64) return static_cast<float>(t.item<double>());
-        return std::nullopt;
-    } catch (...) {
-        return std::nullopt;
-    }
-}
-
 /// Like get_scalar_float but preserves full double precision for Float64
 /// constants (used when computing a reciprocal that will be baked back into a
 /// Float64 tensor — narrowing to float first would lose precision).
@@ -1913,9 +1908,9 @@ auto StrengthReductionPass::reduce_node(std::shared_ptr<Node> node, Graph& graph
     // ---- Pow(x, 2) -> Mul(x, x) ----
     if (allow_unsafe_algebra_ && node->op_type() == OpType::Pow && producer1 &&
         producer1->op_type() == OpType::Constant) {
-        auto val = get_scalar_float(*producer1);
+        auto val = get_scalar_double(*producer1);
         if (val) {
-            if (*val == 2.0f) {
+            if (*val == 2.0) {
                 // Replace with Mul(x, x)
                 auto mul_node = graph.create_node(OpType::Mul);
                 mul_node->add_input(input0);
@@ -1936,7 +1931,7 @@ auto StrengthReductionPass::reduce_node(std::shared_ptr<Node> node, Graph& graph
             }
 
             // ---- Pow(x, 0.5) -> Sqrt(x) ----
-            if (*val == 0.5f) {
+            if (*val == 0.5) {
                 auto sqrt_node = graph.create_node(OpType::Sqrt);
                 sqrt_node->add_input(input0);
 
@@ -1962,18 +1957,18 @@ auto StrengthReductionPass::reduce_node(std::shared_ptr<Node> node, Graph& graph
         bool is_const0 = producer0 && producer0->op_type() == OpType::Constant;
         bool is_const1 = producer1 && producer1->op_type() == OpType::Constant;
 
-        std::optional<float> val;
+        std::optional<double> val;
         std::shared_ptr<Value> non_const_input;
 
         if (is_const1 && !is_const0) {
-            val = get_scalar_float(*producer1);
+            val = get_scalar_double(*producer1);
             non_const_input = input0;
         } else if (is_const0 && !is_const1) {
-            val = get_scalar_float(*producer0);
+            val = get_scalar_double(*producer0);
             non_const_input = input1;
         }
 
-        if (val && *val == 2.0f && non_const_input) {
+        if (val && *val == 2.0 && non_const_input) {
             // Replace Mul(x, 2) with Add(x, x)
             auto add_node = graph.create_node(OpType::Add);
             add_node->add_input(non_const_input);
@@ -2565,6 +2560,43 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
             if (eps_val != 0.0f) fused_node->set_attr("eps", eps_val);
             float momentum_val = node->get_attr("momentum");
             if (momentum_val != 0.0f) fused_node->set_attr("momentum", momentum_val);
+        }
+
+        // A DECOMPOSED LayerNorm/RMSNorm carries eps not as an "eps" attr but as a
+        // scalar Constant operand of the Add(var, eps) that precedes the Sqrt. The
+        // loop above only copies an "eps" attr, so a decomposed norm with a custom
+        // eps (e.g. 1e-6, 1e-12) silently fell back to the reconstruction default
+        // of 1e-5, diverging from eager as the denominator approaches eps
+        // (JIT-F036). Recover it from that Add's scalar constant. Identify the
+        // eps-add (not the affine beta-add) by requiring an in-group Sqrt consumer.
+        if (!fused_node->has_attr("eps") &&
+            (match.kind == FusionKind::LayerNorm ||
+             match.kind == FusionKind::RMSNorm)) {
+            std::unordered_set<Node*> grp;
+            for (auto& n : match.nodes) grp.insert(n.get());
+            for (auto& node : match.nodes) {
+                if (node->op_type() != OpType::Add || node->outputs().empty()) {
+                    continue;
+                }
+                bool feeds_sqrt = false;
+                for (const auto& u : node->outputs()[0]->uses()) {
+                    auto up = u.lock();
+                    if (up && grp.count(up.get()) &&
+                        up->op_type() == OpType::Sqrt) {
+                        feeds_sqrt = true;
+                        break;
+                    }
+                }
+                if (!feeds_sqrt) continue;
+                for (auto& in : node->inputs()) {
+                    auto prod = in->node();
+                    if (prod && prod->op_type() == OpType::Constant) {
+                        if (auto v = get_scalar_double(*prod); v && *v > 0.0) {
+                            fused_node->set_attr("eps", *v);
+                        }
+                    }
+                }
+            }
         }
 
         // ------------------------------------------------------------------

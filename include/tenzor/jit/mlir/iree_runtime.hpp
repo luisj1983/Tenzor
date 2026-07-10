@@ -81,6 +81,13 @@ public:
     /// The mode this invoker is operating in.
     auto mode() const -> Mode { return mode_; }
 
+    /// Number of outputs the compiled @main returns. The subprocess path needs
+    /// this to write one --output=@file per result (the in-process path pops
+    /// results dynamically). Set by the caller from the graph's output count so a
+    /// multi-output graph returns ALL results on the subprocess path, not just the
+    /// first (JIT-F003). Defaults to 1.
+    void set_expected_outputs(int n) { expected_outputs_ = n > 0 ? n : 1; }
+
     ~IreeInvoker();
 
     // Non-copyable, non-movable to keep the underlying device handle pinned.
@@ -102,6 +109,7 @@ private:
     std::string device_uri_;        ///< HAL device URI incl. ordinal (M3).
     int         device_index_ = 0;  ///< Requested HAL device ordinal (M3).
     std::string iree_run_module_;   ///< Subprocess CLI path (subprocess mode).
+    int         expected_outputs_ = 1;  ///< @main result count (JIT-F003).
 
     // In-process fields. Stored as void* in the header so we don't drag
     // <iree/runtime/api.h> through every translation unit. The .cpp

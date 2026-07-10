@@ -368,16 +368,33 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
         }
     };
 
+    // For the 16-bit storage types (Float16/BFloat16, where T != C) eager runs
+    // each pre-/post-reduction elementwise op as a full tensor op that NARROWS the
+    // result back to the 16-bit storage dtype after EVERY step. Chaining the ops
+    // in float (narrowing only on the final store) therefore diverges from
+    // eager/CPU on any multi-step 16-bit pre/post block. Mirror eager's per-op
+    // narrowing by round-tripping the accumulator through T after each op. For
+    // Float32/Float64 (T == C) this is skipped — no behavior change, no overhead.
+    const bool round_16 = (T != C);
+    auto round_to_T = [&](std::ostringstream& out, const std::string& v) {
+        if (round_16) {
+            out << indent << v << " = static_cast<" << C << ">(static_cast<" << T
+                << ">(" << v << "));\n";
+        }
+    };
+
     bool representable = true;
     std::ostringstream pre_block;
     for (const auto& op : group.pre_ops) {
         emit_elem(pre_block, "val", op, representable);
         if (!representable) return "";
+        round_to_T(pre_block, "val");
     }
     std::ostringstream post_block;
     for (const auto& op : group.post_ops) {
         emit_elem(post_block, "result", op, representable);
         if (!representable) return "";
+        round_to_T(post_block, "result");
     }
 
     ss << R"(
@@ -509,6 +526,15 @@ extern "C" __global__ void fused_gemm_epilogue_kernel(
 
     if (group.has_bias) {
         ss << "    val = val + static_cast<" << C << ">(bias[col]);\n";
+        // Eager runs matmul -> narrow to T, bias-add -> narrow to T, then
+        // activation -> narrow to T. For the 16-bit storage types (T != C) the
+        // bias-add result must be rounded to T BEFORE the activation so the
+        // activation sees the same 16-bit-rounded input eager does; otherwise a
+        // f16/bf16 bias+activation epilogue diverges from eager/CPU. Float32/
+        // Float64 (T == C) skip this — no behavior change.
+        if (group.has_activation && T != C) {
+            ss << "    val = static_cast<" << C << ">(static_cast<" << T << ">(val));\n";
+        }
     }
 
     if (group.has_activation) {
@@ -885,7 +911,18 @@ extern "C" __global__ void fused_small_mlp_kernel(
         for (int64_t i = 0; i < in_dim; ++i) {
             acc += static_cast<)" << C << R"(>(x[i]) * static_cast<)" << C << R"(>(w1[i * hidden_dim + h]);
         }
-        hidden[h] = static_cast<)" << T << R"(>()" << activation_expr(group.mlp_activation, "acc", group.dtype) << R"();
+)";
+    // Eager runs stage 1 as linear(x, W1, b1) -> narrow to T, then activation ->
+    // narrow to T. Stage 1 previously fed the float `acc` (the linear result)
+    // straight into the activation, skipping the narrow of the LINEAR result that
+    // eager performs. For the 16-bit storage types (T != C) round acc to T before
+    // the activation so it sees the same 16-bit-rounded input eager does; a f16/
+    // bf16 SmallMLP otherwise diverges from eager/CPU. (Stage 2 already narrows
+    // its linear result correctly.) Float32/Float64 (T == C) skip this.
+    if (T != C) {
+        ss << "        acc = static_cast<" << C << ">(static_cast<" << T << ">(acc));\n";
+    }
+    ss << R"(        hidden[h] = static_cast<)" << T << R"(>()" << activation_expr(group.mlp_activation, "acc", group.dtype) << R"();
     }
     __syncthreads();
 

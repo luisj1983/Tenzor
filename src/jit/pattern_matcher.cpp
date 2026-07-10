@@ -287,6 +287,18 @@ auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
         return std::nullopt;
     }
 
+    // The fused Softmax kernel only normalizes over the LAST dimension:
+    // execute_extended_fused throws for any other axis and execute_fused_gpu_node
+    // has NO eager fallback, so fusing a non-last-axis softmax would hard-crash at
+    // runtime on CUDA/ROCm (JIT-F034). Only fuse when the reduction axis is
+    // provably the last dim; otherwise leave the softmax unfused so it runs
+    // correctly over its true axis. An absent `dim` cannot be confirmed as last,
+    // so it is conservatively left unfused.
+    {
+        auto sm_dim = reduce_dim(n0);
+        if (!sm_dim.has_value() || *sm_dim != sm_rank - 1) return std::nullopt;
+    }
+
     FusionMatch match;
     match.kind = FusionKind::Softmax;
     match.nodes = {n0, n1, n2, n3, n4};
@@ -356,27 +368,45 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     if (n3->op_type() != OpType::Mean || used.count(n3.get())) return std::nullopt;
     if (!consumes_output(n2, n3)) return std::nullopt;
 
-    // Both Means must reduce the SAME axis. The canonical fused LayerNorm kernel
-    // normalizes over a single axis; a structurally similar chain whose mean and
-    // variance reductions are over DIFFERENT axes is not a LayerNorm and must
-    // not be silently replaced by the hardcoded kernel. Normalize negative dims
-    // before comparing so dim=-1 and dim=rank-1 count as the same axis.
+    // Both Means must reduce the SAME axis set, and the fused LayerNorm kernel
+    // folds every dim from the first normalized axis to the end into one
+    // contiguous instance length (norm_size = suffix_prod(axis)). That is only
+    // correct when the normalized axes are a CONTIGUOUS BLOCK ENDING AT THE LAST
+    // dim. Read the axes from whichever key the tracer emitted — "dim" (int) for
+    // a single axis, "dims" (vec) for multi-axis. The guard previously read only
+    // "dim" and silently passed nullopt==nullopt for a multi-axis "dims" list,
+    // defeating the same-axis check (JIT-F010). A non-last / non-contiguous /
+    // unknown axis set would read the wrong (strided) elements — silently wrong
+    // on GPU (JIT-F035) — so reject and let the eager path run.
     {
-        int64_t rank = static_cast<int64_t>(
+        const int64_t rank = static_cast<int64_t>(
             n0->inputs().empty() ? 0 : n0->inputs()[0]->shape().size());
-        auto mean_axis = [rank](const std::shared_ptr<Node>& n)
-                -> std::optional<int64_t> {
-            std::optional<int64_t> a;
-            if (n->has_int_attr("dim")) a = n->get_int_attr("dim");
-            else if (n->has_vec_attr("dim")) {
-                auto v = n->get_vec_attr("dim");
-                if (v.size() == 1) a = v[0];
-                else return std::nullopt;  // multi-axis mean: handled below
+        auto reduction_axes = [rank](const std::shared_ptr<Node>& n)
+                -> std::optional<std::vector<int64_t>> {
+            std::vector<int64_t> axes;
+            if (n->has_int_attr("dim")) {
+                axes.push_back(n->get_int_attr("dim"));
+            } else if (n->has_vec_attr("dims")) {
+                axes = n->get_vec_attr("dims");
+            } else if (n->has_vec_attr("dim")) {
+                axes = n->get_vec_attr("dim");
+            } else {
+                return std::nullopt;
             }
-            if (a && *a < 0) a = *a + rank;
-            return a;
+            for (auto& a : axes) if (a < 0) a += rank;
+            std::sort(axes.begin(), axes.end());
+            axes.erase(std::unique(axes.begin(), axes.end()), axes.end());
+            return axes;
         };
-        if (mean_axis(n0) != mean_axis(n3)) return std::nullopt;
+        auto a0 = reduction_axes(n0);
+        auto a3 = reduction_axes(n3);
+        if (!a0.has_value() || !a3.has_value() || *a0 != *a3) return std::nullopt;
+        const auto& ax = *a0;
+        const int64_t last = rank - 1;
+        const bool trailing_contiguous =
+            !ax.empty() && ax.back() == last &&
+            ax.front() == last - static_cast<int64_t>(ax.size()) + 1;
+        if (!trailing_contiguous) return std::nullopt;
     }
 
     // Look for the remaining chain: could be Add(eps) -> Sqrt -> Div -> Mul(gamma) -> Add(beta)
@@ -410,6 +440,20 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
 
     // Need at least 6 nodes for a meaningful LayerNorm fusion
     if (matched.size() < 6) return std::nullopt;
+
+    // A real LayerNorm DIVIDES the centered input by the standard deviation:
+    // (x - mean) / sqrt(var + eps). A plain variance/std subgraph
+    // (Mean,Sub,Pow,Mean,Add,Sqrt) has the same 6-node op-type prefix but NO such
+    // division — it is not a LayerNorm. Without this guard extended_codegen would
+    // replace that std computation with the hardcoded full-LayerNorm kernel and
+    // silently return normalized+affine output instead of a standard deviation
+    // (JIT-F009). Require the normalizing Div to be present in the matched chain.
+    if (std::none_of(matched.begin(), matched.end(),
+                     [](const std::shared_ptr<Node>& n) {
+                         return n->op_type() == OpType::Div;
+                     })) {
+        return std::nullopt;
+    }
 
     // Intermediates may be consumed by MULTIPLE nodes inside the pattern — the
     // canonical LayerNorm reuses (x - mean) for both the variance branch and the
@@ -476,6 +520,36 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     // extended_codegen replaces an RMSNorm match with hardcoded RMSNorm math,
     // so a spurious match of an unrelated Pow/Mean chain is silently wrong.
     if (!consumes_output(n0, n1)) return std::nullopt;
+
+    // The fused RMSNorm kernel folds every dim from the normalized axis to the
+    // end into one instance length (norm_size = suffix_prod(axis)), correct only
+    // for a CONTIGUOUS TRAILING axis block ending at the last dim. Read the Mean's
+    // axes from "dim" (int) or "dims"/"dim" (vec) — the plural key is what the
+    // tracer emits for multi-axis — and reject a non-last / non-contiguous /
+    // unknown axis set so the eager path runs instead of the mis-indexed kernel
+    // (JIT-F035).
+    {
+        const int64_t rank = static_cast<int64_t>(
+            n0->inputs().empty() ? 0 : n0->inputs()[0]->shape().size());
+        std::vector<int64_t> axes;
+        if (n1->has_int_attr("dim")) {
+            axes.push_back(n1->get_int_attr("dim"));
+        } else if (n1->has_vec_attr("dims")) {
+            axes = n1->get_vec_attr("dims");
+        } else if (n1->has_vec_attr("dim")) {
+            axes = n1->get_vec_attr("dim");
+        } else {
+            return std::nullopt;
+        }
+        for (auto& a : axes) if (a < 0) a += rank;
+        std::sort(axes.begin(), axes.end());
+        axes.erase(std::unique(axes.begin(), axes.end()), axes.end());
+        const int64_t last = rank - 1;
+        const bool trailing_contiguous =
+            !axes.empty() && axes.back() == last &&
+            axes.front() == last - static_cast<int64_t>(axes.size()) + 1;
+        if (!trailing_contiguous) return std::nullopt;
+    }
 
     // Add(eps) or directly Sqrt/Rsqrt
     size_t next = start_idx + 2;

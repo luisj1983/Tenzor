@@ -1090,12 +1090,15 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // passes the NVRTC path uses; reduce-overhead has no CUDA-graph capture on
     // the IREE runtime here, so warn once rather than silently ignoring it.
     if (config_.mode == "max-autotune") {
-        // Layout optimization only — no forced Float16 downcast (see the NVRTC
-        // path). max-autotune must not silently change numerics vs eager or
-        // across IREE targets; precision reduction stays opt-in.
-        Compiler autotune_compiler(false);  // no default passes
-        autotune_compiler.add_pass(std::make_unique<LayoutOptimizationPass>());
-        autotune_compiler.optimize(*graph, 1);
+        // F014: LayoutOptimizationPass inserts OpType::LayoutConvert nodes with a
+        // memory_format tag intended for the cuDNN/MIOpen NATIVE kernels. The
+        // StableHLO lowerer has no LayoutConvert case — it would throw, forcing a
+        // silent eager fallback (non-strict) or a hard compile error (strict) on
+        // an otherwise valid conv graph — and IREE already performs its own
+        // layout/tiling optimization during codegen. Running the pass here is
+        // therefore both redundant and harmful, so the MLIR path skips it and
+        // lets IREE handle layout. (No forced Float16 downcast either: max-autotune
+        // must not silently change numerics vs eager or across IREE targets.)
     } else if (config_.mode == "reduce-overhead") {
         static std::once_flag warned_reduce_overhead;
         std::call_once(warned_reduce_overhead, [] {
@@ -1143,6 +1146,28 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // overrides. Empty result => compile_mlir falls back to the build default.
     if (opts.target == "vulkan-spirv" || opts.target == "vulkan") {
         opts.vulkan_arch = detect_vulkan_iree_target(in_dev);
+    }
+    // F004: derive the CUDA arch (sm_XX) from the actual device's compute
+    // capability instead of only env/build-default/sm_80, so device-specific
+    // codegen and sm_90+-only ops are available (matching the device-derived
+    // rocm/vulkan arch). Best-effort: any failure (no CUDA runtime) leaves
+    // cuda_arch empty and compile_mlir falls back to TENZOR_CUDA_TARGET / build
+    // default / sm_80.
+    if (opts.target == "cuda") {
+        try {
+            const ::tenzor::Device cuda_dev =
+                (in_dev.type == ::tenzor::Device::Type::CUDA)
+                    ? in_dev
+                    : ::tenzor::Device::cuda(0);
+            const auto props = ::tenzor::get_device_properties(cuda_dev);
+            if (props.major_version > 0) {
+                opts.cuda_arch = "sm_" +
+                    std::to_string(props.major_version) +
+                    std::to_string(props.minor_version);
+            }
+        } catch (...) {
+            opts.cuda_arch.clear();
+        }
     }
 
     auto artifact = mj::compile_mlir(mlir_text, opts);
@@ -1289,6 +1314,11 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
         }
     }
 
+    // F003: tell the invoker how many results @main returns so the subprocess
+    // path writes one --output=@file per result and returns ALL of them (matching
+    // the in-process path), rather than only the first. Set before the invoker is
+    // cached below so the cached instance keeps the value.
+    invoker->set_expected_outputs(static_cast<int>(graph->outputs().size()));
     auto outs = invoker->invoke(input_tensors);
     if (outs.size() != 1) {
         throw std::runtime_error(

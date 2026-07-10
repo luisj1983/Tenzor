@@ -356,9 +356,22 @@ auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
         body << "        " << C << " x" << i << " = static_cast<" << C
              << ">(inp" << i << "[i]);\n";
     }
+    // For the 16-bit storage types (Float16/BFloat16, where T != C) eager runs
+    // each fused elementwise op as a full tensor op that NARROWS the result back
+    // to the 16-bit storage dtype after EVERY step. Keeping `val` in float across
+    // all steps (narrowing only on the final store) therefore diverges from
+    // eager/CPU on any multi-step 16-bit fusion. Mirror eager's per-op narrowing
+    // by round-tripping `val` through the storage type T after each step. For
+    // Float32/Float64 (T == C) this is skipped entirely — no behavior change, no
+    // overhead.
+    const bool round_each_step = (T != C);
     body << "        " << C << " val;\n";
     for (size_t s = 0; s < group.steps.size(); ++s) {
         body << "        " << emit_op(group.steps[s], "", group.dtype) << "\n";
+        if (round_each_step) {
+            body << "        val = static_cast<" << C << ">(static_cast<" << T
+                 << ">(val));\n";
+        }
     }
     body << "        out[i] = static_cast<" << T << ">(val);\n";
     body << "    }\n";

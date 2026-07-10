@@ -160,6 +160,32 @@ TEST_F(ControlFlowIntegrationTest, CondReplayDispatchesDynamically) {
     }
 }
 
+TEST_F(ControlFlowIntegrationTest, InPlaceMutationInCondBranchThrows) {
+    // JIT-F043: an in-place op inside a cond branch mutates a tensor visible
+    // OUTSIDE the branch (here the carried input x). trace_if executes BOTH
+    // branches eagerly on the same tensors but only one runs at replay, so the
+    // mutation is conditional and has no functional trace — it would remap the
+    // tensor's SSA id inside the branch's skipped op range and silently corrupt
+    // the other branch / post-cond graph. trace_if must reject it loudly.
+    auto cond_t = ones({1}, DType::Float32, Device::cpu());
+    auto x = Variable(ones({2}, DType::Float32, Device::cpu()), false);
+    jit::TracingGuard guard;
+    EXPECT_THROW(
+        {
+            auto result = jit::cond(
+                cond_t,
+                [](const Variable& v) -> Variable {
+                    Tensor t = v.tensor();
+                    tenzor::add_(t, t);  // in-place mutation of a carried input
+                    return v;
+                },
+                [](const Variable& v) -> Variable { return v + v; },
+                x);
+            (void)result;
+        },
+        std::runtime_error);
+}
+
 TEST_F(ControlFlowIntegrationTest, LoopBodySubgraphAttached) {
     // Traces a while_loop, end_traces to a Graph, and verifies that the
     // Loop node has a non-empty body subgraph with the expected tensor

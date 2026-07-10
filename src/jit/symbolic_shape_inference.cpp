@@ -40,9 +40,21 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::Sub:
         case OpType::Mul:
         case OpType::Div:
+        // Comparison / logical-binary ops broadcast their two inputs exactly like
+        // arithmetic elementwise ops (the result is Bool but the SHAPE follows the
+        // same broadcast rule). Without these they fell to `default -> {}` and
+        // froze downstream dynamic dims to the trace-time size (JIT-F040).
+        case OpType::Eq:
+        case OpType::Ne:
+        case OpType::Lt:
+        case OpType::Le:
+        case OpType::Gt:
+        case OpType::Ge:
+        case OpType::LogicalAnd:
+        case OpType::LogicalOr:
             return infer_elementwise(node);
 
-        // Unary elementwise: preserve shape
+        // Unary elementwise / shape-preserving: preserve input[0] shape.
         case OpType::ReLU:
         case OpType::Sigmoid:
         case OpType::Tanh:
@@ -61,6 +73,20 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::Softmax:
         case OpType::LogSoftmax:
         case OpType::BatchNorm2d:
+        // The following are all shape-preserving but were previously omitted, so
+        // a graph containing any of them (e.g. a single Cast for mixed precision,
+        // or a GroupNorm/RMSNorm/activation) froze the marked dynamic dim to the
+        // trace-time size in SymbolicTracePass (JIT-F040).
+        case OpType::Cast:
+        case OpType::LeakyReLU:
+        case OpType::ELU:
+        case OpType::Mish:
+        case OpType::Softplus:
+        case OpType::GroupNorm:
+        case OpType::InstanceNorm:
+        case OpType::RMSNorm:
+        case OpType::Flip:
+        case OpType::LogicalNot:
         case OpType::LayerNorm: {
             auto input_shapes = gather_input_shapes(node);
             if (!input_shapes.empty()) {
@@ -100,6 +126,18 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
 
         case OpType::Linear:
             return infer_linear(node);
+
+        // Rank-changing / select ops that previously fell to `default -> {}` and
+        // froze downstream dynamic dims (JIT-F040). A CNN classifier's
+        // conv->Flatten->Linear is the canonical case.
+        case OpType::Where:
+            return infer_where(node);
+        case OpType::Squeeze:
+            return infer_squeeze(node);
+        case OpType::Unsqueeze:
+            return infer_unsqueeze(node);
+        case OpType::Flatten:
+            return infer_flatten(node);
 
         default:
             // For unhandled ops, return empty (no inference available)
@@ -551,6 +589,101 @@ auto SymbolicShapeInference::infer_permute(const Node* node) -> std::vector<Symb
         }
     }
 
+    return {SymbolicShape(std::move(out_dims))};
+}
+
+// ============================================================================
+// Where / Squeeze / Unsqueeze / Flatten (JIT-F040: previously default -> {},
+// which froze downstream dynamic dims). Mirrors the concrete symbolic logic in
+// Graph's infer_types so SymbolicTracePass propagates dynamic dims through them.
+// ============================================================================
+
+auto SymbolicShapeInference::infer_where(const Node* node)
+    -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.empty()) return {};
+    SymbolicShape out = input_shapes[0];
+    for (size_t i = 1; i < input_shapes.size(); ++i) {
+        out = broadcast_symbolic_shapes(out, input_shapes[i]);
+    }
+    return {out};
+}
+
+auto SymbolicShapeInference::infer_squeeze(const Node* node)
+    -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.empty()) return {};
+    auto sym_shape = input_shapes[0];
+    const int64_t rank = static_cast<int64_t>(sym_shape.rank());
+    // Only a CONCRETE size-1 dim can be squeezed; an unknown symbolic dim is
+    // conservatively kept (matches Graph::infer_types).
+    auto is_one = [](const SymbolicDim& d) {
+        return d.is_concrete() && d.value() == 1;
+    };
+    if (node->has_attr("dims")) {
+        auto dims = node->get_vec_attr("dims");
+        std::vector<int64_t> norm;
+        for (int64_t d : dims) { if (d < 0) d += rank; norm.push_back(d); }
+        std::sort(norm.begin(), norm.end(),
+                  [](int64_t a, int64_t b) { return a > b; });
+        for (int64_t d : norm) {
+            if (d >= 0 && d < static_cast<int64_t>(sym_shape.rank()) &&
+                is_one(sym_shape[static_cast<size_t>(d)])) {
+                sym_shape.erase(static_cast<size_t>(d));
+            }
+        }
+    } else if (node->has_attr("dim")) {
+        int64_t dim = node->get_int_attr("dim");
+        if (dim < 0) dim += rank;
+        if (dim >= 0 && dim < rank &&
+            is_one(sym_shape[static_cast<size_t>(dim)])) {
+            sym_shape.erase(static_cast<size_t>(dim));
+        }
+    } else {
+        for (int64_t i = static_cast<int64_t>(sym_shape.rank()) - 1; i >= 0; --i) {
+            if (is_one(sym_shape[static_cast<size_t>(i)])) {
+                sym_shape.erase(static_cast<size_t>(i));
+            }
+        }
+    }
+    return {std::move(sym_shape)};
+}
+
+auto SymbolicShapeInference::infer_unsqueeze(const Node* node)
+    -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.empty()) return {};
+    auto sym_shape = input_shapes[0];
+    int64_t dim = node->get_int_attr("dim");
+    if (dim < 0) dim += static_cast<int64_t>(sym_shape.rank()) + 1;
+    if (dim >= 0 && dim <= static_cast<int64_t>(sym_shape.rank())) {
+        sym_shape.insert(static_cast<size_t>(dim), SymbolicDim::concrete(1));
+    }
+    return {std::move(sym_shape)};
+}
+
+auto SymbolicShapeInference::infer_flatten(const Node* node)
+    -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.empty()) return {};
+    auto& in_shape = input_shapes[0];
+    int64_t start_dim = node->has_attr("start_dim")
+                            ? node->get_int_attr("start_dim") : 0;
+    int64_t end_dim = node->has_attr("end_dim")
+                          ? node->get_int_attr("end_dim") : -1;
+    const int64_t rank = static_cast<int64_t>(in_shape.rank());
+    if (start_dim < 0) start_dim += rank;
+    if (end_dim < 0) end_dim += rank;
+    std::vector<SymbolicDim> out_dims;
+    SymbolicDim flat = SymbolicDim::concrete(1);
+    for (int64_t i = 0; i < rank; ++i) {
+        if (i < start_dim || i > end_dim) {
+            out_dims.push_back(in_shape[static_cast<size_t>(i)]);
+        } else {
+            flat = flat * in_shape[static_cast<size_t>(i)];
+            if (i == end_dim) out_dims.push_back(flat);
+        }
+    }
     return {SymbolicShape(std::move(out_dims))};
 }
 

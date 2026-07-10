@@ -37,7 +37,6 @@ static void copy_params(nn::Module& src, nn::Module& dst) {
 
 TEST(JITBackendParity, LinearChain) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     nn::Linear l1(32, 16);
     nn::Linear l2(16, 8);
@@ -46,6 +45,7 @@ TEST(JITBackendParity, LinearChain) {
     auto x = nn::relu(l1.forward(Variable(input, false)));
     auto ref = l2.forward(x).tensor();
 
+    // Eager cross-backend parity (starts at index 1; a no-op on a CPU-only build).
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
             nn::Linear l1_dev(32, 16);
@@ -62,6 +62,34 @@ TEST(JITBackendParity, LinearChain) {
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "LinearChain failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+
+    // F018: the loop above runs EAGER .forward() only — despite the "JIT" name.
+    // Also drive the JIT COMPILER on the same Linear->ReLU->Linear chain, on every
+    // backend INCLUDING CPU (index 0), so a JIT trace/lower/fuse divergence is
+    // caught here too. num_cached>0 proves the compiled path was actually taken.
+    for (size_t i = 0; i < backends.size(); ++i) {
+        try {
+            nn::Linear l1_dev(32, 16);
+            nn::Linear l2_dev(16, 8);
+            copy_params(l1, l1_dev);
+            copy_params(l2, l2_dev);
+            l1_dev.to(backends[i]);
+            l2_dev.to(backends[i]);
+            auto in_dev = input.to(backends[i]);
+            auto jfn = [&l1_dev, &l2_dev](const Variable& in) -> Variable {
+                return l2_dev.forward(nn::relu(l1_dev.forward(in)));
+            };
+            jit::CompiledFunction compiled(jfn, {});
+            auto jout = compiled(Variable(in_dev, false)).tensor();
+            backends[i].synchronize();
+            EXPECT_GT(compiled.num_cached(), 0u)
+                << "JIT silently fell back to eager on " << backend_name(backends[i]);
+            EXPECT_TENSORS_CLOSE(ref, jout, 1e-3f, 1e-3f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "LinearChain JIT failed on "
                           << backend_name(backends[i]) << ": " << e.what();
         }
     }
@@ -484,7 +512,12 @@ TEST(JITBackendParity, ConvPool) {
 
 TEST(JITBackendParity, JITCompiledMLP) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled MLP parity");
+    // F019: do NOT gate on >=2 backends. This test compares the JIT output to the
+    // eager reference ON THE SAME backend (starting at CPU, index 0); the bug it
+    // guards produces silently-wrong output on ALL backends, so the CPU iteration
+    // alone catches it. Gating behind REQUIRE_MULTI_BACKEND_OR_SKIP made a CPU-only
+    // build skip the regression entirely. get_available_backends() always includes
+    // CPU, so the loop below always has something to check.
 
     nn::Linear l1(32, 16);
     nn::Linear l2(16, 8);
@@ -551,7 +584,10 @@ TEST(JITBackendParity, JITCompiledMLP) {
 
 TEST(JITBackendParity, JITCompiledGemmEpilogueBias) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled GemmEpilogue parity");
+    // F019: not gated on >=2 backends — the per-backend loop below compares
+    // JIT vs eager on the SAME backend (incl. CPU, index 0) and all
+    // GPU-only assertions are guarded by is_gpu, so the CPU iteration alone
+    // catches this regression. Gating made a CPU-only build skip it entirely.
 
     nn::Linear fc(32, 16);  // bias enabled by default
     auto input = randn({4, 32}, DType::Float32, Device::cpu());
@@ -633,7 +669,10 @@ TEST(JITBackendParity, JITCompiledGemmEpilogueBias) {
 
 TEST(JITBackendParity, JITCompiledBatchNorm2dAffineEval) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled affine BatchNorm2d eval parity");
+    // F019: not gated on >=2 backends — the per-backend loop below compares
+    // JIT vs eager on the SAME backend (incl. CPU, index 0) and all
+    // GPU-only assertions are guarded by is_gpu, so the CPU iteration alone
+    // catches this regression. Gating made a CPU-only build skip it entirely.
 
     const int64_t N = 2, C = 4, H = 3, W = 3;
     nn::BatchNorm2d bn(C);  // affine=true, track_running_stats=true by default
@@ -701,7 +740,10 @@ TEST(JITBackendParity, JITCompiledBatchNorm2dAffineEval) {
 
 TEST(JITBackendParity, JITCompiledLinearFullResidual) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled bias-less Linear + residual parity");
+    // F019: not gated on >=2 backends — the per-backend loop below compares
+    // JIT vs eager on the SAME backend (incl. CPU, index 0) and all
+    // GPU-only assertions are guarded by is_gpu, so the CPU iteration alone
+    // catches this regression. Gating made a CPU-only build skip it entirely.
 
     const int64_t M = 4, K = 32, Ncol = 16;
     nn::Linear proj(K, Ncol, /*bias=*/false);  // bias-less -> reaches GemmEpilogue
@@ -762,7 +804,10 @@ TEST(JITBackendParity, JITCompiledLinearFullResidual) {
 
 TEST(JITBackendParity, JITCompiledScaledDotProductAttention) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit compiled attention parity");
+    // F019: not gated on >=2 backends — the per-backend loop below compares
+    // JIT vs eager on the SAME backend (incl. CPU, index 0) and all
+    // GPU-only assertions are guarded by is_gpu, so the CPU iteration alone
+    // catches this regression. Gating made a CPU-only build skip it entirely.
 
     const int64_t B = 2, S = 8, D = 16;
     const float scale = 1.0f / std::sqrt(static_cast<float>(D));
@@ -865,6 +910,56 @@ void check_jit_matches_eager_per_dtype(
 }
 }  // namespace
 
+// F024: the multi-dtype table above covers only F32/F64/F16/BF16. A JIT path that
+// mishandled Complex64/Complex128 or integer arithmetic (the documented
+// Cast/Expand/Zeros complex-dispatch bug class) had NO parity check. x*x + 2x is a
+// pure elementwise function valid for complex and integer dtypes; the JIT replay
+// must match eager on the same backend and dtype. Unsupported (dtype, backend, op)
+// combinations throw at eager time and are skipped (not a JIT bug).
+TEST(JITBackendParity, ComplexAndIntegerElementwiseJitParity) {
+    auto fn = [](const Variable& x) -> Variable { return x * x + x + x; };
+    struct DtypeTol { DType dt; double tol; const char* name; };
+    const std::vector<DtypeTol> dtypes = {
+        {DType::Complex64,  1e-3, "Complex64"},
+        {DType::Complex128, 1e-9, "Complex128"},
+        {DType::Int32,      0.0,  "Int32"},
+        {DType::Int64,      0.0,  "Int64"},
+    };
+    for (const auto& dev : get_available_backends()) {
+        for (const auto& d : dtypes) {
+            Tensor input;
+            Tensor eager;
+            try {
+                input = (randn({16}, DType::Float32, dev) * 5.0F).to(d.dt);
+                eager = fn(Variable(input, false)).tensor().to(Device::cpu());
+            } catch (const std::exception&) {
+                continue;  // dtype/op unsupported on this backend — nothing to check
+            }
+            try {
+                auto compiled =
+                    jit::compile([&fn](const Variable& x) { return fn(x); });
+                (void)compiled(Variable(input, false));  // trace/compile
+                dev.synchronize();
+                Tensor replay =
+                    compiled(Variable(input, false)).tensor().to(Device::cpu());
+                dev.synchronize();
+                // abs() gives a real magnitude for complex and |v| for integers,
+                // so a single max-abs-diff works across all four dtypes.
+                const double diff = tenzor::max(tenzor::abs(eager - replay))
+                                        .to(DType::Float64)
+                                        .item<double>();
+                EXPECT_LE(diff, d.tol)
+                    << "JIT replay != eager on " << backend_name(dev) << " / "
+                    << d.name << " (diff=" << diff << ")";
+            } catch (const std::exception& e) {
+                ADD_FAILURE() << "Complex/Int JIT parity threw on "
+                              << backend_name(dev) << " / " << d.name << ": "
+                              << e.what();
+            }
+        }
+    }
+}
+
 TEST(JITBackendParity, LayerNormGeluReluMultiDtype) {
     // Exercises C1 (fused LayerNorm activation) across dtypes and backends.
     check_jit_matches_eager_per_dtype(
@@ -886,6 +981,69 @@ TEST(JITBackendParity, SoftmaxMultiDtype) {
         {4, 32});
 }
 
+
+// ============================================================================
+// Multi-step Float16 elementwise fusion: per-op 16-bit rounding (JIT-F011).
+//
+// Eager runs each elementwise op as a full tensor op that NARROWS the Float16
+// intermediate back to 16-bit storage after EVERY step. The native fused GPU
+// elementwise kernel (codegen.cpp KernelCodegen::generate) kept the fused value
+// in `float` across all steps and narrowed only on the final store, so a
+// multi-step f16 chain drifted from eager/CPU. The fix rounds `val` through the
+// storage type after each step.
+//
+// This builds a long alternating (*a)+(b) f16 chain — pure IEEE arithmetic that
+// is bit-identical on device and host, so with the fix the JIT-replayed graph
+// matches eager to a very tight bound; WITHOUT the fix the never-narrowed float
+// trajectory diverges by >1e-2 over the chain (the multiply compounds each
+// skipped per-step rounding). Runs JIT-vs-SAME-backend-eager on every backend.
+// ============================================================================
+TEST(JITBackendParity, Float16ElementwiseChainPerStepRounding) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("f16 multi-step elementwise per-step rounding");
+
+    // ~24 fusible elementwise steps. 1.03125 (= 1 + 1/32) is exactly f16; the
+    // 0.017 add is not, so intermediates are non-f16-exact and must be rounded.
+    auto fn = [](const Variable& x) -> Variable {
+        Variable y = x;
+        for (int k = 0; k < 12; ++k) {
+            y = y * 1.03125f;   // MulScalar (compounds skipped roundings)
+            y = y + 0.017f;     // AddScalar
+        }
+        return y;
+    };
+
+    for (size_t i = 0; i < backends.size(); ++i) {
+        try {
+            // Small positive inputs so the chain stays in f16's well-resolved
+            // range and neither overflows nor underflows.
+            auto base = randn({4, 32}, DType::Float32, Device::cpu());
+            auto input = tenzor::add(base, 2.0f).to(DType::Float16).to(backends[i]);
+
+            // Same-backend eager reference (each op narrows to f16 per step).
+            auto eager = fn(Variable(input, false)).tensor()
+                             .to(DType::Float32).to(Device::cpu());
+
+            auto compiled = jit::compile([&fn](const Variable& x) { return fn(x); });
+            (void)compiled(Variable(input, false));   // trace + compile + cache
+            backends[i].synchronize();
+            auto replay = compiled(Variable(input, false)).tensor()  // cache hit
+                              .to(DType::Float32).to(Device::cpu());
+            backends[i].synchronize();
+
+            SCOPED_TRACE("f16 elementwise chain on " + backend_name(backends[i]));
+            // Tight bound: with per-step rounding the JIT kernel reproduces eager's
+            // f16 trajectory (pure IEEE mul/add, identical device/host), so the two
+            // agree to a couple f16 ULP. The unpatched kernel diverges by >1e-2.
+            EXPECT_TRUE(tensors_close(eager, replay, 2e-3f, 2e-3f))
+                << "JIT f16 elementwise chain != eager on "
+                << backend_name(backends[i]);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "Float16ElementwiseChainPerStepRounding failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
 
 // ============================================================================
 // Main

@@ -137,6 +137,39 @@ void run_c2_unlowered_op(const std::string& target) {
 TEST(JitEagerFallback, UnloweredOpDegradesToEager_Cpu) {
     run_c2_unlowered_op("llvm-cpu");
 }
+
+// F021: a JIT eager-fallback must run the user function EXACTLY once — the trace
+// runs it, and the fallback must REUSE that captured result (out-param capture)
+// rather than re-running it. The documented double-exec regression
+// (mlir_invoke/grad_invoke replaying fn_ twice) produced CORRECT numbers but ran
+// fn_ twice, so only an invocation counter catches it. Runs on llvm-cpu where the
+// unlowered Tanh op forces the C2 eager-fallback path.
+TEST(JitEagerFallback, TracedFnRunsExactlyOnceOnEagerFallback) {
+    ensure_core_init();
+    auto counter = std::make_shared<int>(0);
+    auto counting_fn =
+        [counter](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+            ++(*counter);
+            return ::tenzor::tanh(x);  // no StableHLO lowering -> eager fallback
+        };
+    auto x = ::tenzor::Variable(
+        ::tenzor::full({4}, 0.3F, ::tenzor::DType::Float32), false);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend       = "mlir";
+    cfg.target        = "llvm-cpu";
+    cfg.strict        = false;
+    cfg.enable_fusion = false;  // keep the Tanh node intact so lowering fails
+    ::tenzor::jit::CompiledFunction compiled(
+        ::tenzor::jit::CompiledFunction::FnType(counting_fn), cfg);
+
+    (void)compiled(x);
+    // Trace-once + reuse == 1 total across construction + first invoke. A
+    // double-exec regression would make this 2.
+    EXPECT_EQ(*counter, 1)
+        << "traced fn ran " << *counter << " times on the eager-fallback path; "
+           "it must run EXACTLY once (double-exec regression)";
+}
 TEST(JitEagerFallback, UnloweredOpDegradesToEager_Cuda) {
     run_c2_unlowered_op("cuda");
 }

@@ -699,8 +699,13 @@ private:
         // scripting device. ForStmt/NumberExpr below already use this CPU-first
         // idiom.
         cond_t = cond_t.to(Device::cpu());
-        if (cond_t.dtype() != DType::Float32) cond_t = cond_t.to(DType::Float32);
-        bool cond_val = cond_t.item<float>() != 0.0f;
+        // Compare in Float64, NOT Float32 (JIT-F001): a nonzero Float64 condition
+        // below the Float32 denormal floor (e.g. 1e-40) would underflow to 0.0f
+        // and wrongly take the else-branch, baking a different graph than eager /
+        // jit::cond. control_flow.cpp's cond()/while_loop() widen to Float64 for
+        // exactly this reason; the scripted `if` must match.
+        if (cond_t.dtype() != DType::Float64) cond_t = cond_t.to(DType::Float64);
+        bool cond_val = cond_t.item<double>() != 0.0;
         const auto& body = cond_val ? iff.then_body : iff.else_body;
         exec_block(body, env, returned);
     }

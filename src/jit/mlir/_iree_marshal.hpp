@@ -45,11 +45,15 @@ inline auto dtype_to_iree(::tenzor::DType d) -> iree_hal_element_type_t {
         case ::tenzor::DType::Bool:       return IREE_HAL_ELEMENT_TYPE_BOOL_8;
         case ::tenzor::DType::Complex64:  return IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_64;
         case ::tenzor::DType::Complex128: return IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_128;
-        // Quantized int8 is stored one byte per value, byte-identical to a plain
-        // (u)int8 buffer; marshal it as such (scale/zero-point are separate
-        // metadata, not part of the element buffer).
-        case ::tenzor::DType::QInt8:      return IREE_HAL_ELEMENT_TYPE_INT_8;
-        case ::tenzor::DType::QUInt8:     return IREE_HAL_ELEMENT_TYPE_UINT_8;
+        // F039: QInt8/QUInt8 are NOT marshalled through the IREE path. Quantized
+        // arithmetic (scale/zero-point) is not lowered to StableHLO, so a
+        // quantized graph must fall back to eager / the interpreter (which is
+        // where the QuantizedLinear kernels live) rather than being reinterpreted
+        // as plain integer ops. Marshalling QInt8 as INT_8 on the input side while
+        // iree_to_dtype could only ever return plain Int8 on the output side was
+        // an unreachable-but-inconsistent asymmetry; rejecting here makes the IREE
+        // path uniformly fail-safe for quantized dtypes. (QInt8 tensors don't
+        // reach this path today — the quantized JIT uses the interpreter.)
         // QInt4x2 packs two 4-bit values per byte: dtype_size is 1 byte for 2
         // logical elements, so numel*element_size under-counts the buffer by 2x.
         // There is no whole-byte IREE element type for it — reject explicitly

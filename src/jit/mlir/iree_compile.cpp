@@ -471,6 +471,14 @@ auto compile_via_subprocess(const std::string& mlir_text,
         // it, complex stablehlo IR fails with "Dialect 'stablehlo' not
         // found for custom op 'stablehlo.constant'".
         "--iree-input-type=auto",
+        // Do NOT let IREE silently demote f64 to f32 (its default). A demoted f64
+        // graph compiles to an f32 module that mismatches the real f64 input at
+        // runtime (buffer_view.assert -> eager fallback) or, worse, silently
+        // computes in reduced precision. Keeping f64 means the graph either runs
+        // correctly in f64 or fails to compile on a target lacking f64 libm and
+        // falls back to eager (which computes f64 correctly) — never a silent
+        // precision reduction. Only affects f64 graphs; f16/f32 are unchanged.
+        "--iree-input-demote-f64-to-f32=false",
         "--output-format=vm-bytecode",
     };
     // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. The arch
@@ -634,6 +642,37 @@ auto iree_compiler_version() -> std::string {
     return os.str();
 }
 
+// F002: version identifier for the SEPARATE iree-compile subprocess binary used
+// for GPU targets the linked libIREECompiler does not register. compute_cache_key
+// only folds in the linked-lib iree_compiler_version(), so without this an upgrade
+// of the subprocess binary (e.g. the pip iree-base-compiler wheel) would NOT
+// rotate the cache and a stale GPU .vmfb would be silently reused. Cached — the
+// probe spawns a subprocess.
+auto iree_compile_subprocess_version() -> std::string {
+    static std::mutex mu;
+    static std::optional<std::string> cached;
+    std::lock_guard<std::mutex> g(mu);
+    if (cached) return *cached;
+    std::string ver;
+    try {
+        const std::string& bin = ::tenzor::jit::mlir_jit::resolve_iree_compile();
+        if (!bin.empty()) {
+            ver = exec_capture(bin, {"--version"}, /*capture_stderr=*/false);
+            // Collapse to a compact single-line token.
+            for (char& c : ver) {
+                if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            }
+            // Fall back to the resolved path if --version yielded nothing, so the
+            // key still differs when a different binary is on the discovery chain.
+            if (ver.find_first_not_of(' ') == std::string::npos) ver = bin;
+        }
+    } catch (...) {
+        ver.clear();
+    }
+    cached = ver;
+    return ver;
+}
+
 auto compute_cache_key(const std::string& mlir_text,
                        const std::string& target) -> std::string {
     std::ostringstream os;
@@ -681,7 +720,9 @@ auto compile_mlir(const std::string& mlir_text,
     std::string cuda_arch;
     if (target == "cuda") {
         if (const char* e = std::getenv("TENZOR_CUDA_TARGET"); e != nullptr && *e != '\0') {
-            cuda_arch = e;
+            cuda_arch = e;                 // explicit user override wins
+        } else if (!opts.cuda_arch.empty()) {
+            cuda_arch = opts.cuda_arch;    // device-derived arch (F004)
         } else {
 #ifdef TENZOR_DEFAULT_CUDA_TARGET
             cuda_arch = TENZOR_DEFAULT_CUDA_TARGET;
@@ -716,12 +757,18 @@ auto compile_mlir(const std::string& mlir_text,
     // Fold the ROCm arch into the cache key: two GPUs with different ISAs
     // (e.g. gfx1150 vs gfx90a) produce different bytecode from the same MLIR,
     // and must not alias to one .vmfb. Non-rocm targets keep the bare target.
-    const std::string key_target =
+    std::string key_target =
         (target == "rocm" && !rocm_arch.empty()) ? (target + ":" + rocm_arch)
       : (target == "cuda" && !cuda_arch.empty()) ? (target + ":" + cuda_arch)
       : ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty())
             ? (target + ":" + vulkan_arch)
                                                  : target;
+    // F002: for targets the linked libIREECompiler doesn't register (compiled by
+    // a separate iree-compile subprocess), fold that binary's version into the
+    // key so a subprocess-compiler upgrade rotates the cache.
+    if (embedding_api_supported_targets().count(target) == 0) {
+        key_target += "|subver:" + iree_compile_subprocess_version();
+    }
     const std::string key = compute_cache_key(mlir_text, key_target);
     const fs::path vmfb_path = cache_dir / (key + ".vmfb");
     const fs::path mlir_path = cache_dir / (key + ".mlir");
@@ -805,12 +852,19 @@ auto compile_mlir(const std::string& mlir_text,
     // We CAN'T leave this empty — ireeCompilerSessionSetFlags treats an
     // empty string as a positional arg and rejects it.
     const std::string input_flag = "--iree-input-type=auto";
+    // Do NOT let IREE silently demote f64 to f32 (its default) — see the matching
+    // comment on the subprocess arg path. Keeps this in-process embedding-API
+    // compile consistent: f64 graphs run correctly in f64 or fall back to eager,
+    // never a silent precision reduction. (Must outlive `flags`, which stores
+    // c_str() pointers.)
+    const std::string demote_flag = "--iree-input-demote-f64-to-f32=false";
     // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. CUDA
     // has a sensible default in iree-compile; Vulkan/CPU are
     // chip-independent.
     std::string rocm_target_flag;
     std::string cuda_target_flag;
-    std::vector<const char*> flags = {target_flag.c_str(), input_flag.c_str()};
+    std::vector<const char*> flags = {target_flag.c_str(), input_flag.c_str(),
+                                      demote_flag.c_str()};
     if (target == "rocm") {
         // Device-derived arch (M1); rocm_arch is guaranteed non-empty above.
         rocm_target_flag = std::string("--iree-rocm-target=") + rocm_arch;

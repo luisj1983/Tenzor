@@ -92,6 +92,14 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_linalg
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 
+    # JIT-F013 — fused epilogue (Conv/Linear/MatMul + ReLU/bias) must not be
+    # dropped by the MLIR lowerer.
+    add_executable(test_op_fused_epilogue test_op_fused_epilogue.cpp)
+    target_link_libraries(test_op_fused_epilogue
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_op_fused_epilogue
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task C.5 — Shape ops (Reshape, Permute, Transpose, Slice, Cat,
     # Stack, Squeeze, Unsqueeze, Flatten, Broadcast).
     add_executable(test_op_shape test_op_shape.cpp)

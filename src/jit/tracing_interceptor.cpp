@@ -240,6 +240,23 @@ auto make_tracing_interceptor(
         // Try to map dispatch OpId to IR OpType
         auto op_type = opid_to_optype(op);
 
+        // JIT-F016: if a mappable op mutates one of its inputs in place, the eager
+        // execution below overwrites that input's storage BEFORE we register the
+        // inputs, so end_trace would bake the POST-mutation data for a captured
+        // constant leaf. Snapshot the pre-op value of every REGISTERED input (a
+        // potential captured leaf/constant) now, so the in-place branch can
+        // restore it. Only clones already-tracked inputs, and only during tracing
+        // (a one-time cost that never touches the inference/replay hot path).
+        std::vector<std::optional<Tensor>> pre_inputs;
+        if (op_type && !inputs.empty()) {
+            pre_inputs.resize(inputs.size());
+            for (std::size_t k = 0; k < inputs.size(); ++k) {
+                if (tracer.is_registered(inputs[k])) {
+                    pre_inputs[k] = inputs[k].clone();
+                }
+            }
+        }
+
         // Execute eagerly first (we always run the op)
         auto results = next(op, inputs, attrs);
 
@@ -351,6 +368,16 @@ auto make_tracing_interceptor(
                     versioned.push_back(tracer.register_new_tensor(t));
                 }
                 output_ids = std::move(versioned);
+                // JIT-F016: restore each mutated input's PRE-op value under its
+                // id, so a captured constant leaf read pre-mutation elsewhere
+                // bakes its pre-mutation value (not the post-op data). An input
+                // that was NOT mutated gets its identical clone back (a no-op).
+                for (std::size_t k = 0;
+                     k < input_ids.size() && k < pre_inputs.size(); ++k) {
+                    if (pre_inputs[k]) {
+                        tracer.set_pre_op_snapshot(input_ids[k], *pre_inputs[k]);
+                    }
+                }
             }
         }
 

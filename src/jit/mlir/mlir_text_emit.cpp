@@ -40,6 +40,26 @@ auto mlir_type_name(::tenzor::DType d) -> std::string {
         case DType::Bool:       return "i1";
         case DType::Complex64:  return "complex<f32>";
         case DType::Complex128: return "complex<f64>";
+        // Quantized int8/uint8 store one byte per value, byte-identical to plain
+        // (u)int8; emit the signless/unsigned integer element type. Quantized
+        // ARITHMETIC ops (QuantizedLinear …) are not in the OpType->StableHLO
+        // mapping and fall back to eager at the op level, so this only affects
+        // graphs that merely type a tensor as (u)int8 — where integer semantics
+        // are correct. (F042)
+        case DType::QInt8:      return "i8";
+        case DType::QUInt8:     return "ui8";
+        // FP8 element types IREE/StableHLO support (F042). A graph is only JITable
+        // end-to-end if the runtime can also marshal the dtype; the marshal layer
+        // gates FP8, so an all-FP8 graph still degrades to eager, but the type
+        // emission is now complete rather than throwing.
+        case DType::FP8_E4M3:     return "f8E4M3FN";
+        case DType::FP8_E5M2:     return "f8E5M2";
+        case DType::FP8_E4M3FNUZ: return "f8E4M3FNUZ";
+        case DType::FP8_E5M2FNUZ: return "f8E5M2FNUZ";
+        // QInt4x2 packs two 4-bit values per byte — no whole-byte MLIR element
+        // type — so it still falls through to the throw below.
+        case DType::QInt4x2:
+            break;
     }
     throw std::invalid_argument(
         "mlir_type_name: unsupported DType (value=" +

@@ -344,6 +344,27 @@ TEST(JitScript, IfWithoutElse) {
     EXPECT_NEAR(compiled->forward(x_pos).tensor().item<float>(), 16.0f, 1e-5f);
 }
 
+TEST(JitScript, IfTinyFloat64ConditionIsTruthy) {
+    // JIT-F001: a nonzero Float64 condition below the Float32 denormal floor
+    // (1e-40) must NOT be flushed to false. exec_one(IfStmt) previously narrowed
+    // the condition to Float32 before the truthiness test, so 1e-40 underflowed
+    // to 0.0f and the ELSE branch was baked into the trace — diverging from eager
+    // and jit::cond. Compiling with a 1e-40 Float64 dummy must trace the THEN
+    // branch (y = x * 2), not the else branch (y = -x).
+    const char* src = R"(
+        def forward(x):
+            if x:
+                y = x * 2.0
+            else:
+                y = x.neg()
+            return y
+    )";
+    Tensor dummy = full({}, 1e-40, DType::Float64, Device::cpu());
+    auto compiled = jit::compile_script(src, dummy);
+    auto x = Variable(full({}, 3.0, DType::Float64, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x).tensor().item<double>(), 6.0, 1e-9);
+}
+
 TEST(JitScript, ForRangeUnrolled) {
     // y = x; for 4 iterations y = y * 2 → y = x * 16
     auto compiled = jit::compile_script(R"(

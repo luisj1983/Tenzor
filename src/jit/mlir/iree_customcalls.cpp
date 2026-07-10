@@ -422,6 +422,28 @@ struct OneRefResult {
     iree_vm_ref_t r0;
 };
 
+// F005: the tenzor_plugin custom-call shims below marshal their buffer_views to
+// CPU tensors and dispatch the op on the CPU kernel. That is correct ONLY on a
+// local (CPU) HAL. On a GPU HAL they would host-stage the buffers and silently
+// run the CPU kernel, forking numerics from the compiled cuda/rocm/vulkan target
+// (a CPU fallback for a GPU backend). Production never reaches here — the compile
+// path forces the pure-StableHLO expand form (plugin_enabled=false), which runs
+// on the actual HAL target. This guard makes the CPU-only assumption explicit and
+// fails LOUDLY instead of silently CPU-forking if plugins are ever enabled on a
+// non-CPU HAL.
+static iree_status_t require_local_hal(iree_hal_device_t* device) {
+    const iree_string_view_t id = iree_hal_device_id(device);
+    if (!iree_string_view_starts_with(id, IREE_SV("local"))) {
+        return iree_make_status(
+            IREE_STATUS_UNIMPLEMENTED,
+            "tenzor_plugin custom calls run the CPU kernel and are valid only on "
+            "a local (CPU) HAL; on device '%.*s' use the pure-StableHLO expand "
+            "form (the default compile path), which runs on the GPU target.",
+            static_cast<int>(id.size), id.data);
+    }
+    return iree_ok_status();
+}
+
 extern "C" {
 
 static iree_status_t IREE_API_PTR call_shim_flash_attention(
@@ -433,6 +455,7 @@ static iree_status_t IREE_API_PTR call_shim_flash_attention(
     void* module,
     void* /*module_state*/) {
     auto* device = reinterpret_cast<iree_hal_device_t*>(module);
+    IREE_RETURN_IF_ERROR(require_local_hal(device));
     const auto* args = reinterpret_cast<const FlashAttentionArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 
@@ -477,6 +500,7 @@ static iree_status_t IREE_API_PTR call_shim_gqa(
     void* module,
     void* /*module_state*/) {
     auto* device = reinterpret_cast<iree_hal_device_t*>(module);
+    IREE_RETURN_IF_ERROR(require_local_hal(device));
     const auto* args = reinterpret_cast<const FlashAttentionArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 
@@ -528,6 +552,7 @@ static iree_status_t IREE_API_PTR call_shim_rope_apply(
     void* module,
     void* /*module_state*/) {
     auto* device = reinterpret_cast<iree_hal_device_t*>(module);
+    IREE_RETURN_IF_ERROR(require_local_hal(device));
     const auto* args = reinterpret_cast<const RopeArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 
@@ -568,6 +593,7 @@ static iree_status_t IREE_API_PTR call_shim_rms_norm(
     void* module,
     void* /*module_state*/) {
     auto* device = reinterpret_cast<iree_hal_device_t*>(module);
+    IREE_RETURN_IF_ERROR(require_local_hal(device));
     const auto* args = reinterpret_cast<const RmsNormArgs*>(args_storage.data);
     auto* rets       = reinterpret_cast<OneRefResult*>(rets_storage.data);
 

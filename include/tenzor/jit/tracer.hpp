@@ -382,6 +382,27 @@ public:
     auto register_new_tensor(const Tensor& tensor) -> std::string;
 
     /**
+     * @brief Whether `tensor`'s logical-view fingerprint is already registered.
+     *
+     * Cheap map lookup used by the tracing interceptor to decide, BEFORE running
+     * an op, whether an input is a tracked value (a potential captured
+     * leaf/constant) and therefore worth deep-copying so an in-place mutation can
+     * preserve its pre-op value (JIT-F016).
+     */
+    auto is_registered(const Tensor& tensor) const -> bool;
+
+    /**
+     * @brief Overwrite the retained storage for an existing value id.
+     *
+     * Used by the interceptor's in-place path to store a PRE-mutation snapshot
+     * under the mutated input's id, so end_trace's constant-baking sees the
+     * pre-op value rather than the post-mutation data (JIT-F016). No-op if `id`
+     * is not present.
+     */
+    auto set_pre_op_snapshot(const std::string& id, const Tensor& snapshot)
+        -> void;
+
+    /**
      * @brief Alias a tensor to an already-registered value id.
      *
      * Maps `alias`'s fingerprint to `existing_id` so a later consumer that

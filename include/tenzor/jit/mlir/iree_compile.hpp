@@ -52,6 +52,15 @@ struct CompileOptions {
     /// constant. Ignored for non-vulkan targets. Participates in the on-disk cache
     /// key so artifacts for different Vulkan devices never alias.
     std::string vulkan_arch;
+
+    /// For target=="cuda": the CUDA arch (e.g. "sm_90"), derived from the actual
+    /// device's compute capability. Without it the CUDA arch tracked only
+    /// TENZOR_CUDA_TARGET / the build default / sm_80, so a Hopper/Blackwell GPU
+    /// still got sm_80 PTX and any sm_90+-only op forced eager fallback (F004).
+    /// When empty, compile_mlir() consults TENZOR_CUDA_TARGET, then the
+    /// TENZOR_DEFAULT_CUDA_TARGET build constant, then sm_80. Ignored for
+    /// non-cuda targets. Participates in the on-disk cache key.
+    std::string cuda_arch;
 };
 
 /// Result of a successful compile invocation.

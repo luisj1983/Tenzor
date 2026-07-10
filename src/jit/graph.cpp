@@ -3758,7 +3758,7 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     Variable x2 = xw * xw;
                     Variable ms = tenzor::mean(x2, static_cast<int64_t>(-1), /*keepdim=*/true);
                     Variable denom = tenzor::rsqrt(ms + Variable(
-                        tenzor::full({1}, static_cast<float>(eps),
+                        tenzor::full({1}, eps,
                                      ms.tensor().dtype(), ms.tensor().device()), false));
                     Variable y = xw * denom;  // broadcasts denom over last dim
                     if (input_vars.size() >= 2) {
@@ -4017,12 +4017,12 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 // attr. Honour that recorded value rather than recomputing
                 // 1/sqrt(d_k) — otherwise a traced model using a non-1/sqrt(d_k)
                 // scale silently diverges from eager.
-                float scale;
+                double scale;
                 if (node->has_float_attr("scale")) {
                     scale = node->get_attr("scale");
                 } else {
-                    auto d_k = static_cast<float>(K.tensor().shape().back());
-                    scale = 1.0f / std::sqrt(d_k);
+                    auto d_k = static_cast<double>(K.tensor().shape().back());
+                    scale = 1.0 / std::sqrt(d_k);
                 }
 
                 auto scores = tenzor::matmul(Q, K.transpose(-2, -1));
